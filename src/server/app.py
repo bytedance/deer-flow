@@ -30,6 +30,10 @@ from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataRe
 from src.server.mcp_utils import load_mcp_tools
 from src.tools import VolcengineTTS
 
+# fix CORS error: cache-control is not allowed...
+import starlette.middleware.cors as cors
+cors.SAFELISTED_HEADERS.add("Cache-Control")
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
