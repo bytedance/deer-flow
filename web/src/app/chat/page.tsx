@@ -15,7 +15,14 @@ import { ThemeToggle } from "../../components/deer-flow/theme-toggle";
 import { Tooltip } from "../../components/deer-flow/tooltip";
 import { SettingsDialog } from "../settings/dialogs/settings-dialog";
 
-const Main = dynamic(() => import("./main"), { ssr: false });
+const Main = dynamic(() => import("./main"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full w-full items-center justify-center">
+      Loading DeerFlow...
+    </div>
+  ),
+});
 
 export default function HomePage() {
   return (
@@ -39,9 +46,7 @@ export default function HomePage() {
           </Suspense>
         </div>
       </header>
-      <Suspense fallback={<div>Loading DeerFlow...</div>}>
-        <Main />
-      </Suspense>
+      <Main />
     </div>
   );
 }
