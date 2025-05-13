@@ -20,6 +20,7 @@ Please visit [our official website](https://deerflow.tech/) for more details.
 https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
 
 In this demo, we showcase how to use DeerFlow to:
+
 - Seamlessly integrate with MCP services
 - Conduct the Deep Research process and produce a comprehensive report with images
 - Create podcast audio based on the generated report
@@ -34,7 +35,6 @@ In this demo, we showcase how to use DeerFlow to:
 
 ---
 
-
 ## 📑 Table of Contents
 
 - [🚀 Quick Start](#quick-start)
@@ -48,12 +48,12 @@ In this demo, we showcase how to use DeerFlow to:
 - [💖 Acknowledgments](#acknowledgments)
 - [⭐ Star History](#star-history)
 
-
 ## Quick Start
 
 DeerFlow is developed in Python, and comes with a web UI written in Node.js. To ensure a smooth setup process, we recommend using the following tools:
 
 ### Recommended Tools
+
 - **[`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
   Simplify Python environment and dependency management. `uv` automatically creates a virtual environment in the root directory and installs all required packages for you—no need to manually install Python environments.
 
@@ -64,11 +64,14 @@ DeerFlow is developed in Python, and comes with a web UI written in Node.js. To 
   Install and manage dependencies of Node.js project.
 
 ### Environment Requirements
+
 Make sure your system meets the following minimum requirements:
+
 - **[Python](https://www.python.org/downloads/):** Version `3.12+`
 - **[Node.js](https://nodejs.org/en/download/):** Version `22+`
 
 ### Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/bytedance/deer-flow.git
@@ -136,25 +139,24 @@ Open your browser and visit [`http://localhost:3000`](http://localhost:3000) to 
 
 Explore more details in the [`web`](./web/) directory.
 
-
 ## Supported Search Engines
 
 DeerFlow supports multiple search engines that can be configured in your `.env` file using the `SEARCH_API` variable:
 
 - **Tavily** (default): A specialized search API for AI applications
-    - Requires `TAVILY_API_KEY` in your `.env` file
-    - Sign up at: https://app.tavily.com/home
+  - Requires `TAVILY_API_KEY` in your `.env` file
+  - Sign up at: https://app.tavily.com/home
 
 - **DuckDuckGo**: Privacy-focused search engine
-    - No API key required
+  - No API key required
 
 - **Brave Search**: Privacy-focused search engine with advanced features
-    - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file
-    - Sign up at: https://brave.com/search/api/
+  - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file
+  - Sign up at: https://brave.com/search/api/
 
 - **Arxiv**: Scientific paper search for academic research
-    - No API key required
-    - Specialized for scientific and academic papers
+  - No API key required
+  - Specialized for scientific and academic papers
 
 To configure your preferred search engine, set the `SEARCH_API` variable in your `.env` file:
 
@@ -168,40 +170,39 @@ SEARCH_API=tavily
 ### Core Capabilities
 
 - 🤖 **LLM Integration**
-    - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
-    - Support for open source models like Qwen
-    - OpenAI-compatible API interface
-    - Multi-tier LLM system for different task complexities
+  - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
+  - Support for open source models like Qwen
+  - OpenAI-compatible API interface
+  - Multi-tier LLM system for different task complexities
 
 ### Tools and MCP Integrations
 
 - 🔍 **Search and Retrieval**
-    - Web search via Tavily, Brave Search and more
-    - Crawling with Jina
-    - Advanced content extraction
+  - Web search via Tavily, Brave Search and more
+  - Crawling with Jina
+  - Advanced content extraction
 
 - 🔗 **MCP Seamless Integration**
-    - Expand capabilities for private domain access, knowledge graph, web browsing and more
-    - Facilitates integration of diverse research tools and methodologies
+  - Expand capabilities for private domain access, knowledge graph, web browsing and more
+  - Facilitates integration of diverse research tools and methodologies
 
 ### Human Collaboration
 
 - 🧠 **Human-in-the-loop**
-    - Supports interactive modification of research plans using natural language
-    - Supports auto-acceptance of research plans
+  - Supports interactive modification of research plans using natural language
+  - Supports auto-acceptance of research plans
 
 - 📝 **Report Post-Editing**
-    - Supports Notion-like block editing
-    - Allows AI refinements, including AI-assisted polishing, sentence shortening, and expansion
-    - Powered by [tiptap](https://tiptap.dev/)
+  - Supports Notion-like block editing
+  - Allows AI refinements, including AI-assisted polishing, sentence shortening, and expansion
+  - Powered by [tiptap](https://tiptap.dev/)
 
 ### Content Creation
 
 - 🎙️ **Podcast and Presentation Generation**
-    - AI-powered podcast script generation and audio synthesis
-    - Automated creation of simple PowerPoint presentations
-    - Customizable templates for tailored content
-
+  - AI-powered podcast script generation and audio synthesis
+  - Automated creation of simple PowerPoint presentations
+  - Customizable templates for tailored content
 
 ## Architecture
 
@@ -252,7 +253,6 @@ curl --location 'http://localhost:8000/api/tts' \
 }' \
 --output speech.mp3
 ```
-
 
 ## Development
 
@@ -311,6 +311,7 @@ langgraph dev
 ```
 
 After starting the LangGraph server, you'll see several URLs in the terminal:
+
 - API: http://127.0.0.1:2024
 - Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 - API Docs: http://127.0.0.1:2024/docs
@@ -328,6 +329,7 @@ In the Studio UI, you can:
 5. Provide feedback during the planning phase to refine research plans
 
 When you submit a research topic in the Studio UI, you'll be able to see the entire workflow execution, including:
+
 - The planning phase where the research plan is created
 - The feedback loop where you can modify the plan
 - The research and writing phases for each section
@@ -400,6 +402,7 @@ uv run main.py --help
 The application now supports an interactive mode with built-in questions in both English and Chinese:
 
 1. Launch the interactive mode:
+
    ```bash
    uv run main.py --interactive
    ```
@@ -425,6 +428,7 @@ DeerFlow includes a human in the loop mechanism that allows you to review, edit,
    - Via API: Set `auto_accepted_plan: true` in your request
 
 4. **API Integration**: When using the API, you can provide feedback through the `feedback` parameter:
+
    ```json
    {
      "messages": [{"role": "user", "content": "What is quantum computing?"}],
@@ -464,6 +468,7 @@ We would like to extend our sincere appreciation to the following projects for t
 These projects exemplify the transformative power of open-source collaboration, and we are proud to build upon their foundations.
 
 ### Key Contributors
+
 A heartfelt thank you goes out to the core authors of `DeerFlow`, whose vision, passion, and dedication have brought this project to life:
 
 - **[Daniel Walnut](https://github.com/hetaoBackend/)**
