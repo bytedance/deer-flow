@@ -17,11 +17,14 @@ There are many ways you can contribute to DeerFlow:
 
 1. Fork the repository
 2. Clone your fork:
+
    ```bash
    git clone https://github.com/bytedance/deer-flow.git
    cd deer-flow
    ```
+
 3. Set up your development environment:
+
    ```bash
    # Install dependencies, uv will take care of the python interpreter and venv creation
    uv sync
@@ -30,7 +33,9 @@ There are many ways you can contribute to DeerFlow:
    uv pip install -e ".[dev]"
    uv pip install -e ".[test]"
    ```
+
 4. Configure pre-commit hooks:
+
    ```bash
    chmod +x pre-commit
    ln -s ../../pre-commit .git/hooks/pre-commit
@@ -39,6 +44,7 @@ There are many ways you can contribute to DeerFlow:
 ## Development Process
 
 1. Create a new branch:
+
    ```bash
    git checkout -b feature/amazing-feature
    ```
@@ -50,6 +56,7 @@ There are many ways you can contribute to DeerFlow:
    - Update documentation as needed
 
 3. Run tests and checks:
+
    ```bash
    make test      # Run tests
    make lint      # Run linting
@@ -58,11 +65,13 @@ There are many ways you can contribute to DeerFlow:
    ```
 
 4. Commit your changes:
+
    ```bash
    git commit -m 'Add some amazing feature'
    ```
 
 5. Push to your fork:
+
    ```bash
    git push origin feature/amazing-feature
    ```
@@ -90,6 +99,7 @@ There are many ways you can contribute to DeerFlow:
 ## Testing
 
 Run the test suite:
+
 ```bash
 # Run all tests
 make test
@@ -122,6 +132,7 @@ make format
 ## Need Help?
 
 If you need help with anything:
+
 - Check existing issues and discussions
 - Join our community channels
 - Ask questions in discussions
