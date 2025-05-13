@@ -168,7 +168,7 @@ SEARCH_API=tavily
 ### Core Capabilities
 
 - 🤖 **LLM Integration**
-    - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
+    - Support for various models through OpenAI-compatible API interface
     - Support for open source models like Qwen
     - OpenAI-compatible API interface
     - Multi-tier LLM system for different task complexities

@@ -165,8 +165,8 @@ SEARCH_API=tavily
 
 ### 核心能力
 
-- 🤖 **LLM集成**
-    - 通过[litellm](https://docs.litellm.ai/docs/providers)支持集成大多数模型
+- �� **LLM集成**
+    - 通过OpenAI兼容的API接口支持各种模型
     - 支持开源模型如Qwen
     - 兼容OpenAI的API接口
     - 多层LLM系统适用于不同复杂度的任务

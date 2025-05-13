@@ -166,7 +166,7 @@ SEARCH_API=tavily
 ### コア機能
 
 - 🤖 **LLM統合**
-    - [litellm](https://docs.litellm.ai/docs/providers)を通じてほとんどのモデルの統合をサポート
+    - OpenAI互換のAPIインターフェースを通じて様々なモデルをサポート
     - Qwenなどのオープンソースモデルをサポート
     - OpenAI互換のAPIインターフェース
     - 異なるタスクの複雑さに対応するマルチティアLLMシステム
