@@ -15,7 +15,7 @@
 
 ### 视频
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 在此演示中，我们展示了如何使用 DeerFlow：
 
@@ -143,14 +143,14 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 
 - **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
   - 需要在`.env`文件中设置`TAVILY_API_KEY`
-  - 注册地址：https://app.tavily.com/home
+  - 注册地址：<https://app.tavily.com/home>
 
 - **DuckDuckGo**：注重隐私的搜索引擎
   - 无需 API 密钥
 
 - **Brave Search**：具有高级功能的注重隐私的搜索引擎
   - 需要在`.env`文件中设置`BRAVE_SEARCH_API_KEY`
-  - 注册地址：https://brave.com/search/api/
+  - 注册地址：<https://brave.com/search/api/>
 
 - **Arxiv**：用于学术研究的科学论文搜索
   - 无需 API 密钥
@@ -255,7 +255,6 @@ curl --location 'http://localhost:8000/api/tts' \
 --output speech.mp3
 ```
 
-
 ## 开发
 
 ### 测试
@@ -314,9 +313,9 @@ langgraph dev
 
 启动 LangGraph 服务器后，您将在终端中看到几个 URL：
 
-- API: http://127.0.0.1:2024
-- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- API 文档：http://127.0.0.1:2024/docs
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- API 文档：<http://127.0.0.1:2024/docs>
 
 在浏览器中打开 Studio UI 链接以访问调试界面。
 
