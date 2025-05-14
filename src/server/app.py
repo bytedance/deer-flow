@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessageChunk, ToolMessage, BaseMessage
 from langgraph.types import Command
 
 from src.graph.builder import build_graph_with_memory
@@ -124,7 +124,7 @@ async def _astream_workflow_generator(
                 )
             continue
         message_chunk, message_metadata = cast(
-            tuple[AIMessageChunk, dict[str, any]], event_data
+            tuple[BaseMessage, dict[str, any]], event_data
         )
         event_stream_message: dict[str, any] = {
             "thread_id": thread_id,
@@ -141,7 +141,7 @@ async def _astream_workflow_generator(
             # Tool Message - Return the result of the tool call
             event_stream_message["tool_call_id"] = message_chunk.tool_call_id
             yield _make_event("tool_call_result", event_stream_message)
-        else:
+        elif isinstance(message_chunk, AIMessageChunk):
             # AI Message - Raw message tokens
             if message_chunk.tool_calls:
                 # AI Message - Tool Call
