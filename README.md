@@ -148,14 +148,14 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 
 - **Tavily** (default): A specialized search API for AI applications
   - Requires `TAVILY_API_KEY` in your `.env` file
-  - Sign up at: <https://app.tavily.com/home>
+  - Sign up at: https://app.tavily.com/home
 
 - **DuckDuckGo**: Privacy-focused search engine
   - No API key required
 
 - **Brave Search**: Privacy-focused search engine with advanced features
   - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file
-  - Sign up at: <https://brave.com/search/api/>
+  - Sign up at: https://brave.com/search/api/
 
 - **Arxiv**: Scientific paper search for academic research
   - No API key required
@@ -319,9 +319,9 @@ langgraph dev
 
 After starting the LangGraph server, you'll see several URLs in the terminal:
 
-- API: <http://127.0.0.1:2024>
-- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
-- API Docs: <http://127.0.0.1:2024/docs>
+- API: http://127.0.0.1:2024
+- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- API Docs: http://127.0.0.1:2024/docs
 
 Open the Studio UI link in your browser to access the debugging interface.
 

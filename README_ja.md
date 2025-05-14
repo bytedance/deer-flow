@@ -319,6 +319,10 @@ LangGraphサーバーを開始すると、端末にいくつかのURLが表示�
 - Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
 - APIドキュメント: <http://127.0.0.1:2024/docs>
 
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- APIドキュメント: <http://127.0.0.1:2024/docs>
+
 ブラウザで Studio UI リンクを開いてデバッグインターフェースにアクセスします。
 
 #### LangGraph Studio の使用
