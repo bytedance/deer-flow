@@ -1,8 +1,6 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import operator
-from typing import Annotated
 
 from langgraph.graph import MessagesState
 
