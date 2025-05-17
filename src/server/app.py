@@ -15,9 +15,9 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.types import Command
 
 from src.graph.builder import build_graph_with_memory
-from src.podcast.graph.builder import build_graph as build_podcast_graph
-from src.ppt.graph.builder import build_graph as build_ppt_graph
-from src.prose.graph.builder import build_graph as build_prose_graph
+from src.podcast.graph.builder import build_graph_with_memory as build_podcast_graph
+from src.ppt.graph.builder import build_graph_with_memory as build_ppt_graph
+from src.prose.graph.builder import build_graph_with_memory as build_prose_graph
 from src.server.chat_request import (
     ChatMessage,
     ChatRequest,
@@ -46,8 +46,14 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+graph = None
 
-graph = build_graph_with_memory()
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize graph when application starts"""
+    global graph
+    graph = await build_graph_with_memory()
 
 
 @app.post("/api/chat/stream")
@@ -227,9 +233,12 @@ async def text_to_speech(request: TTSRequest):
 async def generate_podcast(request: GeneratePodcastRequest):
     try:
         report_content = request.content
-        print(report_content)
-        workflow = build_podcast_graph()
-        final_state = workflow.invoke({"input": report_content})
+        config = {"configurable": {"thread_id": str(uuid4())}}
+        logger.info(
+            f"Generating podcast for report content: {report_content}, thread_id: {config['configurable']['thread_id']}"
+        )
+        workflow = await build_podcast_graph()
+        final_state = await workflow.ainvoke({"input": report_content}, config=config)
         audio_bytes = final_state["output"]
         return Response(content=audio_bytes, media_type="audio/mp3")
     except Exception as e:
@@ -241,9 +250,12 @@ async def generate_podcast(request: GeneratePodcastRequest):
 async def generate_ppt(request: GeneratePPTRequest):
     try:
         report_content = request.content
-        print(report_content)
-        workflow = build_ppt_graph()
-        final_state = workflow.invoke({"input": report_content})
+        workflow = await build_ppt_graph()
+        config = {"configurable": {"thread_id": str(uuid4())}}
+        logger.info(
+            f"Generating ppt for report content: {report_content}, thread_id: {config['configurable']['thread_id']}"
+        )
+        final_state = await workflow.ainvoke({"input": report_content}, config=config)
         generated_file_path = final_state["generated_file_path"]
         with open(generated_file_path, "rb") as f:
             ppt_bytes = f.read()
@@ -260,7 +272,9 @@ async def generate_ppt(request: GeneratePPTRequest):
 async def generate_prose(request: GenerateProseRequest):
     try:
         logger.info(f"Generating prose for prompt: {request.prompt}")
-        workflow = build_prose_graph()
+        workflow = await build_prose_graph()
+        config = {"configurable": {"thread_id": str(uuid4())}}
+
         events = workflow.astream(
             {
                 "content": request.prompt,
@@ -269,6 +283,7 @@ async def generate_prose(request: GenerateProseRequest):
             },
             stream_mode="messages",
             subgraphs=True,
+            config=config,
         )
         return StreamingResponse(
             (f"data: {event[0].content}\n\n" async for _, event in events),

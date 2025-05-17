@@ -7,3 +7,29 @@ BASIC_MODEL:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: "doubao-1-5-pro-32k-250115"
   api_key: xxxx
+
+# Storage configuration
+# You can choose between three types of storage:
+# - memory: In-memory storage (default, no persistence across restarts)
+# - sqlite: SQLite database storage (requires 'langgraph-checkpoint-sqlite' package)
+# - postgres: PostgreSQL database storage (requires 'langgraph-checkpoint-postgres' package)
+STORAGE:
+  # Uncomment one of the following configurations:
+  
+  # Memory storage (default)
+  type: memory
+  
+  # SQLite storage
+  # type: sqlite
+  # db_path: checkpoints.sqlite
+  
+  # PostgreSQL storage
+  # type: postgres
+  # db_uri: "host=host port=port dbname=dbname user=user password=password"
+  # pool:
+  #   min_size: 1     # minimum
+  #   max_size: 5     # maximum connections
+  #   timeout: 30     # connection timeout (seconds)
+  #   max_idle: 300   # maximum idle time (seconds)
+  #   max_lifetime: 3600  # maximum connection lifetime (seconds)
+  #   name: "pgpool"  # connection pool name

@@ -3,6 +3,11 @@
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+import importlib.util
+from typing import Optional, Union, Dict, Any
+import logging
+
+from src.config.storage import _create_checkpointer_from_config
 
 from .types import State
 from .nodes import (
@@ -15,6 +20,14 @@ from .nodes import (
     human_feedback_node,
     background_investigation_node,
 )
+
+from src.config.loader import load_yaml_config
+
+# Get logger
+logger = logging.getLogger(__name__)
+
+# Global connection pool to keep connections alive
+_connection_pool: Dict[str, Any] = {}
 
 
 def _build_base_graph():
@@ -33,11 +46,10 @@ def _build_base_graph():
     return builder
 
 
-def build_graph_with_memory():
+async def build_graph_with_memory():
     """Build and return the agent workflow graph with memory."""
-    # use persistent memory to save conversation history
-    # TODO: be compatible with SQLite / PostgreSQL
-    memory = MemorySaver()
+    # Get appropriate storage from configuration file
+    memory = await _create_checkpointer_from_config()
 
     # build state graph
     builder = _build_base_graph()

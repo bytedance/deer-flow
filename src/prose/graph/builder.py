@@ -5,6 +5,7 @@ import asyncio
 import logging
 from langgraph.graph import END, START, StateGraph
 
+from src.config.storage import _create_checkpointer_from_config
 from src.prose.graph.prose_continue_node import prose_continue_node
 from src.prose.graph.prose_fix_node import prose_fix_node
 from src.prose.graph.prose_improve_node import prose_improve_node
@@ -18,7 +19,7 @@ def optional_node(state: ProseState):
     return state["option"]
 
 
-def build_graph():
+def _build_base_graph():
     """Build and return the ppt workflow graph."""
     # build state graph
     builder = StateGraph(ProseState)
@@ -41,27 +42,43 @@ def build_graph():
         },
         END,
     )
-    return builder.compile()
+    return builder
 
 
-async def _test_workflow():
-    workflow = build_graph()
-    events = workflow.astream(
-        {
-            "content": "The weather in Beijing is sunny",
-            "option": "continue",
-        },
-        stream_mode="messages",
-        subgraphs=True,
-    )
-    async for node, event in events:
-        e = event[0]
-        print({"id": e.id, "object": "chat.completion.chunk", "content": e.content})
+async def build_graph_with_memory():
+    """Build and return the agent workflow graph with memory."""
+    # Get appropriate storage from configuration file
+    memory = await _create_checkpointer_from_config()
 
+    # build state graph
+    builder = _build_base_graph()
+    return builder.compile(checkpointer=memory)
+
+
+workflow = None
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
     load_dotenv()
     logging.basicConfig(level=logging.INFO)
+
+    async def _test_workflow():
+        global workflow
+        workflow = await build_graph_with_memory()
+
+        config = {"configurable": {"thread_id": "test"}}
+        events = workflow.astream(
+            {
+                "content": "The weather in Beijing is sunny",
+                "option": "continue",
+            },
+            config=config,
+            stream_mode="messages",
+            subgraphs=True,
+        )
+        async for node, event in events:
+            e = event[0]
+            print({"id": e.id, "object": "chat.completion.chunk", "content": e.content})
+
     asyncio.run(_test_workflow())

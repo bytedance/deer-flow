@@ -99,3 +99,63 @@ BASIC_MODEL:
   api_version: $AZURE_API_VERSION
   api_key: $AZURE_API_KEY
 ```
+
+## Storage Configuration
+
+DeerFlow allows you to configure different storage backends for the LangGraph workflow checkpoints. This enables persistence of workflow states across application restarts or even across different instances.
+
+### Available Storage Options
+
+1. **Memory Storage (Default)**
+   - In-memory storage with no persistence across restarts
+   - No additional dependencies required
+   - Best for development and testing
+
+2. **SQLite Storage**
+   - Simple file-based persistence
+   - Requires the `langgraph-checkpoint-sqlite` package
+   - Good for single-instance deployments or light workloads
+
+3. **PostgreSQL Storage**
+   - Robust, scalable database persistence
+   - Requires the `langgraph-checkpoint-postgres` package and a PostgreSQL server
+   - Best for production environments and multi-instance deployments
+
+### Configuration Examples
+
+Add the following section to your `conf.yaml` file to configure the storage:
+
+```yaml
+# Memory Storage (Default)
+STORAGE:
+  type: memory
+
+# SQLite Storage
+STORAGE:
+  type: sqlite
+  db_path: checkpoints.sqlite  # Path to SQLite database file
+
+# PostgreSQL Storage
+STORAGE:
+  type: postgres
+  db_uri: postgres://username:password@localhost:5432/dbname  # PostgreSQL connection URI
+```
+
+### Installing Dependencies
+
+To use SQLite or PostgreSQL storage, install the necessary dependencies:
+
+```bash
+# For SQLite storage
+uv pip install langgraph-checkpoint-sqlite
+
+# For PostgreSQL storage
+uv pip install langgraph-checkpoint-postgres psycopg psycopg-pool
+```
+
+### Notes on Storage Selection
+
+- Memory storage is fast but not persistent - all data will be lost when the application restarts
+- SQLite is good for single-instance deployments with moderate persistence needs
+- PostgreSQL is recommended for production deployments, especially when running multiple instances
+- The system will fall back to memory storage if the configured storage type is not available or properly configured
