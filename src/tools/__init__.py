@@ -8,6 +8,7 @@ from .python_repl import python_repl_tool
 from .search import (
     tavily_search_tool,
     duckduckgo_search_tool,
+    searx_search_tool,
     brave_search_tool,
     arxiv_search_tool,
 )
@@ -18,6 +19,7 @@ from src.config import SELECTED_SEARCH_ENGINE, SearchEngine
 search_tool_mappings = {
     SearchEngine.TAVILY.value: tavily_search_tool,
     SearchEngine.DUCKDUCKGO.value: duckduckgo_search_tool,
+    SearchEngine.SEARXNG.value: searx_search_tool,
     SearchEngine.BRAVE_SEARCH.value: brave_search_tool,
     SearchEngine.ARXIV.value: arxiv_search_tool,
 }

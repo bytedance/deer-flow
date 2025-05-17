@@ -155,6 +155,10 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 
   - No API key required
 
+- **SearXNG**: local search engine
+
+  - Requires `SEARXNG_API_URL` in your `.env` file
+
 - **Brave Search**: Privacy-focused search engine with advanced features
 
   - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file

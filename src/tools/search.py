@@ -7,7 +7,8 @@ import os
 
 from langchain_community.tools import BraveSearch, DuckDuckGoSearchResults
 from langchain_community.tools.arxiv import ArxivQueryRun
-from langchain_community.utilities import ArxivAPIWrapper, BraveSearchWrapper
+from langchain_community.tools.searx_search.tool import SearxSearchResults
+from langchain_community.utilities import ArxivAPIWrapper, BraveSearchWrapper, SearxSearchWrapper
 
 from src.config import SEARCH_MAX_RESULTS, SearchEngine
 from src.tools.tavily_search.tavily_search_results_with_images import (
@@ -51,6 +52,14 @@ arxiv_search_tool = LoggedArxivSearch(
         top_k_results=SEARCH_MAX_RESULTS,
         load_max_docs=SEARCH_MAX_RESULTS,
         load_all_available_meta=True,
+    ),
+)
+
+LoggedSearxSearch = create_logged_tool(SearxSearchResults)
+searx_search_tool = LoggedSearxSearch(
+    name="web_search",
+    wrapper = SearxSearchWrapper(
+        searx_host=os.getenv("SEARXNG_API_URL", "http://localhost:8081"),
     ),
 )
 
