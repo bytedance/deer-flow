@@ -91,11 +91,17 @@ Note: The available models and their exact names may change over time. Please ve
 
 ### How to use Azure models?
 
-DeerFlow supports the integration of Azure models. You can refer to [litellm Azure](https://docs.litellm.ai/docs/providers/azure). Configuration example of `conf.yaml`:
+DeerFlow seamlessly integrates with Azure OpenAI services. Azure OpenAI requires specific configuration parameters including an endpoint URL, API version, deployment name, and API key.
+
+To configure Azure OpenAI in DeerFlow, use the following structure in your `conf.yaml` file:
+
 ```yaml
 BASIC_MODEL:
-  model: "azure/gpt-4o-2024-08-06"
-  api_base: $AZURE_API_BASE
-  api_version: $AZURE_API_VERSION
-  api_key: $AZURE_API_KEY
+  AZURE:
+    base_url: "https://your-resource-name.openai.azure.com/"  # Your Azure OpenAI endpoint URL
+    model: "your-deployment-name"                             # The deployment name of your model
+    api_key: "your-azure-api-key"                             # Your Azure OpenAI API key
+    api_version: "2024-10-21"                                 # API version
 ```
+
+Note: The `model` parameter refers to your Azure deployment name, not the underlying model name.
