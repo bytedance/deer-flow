@@ -4,32 +4,47 @@
 from pathlib import Path
 from typing import Any, Dict
 
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
+import os
 
 # Cache for LLM instances
-_llm_cache: dict[LLMType, ChatOpenAI] = {}
+_llm_cache: Dict[str, BaseChatModel] = {}
 
 
-def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
-    llm_type_map = {
+def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatModel:
+    basic = conf.get("BASIC_MODEL")
+    openai_basic = basic and basic.get("OPENAI")
+    azure_basic = basic and basic.get("AZURE")
+
+    llm_config = {
         "reasoning": conf.get("REASONING_MODEL"),
-        "basic": conf.get("BASIC_MODEL"),
+        "basic": openai_basic or azure_basic,
         "vision": conf.get("VISION_MODEL"),
-    }
-    llm_conf = llm_type_map.get(llm_type)
-    if not llm_conf:
+    }.get(llm_type)
+
+    if not llm_config:
         raise ValueError(f"Unknown LLM type: {llm_type}")
-    if not isinstance(llm_conf, dict):
+    if not isinstance(llm_config, dict):
         raise ValueError(f"Invalid LLM Conf: {llm_type}")
-    return ChatOpenAI(**llm_conf)
+
+    if openai_basic is not None:
+        return ChatOpenAI(**llm_config)
+
+    os.environ.update({
+        "OPENAI_API_VERSION": llm_config.get("api_version"),
+        "AZURE_OPENAI_API_KEY": llm_config.get("api_key"),
+        "AZURE_OPENAI_ENDPOINT": llm_config.get("base_url")
+    })
+    return AzureChatOpenAI(deployment_name=llm_config.get("model"))
 
 
 def get_llm_by_type(
     llm_type: LLMType,
-) -> ChatOpenAI:
+) -> BaseChatModel:
     """
     Get LLM instance by type. Returns cached instance if available.
     """
