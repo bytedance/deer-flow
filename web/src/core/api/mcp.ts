@@ -6,7 +6,8 @@ import type { SimpleMCPServerMetadata } from "../mcp";
 import { resolveServiceURL } from "./resolve-service-url";
 
 export async function queryMCPServerMetadata(config: SimpleMCPServerMetadata) {
-  const response = await fetch(resolveServiceURL("mcp/server/metadata"), {
+  const url = await resolveServiceURL("mcp/server/metadata");
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

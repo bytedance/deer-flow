@@ -4,6 +4,6 @@
 # - Replace `base_url` and `model` name if you want to use a custom model
 
 BASIC_MODEL:
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model: "doubao-1-5-pro-32k-250115"
-  api_key: xxxx
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: "qwen-max-latest"
+  api_key: ""

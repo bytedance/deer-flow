@@ -30,6 +30,8 @@ services:
     restart: unless-stopped
     networks:
       - deer-flow-network
+    volumes:
+      - ./config.json:/app/public/config.json
 
 networks:
   deer-flow-network:

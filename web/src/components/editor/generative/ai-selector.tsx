@@ -37,9 +37,9 @@ function useProseCompletion() {
       setError(null);
 
       try {
-        const response = await fetchStream(
-          resolveServiceURL("/api/prose/generate"),
-          {
+          // ✅ 使用 await 等待异步函数结果
+          const url = await resolveServiceURL("/api/prose/generate");
+          const response = await fetchStream(url, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
