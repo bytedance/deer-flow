@@ -148,6 +148,34 @@ DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die
 - **DuckDuckGo**: Datenschutzorientierte Suchmaschine
     - Kein API-Schlüssel erforderlich
 
+- **SearXNG**: Lokale Suchmaschine
+
+  - Erfordert `SEARXNG_API_URL` in der `.env`-Datei
+  Hinweis: Passen Sie die settings.yml Ihrer SearXNG-Instanz wie folgt an:
+  ```yaml
+  # Siehe https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+  use_default_settings: true
+  server:
+    # base_url wird durch SEARXNG_BASE_URL-Umgebungsvariable definiert (siehe .env und docker-compose.yml)
+    secret_key: "key"
+    limiter: false  # Deaktiviert Ratenbegrenzung
+    image_proxy: true
+  ui:
+    static_use_hash: true
+  redis:
+    url: redis://redis:6379/0
+  
+  search:
+    formats:
+      - html
+      - json  # Aktiviert JSON-API-Ausgabe
+  ```
+  API-Funktionalität testen mit:
+  ```bash
+  curl -kLX GET --data-urlencode q='langchain' -d format=json http://localhost:8888
+  ```
+  Sollte JSON-Objekt mit Suchergebnissen zurückgeben
+
 - **Brave Search**: Datenschutzorientierte Suchmaschine mit erweiterten Funktionen
     - Erfordert `BRAVE_SEARCH_API_KEY` in Ihrer `.env`-Datei
     - Registrieren Sie sich unter: https://brave.com/search/api/

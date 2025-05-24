@@ -154,6 +154,34 @@ DeerFlow поддерживает несколько поисковых сист
 
   - Не требуется API-ключ
 
+- **SearXNG**: Локальная поисковая система
+
+  - Требуется указать `SEARXNG_API_URL` в файле `.env`
+  Примечание: Внесите следующие изменения в файл settings.yml вашего экземпляра SearXNG:
+  ```yaml
+  # См. https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+  use_default_settings: true
+  server:
+    # base_url определяется переменной окружения SEARXNG_BASE_URL (см. .env и docker-compose.yml)
+    secret_key: "key"
+    limiter: false  # Отключает ограничение скорости запросов
+    image_proxy: true
+  ui:
+    static_use_hash: true
+  redis:
+    url: redis://redis:6379/0
+  
+  search:
+    formats:
+      - html
+      - json  # Включает вывод JSON API
+  ```
+  Проверить работоспособность API можно командой curl:
+  ```bash
+  curl -kLX GET --data-urlencode q='langchain' -d format=json http://localhost:8888
+  ```
+  Команда должна вернуть JSON-объект с результатами поиска
+
 - **Brave Search**: Поисковая система, ориентированная на конфиденциальность, с расширенными функциями
 
   - Требуется `BRAVE_SEARCH_API_KEY` в вашем файле `.env`

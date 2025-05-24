@@ -13,7 +13,7 @@ from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from src.agents import create_agent
-from src.tools.search import LoggedTavilySearch
+from src.tools.search import LoggedTavilySearch, LoggedSearxSearch
 from src.tools import (
     crawl_tool,
     get_web_search_tool,
@@ -63,6 +63,21 @@ def background_investigation_node(
         else:
             logger.error(
                 f"Tavily search returned malformed response: {searched_content}"
+            )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.SEARXNG:
+        searched_content = LoggedSearxSearch(
+            max_results=configurable.max_search_results,
+            format=json,
+        ).invoke({"query": query})
+        background_investigation_results = None
+        if isinstance(searched_content, list):
+            background_investigation_results = [
+                {"title": elem["title"], "content": elem["content"]}
+                for elem in searched_content
+            ]
+        else:
+            logger.error(
+                f"Searxng search returned malformed response: {searched_content}"
             )
     else:
         background_investigation_results = get_web_search_tool(
