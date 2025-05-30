@@ -105,6 +105,24 @@ cd deer-flow/web
 pnpm install
 ```
 
+### Uso de Nix flakes (opcional)
+
+Si tienes Nix y flakes habilitados, puedes configurar todas las dependencias con un solo comando:
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+
+# Entra en el entorno con Python/uv, Node.js, pnpm y marp-cli
+nix develop
+
+# En una terminal:
+uv run server.py --reload
+
+# En otra:
+pnpm --dir web dev
+```
+
 ### Configuraciones
 
 Por favor, consulta la [Guía de Configuración](docs/configuration_guide.md) para más detalles.
