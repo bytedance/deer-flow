@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Any, Dict
 import os
 
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
 
 # Cache for LLM instances
-_llm_cache: dict[LLMType, ChatOpenAI] = {}
+_llm_cache: dict[LLMType, BaseChatModel] = {}
 
 
 def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
@@ -29,7 +30,7 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
     return conf
 
 
-def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
+def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatModel:
     llm_type_map = {
         "reasoning": conf.get("REASONING_MODEL", {}),
         "basic": conf.get("BASIC_MODEL", {}),
@@ -47,12 +48,14 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
     if not merged_conf:
         raise ValueError(f"Unknown LLM Conf: {llm_type}")
 
+    if "azure_endpoint" in merged_conf or os.getenv("AZURE_OPENAI_ENDPOINT"):
+        return AzureChatOpenAI(**merged_conf)
     return ChatOpenAI(**merged_conf)
 
 
 def get_llm_by_type(
     llm_type: LLMType,
-) -> ChatOpenAI:
+) -> BaseChatModel:
     """
     Get LLM instance by type. Returns cached instance if available.
     """

@@ -99,3 +99,14 @@ BASIC_MODEL:
   api_version: $AZURE_API_VERSION
   api_key: $AZURE_API_KEY
 ```
+
+### How to use Azure OpenAI chat models?
+
+DeerFlow supports the integration of Azure OpenAI chat models. You can refer to [AzureChatOpenAI](https://python.langchain.com/api_reference/openai/chat_models/langchain_openai.chat_models.azure.AzureChatOpenAI.html). Configuration example of `conf.yaml`:
+```yaml
+BASIC_MODEL:
+  model: "azure/gpt-4o-2024-08-06"
+  azure_endpoint: $AZURE_OPENAI_ENDPOINT
+  api_version: $OPENAI_API_VERSION
+  api_key: $AZURE_OPENAI_API_KEY
+```
