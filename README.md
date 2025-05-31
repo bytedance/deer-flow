@@ -155,6 +155,34 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 
   - No API key required
 
+- **SearXNG**: local search engine
+
+  - Requires `SEARXNG_API_URL` in your `.env` file
+  Note: Modify your SearXNG instance's settings.yml with the following critical configurations:
+  ```
+  # see https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+   use_default_settings: true
+   server:
+   # base_url is defined in the SEARXNG_BASE_URL environment variable, see .env and docker-compose.yml
+   secret_key: "key"
+   limiter: false  # Disables request rate limiting
+   image_proxy: true
+   ui:
+   static_use_hash: true
+   redis:
+   url: redis://redis:6379/0
+
+   search:
+   formats:
+   - html
+   - json  # Enable JSON API output
+  ```
+  You can make sure that the API is working by issuing a curl request to the API endpoint:
+  ```
+  curl -kLX GET --data-urlencode q='langchain' -d format=json http://localhost:8888
+  ```
+  This should return a JSON object with the results.
+
 - **Brave Search**: Privacy-focused search engine with advanced features
 
   - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file

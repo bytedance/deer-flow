@@ -7,11 +7,16 @@ import os
 
 from langchain_community.tools import BraveSearch, DuckDuckGoSearchResults
 from langchain_community.tools.arxiv import ArxivQueryRun
-from langchain_community.utilities import ArxivAPIWrapper, BraveSearchWrapper
+from langchain_community.tools.searx_search.tool import SearxSearchResults
+from langchain_community.utilities import ArxivAPIWrapper, BraveSearchWrapper, SearxSearchWrapper
 
 from src.config import SearchEngine, SELECTED_SEARCH_ENGINE
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchResultsWithImages,
+)
+
+from src.tools.searxng_search.searxng_search_api_wrapper import (
+    CustomSearxSearchResults, CustomSearxSearchWrapper
 )
 
 from src.tools.decorators import create_logged_tool
@@ -23,6 +28,7 @@ LoggedTavilySearch = create_logged_tool(TavilySearchResultsWithImages)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
+LoggedSearxSearch = create_logged_tool(CustomSearxSearchResults)
 
 
 # Get the selected search tool
@@ -54,11 +60,23 @@ def get_web_search_tool(max_search_results: int):
                 load_all_available_meta=True,
             ),
         )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.SEARXNG.value:
+        return LoggedSearxSearch(
+            name="web_search",
+            wrapper=CustomSearxSearchWrapper(
+                searx_host=os.getenv("SEARXNG_API_URL", "http://localhost:8080")
+            ),
+            kwargs={"num_results": max_search_results}
+        )
     else:
         raise ValueError(f"Unsupported search engine: {SELECTED_SEARCH_ENGINE}")
 
-
 if __name__ == "__main__":
+    # results = LoggedDuckDuckGoSearch(
+    #     name="web_search", max_results=3, output_format="list"
+    # ).invoke("cute panda")
+    # results = get_web_search_tool(5).invoke("cute panda")
+    print(json.dumps(results, indent=2, ensure_ascii=False))
     results = LoggedDuckDuckGoSearch(
         name="web_search", max_results=3, output_format="list"
     )

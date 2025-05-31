@@ -151,6 +151,34 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 
   - 无需 API 密钥
 
+- **SearXNG**: 本地搜索引擎
+
+  - 需在 `.env` 文件中设置 `SEARXNG_API_URL`
+  注意：修改 SearXNG 实例的 settings.yml 文件，添加以下关键配置：
+  ```yaml
+  # 详见 https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+  use_default_settings: true
+  server:
+    # base_url 在环境变量 SEARXNG_BASE_URL 中定义，参见 .env 和 docker-compose.yml
+    secret_key: "key"
+    limiter: false  # 禁用请求速率限制
+    image_proxy: true
+  ui:
+    static_use_hash: true
+  redis:
+    url: redis://redis:6379/0
+  
+  search:
+    formats:
+      - html
+      - json  # 启用 JSON API 输出
+  ```
+  可通过以下 curl 命令验证 API 是否正常工作：
+  ```
+  curl -kLX GET --data-urlencode q='langchain' -d format=json http://localhost:8888
+  ```
+  该命令应返回包含搜索结果的 JSON 对象
+
 - **Brave Search**：具有高级功能的注重隐私的搜索引擎
 
   - 需要在`.env`文件中设置`BRAVE_SEARCH_API_KEY`
