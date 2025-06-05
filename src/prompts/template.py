@@ -50,16 +50,17 @@ def apply_prompt_template(
     # Convert state to dict for template rendering
     state_vars = {
         "CURRENT_TIME": datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
-        **state,
     }
-
+    
+   
     # Add configurable variables
     if configurable:
         state_vars.update(dataclasses.asdict(configurable))
-
+    state_vars.update(state)
     try:
         template = env.get_template(f"{prompt_name}.md")
         system_prompt = template.render(**state_vars)
+    
         return [{"role": "system", "content": system_prompt}] + state["messages"]
     except Exception as e:
         raise ValueError(f"Error applying template {prompt_name}: {e}")

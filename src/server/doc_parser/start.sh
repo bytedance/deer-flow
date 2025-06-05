@@ -1,0 +1,1 @@
+uv run python doc_parser.py --host 0.0.0.0 --port 8010
