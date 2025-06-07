@@ -11,6 +11,7 @@ services:
     volumes:
       - ./conf.yaml:/app/conf.yaml
     restart: unless-stopped
+    privileged: true
     networks:
       - deer-flow-network
 
@@ -28,6 +29,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    privileged: true
     networks:
       - deer-flow-network
 
