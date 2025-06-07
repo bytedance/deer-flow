@@ -154,6 +154,34 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
 
   - No requiere clave API
 
+- **SearXNG**: Motor de búsqueda local
+
+  - Requiere `SEARXNG_API_URL` en el archivo `.env`
+  Nota: Modifique settings.yml de su instancia SearXNG con estas configuraciones:
+  ```yaml
+  # Ver https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+  use_default_settings: true
+  server:
+    # base_url se define en la variable SEARXNG_BASE_URL (ver .env y docker-compose.yml)
+    secret_key: "key"
+    limiter: false  # Deshabilita límite de tasa
+    image_proxy: true
+  ui:
+    static_use_hash: true
+  redis:
+    url: redis://redis:6379/0
+  
+  search:
+    formats:
+      - html
+      - json  # Habilita salida JSON para API
+  ```
+  Verifique con comando curl:
+  ```bash
+  curl -kLX GET --data-urlencode q='langchain' -d format=json http://localhost:8888
+  ```
+  Debe devolver un objeto JSON con resultados
+
 - **Brave Search**: Motor de búsqueda centrado en la privacidad con características avanzadas
 
   - Requiere `BRAVE_SEARCH_API_KEY` en tu archivo `.env`
