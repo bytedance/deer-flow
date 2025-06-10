@@ -5,7 +5,7 @@ import asyncio  # Ensure asyncio is imported
 import pytest
 from pydantic import ValidationError
 from src.config.report_style import ReportStyle
-from src.rag.retriever import Resource  
+from src.rag.retriever import Resource
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi import HTTPException
 
@@ -65,7 +65,9 @@ def test_chat_request_defaults():
 
 
 def test_chat_request_with_values():
-    resource = Resource(name="test", type="doc", uri="some-uri-value", title="some-title-value")
+    resource = Resource(
+        name="test", type="doc", uri="some-uri-value", title="some-title-value"
+    )
     msg = ChatMessage(role="user", content="hi")
     req = ChatRequest(
         messages=[msg],
@@ -79,7 +81,7 @@ def test_chat_request_with_values():
         interrupt_feedback="stop",
         mcp_settings={"foo": "bar"},
         enable_background_investigation=False,
-        report_style="academic",  
+        report_style="academic",
     )
     assert req.messages[0].role == "user"
     assert req.debug is True
@@ -153,15 +155,14 @@ def test_tts_request_validation_error():
 @patch("src.server.mcp_utils._get_tools_from_client_session", new_callable=AsyncMock)
 @patch("src.server.mcp_utils.StdioServerParameters")
 @patch("src.server.mcp_utils.stdio_client")
-async def test_load_mcp_tools_exception_handling(mock_stdio_client, mock_StdioServerParameters, mock_get_tools):  # Changed to async def
+async def test_load_mcp_tools_exception_handling(
+    mock_stdio_client, mock_StdioServerParameters, mock_get_tools
+):  # Changed to async def
     mock_get_tools.side_effect = Exception("unexpected error")
     mock_StdioServerParameters.return_value = MagicMock()
     mock_stdio_client.return_value = MagicMock()
 
     with pytest.raises(HTTPException) as exc:
-        await mcp_utils.load_mcp_tools(  # Use await
-            server_type="stdio",
-            command="foo"
-        )
+        await mcp_utils.load_mcp_tools(server_type="stdio", command="foo")  # Use await
     assert exc.value.status_code == 500
     assert "unexpected error" in exc.value.detail

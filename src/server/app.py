@@ -194,15 +194,13 @@ async def text_to_speech(request: TTSRequest):
     """Convert text to speech using volcengine TTS API."""
     app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
     if not app_id:
-        raise HTTPException(
-            status_code=400, detail="VOLCENGINE_TTS_APPID is not set"
-        )
+        raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
     access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
     if not access_token:
         raise HTTPException(
             status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
         )
-    
+
     try:
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
         voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "BV700_V2_streaming")
