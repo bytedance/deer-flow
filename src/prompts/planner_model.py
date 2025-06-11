@@ -6,11 +6,14 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-
+# "analyzer" | "coder" | "validator" | "thinker"
 class StepType(str, Enum):
-    RESEARCH = "research"
-    PROCESSING = "processing"
-
+    ANALYZER = "analyzer"
+    CODER = "coder"
+    RESEARCHER = "researcher"
+    THINKER = "thinker"
+    READER = "reader"
+    
 
 class Step(BaseModel):
     need_search: bool = Field(..., description="Must be explicitly set for each step")
@@ -26,7 +29,6 @@ class Plan(BaseModel):
     locale: str = Field(
         ..., description="e.g. 'en-US' or 'zh-CN', based on the user's language"
     )
-    has_enough_context: bool
     thought: str
     title: str
     steps: List[Step] = Field(
@@ -38,7 +40,6 @@ class Plan(BaseModel):
         json_schema_extra = {
             "examples": [
                 {
-                    "has_enough_context": False,
                     "thought": (
                         "To understand the current market trends in AI, we need to gather comprehensive information."
                     ),
