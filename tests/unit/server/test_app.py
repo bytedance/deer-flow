@@ -145,6 +145,21 @@ class TestTTSEndpoint:
         assert response.status_code == 500
         assert "TTS API error" in response.json()["detail"]
 
+    @patch("src.server.app.VolcengineTTS")
+    def test_tts_api_exception(self, mock_tts_class, client):
+        mock_tts_instance = MagicMock()
+        mock_tts_class.return_value = mock_tts_instance
+
+        # Mock TTS error response
+        mock_tts_instance.text_to_speech.side_effect = Exception("TTS API error")
+
+        request_data = {"text": "Hello world", "encoding": "mp3"}
+
+        response = client.post("/api/tts", json=request_data)
+
+        assert response.status_code == 500
+        assert "Internal Server Error" in response.json()["detail"]
+
 
 class TestPodcastEndpoint:
     @patch("src.server.app.build_podcast_graph")
@@ -292,6 +307,24 @@ class TestMCPEndpoint:
 
         assert response.status_code == 200
         mock_load_tools.assert_called_once()
+
+    @patch("src.server.app.load_mcp_tools")
+    def test_mcp_server_metadata_with_exception(self, mock_load_tools, client):
+        mock_load_tools.side_effect = HTTPException(
+            status_code=400, detail="MCP Server Error"
+        )
+
+        request_data = {
+            "transport": "stdio",
+            "command": "test_command",
+            "args": ["arg1", "arg2"],
+            "env": {"ENV_VAR": "value"},
+        }
+
+        response = client.post("/api/mcp/server/metadata", json=request_data)
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal Server Error"
 
 
 class TestRAGEndpoints:
