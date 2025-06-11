@@ -383,7 +383,7 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
     except Exception as e:
         logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
-        
+
 
 @app.get("/api/rag/config", response_model=RAGConfigResponse)
 async def rag_config():

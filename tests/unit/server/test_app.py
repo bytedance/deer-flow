@@ -435,7 +435,7 @@ class TestAstreamWorkflowGenerator:
         assert "event: message_chunk" in events[0]
         assert "Hello world" in events[0]
         # Check for the actual agent name that appears in the output
-        assert '"agent": "a"' in events[0] 
+        assert '"agent": "a"' in events[0]
 
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
@@ -682,3 +682,47 @@ class TestAstreamWorkflowGenerator:
             assert config["max_search_results"] == 10
             assert config["report_style"] == ReportStyle.NEWS.value
             yield ("agent1", "messages", [mock_ai_message])
+
+
+class TestGenerateProseEndpoint:
+    @patch("src.server.app.build_prose_graph")
+    def test_generate_prose_success(self, mock_build_graph, client):
+        # Mock the workflow and its astream method
+        mock_workflow = MagicMock()
+        mock_build_graph.return_value = mock_workflow
+
+        class MockEvent:
+            def __init__(self, content):
+                self.content = content
+
+        async def mock_astream(*args, **kwargs):
+            yield (None, [MockEvent("Generated prose 1")])
+            yield (None, [MockEvent("Generated prose 2")])
+
+        mock_workflow.astream.return_value = mock_astream()
+        request_data = {
+            "prompt": "Write a story.",
+            "option": "default",
+            "command": "generate",
+        }
+
+        response = client.post("/api/prose/generate", json=request_data)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+
+        # Read the streaming response content
+        content = b"".join(response.iter_bytes())
+        assert b"Generated prose 1" in content or b"Generated prose 2" in content
+
+    @patch("src.server.app.build_prose_graph")
+    def test_generate_prose_error(self, mock_build_graph, client):
+        mock_build_graph.side_effect = Exception("Prose generation failed")
+        request_data = {
+            "prompt": "Write a story.",
+            "option": "default",
+            "command": "generate",
+        }
+        response = client.post("/api/prose/generate", json=request_data)
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal Server Error"
