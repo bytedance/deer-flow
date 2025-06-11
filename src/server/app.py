@@ -239,7 +239,7 @@ async def text_to_speech(request: TTSRequest):
                 )
             },
         )
-    
+
     except Exception as e:
         logger.exception(f"Error in TTS endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)

@@ -151,9 +151,7 @@ class TestTTSEndpoint:
         mock_tts_class.return_value = mock_tts_instance
 
         # Mock TTS error response
-        mock_tts_instance.text_to_speech.side_effect = HTTPException(
-            status_code=400, detail="TTS API error"
-        )
+        mock_tts_instance.side_effect = Exception("TTS API error")
 
         request_data = {"text": "Hello world", "encoding": "mp3"}
 
