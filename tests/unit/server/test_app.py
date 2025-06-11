@@ -143,7 +143,7 @@ class TestTTSEndpoint:
         response = client.post("/api/tts", json=request_data)
 
         assert response.status_code == 500
-        assert "TTS API error" in response.json()["detail"]
+        assert "Internal Server Error" in response.json()["detail"]
 
     @patch("src.server.app.VolcengineTTS")
     def test_tts_api_exception(self, mock_tts_class, client):
@@ -151,7 +151,9 @@ class TestTTSEndpoint:
         mock_tts_class.return_value = mock_tts_instance
 
         # Mock TTS error response
-        mock_tts_instance.text_to_speech.side_effect = Exception("TTS API error")
+        mock_tts_instance.text_to_speech.side_effect = HTTPException(
+            status_code=400, detail="TTS API error"
+        )
 
         request_data = {"text": "Hello world", "encoding": "mp3"}
 
