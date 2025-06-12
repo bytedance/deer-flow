@@ -22,6 +22,7 @@ def file2resource(file: str) -> dict:
         'description': file
     }
 
+
 def resources2user_input(resources: list[dict]) -> str:
     """Convert a list of resources to a user input string.
     

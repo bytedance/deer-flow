@@ -31,8 +31,9 @@ dependencies = [
     "inquirerpy>=0.3.4",
     "arxiv>=2.2.0",
     "mcp>=1.6.0",
-    "langchain-mcp-adapters>=0.0.9",
-    "MarkItDown[all]"
+    "langchain-mcp-adapters==0.0.9",
+    "MarkItDown[all]",
+    "filetype"
 ]
 
 [project.optional-dependencies]

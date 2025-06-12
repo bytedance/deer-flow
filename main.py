@@ -7,12 +7,20 @@ Entry point script for the DeerFlow project.
 
 import argparse
 import asyncio
+import os
 
 from InquirerPy import inquirer
 
 from src.config.questions import BUILT_IN_QUESTIONS, BUILT_IN_QUESTIONS_ZH_CN
 from src.workflow import run_agent_workflow_async
 
+def get_all_file_paths(folder_path):
+    file_paths = []
+    for entry in os.listdir(folder_path):  # 遍历文件夹中的所有条目
+        full_path = os.path.join(folder_path, entry)  # 获取完整路径
+        if os.path.isfile(full_path):  # 判断是否为文件
+            file_paths.append(full_path)
+    return file_paths
 
 def ask(
     question,
@@ -32,6 +40,10 @@ def ask(
         enable_background_investigation: If True, performs web search before planning to enhance context
     """
     if files:
+        # get all file path from folder
+        if len(files)==1 and os.path.isdir(files[0]):
+            files = get_all_file_paths(files[0])
+
         user_input = [
             {'type': 'text', 'text': question}
         ]
@@ -117,7 +129,7 @@ if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Run the Deer")
     parser.add_argument("--query", nargs="*", help="The query to process")
-    parser.add_argument("--file", nargs="*", help="upload files ")
+    parser.add_argument("--file", nargs="*", help="upload files, you can upload multiple files seperated by space or upload a folder path")
     parser.add_argument(
         "--interactive",
         action="store_true",
@@ -175,10 +187,12 @@ if __name__ == "__main__":
 # main.py --query "看文件中张国战的所有加班时长, 使用analyzer调用mcp服务查看,不使用coder" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/加班清单.xlsx
 # main.py --query 分析目前agent的最新研究，给一个详细的报告
 # main.py --query "图中画着什么东西" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/ts.png
-# main.py --query "看看他是哪个学校毕业的" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/cv.pdf
+# main.py --query "看看他是哪个学校毕业的" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/cv.pdf
 # main.py --query "从图中能获取哪些现象和推论？" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/report.jpg
 
 # main.py --query "有哪些同学严重偏科, 不使用coder和search，只使用doc_parse" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/成绩单.xlsx
 # main.py --query " 图中中国玩具的的线上销售渠道有哪些？" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/sell.jpg
 
 # main.py --query "Q1: 这些材料体现了什么交通事故，责任如何认定？ Q2: 涉及事故的白色小汽车在哪些位置发生明显损坏，如果维修的话需要多少费用？请结合图片和必要的搜索材料回答该问题" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car1.jpg /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car2.jpg /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car3.jpg
+
+# main.py --query "微博评论中统计积极/消极占比，并尝试解读其原因, 不使用coder" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/multi_files

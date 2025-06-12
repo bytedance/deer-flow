@@ -91,6 +91,7 @@ class MultiServerMCPClient_wFileUpload(MultiServerMCPClient):
         old_coroutine = tool.coroutine
 
         def _replace_base64_with_path(out):
+            print(out)
             # todo: 有潜在bug，如果模型输出内容就是有base64编码的内容，则会被替换为文件路径
             # 需要针对特定返回格式的json string进行处理
             # todo: 如果返回内容中有两个相同的文件？

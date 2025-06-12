@@ -60,6 +60,7 @@ def get_init_state(
         for content in user_input:
             # copy file from file_url and save to session_dir
             if content['type'] == 'file_url':
+
                 file_url = content['file_url']['url']
                 file_name = osp.basename(file_url)
                 file_path = osp.join(session_dir, file_name)
@@ -84,6 +85,7 @@ def get_init_state(
     return {
         "messages": [{"role": "user", "content": user_input_text}],
         "resources": resources,
+        "locale": "zh-CN",
         "auto_accepted_plan": True,
         "enable_background_investigation": enable_background_investigation,
         "session_id": session_id,
@@ -117,8 +119,8 @@ async def run_agent_workflow_async(
         enable_debug_logging()
 
     logger.info(f"Starting async workflow with user input: {user_input}")
-    initial_state = get_init_state(user_input, enable_background_investigation)
 
+    initial_state = get_init_state(user_input, enable_background_investigation)
 
     config = {
         "configurable": {
@@ -126,6 +128,7 @@ async def run_agent_workflow_async(
             "max_plan_iterations": max_plan_iterations,
             "max_step_num": max_step_num,
             "max_search_results": 5,
+            "max_toolcall_iterater_times": 5,
             "mcp_settings": {
                 "servers": {
                     "doc_parser": {

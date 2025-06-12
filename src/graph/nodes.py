@@ -32,6 +32,8 @@ from src.utils.json_utils import repair_json_output
 from src.graph.types import State
 from src.config import SELECTED_SEARCH_ENGINE, SearchEngine
 
+from src.utils.file_descriptors import file2resource
+
 logger = logging.getLogger(__name__)
 
 # Define available LLM types
@@ -125,7 +127,7 @@ def coordinator_node(
     logger.info("Coordinator node is running.")
     configurable = Configuration.from_runnable_config(config)
     messages = apply_prompt_template("coordinator", state, configurable)
-    
+    print(State)
     response = (
         get_llm_by_type(AGENT_LLM_MAP["coordinator"])
         .bind_tools([handoff_to_planner])
@@ -260,6 +262,7 @@ def router_node(
         logger.info(f"Default routing to analyzer for step: {current_step.title}")
         return Command(update=update_data, goto="analyzer")
 
+
 async def analyzer_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["router"]]:
@@ -344,9 +347,14 @@ async def analyzer_node(
         all_tools = delegation_tools + mcp_tools
         llm = get_llm_by_type(AGENT_LLM_MAP["analyzer"]).bind_tools(all_tools)
         response = llm.invoke(messages)
-        # print(response)
+        logger.info(response.content)
+      
         # 检查tool call
-        if hasattr(response, 'tool_calls') and response.tool_calls:
+        max_toolcall_iterater_times = configurable.max_toolcall_iterater_times
+        iterater_times = 0
+        while hasattr(response, 'tool_calls') and response.tool_calls and iterater_times < max_toolcall_iterater_times:
+            iterater_times += 1
+            logger.info(f"analyzer tool call times: {iterater_times}")
             delegation_calls = []
             mcp_calls = []
 
@@ -365,18 +373,29 @@ async def analyzer_node(
                     for tool in mcp_tools:
                         if tool.name == tool_call["name"]:
                             result = await tool.coroutine(**tool_call["args"])
-                            mcp_results.append(f"{tool_call['name']}: {result}")
+                            print(f"tool result: {result}")
+                            tool_response_list = json.loads(result[0])
+                            result_text = "response text: "
+                            for res in tool_response_list:
+                                if res["type"] == "text":
+                                    result_text = result_text + res["text"] + " | " 
+                                elif res["type"] == "uri":
+                                    result_text = result_text + "toolcall output file_path: " + res["uri"]
+                                else:
+                                    raise ValueError
+                            mcp_results.append(f"**{tool_call['name']}**\n {result_text}")
                             break
                 
                 # 将MCP结果返回给analyzer
                 mcp_summary = "MCP Tools Results:\n" + "\n".join(mcp_results)
                 
                 # 第二次LLM调用：基于MCP结果分析
-                analysis_messages = messages + [
+                messages = messages + [
                     AIMessage(content=response.content, tool_calls=response.tool_calls),
-                    HumanMessage(content=f"{mcp_summary}\n\nBased on the MCP results, provide your analysis or delegate to appropriate agents.")
+                    HumanMessage(content=f"{mcp_summary}\n\nBased on the MCP results, provide your analysis or delegate to appropriate agents.\n## Locale\n{state.get('locale', 'en-US')}")
                 ]
-                response = llm.invoke(analysis_messages)
+                print(messages)
+                response = llm.invoke(messages)
 
             if delegation_calls:
                 
@@ -681,7 +700,7 @@ def reporter_node(state: State, config: RunnableConfig) -> dict:
     current_step_index = state.get("current_step_index", 0)
     current_step = current_plan.steps[current_step_index]
 
-    logger.info(f"Reporter node is generating final report. current_step: {current_step}")
+    logger.info(f"Reporter node is generating final report. current_step_index: {current_step_index}")
     # 构建综合报告输入
     comprehensive_context = f"""
 # Task Overview
@@ -720,5 +739,6 @@ def reporter_node(state: State, config: RunnableConfig) -> dict:
     # 生成最终报告
     response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
     logger.info("Final report generated successfully.")
+    logger.info(response.content)
     # print(response.content)
     return {"final_report": response.content}
