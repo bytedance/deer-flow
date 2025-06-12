@@ -480,17 +480,20 @@ async def coder_node(
                 }
 
     # 创建mcp agent
-    assert mcp_servers
-    try:
-        client = MultiServerMCPClient(mcp_servers)
-        tools = await client.get_tools(server_name="Sandbox")
-        logger.info(
-            "Able to establish the connection with the sandbox. Use sandbox service to run codes."
-        )
-    except Exception as e:
-        logger.warning(
-            f"Could not estabilish connection with the sandbox service with error {e}. Fallback to python_repl_tool"
-        )
+    if len(mcp_servers) != 0:
+        try:
+            client = MultiServerMCPClient(mcp_servers)
+            tools = await client.get_tools(server_name="Sandbox")
+            logger.info(
+                "Able to establish the connection with the sandbox. Use sandbox service to run codes."
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not estabilish connection with the sandbox service with error {e}. Fallback to python_repl_tool"
+            )
+            tools = [python_repl_tool]
+    else:
+        logger.info("Do not configurate to use sandbox. Fallback to python_repl_tool.")
         tools = [python_repl_tool]
 
     coder_agent = create_agent("coder", "coder", tools, "coder")
