@@ -31,7 +31,7 @@ def get_web_search_tool(max_search_results: int):
         return LoggedTavilySearch(
             name="web_search",
             max_results=max_search_results,
-            include_raw_content=True,
+            include_raw_content=False, # TODO 这个会很长，先不加
             include_images=True,
             include_image_descriptions=True,
         )

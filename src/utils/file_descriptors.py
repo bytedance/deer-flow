@@ -2,6 +2,7 @@ import json
 from copy import deepcopy
 import logging
 import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,6 @@ def file2resource(file: str) -> dict:
         'title': os.path.basename(file),
         'description': file
     }
-
 
 def resources2user_input(resources: list[dict]) -> str:
     """Convert a list of resources to a user input string.

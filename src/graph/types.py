@@ -25,3 +25,4 @@ class State(MessagesState):
 
     current_step_index: int = -1
     file_info: str
+    need_image: str = "true"

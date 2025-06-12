@@ -196,3 +196,10 @@ if __name__ == "__main__":
 # main.py --query "Q1: 这些材料体现了什么交通事故，责任如何认定？ Q2: 涉及事故的白色小汽车在哪些位置发生明显损坏，如果维修的话需要多少费用？请结合图片和必要的搜索材料回答该问题" --file /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car1.jpg /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car2.jpg /mnt/afs/yaotiankuo/agents/deer-dev/tests/multi_images/car3.jpg
 
 # main.py --query "微博评论中统计积极/消极占比，并尝试解读其原因, 不使用coder" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/multi_files
+
+# main.py --query "这些是商业医疗保险理赔材料，准确识别所有表格并整理成md输出" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/rotate_img
+
+# main.py --query "将第二个图转正，整理成md输出" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/rotate_img
+
+
+# main.py --query "搜索一下 attention block的结构图，再帮我讲解一下"

@@ -140,7 +140,7 @@ async def run_agent_workflow_async(
                 }
             },
         },
-        "recursion_limit": 100,
+        "recursion_limit": 25, #为整个的调度次数
     }
     last_message_cnt = 0
     async for s in graph.astream(
