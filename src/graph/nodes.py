@@ -467,15 +467,40 @@ async def coder_node(
     messages = apply_prompt_template("coder", coder_input, configurable)
     # print(f"code: \n{messages}")
     # 创建coder agent
-    coder_agent = create_agent("coder", "coder", [python_repl_tool], "coder")
-    
+    mcp_servers = {}
+    if configurable.mcp_settings:
+        for server_name, server_config in configurable.mcp_settings["servers"].items():
+            if server_config.get("enabled_tools") and "coder" in server_config.get(
+                "add_to_agents", []
+            ):
+                mcp_servers[server_name] = {
+                    k: v
+                    for k, v in server_config.items()
+                    if k in ("transport", "command", "args", "url", "env")
+                }
+
+    # 创建mcp agent
+    assert mcp_servers
+    try:
+        client = MultiServerMCPClient(mcp_servers)
+        tools = await client.get_tools(server_name="Sandbox")
+        logger.info(
+            "Able to establish the connection with the sandbox. Use sandbox service to run codes."
+        )
+    except Exception as e:
+        logger.warning(
+            f"Could not estabilish connection with the sandbox service with error {e}. Fallback to python_repl_tool"
+        )
+        tools = [python_repl_tool]
+
+    coder_agent = create_agent("coder", "coder", tools, "coder")
+
     # 执行agent
     recursion_limit = int(os.getenv("AGENT_RECURSION_LIMIT", "30"))
     result = await coder_agent.ainvoke(
-        input={"messages": messages},
-        config={"recursion_limit": recursion_limit}
+        input={"messages": messages}, config={"recursion_limit": recursion_limit}
     )
-    
+    logger.info(f"Coder-sandbox interaction logs info: {result}")
     execution_result = result["messages"][-1].content
     current_step.execution_res = execution_result
     
