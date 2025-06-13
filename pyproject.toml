@@ -31,7 +31,7 @@ dependencies = [
     "inquirerpy>=0.3.4",
     "arxiv>=2.2.0",
     "mcp>=1.6.0",
-    "langchain-mcp-adapters==0.1.7",
+    "langchain-mcp-adapters>=0.0.9",
     "MarkItDown[all]",
     "filetype>=1.2.0",
 ]
