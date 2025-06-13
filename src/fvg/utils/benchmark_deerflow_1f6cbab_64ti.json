@@ -1,0 +1,15 @@
+{
+    "agent": {
+        "module": "src.graph.builder",
+        "class_name": "build_graph_with_memory"
+    },
+    "dataset_type": "64",
+    "index_table": {
+        "module": "pandas",
+        "class_name": "read_excel",
+        "args": {
+            "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/questions.xlsx"
+        }
+    },
+    "resource_path": "D:/Workspaces/MllmAgent/Benchmark-64ti/resources"
+}

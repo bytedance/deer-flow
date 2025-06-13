@@ -154,7 +154,7 @@ def coordinator_node(
     return Command(
         update={
             "locale": locale, 
-            "resources": state["resources"],
+            "resources": state.get("resources", {}),
             "messages": [AIMessage(content=response.content, name="coordinator")],
             "current_step_index": -1  # 初始化步骤索引
         },
