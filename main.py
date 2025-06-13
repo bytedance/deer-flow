@@ -197,9 +197,15 @@ if __name__ == "__main__":
 
 # main.py --query "微博评论中统计积极/消极占比，并尝试解读其原因, 不使用coder" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/multi_files
 
-# main.py --query "这些是商业医疗保险理赔材料，准确识别所有表格并整理成md输出" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/rotate_img
+# main.py --query "这些是商业医疗保险理赔材料，请判断是否合规合理" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/rotate_img
 
 # main.py --query "将第二个图转正，整理成md输出" --file /mnt/afs/yaotiankuo/agents/deer-main-dev/tests/test_cases/rotate_img
 
 
 # main.py --query "搜索一下 attention block的结构图，再帮我讲解一下"
+
+# main.py --query "搜索一下唐人街探案1900 男主角两年前最热门的电影里的海报传的是什么衣服"
+
+# main.py --query "分析历年上海考生的北大的分数线"
+# main.py --query "广东考生，之前模拟考分数大概在 590 到 610 分之间，性别男，物理方向，孩子挺喜欢计算机编程的，但我们家庭就在广东二线城市，条件比较普通，希望他未来毕业后能找到稳定、待遇比较好的国企工作。孩子一直没出过省，比较想去北上广深这种大城市上学，并想出国交流学习，如果未来学校能有这方面的资源和支持就更好了。请问这种情况能报什么学校专业，以及这些专业的就业前景和薪资空间怎么样?"
+
