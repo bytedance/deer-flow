@@ -68,14 +68,14 @@ def main():
     parser.add_argument(
         "--sandbox_host",
         type=str,
-        default="127.0.0.1",
-        help="Sandbox http host (default: 127.0.0.1)",
+        default="10.210.0.52",
+        help="Sandbox http host (default: 10.210.0.52)",
     )
     parser.add_argument(
         "--sandbox_port",
         type=str,
-        default="8080",
-        help="Sandbox http port (default:8080)",
+        default="25536",
+        help="Sandbox http port (default:25536)",
     )
     args = parser.parse_args()
     sandbox_endpoint = "http://" + args.sandbox_host + ":" + args.sandbox_port
