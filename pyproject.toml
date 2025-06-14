@@ -69,3 +69,8 @@ extend-exclude = '''
 # in the root of the project.
 ^/build/
 '''
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+]
