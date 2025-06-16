@@ -54,35 +54,35 @@ class ExcelAgentRunner:
 
         try:
             async with sem:
-                print("Q {}: {}".format(index, task))
+                print('Q {}: {}'.format(index, task))
                 response = await thread_local.agent.ainvoke(
                     {
-                        "messages": [
+                        'messages': [
                             {'role': 'system', 'content': sys_msg},
                             {'role': 'user', 'content': task}
                         ]
                     },
                     {
-                        "configurable": {
-                            "thread_id": hash("{}-{}".format(
-                                threading.get_native_id(), index))
+                        'configurable': {
+                            'thread_id': str(hash('{}-{}'.format(
+                                threading.get_native_id(), index)))
                         },
-                        "recursion_limit": 50
+                        **config.get('stream_config', {})
                     }
                 )
 
-            answer = response["messages"][-1].text()
-            messages = [i.text() for i in response["messages"]]
-            print("R {}\n{}".format(index, answer))
+            answer = response['messages'][-1].text()
+            messages = [i.text() for i in response['messages']]
+            print('R {}\n{}'.format(index, answer))
 
         except Exception as e:
-            answer = ""
+            answer = ''
             messages = str(e)
-            print("R error {}\n{}".format(index, messages))
+            print('R error {}\n{}'.format(index, messages))
         return index, answer, messages
 
     async def run_parallel(self, config, output_path, message_path):
-        sem = asyncio.Semaphore(config['thread_pool']["max_workers"])
+        sem = asyncio.Semaphore(config['concurrency'])
         thread_local = threading.local()
         futures = [
             self.process_row(thread_local, config, i, row, sem)
@@ -114,13 +114,13 @@ class ExcelAgentRunner:
     def run(self, config, output_path, message_path):
         self.df = load_data_table(config)
 
-        if "thread_pool" in config:
+        if 'concurrency' in config:
             asyncio.run(
                 self.run_parallel(config, output_path, message_path))
         else:
             self.run_sequential(config, output_path, message_path)
 
-        print("Done")
+        print('Done')
 
 
 def create_parser():
@@ -135,8 +135,8 @@ def create_parser():
     parser.add_argument(
         '-m', '--message-path', type=str, required=True,
         help='The path to save the messages in JSON format.')
-    parser.add_argument("--template-version", type=str, default="v1")
-    parser.add_argument("--sys-version", type=str, default="v2")
+    parser.add_argument('--template-version', type=str, default='v1')
+    parser.add_argument('--sys-version', type=str, default='v2')
     return parser
 
 
@@ -150,9 +150,9 @@ def make_object_from_config(config):
     if isinstance(config, list):
         return [make_object_from_config(i) for i in config]
     elif isinstance(config, dict):
-        if "module" in config and "class_name" in config:
-            if "args" in config:
-                config["args"] = make_object_from_config(config["args"])
+        if 'module' in config and 'class_name' in config:
+            if 'args' in config:
+                config['args'] = make_object_from_config(config['args'])
 
             return make_object(**config)
         else:
@@ -177,7 +177,7 @@ def load_data_table(config):
     return index_table
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = create_parser()
     args = parser.parse_args()
 
@@ -187,4 +187,4 @@ if __name__ == "__main__":
     runner = ExcelAgentRunner(args)
     t1 = time.time()
     runner.run(config, args.output_path, args.message_path)
-    print("Elapsed time: {:.2f} s".format(time.time() - t1))
+    print('Elapsed time: {:.2f} s'.format(time.time() - t1))

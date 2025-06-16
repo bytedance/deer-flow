@@ -9,13 +9,13 @@
                 "args": {
                     "model": "claude-4-sonnet",
                     "base_url": "https://genaiapi.cloudsway.net/v1/ai/qzZpcuWIVRuWVmxd",
-                    "api_key": "VMf4YDRhhV6YqNNSOYg5",
+                    "api_key": "",
                     "temperature": 0.5
                 }
             },
             "tools": [
                 {
-                    "module": "langchain_experimental.tools.python.tool",
+                    "module": "fvg.tools.session_based_python",
                     "class_name": "PythonREPLTool"
                 }
             ],
@@ -24,6 +24,9 @@
                 "class_name": "MemorySaver"
             }
         }
+    },
+    "stream_config": {
+        "recursion_limit": 40
     },
     "dataset_type": "64",
     "index_table": {
@@ -34,7 +37,5 @@
         }
     },
     "resource_path": "D:/Workspaces/MllmAgent/Benchmark-64ti/resources",
-    "thread_pool": {
-        "max_workers": 4
-    }
+    "concurrency": 6
 }

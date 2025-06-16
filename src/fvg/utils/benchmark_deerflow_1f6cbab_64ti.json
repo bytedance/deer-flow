@@ -3,6 +3,9 @@
         "module": "src.graph.builder",
         "class_name": "build_graph_with_memory"
     },
+    "stream_config": {
+        "recursion_limit": 40
+    },
     "dataset_type": "64",
     "index_table": {
         "module": "pandas",
