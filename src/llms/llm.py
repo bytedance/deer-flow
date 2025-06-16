@@ -10,6 +10,19 @@ from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
+# Add a file handler to persist LLM requests and responses.
+# This is done lazily to avoid adding duplicate handlers when the module
+# is imported multiple times during tests or execution.
+if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+    )
+    logger.addHandler(file_handler)
+
 
 class LoggingChatOpenAI:
     """Wrapper around ChatOpenAI that logs requests and responses."""
