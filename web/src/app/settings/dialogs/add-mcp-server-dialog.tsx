@@ -138,7 +138,7 @@ export function AddMCPServerDialog({
 
         <main>
           <Textarea
-            className="h-[360px]"
+            className="h-[360px] sm:max-w-[510px]"
             placeholder={
               'Example:\n\n{\n  "mcpServers": {\n    "My Server": {\n      "command": "python",\n      "args": [\n        "-m", "mcp_server"\n      ],\n      "env": {\n        "API_KEY": "YOUR_API_KEY"\n      }\n    }\n  }\n}'
             }
