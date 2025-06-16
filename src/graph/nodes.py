@@ -6,15 +6,18 @@ import io
 import json
 import logging
 import os
-from typing import Annotated, Literal
+import re
+from typing import Annotated, Any, Dict, List, Literal, Tuple
 from PIL import Image
-from langchain_core.messages import AIMessage, HumanMessage
+import aiohttp
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from src.mcp_client.mcp_client import MultiServerMCPClient_wFileUpload
 from src.agents import create_agent
+from src.tools.image_rotate import rotate_image
 from src.tools.search import LoggedTavilySearch
 from src.tools import (
     crawl_tool,
@@ -29,8 +32,13 @@ from src.prompts.planner_model import Plan, StepType, Step
 from src.prompts.template import apply_prompt_template
 from src.utils.json_utils import repair_json_output
 
-from src.graph.types import State
+from src.graph.types import State, Resource
 from src.config import SELECTED_SEARCH_ENGINE, SearchEngine
+
+from src.utils.file_descriptors import file2resource, resources2user_input
+import os
+
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +82,14 @@ def call_coder_agent(
 
 @tool
 def call_researcher_agent(
-    research_request: Annotated[str, "Specific research request for the researcher"]
+    research_request: Annotated[str, "Specific research request for the researcher"],
+    need_image: Annotated[str, "whether the search needs to return images"],
 ):
     """
     Delegate task to researcher agent For research and web searching. 
     Parameters:
         research_request: str, Specific research task description, Clearly state the scope of the field you want to research.
+        need_image: str, input true or false. true for return images
     Returns:
         str, The result of research
     """
@@ -100,6 +110,25 @@ def call_reader_agent(
         str, The result of image reading
         """
     return f"Will delegate to reader: {reader_request}\nfile_info: {file_info}"
+
+@tool
+def call_rotate_tool(
+    rotate_request: Annotated[str, "Specific image rotate angle."],
+    file_info: Annotated[str, "Image file path to rotate"],
+):
+    """
+    Rotate images that are difficult to read and require rotation, only support one image a time, but you can call this tool multiple times in one call.
+    Parameters:
+        rotate_request: Only support 3 angel: 90, -90, 180
+            -90: counterclockwise rotation by 90 degrees
+            90: clockwise rotation by 90 degrees
+            180: clockwise rotation by 180 degrees
+        file_info: Image file path to rotate
+    Returns:
+        str, The result of image rotate
+        """
+    return f"Will rotate tool image: {rotate_request}\nimage file: {file_info}"
+
 
 def _create_delegation_step(target_agent: str, request_content: str, current_step_index: int, need_search=False) -> Step:
     """创建委托步骤"""
@@ -125,7 +154,7 @@ def coordinator_node(
     logger.info("Coordinator node is running.")
     configurable = Configuration.from_runnable_config(config)
     messages = apply_prompt_template("coordinator", state, configurable)
-    
+    # print(State)
     response = (
         get_llm_by_type(AGENT_LLM_MAP["coordinator"])
         .bind_tools([handoff_to_planner])
@@ -260,6 +289,7 @@ def router_node(
         logger.info(f"Default routing to analyzer for step: {current_step.title}")
         return Command(update=update_data, goto="analyzer")
 
+
 async def analyzer_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["router"]]:
@@ -344,9 +374,14 @@ async def analyzer_node(
         all_tools = delegation_tools + mcp_tools
         llm = get_llm_by_type(AGENT_LLM_MAP["analyzer"]).bind_tools(all_tools)
         response = llm.invoke(messages)
-        # print(response)
+        logger.info(response.content)
+      
         # 检查tool call
-        if hasattr(response, 'tool_calls') and response.tool_calls:
+        max_toolcall_iterater_times = configurable.max_toolcall_iterater_times
+        iterater_times = 0
+        while hasattr(response, 'tool_calls') and response.tool_calls and iterater_times < max_toolcall_iterater_times:
+            iterater_times += 1
+            logger.info(f"analyzer tool call times: {iterater_times}")
             delegation_calls = []
             mcp_calls = []
 
@@ -365,18 +400,32 @@ async def analyzer_node(
                     for tool in mcp_tools:
                         if tool.name == tool_call["name"]:
                             result = await tool.coroutine(**tool_call["args"])
-                            mcp_results.append(f"{tool_call['name']}: {result}")
+                            print(f"tool result: {result}")
+                            tool_response_list = json.loads(result[0])
+                            result_text = "response text: "
+                            for res in tool_response_list:
+                                if res["type"] == "text":
+                                    result_text = result_text + res["text"] + " | " 
+                                elif res["type"] == "uri":
+                                    result_text = result_text + "\ntoolcall output file_path: " + res["uri"]
+                                else:
+                                    raise ValueError
+                            mcp_results.append(f"**{tool_call['name']}**\n {result_text}")
                             break
                 
                 # 将MCP结果返回给analyzer
                 mcp_summary = "MCP Tools Results:\n" + "\n".join(mcp_results)
                 
                 # 第二次LLM调用：基于MCP结果分析
-                analysis_messages = messages + [
+                messages = messages + [
                     AIMessage(content=response.content, tool_calls=response.tool_calls),
-                    HumanMessage(content=f"{mcp_summary}\n\nBased on the MCP results, provide your analysis or delegate to appropriate agents.")
+                    ToolMessage(content= mcp_summary,
+                        tool_call_id=response.tool_calls[0]["id"]  # 必须与上面的 id 匹配
+                    ),
+                    HumanMessage(content=f"Based on the MCP results, provide your analysis or delegate to appropriate agents.\n## Locale\n{state.get('locale', 'en-US')}")
                 ]
-                response = llm.invoke(analysis_messages)
+                print(messages)
+                response = llm.invoke(messages)
 
             if delegation_calls:
                 
@@ -406,7 +455,8 @@ async def analyzer_node(
                     return Command(
                         update={
                             "messages": [AIMessage(content=f"{tool_call['args']['research_request']}", name="analyzer")],
-                            "current_plan": current_plan
+                            "current_plan": current_plan,
+                            "need_image": tool_call["args"]["need_image"]
                         },
                         goto="router"
                     )
@@ -515,6 +565,71 @@ async def coder_node(
         goto="router"
     )
 
+
+def extract_markdown_images(text: str) -> List[Tuple[str, str]]:
+    """提取 Markdown 格式图像的描述和 URL"""
+    if not text:
+        return []
+    
+    # 匹配 ![description](url) 格式
+    pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+    matches = re.findall(pattern, text)
+    
+    # 过滤并返回有效的 HTTP(S) URL 和对应的描述
+    result = []
+    for description, url in matches:
+        url = url.strip()
+        if url.startswith(('http://', 'https://')):
+            result.append((description, url))
+    
+    return result
+
+async def download_images_batch(
+    image_infos: List[Tuple[str, str]], 
+    session_dir: str,
+    max_images: int = 5,
+    timeout: int = 10
+) -> List[Dict[str, Any]]:
+    """简化的批量下载"""
+    
+    os.makedirs(session_dir, exist_ok=True)
+    downloaded_images = []
+    
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        for i, (image_desc, url) in enumerate(image_infos[:max_images]):
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        
+                        # 简单的文件扩展名检测
+                        if 'image/png' in response.headers.get('Content-Type', ''):
+                            ext = '.png'
+                        elif 'image/gif' in response.headers.get('Content-Type', ''):
+                            ext = '.gif'
+                        else:
+                            ext = '.jpg'
+                        
+                        filename = f"research_img_{i+1}_{uuid.uuid4().hex[:8]}{ext}"
+                        local_path = os.path.join(session_dir, filename)
+                        
+                        with open(local_path, 'wb') as f:
+                            f.write(content)
+                        
+                        downloaded_images.append({
+                            'original_url': url,
+                            'local_path': local_path,
+                            'image_desc': image_desc,
+                            'mime_type': response.headers.get('Content-Type', 'image/jpeg'),
+                            'size': len(content)
+                        })
+                        
+            except Exception as e:
+                logger.warning(f"Failed to download {url}: {e}")
+                continue
+    
+    return downloaded_images
+
 async def researcher_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["router"]]:
@@ -540,7 +655,8 @@ async def researcher_node(
     messages = apply_prompt_template("researcher", researcher_input, configurable)
     # print(f"research: \n{messages}")
     # 准备研究工具
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+    tools = [get_web_search_tool(configurable.max_search_results)]
+    #crawl_tool
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         tools.insert(0, retriever_tool)
@@ -573,10 +689,50 @@ async def researcher_node(
         input={"messages": messages}, 
         config={"recursion_limit": recursion_limit}
     )
-    
+
+    research_content = result["messages"][-1].content
+    logger.info(f"Research completed. Content length: {len(research_content)}")
+    need_image = state.get("need_image", "true")
+
+    # 图提取并下载，输出结构为![name](https://sss.png)
+    if need_image.lower() == "true":
+        # 读取图的url，但是只要默认5个图
+        image_listtuple = extract_markdown_images(research_content)
+        
+        if image_listtuple:
+            logger.info(f"Found {len(image_listtuple)} images, downloading...")
+            
+            downloaded_images = await download_images_batch(
+                image_listtuple[:5],  # 简单限制
+                session_dir=state.get('session_dir', './sessions/default'),
+                max_images=5
+            )
+            new_images_info = []
+            # 添加到resources
+            for image_info in downloaded_images:
+                new_images_info.append({
+                    'uri': image_info['local_path'],
+                    'title': image_info['image_desc'],
+                    'description': image_info['image_desc'],
+                })
+
+            state['resources'].append(
+                Resource(
+                    uri=image_info['local_path'],
+                    title=image_info['image_desc'],
+                    description=image_info['image_desc'],
+                )
+            )
+            logger.info(f"Downloaded {len(downloaded_images)} images")
+
+        # print(f"research result: {result}")
+        result["messages"][-1].content += f"\n##related images\n{json.dumps(new_images_info, indent=2, ensure_ascii=False)}"
+
     execution_result = result["messages"][-1].content
     current_step.execution_res = execution_result
-    
+    print("=================================")
+    print(execution_result)
+    print("=================================")
     return Command(
         update={
             "messages": [AIMessage(content=execution_result, name="researcher")],
@@ -637,10 +793,13 @@ async def reader_node(
     current_step = current_plan.steps[current_step_index]
     logger.info(f"Reader node is reading image. current_step: {current_step}")
     # 构建reader输入（只使用前一个agent传递的message）
+    delegation_tools = [call_rotate_tool]
+    session_dir = state.get("session_dir", "")
+    image_paths=state.get("file_info", "")
     reader_input = {
         "messages": [create_message_with_base64_image(
-                text=f"# Current Task\n\n## Title\n{current_step.title}\n\n## Description\n{current_step.description}\n\n## Previous Message\n{state.get('messages', [])[-1].content if state.get('messages') else 'No previous message'}\n\n## Locale\n{state.get('locale', 'en-US')}", 
-                image_paths=state.get("file_info", "")
+                text=f"# Current Task\n\n## Title\n{current_step.title}\n\n## Description\n{current_step.description}\n\n## Previous Message\n{state.get('messages', [])[-1].content if state.get('messages') else 'No previous message'}\n#Reading Image paths (The order of image paths corresponds to the order in which images are read):\n{image_paths}\n## Locale\n{state.get('locale', 'en-US')}", 
+                image_paths=image_paths
             )],
         "locale": state.get("locale", "en-US"),
         "resources": state.get("resources", [])
@@ -649,9 +808,57 @@ async def reader_node(
     messages = apply_prompt_template("reader", reader_input, configurable)
     # print(f"reader: \n{messages}")
     # 使用vision模型处理文档和图片
-    llm = get_llm_by_type(AGENT_LLM_MAP["reader"])
+    llm = get_llm_by_type(AGENT_LLM_MAP["reader"]).bind_tools(delegation_tools)
     response = llm.invoke(messages)
-    
+
+    logger.info(f"reader: {response}")
+    max_toolcall_iterater_times = configurable.max_toolcall_iterater_times
+    iterater_times = 0
+    while hasattr(response, 'tool_calls') and response.tool_calls and iterater_times < max_toolcall_iterater_times:
+        iterater_times += 1
+        logger.info(f"reader tool call times: {iterater_times}")
+        for tool_call in response.tool_calls:
+            if tool_call["name"] == "call_rotate_tool":
+                image_path = tool_call["args"]["file_info"]
+                rotate_request = tool_call["args"]["rotate_request"]
+
+                # 生成新的文件路径
+                base_name = os.path.splitext(os.path.basename(image_path))[0]
+                extension = os.path.splitext(image_path)[1]
+                
+                # 使用UUID确保文件名唯一性
+                unique_id = str(uuid.uuid4())[:8]
+                new_filename = f"{base_name}_rotated_{unique_id}{extension}"
+                new_file_path = os.path.join(session_dir, new_filename)
+                # 旋转并保存图
+                rotation_desc = rotate_image(image_path, new_file_path, rotate_request)
+                    
+                # 更新资源列表
+                state['resources'].append(Resource(
+                    uri=new_file_path,
+                    title=f"{base_name} ({rotation_desc})",
+                    description=f"从 {image_path} {rotation_desc}后生成的图像"
+                ))
+                
+                print(f"图像已成功{rotation_desc}并保存到: {new_file_path}")
+                current_resources = f"##Rotated image is: \nuri: {new_file_path}\ntitle: {rotation_desc}\ndescription: 从 {image_path} {rotation_desc}后生成的图像"
+                # 将MCP结果返回给analyzer
+                mcp_summary = f"Rotate success! Tools Results:\n{current_resources}"
+                
+                # 第二次LLM调用：基于MCP结果分析
+                messages = messages + [
+                    AIMessage(content=response.content, tool_calls=response.tool_calls),
+                    ToolMessage(content= mcp_summary,
+                        tool_call_id=response.tool_calls[0]["id"]  # 必须与上面的 id 匹配
+                    ),
+                    create_message_with_base64_image(text=f"Based on results, Continue to complete your task\n## Locale\n{state.get('locale', 'en-US')}",
+                                                        image_paths=new_file_path)
+                    
+                    ]
+            
+                response = llm.invoke(messages)
+
+
     current_step.execution_res = response.content
     
     return Command(
@@ -709,7 +916,7 @@ def reporter_node(state: State, config: RunnableConfig) -> dict:
     current_step_index = state.get("current_step_index", 0)
     current_step = current_plan.steps[current_step_index]
 
-    logger.info(f"Reporter node is generating final report. current_step: {current_step}")
+    logger.info(f"Reporter node is generating final report. current_step_index: {current_step_index}")
     # 构建综合报告输入
     comprehensive_context = f"""
 # Task Overview
@@ -748,5 +955,6 @@ def reporter_node(state: State, config: RunnableConfig) -> dict:
     # 生成最终报告
     response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
     logger.info("Final report generated successfully.")
+    logger.info(response.content)
     # print(response.content)
     return {"final_report": response.content}

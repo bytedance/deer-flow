@@ -2,6 +2,7 @@ import json
 from copy import deepcopy
 import logging
 import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
