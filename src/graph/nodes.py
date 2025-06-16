@@ -102,12 +102,14 @@ def planner_node(
         ]
 
     if AGENT_LLM_MAP["planner"] == "basic":
-        llm = get_llm_by_type(AGENT_LLM_MAP["planner"]).with_structured_output(
+        llm = get_llm_by_type(
+            AGENT_LLM_MAP["planner"], configurable.model
+        ).with_structured_output(
             Plan,
             method="json_mode",
         )
     else:
-        llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
+        llm = get_llm_by_type(AGENT_LLM_MAP["planner"], configurable.model)
 
     # if the plan iterations is greater than the max plan iterations, return the reporter node
     if plan_iterations >= configurable.max_plan_iterations:
@@ -211,7 +213,7 @@ def coordinator_node(
     configurable = Configuration.from_runnable_config(config)
     messages = apply_prompt_template("coordinator", state)
     response = (
-        get_llm_by_type(AGENT_LLM_MAP["coordinator"])
+        get_llm_by_type(AGENT_LLM_MAP["coordinator"], configurable.model)
         .bind_tools([handoff_to_planner])
         .invoke(messages)
     )
@@ -286,7 +288,9 @@ def reporter_node(state: State, config: RunnableConfig):
             )
         )
     logger.debug(f"Current invoke messages: {invoke_messages}")
-    response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
+    response = get_llm_by_type(
+        AGENT_LLM_MAP["reporter"], configurable.model
+    ).invoke(invoke_messages)
     response_content = response.content
     logger.info(f"reporter response: {response_content}")
 
@@ -462,11 +466,23 @@ async def _setup_and_execute_agent_step(
                         f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
                     )
                     loaded_tools.append(tool)
-            agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
+            agent = create_agent(
+                agent_type,
+                agent_type,
+                loaded_tools,
+                agent_type,
+                configurable.model,
+            )
             return await _execute_agent_step(state, agent, agent_type)
     else:
         # Use default tools if no MCP servers are configured
-        agent = create_agent(agent_type, agent_type, default_tools, agent_type)
+        agent = create_agent(
+            agent_type,
+            agent_type,
+            default_tools,
+            agent_type,
+            configurable.model,
+        )
         return await _execute_agent_step(state, agent, agent_type)
 
 

@@ -62,6 +62,10 @@ class ChatRequest(BaseModel):
     report_style: Optional[ReportStyle] = Field(
         ReportStyle.ACADEMIC, description="The style of the report"
     )
+    model: Optional[str] = Field(
+        None,
+        description="Optional model name to override the default configured model",
+    )
 
 
 class TTSRequest(BaseModel):

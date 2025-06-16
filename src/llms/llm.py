@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 import os
 
 from langchain_openai import ChatOpenAI
@@ -10,8 +10,8 @@ from langchain_openai import ChatOpenAI
 from src.config import load_yaml_config
 from src.config.agents import LLMType
 
-# Cache for LLM instances
-_llm_cache: dict[LLMType, ChatOpenAI] = {}
+# Cache for LLM instances keyed by (llm_type, model_name)
+_llm_cache: dict[Tuple[LLMType, str], ChatOpenAI] = {}
 
 
 def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
@@ -29,7 +29,9 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
     return conf
 
 
-def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
+def _create_llm_use_conf(
+    llm_type: LLMType, conf: Dict[str, Any], model_override: str | None = None
+) -> ChatOpenAI:
     llm_type_map = {
         "reasoning": conf.get("REASONING_MODEL", {}),
         "basic": conf.get("BASIC_MODEL", {}),
@@ -43,6 +45,8 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
 
     # Merge configurations, with environment variables taking precedence
     merged_conf = {**llm_conf, **env_conf}
+    if model_override:
+        merged_conf["model"] = model_override
 
     if not merged_conf:
         raise ValueError(f"Unknown LLM Conf: {llm_type}")
@@ -51,19 +55,20 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
 
 
 def get_llm_by_type(
-    llm_type: LLMType,
+    llm_type: LLMType, model: str | None = None
 ) -> ChatOpenAI:
     """
     Get LLM instance by type. Returns cached instance if available.
     """
-    if llm_type in _llm_cache:
-        return _llm_cache[llm_type]
+    cache_key = (llm_type, model or "")
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
 
     conf = load_yaml_config(
         str((Path(__file__).parent.parent.parent / "conf.yaml").resolve())
     )
-    llm = _create_llm_use_conf(llm_type, conf)
-    _llm_cache[llm_type] = llm
+    llm = _create_llm_use_conf(llm_type, conf, model)
+    _llm_cache[cache_key] = llm
     return llm
 
 

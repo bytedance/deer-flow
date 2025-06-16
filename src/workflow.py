@@ -29,6 +29,7 @@ async def run_agent_workflow_async(
     max_plan_iterations: int = 1,
     max_step_num: int = 3,
     enable_background_investigation: bool = True,
+    model: str | None = None,
 ):
     """Run the agent workflow asynchronously with the given user input.
 
@@ -60,6 +61,7 @@ async def run_agent_workflow_async(
             "thread_id": "default",
             "max_plan_iterations": max_plan_iterations,
             "max_step_num": max_step_num,
+            "model": model,
             "mcp_settings": {
                 "servers": {
                     "mcp-github-trending": {

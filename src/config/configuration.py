@@ -23,6 +23,7 @@ class Configuration:
     max_search_results: int = 3  # Maximum number of search results
     mcp_settings: dict = None  # MCP settings, including dynamic loaded tools
     report_style: str = ReportStyle.ACADEMIC.value  # Report style
+    model: str | None = None  # Optional model name override
 
     @classmethod
     def from_runnable_config(
