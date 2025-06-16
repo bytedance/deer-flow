@@ -3,7 +3,17 @@
 
 import os
 import types
+import sys
 import pytest
+
+# Provide a stub langchain_openai module so src.llms.llm can be imported without
+# the real dependency installed.
+sys.modules.setdefault("langchain_openai", types.ModuleType("langchain_openai"))
+setattr(sys.modules["langchain_openai"], "ChatOpenAI", object)
+sys.modules.setdefault("dotenv", types.ModuleType("dotenv"))
+setattr(sys.modules["dotenv"], "load_dotenv", lambda *a, **k: None)
+sys.modules.setdefault("yaml", types.ModuleType("yaml"))
+
 from src.llms import llm
 
 
@@ -13,6 +23,17 @@ class DummyChatOpenAI:
 
     def invoke(self, msg):
         return f"Echo: {msg}"
+
+    def bind_tools(self, tools):
+        bound = DummyChatOpenAI(**self.kwargs)
+        bound.bound_tools = tools
+        return bound
+
+    def with_structured_output(self, schema, **kwargs):
+        bound = DummyChatOpenAI(**self.kwargs)
+        bound.schema = schema
+        bound.so_kwargs = kwargs
+        return bound
 
 
 @pytest.fixture(autouse=True)
@@ -69,3 +90,37 @@ def test_get_llm_by_type_caches(monkeypatch, dummy_conf):
     inst2 = llm.get_llm_by_type("basic")
     assert inst1 is inst2
     assert called["called"]
+
+
+def test_bind_tools_returns_logging(monkeypatch):
+    logs = []
+
+    class DummyLogger:
+        def info(self, msg):
+            logs.append(msg)
+
+    monkeypatch.setattr(llm, "logger", DummyLogger())
+
+    model = llm.LoggingChatOpenAI()
+    bound = model.bind_tools(["tool"])
+    assert isinstance(bound, llm.LoggingChatOpenAI)
+    bound.invoke("hello")
+    assert any("LLM request" in m for m in logs)
+    assert any("LLM response" in m for m in logs)
+
+
+def test_with_structured_output_returns_logging(monkeypatch):
+    logs = []
+
+    class DummyLogger:
+        def info(self, msg):
+            logs.append(msg)
+
+    monkeypatch.setattr(llm, "logger", DummyLogger())
+
+    model = llm.LoggingChatOpenAI()
+    bound = model.with_structured_output(dict)
+    assert isinstance(bound, llm.LoggingChatOpenAI)
+    bound.invoke("test")
+    assert any("LLM request" in m for m in logs)
+    assert any("LLM response" in m for m in logs)
