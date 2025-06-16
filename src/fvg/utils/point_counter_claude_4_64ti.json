@@ -1,0 +1,23 @@
+{
+    "chat_model": {
+        "module": "langchain_openai.chat_models.azure",
+        "class_name": "AzureChatOpenAI",
+        "args": {
+            "azure_endpoint": "https://omnimaid.openai.azure.com/",
+            "deployment_name": "gpt-4.1",
+            "api_version": "2025-01-01-preview",
+            "openai_api_key": "",
+            "temperature": 0.2
+        }
+    },
+    "answer_table": {
+        "module": "pandas",
+        "class_name": "read_excel",
+        "args": {
+            "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/result/claude-4_64ti_0616.answers.xlsx"
+        }
+    },
+    "thread_pool": {
+        "max_workers": 4
+    }
+}

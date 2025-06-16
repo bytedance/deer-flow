@@ -135,8 +135,14 @@ async def run_agent_workflow_async(
                         "transport": "sse",
                         "url": "http://127.0.0.1:8010/sse",
                         "enabled_tools": ["parse_doc"],
-                        "add_to_agents": ["analyzer"]
-                    }
+                        "add_to_agents": ["analyzer"],
+                    },
+                    "Sandbox": {
+                        "transport": "sse",
+                        "url": "http://0.0.0.0:8015/sse",
+                        "enabled_tools": ["run_code_sandbox_fusion"],
+                        "add_to_agents": ["coder"],
+                    },
                 }
             },
         },
