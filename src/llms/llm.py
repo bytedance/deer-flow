@@ -36,6 +36,10 @@ class LoggingChatOpenAI:
         logger.info(f"LLM response: {response}")
         return response
 
+    # Allow the object to be treated as a callable by frameworks expecting a
+    # Runnable or callable LLM.
+    __call__ = invoke
+
     async def ainvoke(self, messages, *args, **kwargs):
         logger.info(f"LLM request: {messages}")
         response = await self.llm.ainvoke(messages, *args, **kwargs)
