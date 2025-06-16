@@ -57,6 +57,20 @@ class LoggingChatOpenAI:
     def __getattr__(self, item):
         return getattr(self.llm, item)
 
+    @staticmethod
+    def _wrap(llm_instance: ChatOpenAI) -> "LoggingChatOpenAI":
+        obj = LoggingChatOpenAI.__new__(LoggingChatOpenAI)
+        obj.llm = llm_instance
+        return obj
+
+    def with_structured_output(self, *args, **kwargs) -> "LoggingChatOpenAI":
+        new_llm = self.llm.with_structured_output(*args, **kwargs)
+        return self._wrap(new_llm)
+
+    def bind_tools(self, *args, **kwargs) -> "LoggingChatOpenAI":
+        new_llm = self.llm.bind_tools(*args, **kwargs)
+        return self._wrap(new_llm)
+
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
