@@ -4,14 +4,52 @@
 from pathlib import Path
 from typing import Any, Dict, Tuple
 import os
+import logging
 
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
+
+
+class LoggingChatOpenAI:
+    """Wrapper around ChatOpenAI that logs requests and responses."""
+
+    def __init__(self, **kwargs):
+        self.llm = ChatOpenAI(**kwargs)
+
+    def invoke(self, messages, *args, **kwargs):
+        logger.info(f"LLM request: {messages}")
+        response = self.llm.invoke(messages, *args, **kwargs)
+        logger.info(f"LLM response: {response}")
+        return response
+
+    async def ainvoke(self, messages, *args, **kwargs):
+        logger.info(f"LLM request: {messages}")
+        response = await self.llm.ainvoke(messages, *args, **kwargs)
+        logger.info(f"LLM response: {response}")
+        return response
+
+    def stream(self, messages, *args, **kwargs):
+        logger.info(f"LLM request: {messages}")
+        for chunk in self.llm.stream(messages, *args, **kwargs):
+            logger.info(f"LLM chunk: {chunk}")
+            yield chunk
+
+    async def astream(self, messages, *args, **kwargs):
+        logger.info(f"LLM request: {messages}")
+        async for chunk in self.llm.astream(messages, *args, **kwargs):
+            logger.info(f"LLM chunk: {chunk}")
+            yield chunk
+
+    def __getattr__(self, item):
+        return getattr(self.llm, item)
+
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
 
 # Cache for LLM instances keyed by (llm_type, model_name)
-_llm_cache: dict[Tuple[LLMType, str], ChatOpenAI] = {}
+_llm_cache: dict[Tuple[LLMType, str], LoggingChatOpenAI] = {}
 
 
 def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
@@ -31,7 +69,7 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
 
 def _create_llm_use_conf(
     llm_type: LLMType, conf: Dict[str, Any], model_override: str | None = None
-) -> ChatOpenAI:
+) -> LoggingChatOpenAI:
     llm_type_map = {
         "reasoning": conf.get("REASONING_MODEL", {}),
         "basic": conf.get("BASIC_MODEL", {}),
@@ -51,12 +89,10 @@ def _create_llm_use_conf(
     if not merged_conf:
         raise ValueError(f"Unknown LLM Conf: {llm_type}")
 
-    return ChatOpenAI(**merged_conf)
+    return LoggingChatOpenAI(**merged_conf)
 
 
-def get_llm_by_type(
-    llm_type: LLMType, model: str | None = None
-) -> ChatOpenAI:
+def get_llm_by_type(llm_type: LLMType, model: str | None = None) -> LoggingChatOpenAI:
     """
     Get LLM instance by type. Returns cached instance if available.
     """

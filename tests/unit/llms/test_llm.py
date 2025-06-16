@@ -40,9 +40,10 @@ def test_get_env_llm_conf(monkeypatch):
 def test_create_llm_use_conf_merges_env(monkeypatch, dummy_conf):
     monkeypatch.setenv("BASIC_MODEL__API_KEY", "env_key")
     result = llm._create_llm_use_conf("basic", dummy_conf)
-    assert isinstance(result, DummyChatOpenAI)
-    assert result.kwargs["api_key"] == "env_key"
-    assert result.kwargs["base_url"] == "http://test"
+    assert isinstance(result, llm.LoggingChatOpenAI)
+    assert isinstance(result.llm, DummyChatOpenAI)
+    assert result.llm.kwargs["api_key"] == "env_key"
+    assert result.llm.kwargs["base_url"] == "http://test"
 
 
 def test_create_llm_use_conf_invalid_type(dummy_conf):

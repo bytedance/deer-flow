@@ -288,9 +288,9 @@ def reporter_node(state: State, config: RunnableConfig):
             )
         )
     logger.debug(f"Current invoke messages: {invoke_messages}")
-    response = get_llm_by_type(
-        AGENT_LLM_MAP["reporter"], configurable.model
-    ).invoke(invoke_messages)
+    response = get_llm_by_type(AGENT_LLM_MAP["reporter"], configurable.model).invoke(
+        invoke_messages
+    )
     response_content = response.content
     logger.info(f"reporter response: {response_content}")
 
