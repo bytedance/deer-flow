@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DeerFlow Auto Plan Demo</title>
+</head>
+<body>
+  <textarea id="prompt" rows="5" cols="80" placeholder="Enter your message"></textarea><br />
+  <button id="send">Send</button>
+  <pre id="output"></pre>
+  <script>
+    async function* fetchStream(url, body) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        while (true) {
+          const i = buf.indexOf('\n\n');
+          if (i === -1) break;
+          const chunk = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          let event = 'message';
+          let data = null;
+          for (const line of chunk.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            if (line.startsWith('data:')) data = line.slice(5).trim();
+          }
+          if (data) yield { event, data: JSON.parse(data) };
+        }
+      }
+    }
+
+    document.getElementById('send').onclick = async () => {
+      const prompt = document.getElementById('prompt').value;
+      const output = document.getElementById('output');
+      output.textContent = '';
+      for await (const evt of fetchStream('http://localhost:8000/api/chat/stream', {
+        messages: [{ role: 'user', content: prompt }],
+        model: 'deepseek-ai/DeepSeek-R1',
+        auto_accepted_plan: true
+      })) {
+        if (evt.event === 'message_chunk') {
+          output.textContent += evt.data.content ?? '';
+        }
+      }
+    };
+  </script>
+</body>
+</html>
+

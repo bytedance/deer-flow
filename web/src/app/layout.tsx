@@ -53,9 +53,12 @@ export default function RootLayout({
         }
         {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && env.AMPLITUDE_API_KEY && (
           <>
-            <Script src="https://cdn.amplitude.com/script/d2197dd1df3f2959f26295bb0e7e849f.js"></Script>
-            <Script id="amplitude-init" strategy="lazyOnload">
-              {`window.amplitude.init('${env.AMPLITUDE_API_KEY}', {"fetchRemoteConfig":true,"autocapture":true});`}
+            <Script
+              src="https://cdn.amplitude.com/script/d2197dd1df3f2959f26295bb0e7e849f.js"
+              strategy="afterInteractive"
+            />
+            <Script id="amplitude-init" strategy="afterInteractive">
+              {`(function(){window.amplitude.init('${env.AMPLITUDE_API_KEY}', {"fetchRemoteConfig": true, "autocapture": true});})();`}
             </Script>
           </>
         )}
