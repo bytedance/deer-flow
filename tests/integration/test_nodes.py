@@ -161,6 +161,7 @@ def mock_state_planner():
 def mock_configurable_planner():
     mock = MagicMock()
     mock.max_plan_iterations = 3
+    mock.enable_deep_thinking = False
     return mock
 
 
@@ -213,7 +214,7 @@ def test_planner_node_basic_has_enough_context(
     patch_ai_message,
     mock_plan,
 ):
-    # AGENT_LLM_MAP["planner"] == "basic"
+    # AGENT_LLM_MAP["planner"] == "basic" and not thinking mode
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"planner": "basic"}),
         patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
@@ -241,7 +242,7 @@ def test_planner_node_basic_not_enough_context(
     patch_plan_model_validate,
     patch_ai_message,
 ):
-    # AGENT_LLM_MAP["planner"] == "basic"
+    # AGENT_LLM_MAP["planner"] == "basic" and not thinking mode
     plan = {
         "has_enough_context": False,
         "title": "Test Plan",
