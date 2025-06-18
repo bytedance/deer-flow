@@ -201,17 +201,16 @@ def _make_event(event_type: str, data: dict[str, any]):
 @app.post("/api/tts")
 async def text_to_speech(request: TTSRequest):
     """Convert text to speech using volcengine TTS API."""
+    app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
+    if not app_id:
+        raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
+    access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
+    if not access_token:
+        raise HTTPException(
+            status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
+        )
+
     try:
-        app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
-        if not app_id:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_APPID is not set"
-            )
-        access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
-        if not access_token:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
-            )
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
         voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "BV700_V2_streaming")
 
@@ -249,6 +248,7 @@ async def text_to_speech(request: TTSRequest):
                 )
             },
         )
+
     except Exception as e:
         logger.exception(f"Error in TTS endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
@@ -388,10 +388,8 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
 
         return response
     except Exception as e:
-        if not isinstance(e, HTTPException):
-            logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
-            raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
-        raise
+        logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.get("/api/rag/config", response_model=RAGConfigResponse)
