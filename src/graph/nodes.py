@@ -190,7 +190,7 @@ def human_feedback_node(
             goto = "reporter"
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 0:
+        if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
