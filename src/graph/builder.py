@@ -3,41 +3,55 @@
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-
+from src.graph.tools.tool_manager import ToolManager
 from .types import State
 from .nodes import (
-    coordinator_node,
-    planner_node,
-    reporter_node,
-    router_node,  
-    researcher_node,
-    coder_node,
-    analyzer_node,
-    reader_node,  
-    thinker_node,  
+    CoordinatorNode,
+    PlannerNode,
+    WriterNode,
+    CoderNode,  
+    SearcherNode,
+    ReaderNode,
+    ThinkerNode,
+    SupervisorNode,  
+    ReporterNode,  
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _build_base_graph():
+    
+    # 全局工具管理器实例
+    tool_manager = ToolManager()    
+    nodes = {
+        "coordinator": CoordinatorNode(tool_manager),
+        "planner": PlannerNode(tool_manager),
+        "writer": WriterNode(tool_manager),
+        # "coder": CoderNode(tool_manager),
+        # "searcher": SearcherNode(tool_manager),
+        # "reader": ReaderNode(tool_manager),
+        # "thinker": ThinkerNode(tool_manager),
+        "supervisor": SupervisorNode(tool_manager),
+        "reporter": ReporterNode(tool_manager),
+    }
+    logger.info(f"Initialized {len(nodes)} nodes")
+
     """Build the agent workflow graph with all nodes."""
     builder = StateGraph(State)
     builder.add_edge(START, "coordinator")
 
-    # Core workflow nodes
-    builder.add_node("coordinator", coordinator_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("router", router_node)  
-    
-    # Specialized agent nodes
-    builder.add_node("analyzer", analyzer_node)
-    builder.add_node("coder", coder_node)
-    builder.add_node("researcher", researcher_node)
-    builder.add_node("reader", reader_node) 
-    builder.add_node("thinker", thinker_node)  
-    
-    # Final reporting
-    builder.add_node("reporter", reporter_node)
-    builder.add_edge("reporter", END)
+    for node_name, node_instance in nodes.items():
+        builder.add_node(node_name, node_instance.execute)
+        tool_manager.register_tool(f"call_{node_name}_agent", node_instance.call_params)
+        logger.debug(f"Added node: {node_name}")
+
+    builder.add_edge("supervisor", END)
+    # 输出统计信息
+    stats = tool_manager.get_statistics()
+    logger.info(f"Tool initialization complete. Stats: {stats}")
+
     return builder
 
 

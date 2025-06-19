@@ -52,7 +52,6 @@ def apply_prompt_template(
         "CURRENT_TIME": datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
     }
     
-   
     # Add configurable variables
     if configurable:
         state_vars.update(dataclasses.asdict(configurable))
