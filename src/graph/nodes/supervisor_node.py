@@ -206,14 +206,6 @@ class SupervisorNode(BaseNode):
                         )
                 
         
-        # 如果没有工具调用，默认批准
-        self.log_execution(f"No explicit action taken, defaulting to approval for step {current_step_index}")
-        next_node = "reporter"
-        
-        return Command(
-            update={
-                "messages": [HumanMessage(content=f"Step evaluation completed: {response.content}", name="supervisor")],
-            },
-            goto=next_node
-        )
+        # 如果没有工具调用，直接结束流程
+        return {"final_report": current_step_res}
         

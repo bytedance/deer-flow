@@ -104,7 +104,6 @@ class PlannerNode(BaseNode):
         #.with_structured_output(
             # Plan, method="json_mode"
         # )
-
         response = llm.invoke(messages)
         self.log_execution(response)
         self.log_execution(response.content)

@@ -88,13 +88,14 @@ class ReporterNode(BaseNode):
         tools = [self.call_supervisor]
         response = get_llm_by_type(self.config.llm_type).bind_tools(tools).invoke(invoke_messages)
         self.log_execution("Final report generated successfully.")
-        self.log_execution(f"{response.content}")
+        self.log_execution(f"{response.tool_calls[0]['args']}")
         
         node_res_summary = ""
+
         if hasattr(response, 'tool_calls') and response.tool_calls:
             for tool_call in response.tool_calls:
                 if tool_call["name"] == "display_result":
-                    node_res_summary += f"\n{tool_call['args']['result']["description"]}"
+                    node_res_summary += f"\n{tool_call['args']['result']}"
                 else:
                     node_res_summary += f"\n{tool_call}"
                     raise ValueError
@@ -103,8 +104,6 @@ class ReporterNode(BaseNode):
             update={
                 "messages": [HumanMessage(content=node_res_summary, name="reporter")],
             },
-            goto="reporter"
+            goto="supervisor"
         )
     
-            # print(response.content)
-            # return {"final_report": response.content}

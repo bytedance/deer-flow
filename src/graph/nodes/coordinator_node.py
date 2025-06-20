@@ -87,7 +87,7 @@ class CoordinatorNode(BaseNode):
                     # 这里直接给planner
                     return Command(
                         update={
-                            "messages": [AIMessage(content=json.dumps(tool_call["args"], ensure_ascii=False, indent=2), name="coordinator")]
+                            "messages": [HumanMessage(content=json.dumps(tool_call["args"], ensure_ascii=False, indent=2), name="coordinator")]
                         },
                         goto="planner"
                     )
