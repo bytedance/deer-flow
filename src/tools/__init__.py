@@ -8,6 +8,8 @@ from .python_repl import python_repl_tool
 from .retriever import get_retriever_tool
 from .search import get_web_search_tool
 from .tts import VolcengineTTS
+from .google_image import google_image_tool   
+from .google_speech import google_speech_tool
 
 __all__ = [
     "crawl_tool",
@@ -15,4 +17,5 @@ __all__ = [
     "get_web_search_tool",
     "get_retriever_tool",
     "VolcengineTTS",
+    "google_image_tool"
 ]
