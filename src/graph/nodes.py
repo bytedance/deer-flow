@@ -395,6 +395,67 @@ async def _execute_agent_step(
     response_content = result["messages"][-1].content
     logger.debug(f"{agent_name.capitalize()} full response: {response_content}")
 
+    # Special handling for image agent - save the generated image
+    if agent_name == "image":
+        import base64
+        import re
+        from datetime import datetime
+        
+        # Extract base64 image data from response
+        base64_pattern = r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)'
+        match = re.search(base64_pattern, response_content)
+        
+        if match:
+            try:
+                # Decode base64 and save image
+                base64_data = match.group(1)
+                # Add padding if needed
+                padding = 4 - (len(base64_data) % 4)
+                if padding != 4:
+                    base64_data += '=' * padding
+                
+                image_data = base64.b64decode(base64_data)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"generated_image_{timestamp}.png"
+                
+                with open(filename, "wb") as f:
+                    f.write(image_data)
+                
+                logger.info(f"Generated image saved as: {filename}")
+                
+                # Update response to include file path
+                response_content += f"\n\n**Generated image saved as: `{filename}`**"
+                
+            except Exception as e:
+                logger.error(f"Failed to save image: {e}")
+        else:
+            # Try to find base64 data without data URL prefix
+            base64_pattern = r'([A-Za-z0-9+/=]{100,})'
+            match = re.search(base64_pattern, response_content)
+            if match:
+                try:
+                    # Decode base64 and save image
+                    base64_data = match.group(1)
+                    # Add padding if needed
+                    padding = 4 - (len(base64_data) % 4)
+                    if padding != 4:
+                        base64_data += '=' * padding
+                    
+                    image_data = base64.b64decode(base64_data)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"generated_image_{timestamp}.png"
+                    
+                    with open(filename, "wb") as f:
+                        f.write(image_data)
+                    
+                    logger.info(f"Generated image saved as: {filename}")
+                    
+                    # Update response to include file path
+                    response_content += f"\n\n**Generated image saved as: `{filename}`**"
+                    
+                except Exception as e:
+                    logger.error(f"Failed to save image: {e}")
+
     # Update the step with the execution result
     current_step.execution_res = response_content
     logger.info(f"Step '{current_step.title}' execution completed by {agent_name}")
@@ -421,7 +482,7 @@ async def _setup_and_execute_agent_step(
 ) -> Command[Literal["research_team"]]:
     """Helper function to set up an agent with appropriate tools and execute a step.
 
-    This function handles the common logic for both researcher_node and coder_node:
+    This function handles the common logic for all agent types:
     1. Configures MCP servers and tools based on agent type
     2. Creates an agent with the appropriate tools or uses the default agent
     3. Executes the agent on the current step
@@ -429,7 +490,7 @@ async def _setup_and_execute_agent_step(
     Args:
         state: The current state
         config: The runnable config
-        agent_type: The type of agent ("researcher" or "coder")
+        agent_type: The type of agent ("researcher", "coder", "image", "speech")
         default_tools: The default tools to add to the agent
 
     Returns:
@@ -456,16 +517,17 @@ async def _setup_and_execute_agent_step(
 
     # Create and execute agent with MCP tools if available
     if mcp_servers:
-        async with MultiServerMCPClient(mcp_servers) as client:
-            loaded_tools = default_tools[:]
-            for tool in client.get_tools():
-                if tool.name in enabled_tools:
-                    tool.description = (
-                        f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-                    )
-                    loaded_tools.append(tool)
-            agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
-            return await _execute_agent_step(state, agent, agent_type)
+        client = MultiServerMCPClient(mcp_servers)
+        loaded_tools = default_tools[:]
+        tools = await client.get_tools()
+        for tool in tools:
+            if tool.name in enabled_tools:
+                tool.description = (
+                    f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
+                )
+                loaded_tools.append(tool)
+        agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
+        return await _execute_agent_step(state, agent, agent_type)
     else:
         # Use default tools if no MCP servers are configured
         agent = create_agent(agent_type, agent_type, default_tools, agent_type)
@@ -501,4 +563,32 @@ async def coder_node(
         config,
         "coder",
         [python_repl_tool],
+    )
+
+
+async def image_agent_node(
+    state: State, config: RunnableConfig
+) -> Command[Literal["research_team"]]:
+    """Image agent node that generates images."""
+    logger.info("Image agent node is generating images.")
+    from src.tools import google_image_tool
+    return await _setup_and_execute_agent_step(
+        state,
+        config,
+        "image",
+        [google_image_tool],
+    )
+
+
+async def speech_agent_node(
+    state: State, config: RunnableConfig
+) -> Command[Literal["research_team"]]:
+    """Speech agent node that generates speech."""
+    logger.info("Speech agent node is generating speech.")
+    from src.tools import google_speech_tool
+    return await _setup_and_execute_agent_step(
+        state,
+        config,
+        "speech",
+        [google_speech_tool],
     )

@@ -1,33 +1,28 @@
-# ── imports ─────────────────────────────────────────────────────────────
-import base64, os, google.generativeai as genai
+import os
 from langchain_core.tools import BaseTool, ToolException
-
-_MODEL_ID = "models/gemini-2.0-flash-preview-image-generation"
-_MODEL    = genai.GenerativeModel(_MODEL_ID)
+from google import genai
+import base64
+from google.genai import types
 
 class GoogleImageTool(BaseTool):
-    name: str = "google_image_tool"
+    name: str = "google_image"
     description: str = (
-        "Generate an image from a text prompt using the Gemini image-generation model. "
-        "Return the image as a base-64-encoded PNG string."
+        "Generate an image with Imagen-3.\n"
+        "Input: prompt string → Output: base-64 PNG string."
     )
 
     def _run(self, prompt: str) -> str:
         try:
-            resp = _MODEL.generate_content(
-                prompt,
-                generation_config = genai.GenerationConfig(
-                    response_mime_type = "image/png"     
-                )
+            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))   
+            resp = client.models.generate_images(
+                model="models/imagen-3.0-generate-002",
+                prompt=prompt,
+                config={"number_of_images": 1, "output_mime_type": "image/png"},
             )
-            img_part = resp.parts[0]
-            return img_part.inline_data.data  # base-64 bytes
+
+            img_bytes = resp.generated_images[0].image.image_bytes
+            return base64.b64encode(img_bytes).decode()
         except Exception as e:
             raise ToolException(f"Image generation failed: {e}") from e
 
-
 google_image_tool = GoogleImageTool()
-
-
-
-

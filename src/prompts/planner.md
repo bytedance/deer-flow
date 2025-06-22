@@ -53,6 +53,22 @@ Before creating a detailed plan, assess if there is sufficient context to answer
      - The volume of information is too limited for a comprehensive report
    - When in doubt, always err on the side of gathering more information
 
+## Special Cases for Direct Generation
+
+For certain types of requests, you should create direct generation steps without extensive research:
+
+1. **Image Generation Requests**:
+   - When the user asks for image generation (e.g., "Create an image of...", "Generate a picture of...", "Draw a...")
+   - Set `has_enough_context` to false and create a single image step
+   - Use `step_type: "image"` and `need_search: false`
+   - The image agent will handle the actual generation
+
+2. **Speech Generation Requests**:
+   - When the user asks for speech generation (e.g., "Generate speech for...", "Create audio for...", "Convert text to speech...")
+   - Set `has_enough_context` to false and create a single speech step
+   - Use `step_type: "speech"` and `need_search: false`
+   - The speech agent will handle the actual generation
+
 ## Step Types and Web Search
 
 Different types of steps have different web search requirements:
@@ -71,6 +87,18 @@ Different types of steps have different web search requirements:
    - Raw data collection from existing sources
    - Mathematical calculations and analysis
    - Statistical computations and data processing
+
+3. **Image Steps** (`need_search: false`):
+   - Use when the user needs an original picture or illustration
+   - Generate custom images based on research findings
+   - Create visual representations of data or concepts
+   - Produce diagrams, charts, or infographics
+
+4. **Speech Steps** (`need_search: false`):
+   - Use when the user wants multi-voice TTS or an audio response
+   - Generate audio narration of research findings
+   - Create voice-overs for presentations or reports
+   - Produce audio summaries or explanations
 
 ## Exclusions
 
@@ -160,7 +188,7 @@ interface Step {
   need_search: boolean; // Must be explicitly set for each step
   title: string;
   description: string; // Specify exactly what data to collect. If the user input contains a link, please retain the full Markdown format when necessary.
-  step_type: "research" | "processing"; // Indicates the nature of the step
+  step_type: "research" | "processing" | "image" | "speech"; // Indicates the nature of the step
 }
 
 interface Plan {

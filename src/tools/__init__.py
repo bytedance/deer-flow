@@ -17,5 +17,6 @@ __all__ = [
     "get_web_search_tool",
     "get_retriever_tool",
     "VolcengineTTS",
-    "google_image_tool"
+    "google_image_tool",
+    "google_speech_tool"
 ]
