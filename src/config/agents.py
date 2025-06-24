@@ -154,5 +154,8 @@ class AgentConfiguration:
         "coder": "coder", 
         "researcher": "researcher",
         "reader": "reader",
-        "thinker": "thinker"
+        "thinker": "thinker",
+        "reporter": "reporter",
+        "supervisor": "supervisor",
+        "planner": "planner"
     }

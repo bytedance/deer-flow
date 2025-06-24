@@ -121,7 +121,7 @@ class SupervisorNode(BaseNode):
         return summary
 
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) \
-        -> Command[Literal["writer", "reporter", "__end__"]]|Dict[str, Any]:#"coder",  "reader","thinker","searcher","planner",
+        -> Command[Literal["writer", "reporter", "searcher", "__end__"]]|Dict[str, Any]:#"coder",  "reader","thinker",
         """执行supervisor逻辑"""
         self.log_execution("Evaluating step completion")
         
@@ -151,7 +151,8 @@ class SupervisorNode(BaseNode):
         llm = get_llm_by_type(self.config.llm_type).bind_tools(tools)
         
         response = llm.invoke(supervisor_input)
-        
+
+        # max_supervisor_iterate_times = configurable.max_supervisor_iterate_times
         # 处理supervisor的决策
         if hasattr(response, 'tool_calls') and response.tool_calls:
             for tool_call in response.tool_calls:
@@ -165,46 +166,43 @@ class SupervisorNode(BaseNode):
                     retry_node = AgentConfiguration.STEP_TYPE_TO_NODE.get(
                         current_action.type.lower(), "reporter"
                     )
-                    
+                    suggestion = tool_call["args"]["suggestion"]
+                    score = tool_call["args"]["score"]
                     return Command(
                         update={
-                            "messages": current_messages + [HumanMessage(content=f"Step rejected: {response.content}. Please retry.", name="supervisor")],
+                            "messages": [HumanMessage(content=f"Step rejected: {suggestion}. \nStep score: {score}.\nPlease retry.", name="supervisor")],
+                            "supervisor_iterate_time": state["supervisor_iterate_time"] + 1
                         },
                         goto=retry_node
                     )
                 
                 elif action == "complete":
+
                     if next_action == {}:
                         # 全部任务完成，汇总信息返回
                         self.log_execution(f"Plan complete")
                         self.plan_update(current_step_index, current_step_res)
                         return {"final_report": current_step_res}
-                        # return Command(
-                        #     update={
-                        #         "messages": [HumanMessage(content=self.plan_res_summary(), name="supervisor")],
-                        #         "current_plan": self.plan
-                        #     },
-                        #     goto="reporter"
-                        # )
+
                     else:
                         # 任务完成继续任务
                         self.log_execution(f"Step {current_step_index} complete")
                         self.plan_update(current_step_index, current_step_res)
                         self.log_execution("supervisor plan update")
                         self.log_execution(self.current_plan)
-                        next_node = AgentConfiguration.STEP_TYPE_TO_NODE.get(
-                            next_action.type.lower(), "reporter"
-                        )
+                        next_node = AgentConfiguration.STEP_TYPE_TO_NODE[next_action.type.lower()]
+                        # .get(
+                        #     next_action.type.lower(), "reporter"
+                        # )
                         next_step_summary = self.get_next_step(next_action)
                         return Command(
                             update={
                                 "messages": [HumanMessage(content=next_step_summary, name="supervisor")],
                                 "current_step_index": next_action.id,  
-                                "step_approved": False
+                                "supervisor_iterate_time": 0
                             },
                             goto=next_node
                         )
-                
         
         # 如果没有工具调用，直接结束流程
         return {"final_report": current_step_res}

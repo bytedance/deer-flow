@@ -6,10 +6,14 @@ import logging
 import os
 import os.path as osp
 import datetime
-from src.graph import build_graph
+from src.graph import build_graph, build_graph_with_memory
 from src.utils.file_descriptors import file2resource, resources2user_input
 import uuid
 import shutil
+from langgraph.types import Command
+
+
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,  # Default level is INFO
@@ -25,8 +29,8 @@ def enable_debug_logging():
 logger = logging.getLogger(__name__)
 
 # Create the graph
-graph = build_graph()
-
+# graph = build_graph()
+graph = build_graph_with_memory() # ask user need memory
 
 def get_init_state(
         user_input: str | list[dict], 
@@ -90,6 +94,9 @@ def get_init_state(
         "enable_background_investigation": enable_background_investigation,
         "session_id": session_id,
         "session_dir": session_dir,
+
+        "supervisor_iterate_time":0,
+        "tool_call_iterate_time":0
     }
 
 
@@ -128,7 +135,8 @@ async def run_agent_workflow_async(
             "max_plan_iterations": max_plan_iterations,
             "max_step_num": max_step_num,
             "max_search_results": 5,
-            "max_toolcall_iterater_times": 5,
+            "max_toolcall_iterate_times": 5,
+            "max_supervisor_iterate_times": 5,
             "mcp_settings": {
                 "servers": {
                     "doc_parser": {
@@ -149,27 +157,41 @@ async def run_agent_workflow_async(
         "recursion_limit": 25, #为整个的调度次数
     }
     last_message_cnt = 0
-    async for s in graph.astream(
-        input=initial_state, config=config, stream_mode="values"
-    ):
-        try:
-            if isinstance(s, dict) and "messages" in s:
-                if len(s["messages"]) <= last_message_cnt:
-                    continue
-                last_message_cnt = len(s["messages"])
-                message = s["messages"][-1]
-                if isinstance(message, tuple):
-                    print(message)
-                else:
-                    message.pretty_print()
-            else:
-                # For any other output format
-                print(f"Output: {s}")
-        except Exception as e:
-            logger.error(f"Error processing stream output: {e}")
-            print(f"Error processing output: {str(e)}")
+    while True:
+            async for s in graph.astream(
+                input=initial_state, config=config, stream_mode="values"
+            ):
+                pass
+                # 这里可以加入简单的记忆处理机制，默认是state一直流转全部history 
+                # try:
+                #     if isinstance(s, dict) and "messages" in s:
+                #         if len(s["messages"]) <= last_message_cnt:
+                #             continue
+                #         last_message_cnt = len(s["messages"])
+                #         message = s["messages"][-1]
+                        
+                #         if isinstance(message, tuple):
+                #             print(message)
+                #             pass
+                #         else:
+                #             message.pretty_print()
+                #             pass
+                #     else:
+                #         # For any other output format
+                #         # print(f"Output: {s}")
+                #         pass
+                # except Exception as e:
+                #     logger.error(f"Error processing stream output: {e}")
+                #     print(f"Error processing output: {str(e)}")
 
-    logger.info("Async workflow completed successfully")
+            if isinstance(s, dict) and "__interrupt__" in s:
+                # print(f"Interrupt: {s['__interrupt__']}")
+                feedback = input(s['__interrupt__'][0].value + ": ")
+                initial_state = Command(resume=feedback)
+            else:
+                logger.info("Async workflow completed successfully")
+                break
+
 
 
 if __name__ == "__main__":

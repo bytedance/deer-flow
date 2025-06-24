@@ -169,12 +169,12 @@ class ReaderNode(BaseNode):
         from src.tools.image_rotate import rotate_image
         from src.graph.types import Resource
         
-        max_toolcall_iterater_times = configurable.max_toolcall_iterater_times
-        iterater_times = 0
+        max_toolcall_iterate_times = configurable.max_toolcall_iterate_times
+        iterate_times = 0
         
-        while hasattr(response, 'tool_calls') and response.tool_calls and iterater_times < max_toolcall_iterater_times:
-            iterater_times += 1
-            self.log_execution(f"Reader tool call iteration: {iterater_times}")
+        while hasattr(response, 'tool_calls') and response.tool_calls and iterate_times < max_toolcall_iterate_times:
+            iterate_times += 1
+            self.log_execution(f"Reader tool call iteration: {iterate_times}")
             
             for tool_call in response.tool_calls:
                 if tool_call["name"] == "call_rotate_tool":

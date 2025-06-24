@@ -9,6 +9,11 @@ from langgraph.types import Command
 from typing import Literal, Dict, Any
 import json
 import logging
+# 导入必要的模块
+from src.config.configuration import Configuration
+from src.prompts.template import apply_prompt_template
+from src.llms.llm import get_llm_by_type
+from src.prompts.planner_model import Plan
 
 logger = logging.getLogger(__name__)
 
@@ -17,85 +22,13 @@ class PlannerNode(BaseNode):
     
     def __init__(self, toolmanager):
         super().__init__("planner", AgentConfiguration.NODE_CONFIGS["planner"], toolmanager)
-        self.call_params = {
-            "name": "planner",
-            "description": "Trigger the task planning process, automatically advancing the planning workflow. No direct response is returned as the user will see the results.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "A concise and clear task title."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "A brief description summarizing the task."
-                    },
-                    "requirements": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of specific requirements for the task."
-                    },
-                    "constraints": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of constraints to follow during task execution."
-                    },
-                    "references": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string", "description": "Unique identifier for the reference."},
-                                "type": {"type": "string", "description": "Type of reference: file|knowledge"},
-                                "name": {"type": "string", "description": "File name."},
-                                "function": {"type": "string", "description": "Summarize the purpose of the document; the planner will relay this information."}
-                            },
-                            "required": ["id", "type", "name", "function"]
-                        },
-                        "description": "List of reference materials provided by the user. References will be indicated using the <file>/<knowledge> tags. Do not fabricate information."
-                    },
-                    "expected_outcome": {
-                        "type": "string",
-                        "description": "The desired outcome after completing the task."
-                    },
-                    # "status": {
-                    #     "type": "string",
-                    #     "enum": ["collecting", "clarifying", "thinking", "complete"],
-                    #     "description": "Current status of the task, indicating progress."
-                    # },
-                    "confidence": {
-                        "type": "object",
-                        "properties": {
-                            "score": {
-                                "type": "number",
-                                "description": "Confidence score (0.00 - 1.00)."
-                            },
-                            "missing_info": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Potential missing information items."
-                            }
-                        },
-                        "description": "Task confidence score (0.00 - 1.00). Use the score to determine the task's readiness. Ensure the score reaches 0.9 or above before setting the status to 'complete'.",
-                        "required": ["score", "missing_info"]
-                    }
-                },
-                "required": ["title", "description", "requirements", "constraints", "references", "expected_outcome", "status", "confidence"]
-            }
-        }
+        
 
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) \
         -> Command[Literal["writer", "reporter", "__end__"]]: #"coder", "searcher", "reader", "thinker"
         """执行规划器逻辑"""
         self.log_execution("Generating execution plan")
         
-        # 导入必要的模块
-        from src.config.configuration import Configuration
-        from src.prompts.template import apply_prompt_template
-        from src.llms.llm import get_llm_by_type
-        from src.prompts.planner_model import Plan
-
         configurable = Configuration.from_runnable_config(config)
         messages = apply_prompt_template("planner", state, configurable)
         
@@ -105,8 +38,8 @@ class PlannerNode(BaseNode):
             # Plan, method="json_mode"
         # )
         response = llm.invoke(messages)
-        self.log_execution(response)
-        self.log_execution(response.content)
+  
+        # self.log_execution(response.content)
         plan_content = response.content.split("<|plan|>")[1].split("<|end|>")[0]
         # plan_content = response.model_dump_json(indent=4, exclude_none=True)
         """ plan 输出结果示意

@@ -73,4 +73,5 @@ def build_graph():
     return builder.compile()
 
 
-graph = build_graph()
+# graph = build_graph()
+# graph = build_graph_with_memory()

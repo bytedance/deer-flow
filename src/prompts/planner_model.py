@@ -9,7 +9,7 @@ class EmployeeType(str, Enum):
     RECEIVER = "receiver" 
     CODER = "coder"
     INTERPRETER = "interpreter"
-    ANALYZER = "anaylzer"
+    WRITER = "writer"
     REPORTER = "reporter"
 
 

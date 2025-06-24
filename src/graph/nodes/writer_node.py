@@ -38,13 +38,14 @@ class WriterNode(BaseNode):
         }
     
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command[Literal["supervisor"]]:
-        """执行分析器逻辑"""
         
         configurable = Configuration.from_runnable_config(config)
         input_messages = state.get("messages")
+        supervisor_iterate_time = state["supervisor_iterate_time"]
+
         # 构建writer输入
         writer_state = {
-            "messages": input_messages,
+            "messages": input_messages[-supervisor_iterate_time - 1:],
             "locale": state.get("locale", "en-US"),
             "resources": state.get("resources", [])
         }
@@ -53,7 +54,7 @@ class WriterNode(BaseNode):
         # 准备委托工具
         tools = [self.call_supervisor]
         
-        llm = get_llm_by_type(self.config.llm_type).bind_tools(tools)
+        llm = get_llm_by_type( self.config.llm_type).bind_tools(tools)
         response = llm.invoke(messages)
 
         node_res_summary = ""
@@ -69,10 +70,7 @@ class WriterNode(BaseNode):
         
         return Command(
             update={
-                "messages": input_messages + [HumanMessage(content=node_res_summary, name="writer")],
+                "messages": [HumanMessage(content=node_res_summary, name="writer")],
             },
             goto="supervisor"
         )
-
-            
-

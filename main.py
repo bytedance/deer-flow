@@ -124,7 +124,6 @@ def main(
         enable_background_investigation=enable_background_investigation,
     )
 
-
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Run the Deer")
@@ -184,4 +183,4 @@ if __name__ == "__main__":
 
 
 
-# uv run main.py --query 写个小作文,随机按你喜好写别反问我
+# uv run main.py --query 写个财经小作文,随机按你喜好写别反问我

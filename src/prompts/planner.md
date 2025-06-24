@@ -82,7 +82,7 @@ Today: {{ CURRENT_TIME }}
 - receiver: 等待用户提交更多数据或者信息,或者等待用户完成某些操作。
 - coder: 擅长各种常见编程语言的代码生成。
 - interpreter: 可以与jupyter notebook交互，直接操作文件，擅长处理表格类型的数据，和数据可视化。
-- anaylzer: 文本理解，生成和创作,信息整理等等。
+- writer: 文本理解，生成和创作,信息整理等等。
 - reporter: 生成最终的任务报告，每个plan应该有且仅有一个reporter。
 
 **action的员工类型仅能从以上列表中选择**

@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import re
 
 from langchain_community.tools import BraveSearch, DuckDuckGoSearchResults
 from langchain_community.tools.arxiv import ArxivQueryRun
@@ -57,6 +58,16 @@ def get_web_search_tool(max_search_results: int):
     else:
         raise ValueError(f"Unsupported search engine: {SELECTED_SEARCH_ENGINE}")
 
+def filter_garbled_text(text):
+    """
+    过滤掉字符串中的乱码内容
+    :param text: 输入的字符串
+    :return: 过滤后的字符串
+    """
+    # 使用正则表达式匹配乱码内容
+    pattern = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9\ufe30\uffa0-\uffa9\uff3f\uff00-\uffa0\u2000-\u206f\u3000-\u303f\ufb00-\uffa0]+')
+    filtered_text = re.sub(pattern, '', text)
+    return filtered_text
 
 if __name__ == "__main__":
     results = LoggedDuckDuckGoSearch(

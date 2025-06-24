@@ -1,9 +1,6 @@
-# nodes/searcher_node.py
-"""研究员节点"""
-
 from .base_node import BaseNode
 from src.config.agents import AgentConfiguration
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 from typing import Literal, Dict, Any, List, Tuple
@@ -13,138 +10,128 @@ import json
 import uuid
 import aiohttp
 import logging
+from src.config.configuration import Configuration
+from src.prompts.template import apply_prompt_template
+from src.llms.llm import get_llm_by_type
 
-logger = logging.getLogger(__name__)
+
 
 class SearcherNode(BaseNode):
-    """研究员节点 - 处理研究任务"""
-    
     def __init__(self, toolmanager):
         super().__init__("searcher", AgentConfiguration.NODE_CONFIGS["searcher"], toolmanager)
-    
-    async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command[Literal["supervisor"]]:
-        """执行研究逻辑"""
-        self.log_execution("Starting research task")
-        
-        # 导入必要的模块
-        from src.config.configuration import Configuration
-        from src.prompts.template import apply_prompt_template
-        from src.agents import create_agent
-        from src.tools import get_web_search_tool, get_retriever_tool
-        from src.mcp_client.mcp_client import MultiServerMCPClient_wFileUpload
-        from src.graph.types import Resource
-        
-        try:
-            configurable = Configuration.from_runnable_config(config)
-            
-            # 推进到下一步
-            current_step_index = self.get_next_step_index(state)
-            current_plan = state.get("current_plan")
-            
-            if not current_plan or current_step_index >= len(current_plan.steps):
-                return Command(goto="reporter")
-            
-            current_step = current_plan.steps[current_step_index]
-            self.log_execution(f"Working on step {current_step_index}: {current_step.title}")
-            
-            # 构建searcher输入
-            searcher_input = {
-                "messages": [
-                    HumanMessage(
-                        content=f"""# Current Task
-
-## Title
-{current_step.title}
-
-## Description
-{current_step.description}
-
-## Previous Message
-{state.get('messages', [])[-1].content if state.get('messages') else 'No previous message'}
-
-## Locale
-{state.get('locale', 'en-US')}"""
-                    )
-                ],
-                "locale": state.get("locale", "en-US"),
-                "resources": state.get("resources", [])
+        self.call_supervisor = {
+            "name": "display_result",
+            "description": "This function used to display your result to Supervisor.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "The list of search queries that were used to gather the information being summarized."
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "A comprehensive markdown-formatted summary of the search results, including key findings, structured information, and relevant details organized in a readable format."
+                    }
+                },
+                "required": [
+                    "queries",
+                    "result"
+                ]
             }
-            
-            messages = apply_prompt_template("searcher", searcher_input, configurable)
-            
-            # 准备研究工具
-            tools = [get_web_search_tool(configurable.max_search_results)]
-            
-            # 添加检索工具
-            retriever_tool = get_retriever_tool(state.get("resources", []))
-            if retriever_tool:
-                tools.insert(0, retriever_tool)
-            
-            # 处理MCP服务器配置
-            mcp_servers = {}
-            if configurable.mcp_settings:
-                for server_name, server_config in configurable.mcp_settings["servers"].items():
-                    if (
-                        server_config.get("enabled_tools")
-                        and "searcher" in server_config.get("add_to_agents", [])
-                    ):
-                        mcp_servers[server_name] = {
-                            k: v for k, v in server_config.items()
-                            if k in ("transport", "command", "args", "url", "env")
-                        }
-            
-            # 创建并执行agent
-            if mcp_servers:
-                async with MultiServerMCPClient_wFileUpload(mcp_servers, state) as client:
-                    loaded_tools = tools[:]
-                    for tool in client.get_tools():
-                        loaded_tools.append(tool)
-                    agent = create_agent("searcher", "searcher", loaded_tools, "searcher")
-                    
-                    recursion_limit = int(os.getenv("AGENT_RECURSION_LIMIT", "25"))
-                    result = await agent.ainvoke(
-                        input={"messages": messages}, 
-                        config={"recursion_limit": recursion_limit}
+        }
+
+        self.webSearchTool = {
+            "name": "web_search",
+            "description": "This function acts as a search engine to retrieve a wide range of information from the web. It is capable of processing queries related to various topics and returning relevant results.This search tool's performance is limited and it only returns summary information. Therefore, it's necessary to narrow down the search scope as much as possible. For example, avoid searching for specific time periods. Note: Except for proper nouns, abbreviations, and terms, it is recommended to use Chinese for search keywords to obtain better search results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query used to retrieve information from the internet. Rewrite and optimize the query based on conversation history for best search quality.The keywords should not exceed four."
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
+        }
+
+    async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command[Literal["supervisor"]]:
+        
+        configurable = Configuration.from_runnable_config(config)
+        input_messages = state.get("messages")
+        supervisor_iterate_time = state["supervisor_iterate_time"]
+
+        # 构建writer输入
+        writer_state = {
+            "messages": input_messages[-supervisor_iterate_time - 1:],
+            "locale": state.get("locale", "en-US"),
+            "resources": state.get("resources", [])
+        }
+        messages = apply_prompt_template("writer", writer_state, configurable)
+        # print(messages)
+        # 准备委托工具
+        tools = [self.call_supervisor, self.webSearchTool]
+        
+        llm = get_llm_by_type( self.config.llm_type).bind_tools(tools)
+        response = llm.invoke(messages)
+
+        node_res_summary = ""
+
+        max_toolcall_iterate_times = configurable.max_toolcall_iterate_times
+        iterate_times = state.get("tool_call_iterate_time", 0)
+        
+        if hasattr(response, 'tool_calls') and response.tool_calls \
+            and iterate_times < max_toolcall_iterate_times:
+
+            self.log_execution(f"Search tool call: {response.tool_calls}")
+            iterate_times += 1
+            self.log_execution(f"call times: {iterate_times}")
+            for tool_call in response.tool_calls:
+                # 返回给supervisor
+                if tool_call["name"] == "display_result":
+                    node_res_summary += f"\n{tool_call['args']['result']}"
+                    return Command(
+                        update={
+                            "messages": [HumanMessage(content=node_res_summary, name="writer")],
+                        },
+                        goto="supervisor"
                     )
-            else:
-                agent = create_agent("searcher", "searcher", tools, "searcher")
-                recursion_limit = int(os.getenv("AGENT_RECURSION_LIMIT", "25"))
-                result = await agent.ainvoke(
-                    input={"messages": messages}, 
-                    config={"recursion_limit": recursion_limit}
-                )
-            
-            research_content = result["messages"][-1].content
-            self.log_execution(f"Research completed. Content length: {len(research_content)}")
-            
-            # 处理图像下载
-            need_image = state.get("need_image", "true")
-            if need_image.lower() == "true":
-                research_content = await self._process_images(research_content, state)
-            
-            execution_result = research_content
-            current_step.execution_res = execution_result
-            
-            # 确定下一个节点
-            next_node = self.determine_next_node(state)
-            
-            return Command(
-                update={
-                    "messages": [AIMessage(content=execution_result, name="searcher")],
-                    "current_plan": current_plan,
-                    "current_step_index": current_step_index
-                },
-                goto=next_node
-            )
-            
-        except Exception as e:
-            self.log_execution(f"Error in searcher execution: {e}")
-            return Command(
-                update={
-                    "messages": [AIMessage(content=f"Error in research: {str(e)}", name="searcher")]
-                },
-                goto="reporter"
-            )
+                elif tool_call["name"] == "web_search":
+                    from src.tools.search import get_web_search_tool, filter_garbled_text
+
+                    background_summary = "相关背景信息收集:\n"
+                    search_engine = get_web_search_tool(configurable.max_search_results)
+                    try:
+                        
+                        searched_content = search_engine.invoke(tool_call["args"])
+                        for elem in searched_content:
+                            background_summary += f"- 题目：{ elem["title"]}\n- 内容：{elem["content"]}\n"
+                        
+                    except Exception as e:
+                        self.log_execution(f"Background research failed: {e}")
+                    background_summary = filter_garbled_text(background_summary)
+                    return Command(
+                        update={
+                            "messages": [ToolMessage(content=background_summary, tool_call_id=tool_call["id"])],
+                            "tool_call_iterate_time" : iterate_times
+                        },
+                        goto="searcher"
+                    )
+                else:
+                    pass
+        return Command(
+            update={
+                "messages": response,
+            },
+            goto="supervisor"
+        )
+
     
     def _extract_markdown_images(self, text: str) -> List[Tuple[str, str]]:
         """提取 Markdown 格式图像的描述和 URL"""
