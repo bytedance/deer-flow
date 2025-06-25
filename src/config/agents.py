@@ -11,6 +11,7 @@ NodeType = Literal["coordinator",
                    "planner", 
                    "writer", 
                    "coder", 
+                   "interpreter"
                    "searcher", 
                    "reader", 
                    "thinker", 
@@ -44,6 +45,7 @@ class AgentConfiguration:
         "planner": "basic", 
         "writer": "basic",
         "coder": "basic",
+        "interpreter": "basic",
         "searcher": "basic",
         "reader": "vision",
         "thinker": "reasoning",
@@ -90,6 +92,13 @@ class AgentConfiguration:
         "coder": NodeConfig(
             name="coder",
             llm_type="basic",
+            enabled_tools=[],
+            next_nodes=["supervisor"],
+            requires_approval=True
+        ),
+        "interpreter": NodeConfig(
+            name="interpreter",
+            llm_type="basic",
             enabled_tools=["python_repl", "sandbox_tools"],
             next_nodes=["supervisor"],
             requires_approval=True
@@ -101,13 +110,13 @@ class AgentConfiguration:
             next_nodes=["supervisor"],
             requires_approval=True
         ),
-        # "reader": NodeConfig(
-        #     name="reader",
-        #     llm_type="vision",
-        #     enabled_tools=["call_rotate_tool", "image_analysis"],
-        #     next_nodes=["supervisor"],
-        #     requires_approval=True
-        # ),
+        "reader": NodeConfig(
+            name="reader",
+            llm_type="vision",
+            enabled_tools=["call_rotate_tool", "image_analysis"],
+            next_nodes=["supervisor"],
+            requires_approval=True
+        ),
         # "thinker": NodeConfig(
         #     name="thinker",
         #     llm_type="reasoning",
@@ -126,19 +135,11 @@ class AgentConfiguration:
     
     # 工具配置
     TOOL_CONFIGS: Dict[str, ToolConfig] = {
-        # 初始化节点流传fc
-        "call_planner_agent": ToolConfig("call_planner_agent", "direct"),
-        "call_coder_agent": ToolConfig("call_coder_agent", "direct"),
-        "call_researcher_agent": ToolConfig("call_researcher_agent", "direct"),
-        "call_reader_agent": ToolConfig("call_reader_agent", "direct"),
-        "call_rotate_tool": ToolConfig("call_rotate_tool", "interactive"),
+
         # 初始化本地工具tool
         "python_repl": ToolConfig("python_repl", "interactive"),
         "web_search": ToolConfig("web_search", "interactive"),
 
-        "approve_step": ToolConfig("approve_step", "direct"),
-        "reject_step": ToolConfig("reject_step", "direct"),
-        "request_revision": ToolConfig("request_revision", "direct"),
         "background_research": ToolConfig("background_research", "interactive"),
         # 初始化MCP tool
         "mcp_tools": ToolConfig("mcp_tools", "interactive"),
@@ -152,6 +153,7 @@ class AgentConfiguration:
     STEP_TYPE_TO_NODE: Dict[str, str] = {
         "writer": "writer",
         "coder": "coder", 
+        "interpreter": "interpreter",
         "researcher": "researcher",
         "reader": "reader",
         "thinker": "thinker",

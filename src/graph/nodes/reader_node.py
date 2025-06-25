@@ -3,6 +3,9 @@
 
 from .base_node import BaseNode
 from src.config.agents import AgentConfiguration
+from src.config.configuration import Configuration
+from src.prompts.template import apply_prompt_template
+from src.llms.llm import get_llm_by_type
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
@@ -21,101 +24,59 @@ class ReaderNode(BaseNode):
     
     def __init__(self, toolmanager):
         super().__init__("reader", AgentConfiguration.NODE_CONFIGS["reader"], toolmanager)
-    
-    async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command[Literal["supervisor"]]:
-        """执行阅读器逻辑"""
-        self.log_execution("Starting image reading task")
-        
-        # 导入必要的模块
-        from src.config.configuration import Configuration
-        from src.prompts.template import apply_prompt_template
-        from src.llms.llm import get_llm_by_type
-        from src.tools.image_rotate import rotate_image
-        from src.graph.types import Resource
-        from tools.delegation_tools import call_rotate_tool
-        
-        try:
-            configurable = Configuration.from_runnable_config(config)
-            
-            # 推进到下一步
-            current_step_index = self.get_next_step_index(state)
-            current_plan = state.get("current_plan")
-            
-            if not current_plan or current_step_index >= len(current_plan.steps):
-                return Command(goto="reporter")
-            
-            current_step = current_plan.steps[current_step_index]
-            self.log_execution(f"Working on step {current_step_index}: {current_step.title}")
-            
-            # 获取图像路径
-            session_dir = state.get("session_dir", "")
-            image_paths = state.get("file_info", "")
-            
-            if not image_paths:
-                self.log_execution("No image paths provided")
-                return Command(goto="reporter")
-            
-            # 构建reader输入
-            reader_input = {
-                "messages": [self._create_message_with_base64_image(
-                    text=f"""# Current Task
-
-## Title
-{current_step.title}
-
-## Description
-{current_step.description}
-
-## Previous Message
-{state.get('messages', [])[-1].content if state.get('messages') else 'No previous message'}
-
-#Reading Image paths (The order of image paths corresponds to the order in which images are read):
-{image_paths}
-
-## Locale
-{state.get('locale', 'en-US')}""", 
-                    image_paths=image_paths
-                )],
-                "locale": state.get("locale", "en-US"),
-                "resources": state.get("resources", [])
+        self.call_supervisor = {
+            "name": "display_result",
+            "description": "This function used to display your result to user and Supervisor.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "string",
+                        "description": "A comprehensive markdown-formatted text content, including the generated or processed text organized in a readable format."
+                    }
+                },
+                "required": [
+                "result"
+                ]
             }
-            
-            messages = apply_prompt_template("reader", reader_input, configurable)
-            
-            # 使用vision模型处理文档和图片
-            delegation_tools = [call_rotate_tool]
-            llm = get_llm_by_type(self.config.llm_type).bind_tools(delegation_tools)
-            response = llm.invoke(messages)
-            
-            self.log_execution(f"Reader initial response received")
-            
-            # 处理工具调用
-            response = await self._handle_tool_calls(
-                response, messages, llm, configurable, state, session_dir
-            )
-            
-            current_step.execution_res = response.content
-            
-            # 确定下一个节点
-            next_node = self.determine_next_node(state)
-            
-            return Command(
-                update={
-                    "messages": [AIMessage(content=response.content, name="reader")],
-                    "current_plan": current_plan,
-                    "current_step_index": current_step_index
-                },
-                goto=next_node
-            )
-            
-        except Exception as e:
-            self.log_execution(f"Error in reader execution: {e}")
-            return Command(
-                update={
-                    "messages": [AIMessage(content=f"Error in reading: {str(e)}", name="reader")]
-                },
-                goto="reporter"
-            )
+        }
+
+    async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command[Literal["supervisor"]]:
+        configurable = Configuration.from_runnable_config(config)
+        input_messages = state.get("messages")
+        supervisor_iterate_time = state["supervisor_iterate_time"]
+
+        # 构建writer输入
+        writer_state = {
+            "messages": input_messages[-supervisor_iterate_time - 1:],
+            "locale": state.get("locale", "en-US"),
+            "resources": state.get("resources", [])
+        }
+        messages = apply_prompt_template("writer", writer_state, configurable)
+        # print(messages)
+        # 准备委托工具
+        tools = [self.call_supervisor]
+        
+        llm = get_llm_by_type( self.config.llm_type).bind_tools(tools)
+        response = llm.invoke(messages)
+
+        node_res_summary = ""
+
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            for tool_call in response.tool_calls:
+                if tool_call["name"] == "display_result":
+                    node_res_summary += f"\n{tool_call['args']['result']}"
+                else:
+                    node_res_summary += f"\n{tool_call}"
+                    # print(node_res_summary)
+                    raise ValueError
+        
+        return Command(
+            update={
+                "messages": [HumanMessage(content=node_res_summary, name="writer")],
+            },
+            goto="supervisor"
+        )
     
     def _create_message_with_base64_image(self, text: str, image_paths: str) -> HumanMessage:
         """使用base64编码传递图像, 都转为jpg再转为base64传输"""

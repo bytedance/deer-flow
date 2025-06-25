@@ -32,3 +32,10 @@ class BaseNode(ABC):
         """记录执行日志"""
         logger.info(f"[{self.name}] {message}")
     
+    def log_execution_warning(self, message: str):
+        """记录执行日志"""
+        logger.warning(f"[{self.name}] {message}")
+
+    def log_execution_error(self, message: str):
+        """记录执行日志"""
+        logger.error(f"[{self.name}] {message}")

@@ -25,7 +25,7 @@ class PlannerNode(BaseNode):
         
 
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) \
-        -> Command[Literal["writer", "reporter", "__end__"]]: #"coder", "searcher", "reader", "thinker"
+        -> Command[Literal["writer", "coder", "interpreter", "searcher", "reader", "reporter", "__end__"]]:
         """执行规划器逻辑"""
         self.log_execution("Generating execution plan")
         
