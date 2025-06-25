@@ -194,6 +194,8 @@ class SupervisorNode(BaseNode):
                         # .get(
                         #     next_action.type.lower(), "reporter"
                         # )
+                        self.log_execution(next_node)
+                        self.log_execution(next_action)
                         next_step_summary = self.get_next_step(next_action)
                         return Command(
                             update={

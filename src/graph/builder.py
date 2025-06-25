@@ -15,6 +15,7 @@ from .nodes import (
     ThinkerNode,
     SupervisorNode,  
     ReporterNode,  
+    ReceiverNode
 )
 
 import logging
@@ -30,9 +31,10 @@ def _build_base_graph():
         "planner": PlannerNode(tool_manager),
         "writer": WriterNode(tool_manager),
         # "coder": CoderNode(tool_manager),
-        # "searcher": SearcherNode(tool_manager),
+        "searcher": SearcherNode(tool_manager),
         # "reader": ReaderNode(tool_manager),
         # "thinker": ThinkerNode(tool_manager),
+        "recriver": ReceiverNode(tool_manager),
         "supervisor": SupervisorNode(tool_manager),
         "reporter": ReporterNode(tool_manager),
     }
