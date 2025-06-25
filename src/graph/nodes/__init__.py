@@ -1,5 +1,6 @@
 from .writer_node import WriterNode
 from .coder_node import CoderNode
+from .interpreter_node import InterpreterNode
 from .coordinator_node import CoordinatorNode
 from .planner_node import PlannerNode
 from .reader_node import ReaderNode
@@ -12,6 +13,7 @@ from .receiver_node import ReceiverNode
 __all__ = [
     "WriterNode",
     "CoderNode",
+    "InterpreterNode",
     "CoordinatorNode",
     "PlannerNode",
     "ReaderNode",

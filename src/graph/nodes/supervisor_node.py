@@ -121,7 +121,7 @@ class SupervisorNode(BaseNode):
         return summary
 
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) \
-        -> Command[Literal["writer", "reporter", "searcher", "__end__"]]|Dict[str, Any]:#"coder",  "reader","thinker",
+        -> Command[Literal["writer", "reporter", "searcher", "coder", "interpreter", "reader", "__end__"]]|Dict[str, Any]:
         """执行supervisor逻辑"""
         self.log_execution("Evaluating step completion")
         

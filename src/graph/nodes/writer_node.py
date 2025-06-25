@@ -1,5 +1,3 @@
-# nodes/writer_node.py
-"""分析器节点"""
 from src.llms.llm import get_llm_by_type
 from .base_node import BaseNode
 from src.config.agents import AgentConfiguration
@@ -26,10 +24,10 @@ class WriterNode(BaseNode):
             "parameters": {
                 "type": "object",
                 "properties": {
-                "result": {
-                    "type": "string",
-                    "description": "A comprehensive markdown-formatted text content, including the generated or processed text organized in a readable format."
-                }
+                    "result": {
+                        "type": "string",
+                        "description": "A comprehensive markdown-formatted text content, including the generated or processed text organized in a readable format."
+                    }
                 },
                 "required": [
                 "result"
