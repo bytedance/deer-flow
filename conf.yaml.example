@@ -3,13 +3,15 @@
 # configurations to match your specific settings and requirements.
 # - Replace `api_key` with your own credentials.
 # - Replace `base_url` and `model` name if you want to use a custom model.
+# - Set `verify_ssl` to `false` if your LLM server uses self-signed certificates
 # - A restart is required every time you change the `config.yaml` file.
 
 BASIC_MODEL:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: "doubao-1-5-pro-32k-250115"
   api_key: xxxx
-
+  # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
+ 
 # Reasoning model is optional.
 # Uncomment the following settings if you want to use reasoning model
 # for planning.
