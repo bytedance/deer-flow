@@ -75,7 +75,7 @@ def _create_llm_use_conf(
 
     # Handle SSL verification settings
     verify_ssl = merged_conf.pop("verify_ssl", True)
-    
+
     # Create custom HTTP client if SSL verification is disabled
     if not verify_ssl:
         http_client = httpx.Client(verify=False)
@@ -88,7 +88,6 @@ def _create_llm_use_conf(
         if llm_type != "reasoning"
         else ChatDeepSeek(**merged_conf)
     )
-
 
 
 def get_llm_by_type(
