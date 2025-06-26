@@ -3,8 +3,8 @@
 
 import { MagicWandIcon } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUp, X } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { ArrowUp, Lightbulb, X } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { Detective } from "~/components/deer-flow/icons/detective";
 import MessageInput, {
@@ -15,8 +15,10 @@ import { Tooltip } from "~/components/deer-flow/tooltip";
 import { BorderBeam } from "~/components/magicui/border-beam";
 import { Button } from "~/components/ui/button";
 import { enhancePrompt } from "~/core/api";
+import { getConfig } from "~/core/api/config";
 import type { Option, Resource } from "~/core/messages";
 import {
+  setEnableDeepThinking,
   setEnableBackgroundInvestigation,
   useSettingsStore,
 } from "~/core/store";
@@ -44,9 +46,13 @@ export function InputBox({
   onCancel?: () => void;
   onRemoveFeedback?: () => void;
 }) {
+  const enableDeepThinking = useSettingsStore(
+    (state) => state.general.enableDeepThinking,
+  );
   const backgroundInvestigation = useSettingsStore(
     (state) => state.general.enableBackgroundInvestigation,
   );
+  const reasoningModel = useMemo(() => getConfig().models.reasoning?.[0], []);
   const reportStyle = useSettingsStore((state) => state.general.reportStyle);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<MessageInputRef>(null);
@@ -203,6 +209,36 @@ export function InputBox({
       </div>
       <div className="flex items-center px-4 py-2">
         <div className="flex grow gap-2">
+          {reasoningModel && (
+            <Tooltip
+              className="max-w-60"
+              title={
+                <div>
+                  <h3 className="mb-2 font-bold">
+                    Deep Thinking Mode: {enableDeepThinking ? "On" : "Off"}
+                  </h3>
+                  <p>
+                    When enabled, DeerFlow will use reasoning model (
+                    {reasoningModel}) to generate more thoughtful plans.
+                  </p>
+                </div>
+              }
+            >
+              <Button
+                className={cn(
+                  "rounded-2xl",
+                  enableDeepThinking && "!border-brand !text-brand",
+                )}
+                variant="outline"
+                onClick={() => {
+                  setEnableDeepThinking(!enableDeepThinking);
+                }}
+              >
+                <Lightbulb /> Deep Thinking
+              </Button>
+            </Tooltip>
+          )}
+
           <Tooltip
             className="max-w-60"
             title={

@@ -10,6 +10,7 @@ const SETTINGS_KEY = "deerflow.settings";
 const DEFAULT_SETTINGS: SettingsState = {
   general: {
     autoAcceptedPlan: false,
+    enableDeepThinking: false,
     enableBackgroundInvestigation: false,
     maxPlanIterations: 1,
     maxStepNum: 3,
@@ -24,6 +25,7 @@ const DEFAULT_SETTINGS: SettingsState = {
 export type SettingsState = {
   general: {
     autoAcceptedPlan: boolean;
+    enableDeepThinking: boolean;
     enableBackgroundInvestigation: boolean;
     maxPlanIterations: number;
     maxStepNum: number;
@@ -127,11 +129,23 @@ export const getChatStreamSettings = () => {
   };
 };
 
-export function setReportStyle(value: "academic" | "popular_science" | "news" | "social_media") {
+export function setReportStyle(
+  value: "academic" | "popular_science" | "news" | "social_media",
+) {
   useSettingsStore.setState((state) => ({
     general: {
       ...state.general,
       reportStyle: value,
+    },
+  }));
+  saveSettings();
+}
+
+export function setEnableDeepThinking(value: boolean) {
+  useSettingsStore.setState((state) => ({
+    general: {
+      ...state.general,
+      enableDeepThinking: value,
     },
   }));
   saveSettings();

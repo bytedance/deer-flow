@@ -36,7 +36,10 @@ def get_web_search_tool(max_search_results: int):
             include_image_descriptions=True,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.DUCKDUCKGO.value:
-        return LoggedDuckDuckGoSearch(name="web_search", max_results=max_search_results)
+        return LoggedDuckDuckGoSearch(
+            name="web_search",
+            num_results=max_search_results,
+        )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.BRAVE_SEARCH.value:
         return LoggedBraveSearch(
             name="web_search",
@@ -56,14 +59,3 @@ def get_web_search_tool(max_search_results: int):
         )
     else:
         raise ValueError(f"Unsupported search engine: {SELECTED_SEARCH_ENGINE}")
-
-
-if __name__ == "__main__":
-    results = LoggedDuckDuckGoSearch(
-        name="web_search", max_results=3, output_format="list"
-    )
-    print(results.name)
-    print(results.description)
-    print(results.args)
-    # .invoke("cute panda")
-    # print(json.dumps(results, indent=2, ensure_ascii=False))

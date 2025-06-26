@@ -60,18 +60,3 @@ def get_retriever_tool(resources: List[Resource]) -> RetrieverTool | None:
     if not retriever:
         return None
     return RetrieverTool(retriever=retriever, resources=resources)
-
-
-if __name__ == "__main__":
-    resources = [
-        Resource(
-            uri="rag://dataset/1c7e2ea4362911f09a41c290d4b6a7f0",
-            title="西游记",
-            description="西游记是中国古代四大名著之一，讲述了唐僧师徒四人西天取经的故事。",
-        )
-    ]
-    retriever_tool = get_retriever_tool(resources)
-    print(retriever_tool.name)
-    print(retriever_tool.description)
-    print(retriever_tool.args)
-    print(retriever_tool.invoke("三打白骨精"))
