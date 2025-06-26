@@ -32,3 +32,4 @@ coverage/
 sessions/
 
 tests/test_cases/
+logs

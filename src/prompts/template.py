@@ -7,7 +7,7 @@ from datetime import datetime
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from langgraph.prebuilt.chat_agent_executor import AgentState
 from src.config.configuration import Configuration
-
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 # Initialize Jinja2 environment
 env = Environment(
     loader=FileSystemLoader(os.path.dirname(__file__)),
@@ -52,7 +52,6 @@ def apply_prompt_template(
         "CURRENT_TIME": datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
     }
     
-   
     # Add configurable variables
     if configurable:
         state_vars.update(dataclasses.asdict(configurable))
@@ -61,6 +60,6 @@ def apply_prompt_template(
         template = env.get_template(f"{prompt_name}.md")
         system_prompt = template.render(**state_vars)
     
-        return [{"role": "system", "content": system_prompt}] + state["messages"]
+        return [SystemMessage(content=system_prompt)] + state["messages"]
     except Exception as e:
         raise ValueError(f"Error applying template {prompt_name}: {e}")

@@ -16,13 +16,18 @@ class State(MessagesState):
     resources: list[Resource] = []
     plan_iterations: int = 0
     current_plan: Plan | str = None
+    current_step_index: str = None
     final_report: str = ""
     auto_accepted_plan: bool = False
+
     enable_background_investigation: bool = True
     background_investigation_results: str = None
     session_id: str = None
     session_dir: str = None
 
-    current_step_index: int = -1
+    tool_call_iterate_time: int = 0 # 当前toolcall的迭代次数
+    supervisor_iterate_time: int = 0 # supervisor_iterate_time
+    history_clear: bool = False # 是否清空
+
     file_info: str
     need_image: str = "true"
