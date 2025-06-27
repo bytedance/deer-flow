@@ -10,6 +10,8 @@ import httpx
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from typing import get_args
+from langchain_google_genai import ChatGoogleGenerativeAI
+import os
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
@@ -29,6 +31,7 @@ def _get_llm_type_config_keys() -> dict[str, str]:
         "reasoning": "REASONING_MODEL",
         "basic": "BASIC_MODEL",
         "vision": "VISION_MODEL",
+        "gemini": "GEMINI_MODEL"
     }
 
 
@@ -48,8 +51,8 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
 
 
 def _create_llm_use_conf(
-    llm_type: LLMType, conf: Dict[str, Any]
-) -> ChatOpenAI | ChatDeepSeek:
+    llm_type: LLMType, conf: Dict[str, Any], tools:list | None = None
+) -> ChatOpenAI | ChatDeepSeek | ChatGoogleGenerativeAI:
     """Create LLM instance using configuration."""
     llm_type_config_keys = _get_llm_type_config_keys()
     config_key = llm_type_config_keys.get(llm_type)
@@ -72,6 +75,18 @@ def _create_llm_use_conf(
 
     if llm_type == "reasoning":
         merged_conf["api_base"] = merged_conf.pop("base_url", None)
+    elif llm_type == "gemini":                  
+        base_llm = ChatGoogleGenerativeAI(
+            model=merged_conf["model"],
+            temperature=merged_conf.get("temperature", 0.7),
+            max_output_tokens=merged_conf.get("max_tokens", 2048),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+    # LangGraph 会塞进来
+        )
+        if tools:
+            base_llm = base_llm.bind_tools(tools)
+        return base_llm
+
 
     # Handle SSL verification settings
     verify_ssl = merged_conf.pop("verify_ssl", True)
@@ -91,17 +106,19 @@ def _create_llm_use_conf(
 
 
 def get_llm_by_type(
-    llm_type: LLMType,
+    llm_type: LLMType, tools: list | None = None
 ) -> ChatOpenAI:
     """
     Get LLM instance by type. Returns cached instance if available.
     """
+    cache_key = (llm_type, id(tools) if tools else None)
     if llm_type in _llm_cache:
         return _llm_cache[llm_type]
 
     conf = load_yaml_config(_get_config_file_path())
     llm = _create_llm_use_conf(llm_type, conf)
     _llm_cache[llm_type] = llm
+
     return llm
 
 

@@ -8,6 +8,7 @@ from .python_repl import python_repl_tool
 from .retriever import get_retriever_tool
 from .search import get_web_search_tool
 from .tts import VolcengineTTS
+from .get_weather import get_weather
 
 __all__ = [
     "crawl_tool",
