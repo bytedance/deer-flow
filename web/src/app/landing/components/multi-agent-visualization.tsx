@@ -21,6 +21,7 @@ import {
   Minimize,
 } from "lucide-react";
 import "@xyflow/react/dist/style.css";
+import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
@@ -47,6 +48,7 @@ const nodeTypes = {
 };
 
 export function MultiAgentVisualization({ className }: { className?: string }) {
+  const t = useTranslations("chat.multiAgent");
   const {
     graph: { nodes, edges },
     activeStepIndex,
@@ -120,12 +122,12 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
       <div className="h-4 shrink-0"></div>
       <div className="flex h-6 w-full shrink-0 items-center justify-center">
         <div className="bg-muted/50 z-[200] flex rounded-3xl px-4 py-2">
-          <Tooltip title="Move to the previous step">
+          <Tooltip title={t("moveToPrevious")}>
             <Button variant="ghost" onClick={prevStep}>
               <ChevronLeft className="size-5" />
             </Button>
           </Tooltip>
-          <Tooltip title="Play / Pause">
+          <Tooltip title={t("playPause")}>
             <Button variant="ghost" onClick={togglePlay}>
               {playing ? (
                 <Pause className="size-5" />
@@ -134,7 +136,7 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
               )}
             </Button>
           </Tooltip>
-          <Tooltip title="Move to the next step">
+          <Tooltip title={t("moveToNext")}>
             <Button
               variant="ghost"
               onClick={() => {
@@ -158,7 +160,7 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
               }}
             />
           </div>
-          <Tooltip title="Toggle fullscreen">
+          <Tooltip title={t("toggleFullscreen")}>
             <Button
               variant="ghost"
               size="icon"

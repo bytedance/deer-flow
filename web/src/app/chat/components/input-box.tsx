@@ -4,6 +4,7 @@
 import { MagicWandIcon } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUp, Lightbulb, X } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import { Detective } from "~/components/deer-flow/icons/detective";
@@ -46,6 +47,8 @@ export function InputBox({
   onCancel?: () => void;
   onRemoveFeedback?: () => void;
 }) {
+  const t = useTranslations("chat.inputBox");
+  const tCommon = useTranslations("common");
   const enableDeepThinking = useSettingsStore(
     (state) => state.general.enableDeepThinking,
   );
@@ -215,11 +218,14 @@ export function InputBox({
               title={
                 <div>
                   <h3 className="mb-2 font-bold">
-                    Deep Thinking Mode: {enableDeepThinking ? "On" : "Off"}
+                    {t("deepThinkingTooltip.title", {
+                      status: enableDeepThinking ? t("on") : t("off"),
+                    })}
                   </h3>
                   <p>
-                    When enabled, DeerFlow will use reasoning model (
-                    {reasoningModel}) to generate more thoughtful plans.
+                    {t("deepThinkingTooltip.description", {
+                      model: reasoningModel || "",
+                    })}
                   </p>
                 </div>
               }
@@ -234,7 +240,7 @@ export function InputBox({
                   setEnableDeepThinking(!enableDeepThinking);
                 }}
               >
-                <Lightbulb /> Deep Thinking
+                <Lightbulb /> {t("deepThinking")}
               </Button>
             </Tooltip>
           )}
@@ -244,13 +250,11 @@ export function InputBox({
             title={
               <div>
                 <h3 className="mb-2 font-bold">
-                  Investigation Mode: {backgroundInvestigation ? "On" : "Off"}
+                  {t("investigationTooltip.title", {
+                    status: backgroundInvestigation ? t("on") : t("off"),
+                  })}
                 </h3>
-                <p>
-                  When enabled, DeerFlow will perform a quick search before
-                  planning. This is useful for researches related to ongoing
-                  events and news.
-                </p>
+                <p>{t("investigationTooltip.description")}</p>
               </div>
             }
           >
@@ -264,13 +268,13 @@ export function InputBox({
                 setEnableBackgroundInvestigation(!backgroundInvestigation)
               }
             >
-              <Detective /> Investigation
+              <Detective /> {t("investigation")}
             </Button>
           </Tooltip>
           <ReportStyleDialog />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Tooltip title="Enhance prompt with AI">
+          <Tooltip title={t("enhancePrompt")}>
             <Button
               variant="ghost"
               size="icon"
@@ -290,7 +294,7 @@ export function InputBox({
               )}
             </Button>
           </Tooltip>
-          <Tooltip title={responding ? "Stop" : "Send"}>
+          <Tooltip title={responding ? tCommon("stop") : tCommon("send")}>
             <Button
               variant="outline"
               size="icon"
