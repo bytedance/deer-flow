@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+# SPDX-License-Identifier: MIT
+
 from src.config.tools import SELECTED_RAG_PROVIDER, RAGProvider
 from src.rag.ragflow import RAGFlowProvider
 from src.rag.retriever import Retriever

@@ -4,7 +4,7 @@
 import { PythonOutlined } from "@ant-design/icons";
 import { motion } from "framer-motion";
 import { LRUCache } from "lru-cache";
-import { BookOpenText, PencilRuler, Search } from "lucide-react";
+import { BookOpenText, FileText, PencilRuler, Search } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useMemo } from "react";
 import SyntaxHighlighter from "react-syntax-highlighter";
@@ -96,6 +96,8 @@ function ActivityListItem({ messageId }: { messageId: string }) {
           return <CrawlToolCall key={toolCall.id} toolCall={toolCall} />;
         } else if (toolCall.name === "python_repl_tool") {
           return <PythonToolCall key={toolCall.id} toolCall={toolCall} />;
+        } else if (toolCall.name === "local_search_tool") {
+          return <RetrieverToolCall key={toolCall.id} toolCall={toolCall} />;
         } else {
           return <MCPToolCall key={toolCall.id} toolCall={toolCall} />;
         }
@@ -118,6 +120,7 @@ type SearchResult =
       image_url: string;
       image_description: string;
     };
+
 function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   const searching = useMemo(() => {
     return toolCall.result === undefined;
@@ -271,6 +274,64 @@ function CrawlToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
           </a>
         </motion.li>
       </ul>
+    </section>
+  );
+}
+
+function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
+  const searching = useMemo(() => {
+    return toolCall.result === undefined;
+  }, [toolCall.result]);
+  const documents = useMemo<
+    Array<{ id: string; title: string; content: string }>
+  >(() => {
+    return toolCall.result ? parseJSON(toolCall.result, []) : [];
+  }, [toolCall.result]);
+  return (
+    <section className="mt-4 pl-4">
+      <div className="font-medium italic">
+        <RainbowText className="flex items-center" animated={searching}>
+          <Search size={16} className={"mr-2"} />
+          <span>Retrieving documents from RAG&nbsp;</span>
+          <span className="max-w-[500px] overflow-hidden text-ellipsis whitespace-nowrap">
+            {(toolCall.args as { keywords: string }).keywords}
+          </span>
+        </RainbowText>
+      </div>
+      <div className="pr-4">
+        {documents && (
+          <ul className="mt-2 flex flex-wrap gap-4">
+            {searching &&
+              [...Array(2)].map((_, i) => (
+                <li
+                  key={`search-result-${i}`}
+                  className="flex h-40 w-40 gap-2 rounded-md text-sm"
+                >
+                  <Skeleton
+                    className="to-accent h-full w-full rounded-md bg-gradient-to-tl from-slate-400"
+                    style={{ animationDelay: `${i * 0.2}s` }}
+                  />
+                </li>
+              ))}
+            {documents.map((doc, i) => (
+              <motion.li
+                key={`search-result-${i}`}
+                className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
+                initial={{ opacity: 0, y: 10, scale: 0.66 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{
+                  duration: 0.2,
+                  delay: i * 0.1,
+                  ease: "easeOut",
+                }}
+              >
+                <FileText size={32} />
+                {doc.title}
+              </motion.li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }

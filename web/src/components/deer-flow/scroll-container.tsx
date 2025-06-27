@@ -1,7 +1,14 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
-import { useEffect, useImperativeHandle, useRef, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useStickToBottom } from "use-stick-to-bottom";
 
 import { ScrollArea } from "~/components/ui/scroll-area";
@@ -26,15 +33,16 @@ export function ScrollContainer({
   scrollShadow = true,
   scrollShadowColor = "var(--background)",
   autoScrollToBottom = false,
-  ref
+  ref,
 }: ScrollContainerProps) {
-  const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({ initial: "instant" });
+  const { scrollRef, contentRef, scrollToBottom, isAtBottom } =
+    useStickToBottom({ initial: "instant" });
   useImperativeHandle(ref, () => ({
     scrollToBottom() {
       if (isAtBottom) {
         scrollToBottom();
       }
-    }
+    },
   }));
 
   const tempScrollRef = useRef<HTMLElement>(null);

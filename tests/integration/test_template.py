@@ -106,3 +106,40 @@ def test_current_time_format():
     assert any(
         line.strip().startswith("CURRENT_TIME:") for line in system_content.split("\n")
     )
+
+
+def test_apply_prompt_template_reporter():
+    """Test reporter template rendering with different styles and locale"""
+
+    test_state_news = {
+        "messages": [],
+        "task": "test reporter task",
+        "workspace_context": "test reporter context",
+        "report_style": "news",
+        "locale": "en-US",
+    }
+    messages_news = apply_prompt_template("reporter", test_state_news)
+    system_content_news = messages_news[0]["content"]
+    assert "NBC News" in system_content_news
+
+    test_state_social_media_en = {
+        "messages": [],
+        "task": "test reporter task",
+        "workspace_context": "test reporter context",
+        "report_style": "social_media",
+        "locale": "en-US",
+    }
+    messages_default = apply_prompt_template("reporter", test_state_social_media_en)
+    system_content_default = messages_default[0]["content"]
+    assert "Twitter/X" in system_content_default
+
+    test_state_social_media_cn = {
+        "messages": [],
+        "task": "test reporter task",
+        "workspace_context": "test reporter context",
+        "report_style": "social_media",
+        "locale": "zh-CN",
+    }
+    messages_cn = apply_prompt_template("reporter", test_state_social_media_cn)
+    system_content_cn = messages_cn[0]["content"]
+    assert "小红书" in system_content_cn

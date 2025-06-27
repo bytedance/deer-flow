@@ -229,3 +229,21 @@ class TestVolcengineTTS:
         args, kwargs = mock_post.call_args
         request_json = json.loads(args[1])
         assert request_json["user"]["uid"] == str(mock_uuid_value)
+
+    @patch("src.tools.tts.requests.post")
+    def test_text_to_speech_request_exception(self, mock_post):
+        """Test error handling when requests.post raises an exception."""
+        # Mock requests.post to raise an exception
+        mock_post.side_effect = Exception("Network error")
+        # Create TTS client
+        tts = VolcengineTTS(
+            appid="test_appid",
+            access_token="test_token",
+        )
+        # Call the method
+        result = tts.text_to_speech("Hello, world!")
+        # Verify the result
+        assert result["success"] is False
+        # The TTS error is caught and returned as a string
+        assert result["error"] == "TTS API call error"
+        assert result["audio_data"] is None

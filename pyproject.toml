@@ -32,6 +32,7 @@ dependencies = [
     "arxiv>=2.2.0",
     "mcp>=1.6.0",
     "langchain-mcp-adapters>=0.0.9",
+    "langchain-deepseek>=0.1.3",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ dev = [
 test = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
+    "pytest-asyncio>=1.0.0",
 ]
 
 [tool.pytest.ini_options]

@@ -9,6 +9,8 @@
 
 **DeerFlow**（**D**eep **E**xploration and **E**fficient **R**esearch **Flow**）是一个社区驱动的深度研究框架，它建立在开源社区的杰出工作基础之上。我们的目标是将语言模型与专业工具（如网络搜索、爬虫和 Python 代码执行）相结合，同时回馈使这一切成为可能的社区。
 
+目前，DeerFlow 已正式入驻[火山引擎的 FaaS 应用中心](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market)，用户可通过[体验链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow)进行在线体验，直观感受其强大功能与便捷操作；同时，为满足不同用户的部署需求，DeerFlow 支持基于火山引擎一键部署，点击[部署链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow)即可快速完成部署流程，开启高效研究之旅。
+
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
 
 ## 演示

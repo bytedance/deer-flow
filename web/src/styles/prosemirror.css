@@ -2,8 +2,18 @@
   max-width: inherit;
 }
 
-.prose .placeholder {
+.prose.inline-editor * {
+  margin: 0;
+}
+
+.prose.inline-editor .is-empty {
+  display: none;
+}
+
+.prose.inline-editor .is-empty.placeholder {
+  display: block;
   opacity: 0.65;
+  font-size: 14px;
 }
 
 .ProseMirror {

@@ -14,16 +14,18 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, ToolMessage, BaseMessage
 from langgraph.types import Command
 
+from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
+from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
 from src.rag.builder import build_retriever
 from src.rag.retriever import Resource
 from src.server.chat_request import (
-    ChatMessage,
     ChatRequest,
+    EnhancePromptRequest,
     GeneratePodcastRequest,
     GeneratePPTRequest,
     GenerateProseRequest,
@@ -36,9 +38,13 @@ from src.server.rag_request import (
     RAGResourceRequest,
     RAGResourcesResponse,
 )
+from src.server.config_request import ConfigResponse
+from src.llms.llm import get_configured_llm_models
 from src.tools import VolcengineTTS
 
 logger = logging.getLogger(__name__)
+
+INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
 app = FastAPI(
     title="DeerFlow API",
@@ -75,13 +81,15 @@ async def chat_stream(request: ChatRequest):
             request.interrupt_feedback,
             request.mcp_settings,
             request.enable_background_investigation,
+            request.report_style,
+            request.enable_deep_thinking,
         ),
         media_type="text/event-stream",
     )
 
 
 async def _astream_workflow_generator(
-    messages: List[ChatMessage],
+    messages: List[dict],
     thread_id: str,
     resources: List[Resource],
     max_plan_iterations: int,
@@ -90,7 +98,9 @@ async def _astream_workflow_generator(
     auto_accepted_plan: bool,
     interrupt_feedback: str,
     mcp_settings: dict,
-    enable_background_investigation,
+    enable_background_investigation: bool,
+    report_style: ReportStyle,
+    enable_deep_thinking: bool,
 ):
     input_ = {
         "messages": messages,
@@ -100,6 +110,7 @@ async def _astream_workflow_generator(
         "observations": [],
         "auto_accepted_plan": auto_accepted_plan,
         "enable_background_investigation": enable_background_investigation,
+        "research_topic": messages[-1]["content"] if messages else "",
     }
     if not auto_accepted_plan and interrupt_feedback:
         resume_msg = f"[{interrupt_feedback}]"
@@ -116,6 +127,8 @@ async def _astream_workflow_generator(
             "max_step_num": max_step_num,
             "max_search_results": max_search_results,
             "mcp_settings": mcp_settings,
+            "report_style": report_style.value,
+            "enable_deep_thinking": enable_deep_thinking,
         },
         stream_mode=["messages", "updates"],
         subgraphs=True,
@@ -147,6 +160,10 @@ async def _astream_workflow_generator(
             "role": "assistant",
             "content": message_chunk.content,
         }
+        if message_chunk.additional_kwargs.get("reasoning_content"):
+            event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
+                "reasoning_content"
+            ]
         if message_chunk.response_metadata.get("finish_reason"):
             event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
                 "finish_reason"
@@ -184,17 +201,16 @@ def _make_event(event_type: str, data: dict[str, any]):
 @app.post("/api/tts")
 async def text_to_speech(request: TTSRequest):
     """Convert text to speech using volcengine TTS API."""
+    app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
+    if not app_id:
+        raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
+    access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
+    if not access_token:
+        raise HTTPException(
+            status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
+        )
+
     try:
-        app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
-        if not app_id:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_APPID is not set"
-            )
-        access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
-        if not access_token:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
-            )
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
         voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "BV700_V2_streaming")
 
@@ -232,9 +248,10 @@ async def text_to_speech(request: TTSRequest):
                 )
             },
         )
+
     except Exception as e:
         logger.exception(f"Error in TTS endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.post("/api/podcast/generate")
@@ -248,7 +265,7 @@ async def generate_podcast(request: GeneratePodcastRequest):
         return Response(content=audio_bytes, media_type="audio/mp3")
     except Exception as e:
         logger.exception(f"Error occurred during podcast generation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.post("/api/ppt/generate")
@@ -267,13 +284,14 @@ async def generate_ppt(request: GeneratePPTRequest):
         )
     except Exception as e:
         logger.exception(f"Error occurred during ppt generation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.post("/api/prose/generate")
 async def generate_prose(request: GenerateProseRequest):
     try:
-        logger.info(f"Generating prose for prompt: {request.prompt}")
+        sanitized_prompt = request.prompt.replace("\r\n", "").replace("\n", "")
+        logger.info(f"Generating prose for prompt: {sanitized_prompt}")
         workflow = build_prose_graph()
         events = workflow.astream(
             {
@@ -290,7 +308,51 @@ async def generate_prose(request: GenerateProseRequest):
         )
     except Exception as e:
         logger.exception(f"Error occurred during prose generation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
+
+
+@app.post("/api/prompt/enhance")
+async def enhance_prompt(request: EnhancePromptRequest):
+    try:
+        sanitized_prompt = request.prompt.replace("\r\n", "").replace("\n", "")
+        logger.info(f"Enhancing prompt: {sanitized_prompt}")
+
+        # Convert string report_style to ReportStyle enum
+        report_style = None
+        if request.report_style:
+            try:
+                # Handle both uppercase and lowercase input
+                style_mapping = {
+                    "ACADEMIC": ReportStyle.ACADEMIC,
+                    "POPULAR_SCIENCE": ReportStyle.POPULAR_SCIENCE,
+                    "NEWS": ReportStyle.NEWS,
+                    "SOCIAL_MEDIA": ReportStyle.SOCIAL_MEDIA,
+                    "academic": ReportStyle.ACADEMIC,
+                    "popular_science": ReportStyle.POPULAR_SCIENCE,
+                    "news": ReportStyle.NEWS,
+                    "social_media": ReportStyle.SOCIAL_MEDIA,
+                }
+                report_style = style_mapping.get(
+                    request.report_style, ReportStyle.ACADEMIC
+                )
+            except Exception:
+                # If invalid style, default to ACADEMIC
+                report_style = ReportStyle.ACADEMIC
+        else:
+            report_style = ReportStyle.ACADEMIC
+
+        workflow = build_prompt_enhancer_graph()
+        final_state = workflow.invoke(
+            {
+                "prompt": request.prompt,
+                "context": request.context,
+                "report_style": report_style,
+            }
+        )
+        return {"result": final_state["output"]}
+    except Exception as e:
+        logger.exception(f"Error occurred during prompt enhancement: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.post("/api/mcp/server/metadata", response_model=MCPServerMetadataResponse)
@@ -326,10 +388,8 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
 
         return response
     except Exception as e:
-        if not isinstance(e, HTTPException):
-            logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-        raise
+        logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.get("/api/rag/config", response_model=RAGConfigResponse)
@@ -345,3 +405,12 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+@app.get("/api/config", response_model=ConfigResponse)
+async def config():
+    """Get the config of the server."""
+    return ConfigResponse(
+        rag=RAGConfigResponse(provider=SELECTED_RAG_PROVIDER),
+        models=get_configured_llm_models(),
+    )
