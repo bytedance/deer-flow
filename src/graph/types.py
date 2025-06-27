@@ -12,6 +12,7 @@ class State(MessagesState):
 
     # Runtime Variables
     locale: str = "en-US"
+    research_topic: str = ""
     observations: list[str] = []
     resources: list[Resource] = []
     plan_iterations: int = 0

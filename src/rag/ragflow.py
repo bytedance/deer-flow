@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+# SPDX-License-Identifier: MIT
+
 import os
 import requests
 from src.rag.retriever import Chunk, Document, Resource, Retriever
@@ -119,12 +122,3 @@ def parse_uri(uri: str) -> tuple[str, str]:
     if parsed.scheme != "rag":
         raise ValueError(f"Invalid URI: {uri}")
     return parsed.path.split("/")[1], parsed.fragment
-
-
-if __name__ == "__main__":
-    uri = "rag://dataset/123#abc"
-    parsed = urlparse(uri)
-    print(parsed.scheme)
-    print(parsed.netloc)
-    print(parsed.path)
-    print(parsed.fragment)
