@@ -7,7 +7,7 @@ import uuid
 
 from langchain.schema import HumanMessage, SystemMessage
 
-from src.config.agents import AGENT_LLM_MAP
+from src.config.agents import AgentConfiguration
 from src.llms.llm import get_llm_by_type
 from src.prompts.template import get_prompt_template
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def ppt_composer_node(state: PPTState):
     logger.info("Generating ppt content...")
-    model = get_llm_by_type(AGENT_LLM_MAP["ppt_composer"])
+    model = get_llm_by_type(AgentConfiguration.AGENT_LLM_MAP["ppt_composer"])
     ppt_content = model.invoke(
         [
             SystemMessage(content=get_prompt_template("ppt/ppt_composer")),
