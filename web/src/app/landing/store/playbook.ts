@@ -56,6 +56,20 @@ export const playbook = {
     },
     {
       description:
+        "The Image Agent is responsible for generating relevant images and visualizations.",
+      tooltipPosition: "right",
+      activeNodes: ["ResearchTeam", "ImageAgent"],
+      activeEdges: ["ResearchTeam->ImageAgent", "ImageAgent->ResearchTeam"],
+    },
+    {
+      description:
+        "The Speech Agent is responsible for generating audio content and voice narrations.",
+      tooltipPosition: "right",
+      activeNodes: ["ResearchTeam", "SpeechAgent"],
+      activeEdges: ["ResearchTeam->SpeechAgent", "SpeechAgent->ResearchTeam"],
+    },
+    {
+      description:
         "Once the research tasks are completed, the Researcher will hand over to the Planner.",
       activeNodes: ["ResearchTeam", "Planner"],
       activeEdges: ["ResearchTeam->Planner"],
