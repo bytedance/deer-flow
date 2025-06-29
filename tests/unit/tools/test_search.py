@@ -39,6 +39,12 @@ class TestGetWebSearchTool:
         assert tool.api_wrapper.top_k_results == 2
         assert tool.api_wrapper.load_max_docs == 2
         assert tool.api_wrapper.load_all_available_meta is True
+    
+    @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.GENERIC_SEARCH.value)
+    def test_get_web_search_tool_generic_search(self):
+        tool = get_web_search_tool(max_search_results=6)
+        assert tool.name == "web_search"
+        assert tool.max_results == 6
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", "unsupported_engine")
     def test_get_web_search_tool_unsupported_engine(self):
