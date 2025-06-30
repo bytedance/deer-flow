@@ -70,9 +70,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     with open(args.config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
+        config = json.load(f)['scoring']
 
-    answer_table = make_object(**config["answer_table"])
+    answer_table = make_object(**config['answer_table'])
     scores = []
 
     thread_local = threading.local()

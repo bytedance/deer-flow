@@ -1,0 +1,75 @@
+{
+    "agent": {
+        "module": "langgraph.prebuilt",
+        "class_name": "create_react_agent",
+        "args": {
+            "model": {
+                "module": "langchain_openai",
+                "class_name": "ChatOpenAI",
+                "args": {
+                    "model": "claude-4-sonnet",
+                    "base_url": "https://genaiapi.cloudsway.net/v1/ai/qzZpcuWIVRuWVmxd",
+                    "api_key": {
+                        "module": "os",
+                        "class_name": "getenv",
+                        "args": {
+                            "key": "RA_MODEL_APIKEY"
+                        }
+                    },
+                    "temperature": 0.5
+                }
+            },
+            "tools": [
+                {
+                    "module": "fvg.tools",
+                    "class_name": "RoleScheduler"
+                },
+                {
+                    "module": "fvg.tools",
+                    "class_name": "PythonREPLTool"
+                },
+                {
+                    "module": "fvg.tools",
+                    "class_name": "MarkItDown",
+                    "args": {
+                        "parser": {
+                            "module": "markitdown",
+                            "class_name": "MarkItDown"
+                        }
+                    }
+                },
+                {
+                    "module": "langchain_google_community.search",
+                    "class_name": "GoogleSearchResults",
+                    "args": {
+                        "api_wrapper": {
+                            "module": "langchain_google_community",
+                            "class_name": "GoogleSearchAPIWrapper",
+                            "args": {
+                                "google_api_key": {
+                                    "module": "os",
+                                    "class_name": "getenv",
+                                    "args": {
+                                        "key": "MRRA_SEARCH_APIKEY"
+                                    }
+                                },
+                                "google_cse_id": "a2f6edbcc606f4177",
+                                "k": 12
+                            }
+                        }
+                    }
+                }
+            ],
+            "checkpointer": {
+                "module": "langgraph.checkpoint.memory",
+                "class_name": "MemorySaver"
+            }
+        }
+    },
+    "stream_config": {
+        "configurable": {
+            "thread_id": "main"
+        },
+        "recursion_limit": 40
+    }
+}

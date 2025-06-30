@@ -1,0 +1,48 @@
+{
+    "agent": {
+        "module": "src.graph.builder",
+        "class_name": "build_graph_from_config",
+        "args": {
+            "compile_args": {
+                "checkpointer": {
+                    "module": "langgraph.checkpoint.memory",
+                    "class_name": "MemorySaver"
+                }
+            }
+        }
+    },
+    "stream_config": {
+        "configurable": {
+            "thread_id": "main",
+            "max_plan_iterations": 1,
+            "max_step_num": 3,
+            "max_search_results": 5,
+            "max_toolcall_iterate_times": 5,
+            "mcp_settings": {
+                "servers": {
+                    "doc_parser": {
+                        "transport": "sse",
+                        "url": "http://127.0.0.1:8010/sse",
+                        "enabled_tools": [
+                            "parse_doc"
+                        ],
+                        "add_to_agents": [
+                            "analyzer"
+                        ]
+                    },
+                    "Sandbox": {
+                        "transport": "sse",
+                        "url": "http://0.0.0.0:8015/sse",
+                        "enabled_tools": [
+                            "run_code_sandbox_fusion"
+                        ],
+                        "add_to_agents": [
+                            "coder"
+                        ]
+                    }
+                }
+            }
+        },
+        "recursion_limit": 25
+    }
+}

@@ -1,0 +1,126 @@
+{
+    "agent": {
+        "module": "fvg.prebuilt.multi_role_react_agent",
+        "class_name": "create_agent",
+        "args": {
+            "role_model_dict": {
+                "Alice": {
+                    "module": "langchain_openai",
+                    "class_name": "ChatOpenAI",
+                    "args": {
+                        "base_url": "https://adb-1680298167147907.7.azuredatabricks.net/serving-endpoints",
+                        "api_key": "",
+                        "model": "databricks-claude-3-7-sonnet",
+                        "temperature": 0.5
+                    }
+                },
+                "Bob": {
+                    "module": "langchain_google_genai.chat_models",
+                    "class_name": "ChatGoogleGenerativeAI",
+                    "args": {
+                        "model": "gemini-2.0-flash",
+                        "google_api_key": "",
+                        "temperature": 0.5
+                    }
+                },
+                "Owen": {
+                    "module": "langchain_openai.chat_models.azure",
+                    "class_name": "AzureChatOpenAI",
+                    "args": {
+                        "azure_endpoint": "https://omnimaid.openai.azure.com/",
+                        "openai_api_key": "",
+                        "deployment_name": "gpt-4.1-mini",
+                        "api_version": "2025-01-01-preview",
+                        "temperature": 0.5
+                    }
+                }
+            },
+            "role_system_prompts": {
+                "Alice": "You are Alice, an AI assistant who is good at planning and solving problems with coding. Your team member Bob is good at Web searching, and Owen is good at analyzing and summarizing. Try to collaborate to solve the user's problem. If the problem is too complex, break it down and assign it to the appropriate person to resolve (Each decomposed task item should be concise and no more than 40 words. It must be submitted into the role_scheduler tool, which will assign the next person according to the plan. If you do not invoke any tools, you should summarize and provide a final answer.). Remember to explicitly open and load the file content every time you analyze files with code, as variables might be cleared after execution. Your programming environment does not support graphical interfaces and visualization. Respond in the same language as the user's question.",
+                "Bob": "You are Bob, an AI assistant who is good at solving problems with Web searching. Your team member Alice is good at planning and coding, and Owen is good at analyzing and summarizing. Try to collaborate to solve the user's problem. If the problem is too complex, break it down and assign it to the appropriate person to resolve (Each decomposed task item should be concise and no more than 40 words. It must be submitted in the required format using the role_scheduler tool, which will assign the next person according to the plan. If you do not invoke any tools, you should summarize and provide a final answer.). If you feel that the search results do not provide sufficient information, you can adjust the keywords and search 1-2 more times. Respond in the same language as the user's question.",
+                "Owen": "You are Owen, an AI assistant who is good at analyzing and summarizing. Your team member Alice is good at planning and coding, and Bob is good at Web searching. Try to collaborate to solve the user's problem. If the problem is too complex, break it down and assign it to the appropriate person to resolve (Each decomposed task item should be concise and no more than 40 words. It must be submitted into the role_scheduler tool, which will assign the next person according to the plan. If you do not invoke any tools, you should summarize and provide a final answer.). Remember to respond in the same language as the user's question."
+            },
+            "starter": "Alice",
+            "role_tools_dict": {
+                "Alice": [
+                    "role_scheduler",
+                    "Python_REPL"
+                ],
+                "Bob": [
+                    "role_scheduler",
+                    "google_search_results_json"
+                ],
+                "Owen": [
+                    "role_scheduler"
+                ]
+            },
+            "tools": [
+                {
+                    "module": "fvg.tools",
+                    "class_name": "RoleScheduler"
+                },
+                {
+                    "module": "fvg.tools",
+                    "class_name": "PythonREPLTool"
+                },
+                {
+                    "module": "langchain_google_community.search",
+                    "class_name": "GoogleSearchResults",
+                    "args": {
+                        "api_wrapper": {
+                            "module": "langchain_google_community",
+                            "class_name": "GoogleSearchAPIWrapper",
+                            "args": {
+                                "google_api_key": "",
+                                "google_cse_id": "a2f6edbcc606f4177",
+                                "k": 12
+                            }
+                        }
+                    }
+                }
+            ],
+            "compile_args": {
+                "checkpointer": {
+                    "module": "langgraph.checkpoint.memory",
+                    "class_name": "MemorySaver"
+                }
+            }
+        }
+    },
+    "stream_config": {
+        "recursion_limit": 40
+    },
+    "dataset_type": "64",
+    "index_table": {
+        "module": "pandas",
+        "class_name": "read_excel",
+        "args": {
+            "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/questions.xlsx"
+        }
+    },
+    "resource_path": "D:/Workspaces/MllmAgent/Benchmark-64ti/resources",
+    "scoring": {
+        "chat_model": {
+            "module": "langchain_openai.chat_models.azure",
+            "class_name": "AzureChatOpenAI",
+            "args": {
+                "azure_endpoint": "https://omnimaid.openai.azure.com/",
+                "openai_api_key": "",
+                "deployment_name": "gpt-4.1-mini",
+                "api_version": "2025-01-01-preview",
+                "temperature": 0.2
+            }
+        },
+        "answer_table": {
+            "module": "pandas",
+            "class_name": "read_excel",
+            "args": {
+                "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/result/raccoon_benchmark_mrra_claude37_gemini20f_gpt41_64ti_0623.answers.xlsx"
+            }
+        },
+        "thread_pool": {
+            "max_workers": 2
+        },
+        "score": 62.5
+    }
+}

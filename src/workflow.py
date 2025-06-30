@@ -1,12 +1,11 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import asyncio
+import copy
 import logging
 import os
 import os.path as osp
 import datetime
-from src.graph import build_graph, build_graph_with_memory
 from src.utils.file_descriptors import file2resource, resources2user_input
 import uuid
 import shutil
@@ -28,9 +27,6 @@ def enable_debug_logging():
 
 logger = logging.getLogger(__name__)
 
-# Create the graph
-# graph = build_graph()
-graph = build_graph_with_memory() # ask user need memory
 
 def get_init_state(
         user_input: str | list[dict], 
@@ -102,11 +98,11 @@ def get_init_state(
 
 
 async def run_agent_workflow_async(
+    graph,
     user_input: str | list[dict],
     debug: bool = False,
-    max_plan_iterations: int = 1,
-    max_step_num: int = 3,
     enable_background_investigation: bool = True,
+    stream_config: dict = {}
 ):
     """Run the agent workflow asynchronously with the given user input.
 
@@ -130,37 +126,13 @@ async def run_agent_workflow_async(
 
     initial_state = get_init_state(user_input, enable_background_investigation)
 
-    config = {
-        "configurable": {
-            "thread_id": "default",
-            "max_plan_iterations": max_plan_iterations,
-            "max_step_num": max_step_num,
-            "max_search_results": 5,
-            "max_toolcall_iterate_times": 5,
-            "max_supervisor_iterate_times": 5,
-            "mcp_settings": {
-                "servers": {
-                    "doc_parser": {
-                        "transport": "sse",
-                        "url": "http://127.0.0.1:8010/sse",
-                        "enabled_tools": ["parse_doc"],
-                        "add_to_agents": ["analyzer"],
-                    },
-                    "Sandbox": {
-                        "transport": "sse",
-                        "url": "http://0.0.0.0:8015/sse",
-                        "enabled_tools": ["run_code_sandbox_fusion"],
-                        "add_to_agents": ["coder"],
-                    },
-                }
-            },
-        },
-        "recursion_limit": 50, #为整个的调度次数
-    }
+    _stream_config = copy.deepcopy(stream_config)
+    _stream_config["configurable"]["thread_id"] = initial_state["session_id"]
+
     last_message_cnt = 0
     while True:
         async for s in graph.astream(
-            input=initial_state, config=config, stream_mode="values"
+            input=initial_state, config=_stream_config, stream_mode="values"
         ):
 
             if "final_report" in s:
@@ -181,6 +153,3 @@ async def run_agent_workflow_async(
             initial_state = Command(resume=feedback)
  
         logger.info("Async workflow completed successfully")
-        
-if __name__ == "__main__":
-    print(graph.get_graph(xray=True).draw_mermaid())

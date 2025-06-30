@@ -1,17 +1,31 @@
 import contextlib
+import fvg.common
 import io
-from langchain_core.callbacks.manager import (
-    AsyncCallbackManagerForToolRun,
-    CallbackManagerForToolRun,
-)
-import langchain_core.runnables.config
-import langchain_core.tools
-from langchain_experimental.tools.python.tool import sanitize_input
+from langchain_core.tools import BaseTool
 from pydantic import Field
-from typing import Optional
+import re
 
 
-class PythonREPLTool(langchain_core.tools.BaseTool):
+def sanitize_input(query: str) -> str:
+    """Sanitize input to the python REPL.
+
+    Remove whitespace, backtick & python (if llm mistakes python console as terminal)
+
+    Args:
+        query: The query to sanitize
+
+    Returns:
+        str: The sanitized query
+    """
+
+    # Removes `, whitespace & python from start
+    query = re.sub(r"^(\s|`)*(?i:python)?\s*", "", query)
+    # Removes whitespace & ` from end
+    query = re.sub(r"(\s|`)*$", "", query)
+    return query
+
+
+class PythonREPLTool(BaseTool):
     """Tool for running python code in a REPL."""
 
     name: str = "Python_REPL"
@@ -24,57 +38,18 @@ class PythonREPLTool(langchain_core.tools.BaseTool):
     sanitize_input: bool = True
     session_locals: dict = Field(default_factory=dict)
 
-    def get_session_local(self, run_manager):
-        if run_manager is None or "thread_id" not in run_manager.metadata:
-            session_id = "main"
-        else:
-            session_id = run_manager.metadata["thread_id"]
-
-        if session_id not in self.session_locals:
-            self.session_locals[session_id] = dict()
-
-        return self.session_locals[session_id]
-
-    def _run(
-        self,
-        query: str,
-        run_manager: Optional[CallbackManagerForToolRun] = None,
-    ):
-        """Use the tool."""
+    def _run(self, query: str, run_manager=None):
         if self.sanitize_input:
             query = sanitize_input(query)
 
         exec_out = io.StringIO()
         try:
             with contextlib.redirect_stdout(exec_out):
-                exec(query, {}, self.get_session_local(run_manager))
+                exec(
+                    query, {},
+                    fvg.common.get_session_local(
+                        self.session_locals, run_manager)
+                )
                 return exec_out.getvalue()
         except Exception as e:
             return repr(e)
-
-    async def _arun(
-        self,
-        query: str,
-        run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
-    ):
-        """Use the tool asynchronously."""
-        if self.sanitize_input:
-            query = sanitize_input(query)
-
-        kwargs = make_session_kwargs(run_manager)
-        return await langchain_core.runnables.config.run_in_executor(
-            None, self.run, query, **kwargs)
-
-
-def make_session_kwargs(
-    run_manager: Optional[AsyncCallbackManagerForToolRun]
-):
-    session_config_keys = ["metadata", "run_id", "tags"]
-    if run_manager is None:
-        return {}
-    else:
-        return {
-            k: getattr(run_manager, k)
-            for k in session_config_keys
-            if hasattr(run_manager, k)
-        }

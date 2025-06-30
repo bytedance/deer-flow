@@ -1,7 +1,8 @@
 import argparse
 import asyncio
-import fvg.utils.prompts
-import fvg.utils.tablelib
+from fvg.messages.utils import convert_to_openai_messages
+import fvg.utils.raccoon_prompts
+import fvg.utils.raccoon_tablelib
 import importlib
 import json
 import os
@@ -11,13 +12,13 @@ import time
 
 
 TEMPLATES = {
-    'v1': fvg.utils.prompts.template_zh_v1,
+    'v1': fvg.utils.raccoon_prompts.template_zh_v1,
 }
 SYS_MSGS = {
-    'v1': fvg.utils.prompts.sys_msg_zh,
-    'v2': fvg.utils.prompts.sys_msg_zh_v2,
-    'v2_vis': fvg.utils.prompts.sys_msg_zh_v2_vis,
-    'sys_msg_zh_yyb2': fvg.utils.prompts.sys_msg_zh_yyb2
+    'v1': fvg.utils.raccoon_prompts.sys_msg_zh,
+    'v2': fvg.utils.raccoon_prompts.sys_msg_zh_v2,
+    'v2_vis': fvg.utils.raccoon_prompts.sys_msg_zh_v2_vis,
+    'sys_msg_zh_yyb2': fvg.utils.raccoon_prompts.sys_msg_zh_yyb2
 }
 
 
@@ -42,7 +43,7 @@ class ExcelAgentRunner:
         if config['dataset_type'] == '64':
             file = os.path.join(
                 config['resource_path'], row['样张链接'].split('/')[-1])
-            info2 = fvg.utils.tablelib.extract_workbook_summary3b(file)
+            info2 = fvg.utils.raccoon_tablelib.extract_workbook_summary3b(file)
             entry = {
                 'path': file,
                 'question': row['question'],
@@ -72,7 +73,8 @@ class ExcelAgentRunner:
                 )
 
             answer = response['messages'][-1].text()
-            messages = [i.text() for i in response['messages']]
+            messages = convert_to_openai_messages(
+                response['messages'], ensure_ascii=False)
             print('R {}\n{}'.format(index, answer))
 
         except Exception as e:
@@ -96,7 +98,7 @@ class ExcelAgentRunner:
                 self.df.to_excel(output_path, index=False)
                 with open(message_path, 'w', encoding='utf-8') as f:
                     json.dump(
-                        self.message_dict, f, indent=4, ensure_ascii=False)
+                        self.message_dict, f, ensure_ascii=False, indent=2)
 
     def run_sequential(self, config, output_path, message_path):
         sem = asyncio.Semaphore(1)
@@ -109,7 +111,7 @@ class ExcelAgentRunner:
                 self.df.to_excel(output_path, index=False)
                 with open(message_path, 'w', encoding='utf-8') as f:
                     json.dump(
-                        self.message_dict, f, indent=4, ensure_ascii=False)
+                        self.message_dict, f, ensure_ascii=False, indent=2)
 
     def run(self, config, output_path, message_path):
         self.df = load_data_table(config)

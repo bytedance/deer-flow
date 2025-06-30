@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -11,11 +12,11 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+import fvg.common
 from langchain_core.messages import AIMessageChunk, ToolMessage, BaseMessage
 from langgraph.types import Command
 
 from src.config.tools import SELECTED_RAG_PROVIDER
-from src.graph.builder import build_graph_with_memory
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
@@ -55,7 +56,11 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-graph = build_graph_with_memory()
+config_path = os.getenv("DEERFLOW_CONFIG_PATH")
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+graph = fvg.common.make_object_from_config(config["agent"])
 
 
 @app.post("/api/chat/stream")
@@ -68,12 +73,8 @@ async def chat_stream(request: ChatRequest):
             request.model_dump()["messages"],
             thread_id,
             request.resources,
-            request.max_plan_iterations,
-            request.max_step_num,
-            request.max_search_results,
             request.auto_accepted_plan,
             request.interrupt_feedback,
-            request.mcp_settings,
             request.enable_background_investigation,
         ),
         media_type="text/event-stream",
@@ -84,12 +85,8 @@ async def _astream_workflow_generator(
     messages: List[ChatMessage],
     thread_id: str,
     resources: List[Resource],
-    max_plan_iterations: int,
-    max_step_num: int,
-    max_search_results: int,
     auto_accepted_plan: bool,
     interrupt_feedback: str,
-    mcp_settings: dict,
     enable_background_investigation,
 ):
     input_ = {
@@ -107,16 +104,14 @@ async def _astream_workflow_generator(
         if messages:
             resume_msg += f" {messages[-1]['content']}"
         input_ = Command(resume=resume_msg)
+
+    _stream_config = copy.deepcopy(config["stream_config"])
+    _stream_config["configurable"]["thread_id"] = thread_id
+    _stream_config["configurable"]["resources"] = resources
+
     async for agent, _, event_data in graph.astream(
         input_,
-        config={
-            "thread_id": thread_id,
-            "resources": resources,
-            "max_plan_iterations": max_plan_iterations,
-            "max_step_num": max_step_num,
-            "max_search_results": max_search_results,
-            "mcp_settings": mcp_settings,
-        },
+        config=_stream_config,
         stream_mode=["messages", "updates"],
         subgraphs=True,
     ):

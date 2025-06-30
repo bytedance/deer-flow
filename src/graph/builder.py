@@ -77,5 +77,6 @@ def build_graph():
     return builder.compile()
 
 
-# graph = build_graph()
-# graph = build_graph_with_memory()
+def build_graph_from_config(compile_args):
+    builder = _build_base_graph()
+    return builder.compile(**compile_args)

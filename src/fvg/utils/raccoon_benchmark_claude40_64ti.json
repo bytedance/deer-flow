@@ -1,0 +1,79 @@
+{
+    "agent": {
+        "module": "langgraph.prebuilt",
+        "class_name": "create_react_agent",
+        "args": {
+            "model": {
+                "module": "langchain_openai",
+                "class_name": "ChatOpenAI",
+                "args": {
+                    "model": "claude-4-sonnet",
+                    "base_url": "https://genaiapi.cloudsway.net/v1/ai/qzZpcuWIVRuWVmxd",
+                    "api_key": "",
+                    "temperature": 0.5
+                }
+            },
+            "tools": [
+                {
+                    "module": "fvg.tools.session_based_python",
+                    "class_name": "PythonREPLTool"
+                },
+                {
+                    "module": "langchain_google_community.search",
+                    "class_name": "GoogleSearchResults",
+                    "args": {
+                        "api_wrapper": {
+                            "module": "langchain_google_community",
+                            "class_name": "GoogleSearchAPIWrapper",
+                            "args": {
+                                "google_api_key": "",
+                                "google_cse_id": "a2f6edbcc606f4177",
+                                "k": 12
+                            }
+                        }
+                    }
+                }
+            ],
+            "checkpointer": {
+                "module": "langgraph.checkpoint.memory",
+                "class_name": "MemorySaver"
+            }
+        }
+    },
+    "stream_config": {
+        "recursion_limit": 40
+    },
+    "dataset_type": "64",
+    "index_table": {
+        "module": "pandas",
+        "class_name": "read_excel",
+        "args": {
+            "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/questions.xlsx"
+        }
+    },
+    "resource_path": "D:/Workspaces/MllmAgent/Benchmark-64ti/resources",
+    "scoring": {
+        "chat_model": {
+            "module": "langchain_openai.chat_models.azure",
+            "class_name": "AzureChatOpenAI",
+            "args": {
+                "azure_endpoint": "https://omnimaid.openai.azure.com/",
+                "openai_api_key": "",
+                "deployment_name": "gpt-4.1-mini",
+                "api_version": "2025-01-01-preview",
+                "temperature": 0.2
+            }
+        },
+        "answer_table": {
+            "module": "pandas",
+            "class_name": "read_excel",
+            "args": {
+                "io": "D:/Workspaces/MllmAgent/Benchmark-64ti/result/raccoon_benchmark_claude40_64ti_0616.answers.xlsx"
+            }
+        },
+        "thread_pool": {
+            "max_workers": 2
+        },
+        "score": 73.4
+    }
+}

@@ -7,6 +7,8 @@ Entry point script for the DeerFlow project.
 
 import argparse
 import asyncio
+import fvg.common
+import json
 import os
 
 from InquirerPy import inquirer
@@ -23,11 +25,11 @@ def get_all_file_paths(folder_path):
     return file_paths
 
 def ask(
+    agent,
     question,
     files,
+    config,
     debug=False,
-    max_plan_iterations=1,
-    max_step_num=3,
     enable_background_investigation=True,
 ):
     """Run the agent workflow with the given question.
@@ -53,19 +55,19 @@ def ask(
         user_input = question
     asyncio.run(
         run_agent_workflow_async(
+            agent,
             user_input=user_input,
             debug=debug,
-            max_plan_iterations=max_plan_iterations,
-            max_step_num=max_step_num,
             enable_background_investigation=enable_background_investigation,
+            stream_config=config["stream_config"]
         )
     )
 
 
 def main(
+    agent,
+    config,
     debug=False,
-    max_plan_iterations=1,
-    max_step_num=3,
     enable_background_investigation=True,
 ):
     """Interactive mode with built-in questions.
@@ -116,17 +118,18 @@ def main(
         files = files.split(';')
     # Pass all parameters to ask function
     ask(
+        agent,
         question=initial_question,
         files=files,
+        config=config,
         debug=debug,
-        max_plan_iterations=max_plan_iterations,
-        max_step_num=max_step_num,
         enable_background_investigation=enable_background_investigation,
     )
 
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Run the Deer")
+    parser.add_argument("-c", "--config-path", default="main.json", help="The path to the config file.")
     parser.add_argument("--query", nargs="*", help="The query to process")
     parser.add_argument("--file", nargs="*", help="upload files, you can upload multiple files seperated by space or upload a folder path")
     parser.add_argument(
@@ -156,12 +159,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    with open(args.config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    agent = fvg.common.make_object_from_config(config["agent"])
+
     if args.interactive:
         # Pass command line arguments to main function
         main(
+            agent,
+            config,
             debug=args.debug,
-            max_plan_iterations=args.max_plan_iterations,
-            max_step_num=args.max_step_num,
             enable_background_investigation=args.enable_background_investigation,
         )
     else:
@@ -173,10 +181,10 @@ if __name__ == "__main__":
 
         # Run the agent workflow with the provided parameters
         ask(
+            agent,
             question=user_query,
             files=args.file,
+            config=config,
             debug=args.debug,
-            max_plan_iterations=args.max_plan_iterations,
-            max_step_num=args.max_step_num,
             enable_background_investigation=args.enable_background_investigation,
         )
