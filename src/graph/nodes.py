@@ -27,6 +27,7 @@ from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
 from src.utils.json_utils import repair_json_output
+from src.tools.image_fetcher import ImageFetcher # Added ImageFetcher
 
 from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
@@ -49,32 +50,66 @@ def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
     query = state.get("research_topic")
-    background_investigation_results = None
+
+    raw_image_urls_from_background = state.get("raw_image_urls_from_background", [])
+
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
-        searched_content = LoggedTavilySearch(
-            max_results=configurable.max_search_results
-        ).invoke(query)
-        if isinstance(searched_content, list):
-            background_investigation_results = [
-                f"## {elem['title']}\n\n{elem['content']}" for elem in searched_content
-            ]
-            return {
-                "background_investigation_results": "\n\n".join(
-                    background_investigation_results
-                )
-            }
+        # LoggedTavilySearch now uses TavilySearchResultsWithImages,
+        # which returns a list of dicts (pages and images)
+        # when include_images=True is set in get_web_search_tool.
+        search_tool_instance = get_web_search_tool(configurable.max_search_results)
+        # Ensure the tool instance is correctly configured for images if it's Tavily
+        if not (isinstance(search_tool_instance, LoggedTavilySearch) and \
+                getattr(search_tool_instance, 'include_images', False)):
+             # Fallback or re-init with include_images=True if necessary,
+             # though get_web_search_tool should handle this.
+             # For now, assume get_web_search_tool correctly configures Tavily for images.
+             pass
+
+        tool_output = search_tool_instance.invoke(query)
+
+        text_results_for_bg = []
+        if isinstance(tool_output, list):
+            for item in tool_output:
+                if item.get("type") == "page" and item.get("content"):
+                    text_results_for_bg.append(f"## {item.get('title', 'Search Result')}\n\n{item.get('content')}")
+                elif item.get("type") == "image" and item.get("image_url"):
+                    # Add to a list that will be processed later
+                    raw_image_urls_from_background.append({
+                        "type": "raw_image_url",
+                        "url": item["image_url"],
+                        "description": item.get("image_description", item.get("title", query))
+                    })
+            background_investigation_text = "\n\n".join(text_results_for_bg)
+        elif isinstance(tool_output, str): # Fallback for non-Tavily or if Tavily fails to return list
+            background_investigation_text = tool_output
+            logger.warning("Tavily search did not return a list as expected, got string.")
         else:
-            logger.error(
-                f"Tavily search returned malformed response: {searched_content}"
-            )
-    else:
-        background_investigation_results = get_web_search_tool(
-            configurable.max_search_results
-        ).invoke(query)
+            logger.error(f"Tavily search returned malformed response: {tool_output}")
+            background_investigation_text = "Search results could not be processed."
+
+    else: # Other search engines
+        tool_output = get_web_search_tool(configurable.max_search_results).invoke(query)
+        if isinstance(tool_output, str):
+             background_investigation_text = tool_output
+        elif isinstance(tool_output, list): # DuckDuckGo might return a list of strings
+             background_investigation_text = "\n\n".join(tool_output)
+        else:
+             background_investigation_text = json.dumps(tool_output, ensure_ascii=False)
+        # For non-Tavily search, we'd need to crawl pages to get images,
+        # which is better handled during the research_steps if specific pages are targeted.
+
+    # Deduplicate raw_image_urls_from_background based on URL
+    seen_urls = set()
+    unique_raw_image_urls = []
+    for item in raw_image_urls_from_background:
+        if item["url"] not in seen_urls:
+            unique_raw_image_urls.append(item)
+            seen_urls.add(item["url"])
+
     return {
-        "background_investigation_results": json.dumps(
-            background_investigation_results, ensure_ascii=False
-        )
+        "background_investigation_results": background_investigation_text,
+        "raw_image_urls_from_background": unique_raw_image_urls
     }
 
 
@@ -142,7 +177,7 @@ def planner_node(
                 "messages": [AIMessage(content=full_response, name="planner")],
                 "current_plan": new_plan,
             },
-            goto="reporter",
+            goto="process_images", # Changed from reporter
         )
     return Command(
         update={
@@ -179,29 +214,33 @@ def human_feedback_node(
 
     # if the plan is accepted, run the following node
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
-    goto = "research_team"
+    goto_next = "research_team" # Renamed variable to avoid conflict
     try:
-        current_plan = repair_json_output(current_plan)
+        current_plan_str = repair_json_output(current_plan) # Use a different variable name
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
-        new_plan = json.loads(current_plan)
-        if new_plan["has_enough_context"]:
-            goto = "reporter"
+        new_plan_obj = json.loads(current_plan_str) # Use a different variable name
+        if new_plan_obj["has_enough_context"]:
+            goto_next = "process_images" # Changed from reporter
     except json.JSONDecodeError:
-        logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 1:  # the plan_iterations is increased before this check
-            return Command(goto="reporter")
+        logger.warning("Planner response is not a valid JSON in human_feedback_node")
+        # If plan is malformed after feedback, and we've tried, maybe end or try planner again?
+        # For now, if it was supposed to go to reporter due to iterations, let it go via process_images.
+        if plan_iterations > 1 : # the plan_iterations is increased before this check
+             logger.warning("Malformed plan in human_feedback after multiple iterations, proceeding to image processing/reporter.")
+             goto_next = "process_images" # Changed from reporter
         else:
+            logger.error("Malformed plan in human_feedback early iteration, ending.")
             return Command(goto="__end__")
 
     return Command(
         update={
-            "current_plan": Plan.model_validate(new_plan),
+            "current_plan": Plan.model_validate(new_plan_obj), # Ensure using the parsed object
             "plan_iterations": plan_iterations,
-            "locale": new_plan["locale"],
+            "locale": new_plan_obj["locale"], # Ensure using the parsed object
         },
-        goto=goto,
+        goto=goto_next, # Use the updated variable name
     )
 
 
@@ -502,3 +541,75 @@ async def coder_node(
         "coder",
         [python_repl_tool],
     )
+
+
+def process_images_node(state: State, config: RunnableConfig):
+    """
+    Processes raw image URLs collected from background investigation and research steps,
+    downloads them, saves them to a public directory, and updates observations
+    with Markdown image tags.
+    """
+    logger.info("Image processing node is running.")
+    configurable = Configuration.from_runnable_config(config)
+
+    # Consolidate all raw image URLs.
+    # researcher_node will need to be modified to add its findings to a similar list.
+    # For now, we primarily use what background_investigation_node provides.
+    # Let's assume researcher_node's tool calls might append to 'raw_image_urls_from_background'
+    # or a new state field like 'raw_image_urls_from_research_steps'.
+    # For simplicity, let's assume all raw image URLs are collected into raw_image_urls_from_background for now.
+
+    all_raw_image_data = state.get("raw_image_urls_from_background", [])
+    # Potentially merge with other sources if researcher_node is updated to output them separately
+    # e.g., all_raw_image_data.extend(state.get("raw_image_urls_from_research_steps", []))
+
+    if not all_raw_image_data:
+        logger.info("No raw image URLs to process.")
+        return state.get("observations", []) # Return existing observations if no images
+
+    image_fetcher = ImageFetcher(unsplash_api_key=configurable.unsplash_api_key)
+
+    processed_image_markdowns = []
+    # Try to get one good image for the report. Can be adjusted for more.
+    # The plan is to have ONE image per report, but ImageFetcher can be called multiple times if needed.
+
+    # Option 1: Iterate through collected URLs first
+    processed_url_from_collected = None
+    for image_data in all_raw_image_data:
+        if image_data.get("type") == "raw_image_url" and image_data.get("url"):
+            # Pass keywords if available, e.g. from plan title, for Unsplash fallback by ImageFetcher
+            keywords_for_fallback = state.get("current_plan").title if state.get("current_plan") else state.get("research_topic","")
+
+            # We only pass article_image_urls to prioritize them.
+            # HTML content parsing is a secondary option within get_report_image_url if this fails.
+            local_image_public_url = image_fetcher.get_report_image_url(
+                article_image_urls=[image_data["url"]], # Pass as list
+                keywords=keywords_for_fallback
+            )
+            if local_image_public_url:
+                description = image_data.get("description", "Report image")
+                processed_image_markdowns.append(f"![{description}]({local_image_public_url})")
+                processed_url_from_collected = True # Found one
+                logger.info(f"Processed an image from collected URLs: {local_image_public_url}")
+                break # Stop after one successful image from collected URLs
+
+    # Option 2: If no image from collected URLs, try a general Unsplash search based on topic
+    if not processed_url_from_collected:
+        logger.info("No image processed from collected URLs, trying Unsplash with general keywords.")
+        keywords = state.get("current_plan").title if state.get("current_plan") else state.get("research_topic","")
+        if keywords:
+            local_image_public_url = image_fetcher.get_report_image_url(keywords=keywords)
+            if local_image_public_url:
+                processed_image_markdowns.append(f"![{keywords}]({local_image_public_url})")
+                logger.info(f"Processed an image from Unsplash using general keywords: {local_image_public_url}")
+
+    # Prepend or append image markdowns to existing observations
+    # Appending might be better so text observations come first.
+    current_observations = state.get("observations", [])
+    updated_observations = current_observations + processed_image_markdowns
+
+    # Log if no images were added
+    if not processed_image_markdowns:
+        logger.info("No images were successfully processed or fetched for the report.")
+
+    return {"observations": updated_observations}

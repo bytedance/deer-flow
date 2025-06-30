@@ -24,6 +24,7 @@ class Configuration:
     mcp_settings: dict = None  # MCP settings, including dynamic loaded tools
     report_style: str = ReportStyle.ACADEMIC.value  # Report style
     enable_deep_thinking: bool = False  # Whether to enable deep thinking
+    unsplash_api_key: Optional[str] = None # API key for Unsplash
 
     @classmethod
     def from_runnable_config(
