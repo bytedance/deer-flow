@@ -34,6 +34,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.0.9",
     "MarkItDown[all]",
     "filetype>=1.2.0",
+    "tencentcloud-sdk-python"
 ]
 
 [project.optional-dependencies]
