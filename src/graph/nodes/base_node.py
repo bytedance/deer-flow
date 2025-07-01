@@ -98,8 +98,26 @@ class BaseNode(ABC):
                     for dep_id in action.dependencies:
                         self.collect_dependencies(plan, dep_id, depth, visited)
         return visited
-
-    def get_action_with_dependencies_json(self, plan: Plan, target_action_id: str) -> str:
+    
+    def get_references(self, references:list, resources: list[Dict]=None):
+        if references == []:
+            return []
+        else:
+            references_ontent = []
+            for ref in references:
+                if ref_content in resources[int(ref)]:
+                    ref_content = resources[int(ref)][""]
+                else:
+                    ref_content = "文件过长，无法解析内容"
+                references_ontent.append(
+                    {
+                        "file": resources[int(ref)]["uri"],
+                        "content": ref_content
+                    }
+                )
+            return references_ontent
+        
+    def get_action_with_dependencies_json(self, plan: Plan, target_action_id: str, resources: list[Dict] = None) -> str:
         if not any(action.id == target_action_id for goal in plan.goals for action in goal.actions):
             raise ValueError(f"Action with ID '{target_action_id}' not found in plan")
         all_action_ids = self.collect_dependencies(plan, target_action_id)
@@ -117,7 +135,7 @@ class BaseNode(ABC):
                             "description": action.description,
                             "type": action.type.value,
                             "dependencies": action.dependencies,
-                            "references": action.references,
+                            "references": self.get_references(action.references, resources) if action.id==target_action_id else action.references,
                             "details": action.details,
                             "status": action.status.value,
                             **({"result": action.execution_res} if action.execution_res is not None else {})

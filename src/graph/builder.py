@@ -4,8 +4,8 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from src.graph.tools.tool_manager import ToolManager
-from .types import State
-from .nodes import (
+from src.graph.types import State
+from src.graph.nodes import (
     CoordinatorNode,
     PlannerNode,
     WriterNode,
@@ -80,3 +80,5 @@ def build_graph():
 def build_graph_from_config(compile_args):
     builder = _build_base_graph()
     return builder.compile(**compile_args)
+
+# graph = build_graph_with_memory()

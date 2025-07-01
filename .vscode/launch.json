@@ -24,6 +24,20 @@
             ]
         },
         {
+            "name": "langgraph_cli",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "langgraph_cli",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [
+                "dev"
+            ]
+        },
+        {
             "name": "Python: llm.py",
             "type": "debugpy",
             "request": "launch",

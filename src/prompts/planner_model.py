@@ -1,7 +1,6 @@
 from enum import Enum
 import json
 from typing import Dict, List, Optional, Set
-import msgpack
 from pydantic import BaseModel, Field
 
 

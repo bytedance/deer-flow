@@ -1,7 +1,7 @@
 {
   "dockerfile_lines": [],
   "graphs": {
-    "deep_research": "./src/workflow.py:graph",
+    "deep_research": "./src/graph/builder.py:graph",
     "podcast_generation": "./src/podcast/graph/builder.py:workflow",
     "ppt_generation": "./src/ppt/graph/builder.py:workflow"
   },

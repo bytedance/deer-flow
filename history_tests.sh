@@ -26,5 +26,8 @@ source /mnt/afs/yaotiankuo/agents/deer-main-dev/.venv/bin/activate
 
 # uv run main.py  --query "广东考生，之前模拟考分数大概在 590 到 610 分之间，性别男，物理方向，孩子挺喜欢计算机编程的，但我们家庭就在广东二线城市，条件比较普通，希望他未来毕业后能找到稳定、待遇比较好的国企工作。孩子一直没出过省，比较想去北上广深这种大城市上学，并想出国交流学习，如果未来学校能有这方面的资源和支持就更好了。请问这种情况能报什么学校专业，以及这些专业的就业前景和薪资空间怎么样?"
 
-uv run main.py  --query 写个财经小作文,随机按你喜好写别反问我
-# uv run main.py  --query "分析历年上海考生的北大的分数线, 别反问我"
+# uv run main.py  --query 写个财经小作文,随机按你喜好写别反问我
+# uv run main.py  --query "分析历年上海考生的北大的分数线"
+
+# uv run main.py  --query "这文件里写了什么" --file /mnt/afs/yaotiankuo/agents/data/xhx_returnData/小浣熊任务规划用户query+分类.xlsx
+uv run main.py --query "这图中表格写了什么" --file /mnt/afs/yaotiankuo/agents/deer-flow/tests/mcp_test/image.png
