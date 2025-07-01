@@ -5,10 +5,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { env } from "~/env";
 
+import type { DeerFlowConfig } from "../config";
 import { useReplay } from "../replay";
 
 import { fetchReplayTitle } from "./chat";
-import { getConfig } from "./config";
+import { resolveServiceURL } from "./resolve-service-url";
 
 export function useReplayMetadata() {
   const { isReplay } = useReplay();
@@ -43,18 +44,30 @@ export function useReplayMetadata() {
   return { title, isLoading, hasError: error };
 }
 
-export function useRAGProvider() {
+export function useConfig(): {
+  config: DeerFlowConfig | null;
+  loading: boolean;
+} {
   const [loading, setLoading] = useState(true);
-  const [provider, setProvider] = useState<string | null>(null);
+  const [config, setConfig] = useState<DeerFlowConfig | null>(null);
 
   useEffect(() => {
     if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY) {
       setLoading(false);
       return;
     }
-    setProvider(getConfig().rag.provider);
-    setLoading(false);
+    fetch(resolveServiceURL("./config"))
+      .then((res) => res.json())
+      .then((config) => {
+        setConfig(config);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch config", err);
+        setConfig(null);
+        setLoading(false);
+      });
   }, []);
 
-  return { provider, loading };
+  return { config, loading };
 }
