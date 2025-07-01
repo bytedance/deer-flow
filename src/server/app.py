@@ -11,16 +11,17 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from langchain_core.messages import AIMessageChunk, ToolMessage, BaseMessage
+from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.types import Command
 
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
+from src.llms.llm import get_configured_llm_models
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
-from src.prose.graph.builder import build_graph as build_prose_graph
 from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
+from src.prose.graph.builder import build_graph as build_prose_graph
 from src.rag.builder import build_retriever
 from src.rag.retriever import Resource
 from src.server.chat_request import (
@@ -31,6 +32,7 @@ from src.server.chat_request import (
     GenerateProseRequest,
     TTSRequest,
 )
+from src.server.config_request import ConfigResponse
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 from src.server.mcp_utils import load_mcp_tools
 from src.server.rag_request import (
@@ -38,8 +40,6 @@ from src.server.rag_request import (
     RAGResourceRequest,
     RAGResourcesResponse,
 )
-from src.server.config_request import ConfigResponse
-from src.llms.llm import get_configured_llm_models
 from src.tools import VolcengineTTS
 
 logger = logging.getLogger(__name__)
@@ -150,9 +150,7 @@ async def _astream_workflow_generator(
                     },
                 )
             continue
-        message_chunk, message_metadata = cast(
-            tuple[BaseMessage, dict[str, any]], event_data
-        )
+        message_chunk, message_metadata = cast(tuple[BaseMessage, dict[str, any]], event_data)
         event_stream_message: dict[str, any] = {
             "thread_id": thread_id,
             "agent": agent[0].split(":")[0],
@@ -161,13 +159,9 @@ async def _astream_workflow_generator(
             "content": message_chunk.content,
         }
         if message_chunk.additional_kwargs.get("reasoning_content"):
-            event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
-                "reasoning_content"
-            ]
+            event_stream_message["reasoning_content"] = message_chunk.additional_kwargs["reasoning_content"]
         if message_chunk.response_metadata.get("finish_reason"):
-            event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
-                "finish_reason"
-            )
+            event_stream_message["finish_reason"] = message_chunk.response_metadata.get("finish_reason")
         if isinstance(message_chunk, ToolMessage):
             # Tool Message - Return the result of the tool call
             event_stream_message["tool_call_id"] = message_chunk.tool_call_id
@@ -177,15 +171,11 @@ async def _astream_workflow_generator(
             if message_chunk.tool_calls:
                 # AI Message - Tool Call
                 event_stream_message["tool_calls"] = message_chunk.tool_calls
-                event_stream_message["tool_call_chunks"] = (
-                    message_chunk.tool_call_chunks
-                )
+                event_stream_message["tool_call_chunks"] = message_chunk.tool_call_chunks
                 yield _make_event("tool_calls", event_stream_message)
             elif message_chunk.tool_call_chunks:
                 # AI Message - Tool Call Chunks
-                event_stream_message["tool_call_chunks"] = (
-                    message_chunk.tool_call_chunks
-                )
+                event_stream_message["tool_call_chunks"] = message_chunk.tool_call_chunks
                 yield _make_event("tool_call_chunks", event_stream_message)
             else:
                 # AI Message - Raw message tokens
@@ -206,9 +196,7 @@ async def text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
     access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
     if not access_token:
-        raise HTTPException(
-            status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
-        )
+        raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set")
 
     try:
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
@@ -242,11 +230,7 @@ async def text_to_speech(request: TTSRequest):
         return Response(
             content=audio_data,
             media_type=f"audio/{request.encoding}",
-            headers={
-                "Content-Disposition": (
-                    f"attachment; filename=tts_output.{request.encoding}"
-                )
-            },
+            headers={"Content-Disposition": (f"attachment; filename=tts_output.{request.encoding}")},
         )
 
     except Exception as e:
@@ -327,14 +311,8 @@ async def enhance_prompt(request: EnhancePromptRequest):
                     "POPULAR_SCIENCE": ReportStyle.POPULAR_SCIENCE,
                     "NEWS": ReportStyle.NEWS,
                     "SOCIAL_MEDIA": ReportStyle.SOCIAL_MEDIA,
-                    "academic": ReportStyle.ACADEMIC,
-                    "popular_science": ReportStyle.POPULAR_SCIENCE,
-                    "news": ReportStyle.NEWS,
-                    "social_media": ReportStyle.SOCIAL_MEDIA,
                 }
-                report_style = style_mapping.get(
-                    request.report_style, ReportStyle.ACADEMIC
-                )
+                report_style = style_mapping.get(request.report_style.upper(), ReportStyle.ACADEMIC)
             except Exception:
                 # If invalid style, default to ACADEMIC
                 report_style = ReportStyle.ACADEMIC
