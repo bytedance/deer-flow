@@ -23,6 +23,8 @@ class PlannerNode(BaseNode):
     def __init__(self, toolmanager):
         super().__init__("planner", AgentConfiguration.NODE_CONFIGS["planner"], toolmanager)
         
+    def getfirst_action(plan: Plan) -> str:
+        """获取计划中的第一个动作"""
 
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) \
         -> Command[Literal["writer", "coder", "interpreter", "searcher", "reader", "reporter", "receiver", "__end__"]]:
@@ -104,15 +106,14 @@ class PlannerNode(BaseNode):
                 "references":[], //reference ids
                 "status": "pending|waiting|processing|completed"
             }
-
             """
-            summary = f"# 当前任务:\n{first_step.description}\n## details\n {first_step.details}\n"
+            summary = self.get_action_with_dependencies_json(new_plan, first_step.id)
             next_node = AgentConfiguration.STEP_TYPE_TO_NODE[first_step.type.lower()]
 
             return Command(
                 update={
                     "current_plan": new_plan,
-                    'current_step_index': "G1-A1",
+                    'current_step_index': first_step.id,
                     "messages": [RemoveMessage(id="__remove_all__"), 
                                  HumanMessage(content=summary, name="planner")],
                 },

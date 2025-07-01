@@ -146,7 +146,7 @@ class CoordinatorNode(BaseNode):
                     # 这里直接给planner
                     return Command(
                         update={
-                            "messages": [HumanMessage(content=json.dumps(tool_call["args"], ensure_ascii=False, indent=2), name="coordinator")],
+                            "messages": [HumanMessage(content=json.dumps(tool_call["args"], ensure_ascii=False), name="coordinator")],
                             "tool_call_iterate_time" : 0
                         },
                         goto="planner"
@@ -190,12 +190,6 @@ class CoordinatorNode(BaseNode):
             self.log_execution("NO tool call, complete dialogue directly")
         
             goto = "__end__"
-            return Command(
-                update={
-                    "messages": [HumanMessage(content=response.content, name="coordinator")],
-                    "current_step_index": "G",
-                    "tool_call_iterate_time" : 0
-                },
-                goto=goto
-            )
+            return {"final_report": response.content}
+
                 

@@ -7,7 +7,7 @@ Entry point script for the DeerFlow project.
 
 import argparse
 import asyncio
-import fvg.common
+from src.fvg.common import  make_object_from_config
 import json
 import os
 
@@ -162,8 +162,9 @@ if __name__ == "__main__":
     with open(args.config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    agent = fvg.common.make_object_from_config(config["agent"])
+    agent = make_object_from_config(config["agent"])
 
+    os.makedirs("logs", exist_ok=True)
     if args.interactive:
         # Pass command line arguments to main function
         main(

@@ -1,6 +1,7 @@
 from enum import Enum
-from typing import List, Optional
-
+import json
+from typing import Dict, List, Optional, Set
+import msgpack
 from pydantic import BaseModel, Field
 
 
@@ -57,7 +58,7 @@ class Plan(BaseModel):
     title: str = Field(..., description="Task title")
     description: str = Field(..., description="Task description summary")
     goals: List[Goal] = Field(default_factory=list, description="List of goals with their actions")
-    
+
     class Config:
         json_schema_extra = {
             "examples": [

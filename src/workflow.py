@@ -137,16 +137,8 @@ async def run_agent_workflow_async(
 
             if "final_report" in s:
                 print(f"Final result:\n{s['final_report']}")
-                break
-            # if isinstance(s, dict) and "messages" in s:
-            #     # 默认会继承全部历史记录，这里如果设置了clear则只保留当前对话
-            #     if s["history_clear"]:
-            #         s["messages"] = s["messages"][-1]
-            #         s["history_clear"] = False
-            #         print("*" * 50)
-            #         print(s["messages"])
-            #         print("*" * 50)
-                    
+                return
+
         if isinstance(s, dict) and "__interrupt__" in s:
             # print(f"Interrupt: {s['__interrupt__']}")
             feedback = input(s['__interrupt__'][0].value + ": ")

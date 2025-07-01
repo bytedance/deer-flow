@@ -1,16 +1,17 @@
 """基础节点抽象类"""
 
 from datetime import datetime
+import json
 from src.config.agents import AgentConfiguration
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 import logging
 from src.config.agents import NodeConfig
 from src.graph.tools.tool_manager import ToolManager
-from src.prompts.planner_model import Plan
+from src.prompts.planner_model import Plan, Action, Goal, TaskStatus
 
 log_filename = datetime.now().strftime("logs/log_%Y-%m-%d_%H-%M.log")
 logging.basicConfig(
@@ -38,7 +39,100 @@ class BaseNode(ABC):
     async def execute(self, state: Dict[str, Any], config: RunnableConfig) -> Command:
         """执行节点逻辑"""
         pass
-       
+
+    # Utility functions
+    def update_plan_action_status(self,
+        plan: Plan,
+        action_id: str,
+        new_status: TaskStatus,
+        execution_res: Optional[str] = None
+    ) -> Plan:
+
+        for goal in plan.goals:
+            for action in goal.actions:
+                if action.id == action_id:
+                    action.status = new_status
+                    action.execution_res = execution_res
+
+    def get_next_action(self, plan: Plan, step_index: str) -> Optional[Action]:
+        found = False
+        for goal in plan.goals:
+            for action in goal.actions:
+                if found:
+                    return action
+                if action.id == step_index:
+                    found = True
+        return None
+
+    def get_action(self, plan: Plan, step_index: str) -> Optional[Action]:
+
+        for goal in plan.goals:
+            for action in goal.actions:
+                if action.id == step_index:
+                    return action
+        raise ValueError("get wrong action id")
+    
+    def find_goal_for_action(self, plan: Plan, action_id: str) -> Optional[Goal]:
+        for goal in plan.goals:
+            for action in goal.actions:
+                if action.id == action_id:
+                    return goal
+        return None
+
+    def collect_dependencies(self, plan: Plan, 
+                             action_id: str, 
+                             depth: int = 0, 
+                             visited: Optional[Set[str]] = None
+                             ) -> Set[str]:
+        depth += 1
+        if depth > 2:
+            return visited
+        if visited is None:
+            visited = set()
+        if action_id in visited:
+            return visited
+        visited.add(action_id)
+        for goal in plan.goals:
+            for action in goal.actions:
+                if action.id == action_id:
+                    for dep_id in action.dependencies:
+                        self.collect_dependencies(plan, dep_id, depth, visited)
+        return visited
+
+    def get_action_with_dependencies_json(self, plan: Plan, target_action_id: str) -> str:
+        if not any(action.id == target_action_id for goal in plan.goals for action in goal.actions):
+            raise ValueError(f"Action with ID '{target_action_id}' not found in plan")
+        all_action_ids = self.collect_dependencies(plan, target_action_id)
+        all_action_ids = sorted(list(all_action_ids))
+        result_goals = []
+        for goal in plan.goals:
+            goal_actions = [action for action in goal.actions if action.id in all_action_ids]
+            if goal_actions:
+                result_goals.append({
+                    "id": goal.id,
+                    "description": goal.description,
+                    "actions": [
+                        {
+                            "id": action.id,
+                            "description": action.description,
+                            "type": action.type.value,
+                            "dependencies": action.dependencies,
+                            "references": action.references,
+                            "details": action.details,
+                            "status": action.status.value,
+                            **({"result": action.execution_res} if action.execution_res is not None else {})
+                        }
+                        for action in goal_actions
+                    ]
+                })
+        result = {
+            "title": plan.title,
+            "description": plan.description,
+            "goals": result_goals
+        }
+        return f"</plan>\n\n{json.dumps(result, ensure_ascii=False, separators=(',', ':'))}\n\n</plan>your task is {target_action_id}"
+
+    # log
     def show_current_plan(self, plan: Plan):
         """展示当前计划"""
         logger.info(plan)
