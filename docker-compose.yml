@@ -9,7 +9,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./conf.yaml:/app/conf.yaml
+      - ./conf.yaml:/app/conf.yaml:ro
     restart: unless-stopped
     networks:
       - deer-flow-network
