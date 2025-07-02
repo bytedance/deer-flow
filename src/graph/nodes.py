@@ -19,6 +19,7 @@ from src.tools import (
     get_web_search_tool,
     get_retriever_tool,
     python_repl_tool,
+    get_weather
 )
 
 from src.config.agents import AGENT_LLM_MAP
@@ -213,8 +214,8 @@ def coordinator_node(
     configurable = Configuration.from_runnable_config(config)
     messages = apply_prompt_template("coordinator", state)
     response = (
-        get_llm_by_type(AGENT_LLM_MAP["coordinator"])
-        .bind_tools([handoff_to_planner])
+        get_llm_by_type(AGENT_LLM_MAP["coordinator"],tools=[handoff_to_planner])
+        .bind_tools([handoff_to_planner, get_weather])
         .invoke(messages)
     )
     logger.debug(f"Current state messages: {state['messages']}")
