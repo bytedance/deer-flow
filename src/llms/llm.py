@@ -4,6 +4,8 @@
 from pathlib import Path
 from typing import Any, Dict
 import os
+import ssl
+import httpx
 
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
@@ -85,6 +87,16 @@ def _create_llm_use_conf(
             base_llm = base_llm.bind_tools(tools)
         return base_llm
 
+
+    # Handle SSL verification settings
+    verify_ssl = merged_conf.pop("verify_ssl", True)
+
+    # Create custom HTTP client if SSL verification is disabled
+    if not verify_ssl:
+        http_client = httpx.Client(verify=False)
+        http_async_client = httpx.AsyncClient(verify=False)
+        merged_conf["http_client"] = http_client
+        merged_conf["http_async_client"] = http_async_client
 
     return (
         ChatOpenAI(**merged_conf)

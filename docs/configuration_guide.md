@@ -58,6 +58,21 @@ BASIC_MODEL:
   api_key: YOUR_API_KEY
 ```
 
+### How to use models with self-signed SSL certificates?
+
+If your LLM server uses self-signed SSL certificates, you can disable SSL certificate verification by adding the `verify_ssl: false` parameter to your model configuration:
+
+```yaml
+BASIC_MODEL:
+  base_url: "https://your-llm-server.com/api/v1"
+  model: "your-model-name"
+  api_key: YOUR_API_KEY
+  verify_ssl: false  # Disable SSL certificate verification for self-signed certificates
+```
+
+> [!WARNING]
+> Disabling SSL certificate verification reduces security and should only be used in development environments or when you trust the LLM server. In production environments, it's recommended to use properly signed SSL certificates.
+
 ### How to use Ollama models?
 
 DeerFlow supports the integration of Ollama models. You can refer to [litellm Ollama](https://docs.litellm.ai/docs/providers/ollama). <br>
