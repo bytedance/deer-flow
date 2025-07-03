@@ -214,8 +214,8 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
   - 支持检索指定私有知识库
 
 - 📃 **RAG 集成**
-  - 支持 RAGFlow 知识库
-  - 支持 VikingDB 火山知识库
+  - 支持 [RAGFlow](https://github.com/infiniflow/ragflow) 知识库
+  - 支持 [VikingDB](https://www.volcengine.com/docs/84313/1254457) 火山知识库
 
 - 🔗 **MCP 无缝集成**
   - 扩展私有域访问、知识图谱、网页浏览等能力
