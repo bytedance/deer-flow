@@ -212,14 +212,6 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 
   - Supports mentioning files from [RAGFlow](https://github.com/infiniflow/ragflow) within the input box. [Start up RAGFlow server](https://ragflow.io/docs/dev/).
 
-  ```bash
-     # .env
-     RAG_PROVIDER=ragflow
-     RAGFLOW_API_URL="http://localhost:9388"
-     RAGFLOW_API_KEY="ragflow-xxx"
-     RAGFLOW_RETRIEVAL_SIZE=10
-  ```
-
 - 🔗 **MCP Seamless Integration**
   - Expand capabilities for private domain access, knowledge graph, web browsing and more
   - Facilitates integration of diverse research tools and methodologies
