@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: format-code
+        name: Format code with make format
+        entry: make format
+        language: system
+        pass_filenames: false
+        always_run: true
