@@ -43,6 +43,11 @@ function mergeTextMessage(message: Message, event: MessageChunkEvent) {
     message.content += event.data.content;
     message.contentChunks.push(event.data.content);
   }
+  if (event.data.reasoning_content) {
+    message.reasoningContent = (message.reasoningContent ?? "") + event.data.reasoning_content;
+    message.reasoningContentChunks = message.reasoningContentChunks ?? [];
+    message.reasoningContentChunks.push(event.data.reasoning_content);
+  }
 }
 
 function mergeToolCallMessage(

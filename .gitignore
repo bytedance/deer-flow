@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 .coverage
+.coverage.*
 agent_history.gif
 static/browser_history/*.gif
 

@@ -24,7 +24,6 @@ from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhanc
 from src.rag.builder import build_retriever
 from src.rag.retriever import Resource
 from src.server.chat_request import (
-    ChatMessage,
     ChatRequest,
     EnhancePromptRequest,
     GeneratePodcastRequest,
@@ -39,6 +38,8 @@ from src.server.rag_request import (
     RAGResourceRequest,
     RAGResourcesResponse,
 )
+from src.server.config_request import ConfigResponse
+from src.llms.llm import get_configured_llm_models
 from src.tools import VolcengineTTS
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ async def chat_stream(request: ChatRequest):
             request.mcp_settings,
             request.enable_background_investigation,
             request.report_style,
+            request.enable_deep_thinking,
         ),
         media_type="text/event-stream",
     )
@@ -98,6 +100,7 @@ async def _astream_workflow_generator(
     mcp_settings: dict,
     enable_background_investigation: bool,
     report_style: ReportStyle,
+    enable_deep_thinking: bool,
 ):
     input_ = {
         "messages": messages,
@@ -125,6 +128,7 @@ async def _astream_workflow_generator(
             "max_search_results": max_search_results,
             "mcp_settings": mcp_settings,
             "report_style": report_style.value,
+            "enable_deep_thinking": enable_deep_thinking,
         },
         stream_mode=["messages", "updates"],
         subgraphs=True,
@@ -156,6 +160,10 @@ async def _astream_workflow_generator(
             "role": "assistant",
             "content": message_chunk.content,
         }
+        if message_chunk.additional_kwargs.get("reasoning_content"):
+            event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
+                "reasoning_content"
+            ]
         if message_chunk.response_metadata.get("finish_reason"):
             event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
                 "finish_reason"
@@ -193,17 +201,16 @@ def _make_event(event_type: str, data: dict[str, any]):
 @app.post("/api/tts")
 async def text_to_speech(request: TTSRequest):
     """Convert text to speech using volcengine TTS API."""
+    app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
+    if not app_id:
+        raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
+    access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
+    if not access_token:
+        raise HTTPException(
+            status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
+        )
+
     try:
-        app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
-        if not app_id:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_APPID is not set"
-            )
-        access_token = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
-        if not access_token:
-            raise HTTPException(
-                status_code=400, detail="VOLCENGINE_TTS_ACCESS_TOKEN is not set"
-            )
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
         voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "BV700_V2_streaming")
 
@@ -241,6 +248,7 @@ async def text_to_speech(request: TTSRequest):
                 )
             },
         )
+
     except Exception as e:
         logger.exception(f"Error in TTS endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
@@ -380,10 +388,8 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
 
         return response
     except Exception as e:
-        if not isinstance(e, HTTPException):
-            logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
-            raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
-        raise
+        logger.exception(f"Error in MCP server metadata endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
 @app.get("/api/rag/config", response_model=RAGConfigResponse)
@@ -399,3 +405,12 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+@app.get("/api/config", response_model=ConfigResponse)
+async def config():
+    """Get the config of the server."""
+    return ConfigResponse(
+        rag=RAGConfigResponse(provider=SELECTED_RAG_PROVIDER),
+        models=get_configured_llm_models(),
+    )

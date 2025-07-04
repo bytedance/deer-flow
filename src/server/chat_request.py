@@ -62,6 +62,9 @@ class ChatRequest(BaseModel):
     report_style: Optional[ReportStyle] = Field(
         ReportStyle.ACADEMIC, description="The style of the report"
     )
+    enable_deep_thinking: Optional[bool] = Field(
+        False, description="Whether to enable deep thinking"
+    )
 
 
 class TTSRequest(BaseModel):

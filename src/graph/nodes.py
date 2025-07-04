@@ -101,11 +101,12 @@ def planner_node(
             }
         ]
 
-    if AGENT_LLM_MAP["planner"] == "basic":
-        llm = get_llm_by_type(AGENT_LLM_MAP["planner"]).with_structured_output(
+    if configurable.enable_deep_thinking:
+        llm = get_llm_by_type("reasoning")
+    elif AGENT_LLM_MAP["planner"] == "basic":
+        llm = get_llm_by_type("basic").with_structured_output(
             Plan,
-            method="json_schema",
-            strict=True,
+            method="json_mode",
         )
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
@@ -115,7 +116,7 @@ def planner_node(
         return Command(goto="reporter")
 
     full_response = ""
-    if AGENT_LLM_MAP["planner"] == "basic":
+    if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
         response = llm.invoke(messages)
         full_response = response.model_dump_json(indent=4, exclude_none=True)
     else:
@@ -189,7 +190,7 @@ def human_feedback_node(
             goto = "reporter"
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 0:
+        if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
