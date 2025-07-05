@@ -124,9 +124,15 @@ function processKatexInMarkdown(markdown?: string | null) {
 
 function dropMarkdownQuote(markdown?: string | null) {
   if (!markdown) return markdown;
-  return markdown
-    .replace(/^```markdown\n/gm, "")
-    .replace(/^```text\n/gm, "")
-    .replace(/^```\n/gm, "")
-    .replace(/\n```$/gm, "");
+  let result = markdown;
+  if (result.startsWith('```markdown\n') && result.endsWith('\n```')) {
+    result = result.slice(12, -4);
+  }
+  else if (result.startsWith('```text\n') && result.endsWith('\n```')) {
+    result = result.slice(8, -4);
+  }
+  else if (result.startsWith('```\n') && result.endsWith('\n```')) {
+    result = result.slice(4, -4);
+  }
+  return result;
 }
