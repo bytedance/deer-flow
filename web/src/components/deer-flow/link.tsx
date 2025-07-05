@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useStore, useToolCalls } from "~/core/store";
 import { Tooltip } from "./tooltip";
 import { WarningFilled } from "@ant-design/icons";
+import { useTranslations } from "next-intl";
 
 export const Link = ({
   href,
@@ -38,16 +39,14 @@ export const Link = ({
       : true;
   }, [credibleLinks, href, responding, checkLinkCredibility]);
 
+  const t = useTranslations("common");
   return (
     <span className="inline-flex items-center gap-1.5">
       <a href={href} target="_blank" rel="noopener noreferrer">
         {children}
       </a>
       {!isCredible && (
-        <Tooltip
-          title="This link might be a hallucination from AI model and may not be reliable."
-          delayDuration={300}
-        >
+        <Tooltip title={t("linkNotReliable")} delayDuration={300}>
           <WarningFilled className="text-sx transition-colors hover:!text-yellow-500" />
         </Tooltip>
       )}
