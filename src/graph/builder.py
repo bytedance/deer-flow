@@ -13,6 +13,8 @@ from .nodes import (
     research_team_node,
     researcher_node,
     coder_node,
+    image_agent_node,
+    speech_agent_node,
     human_feedback_node,
     background_investigation_node,
 )
@@ -31,6 +33,10 @@ def continue_to_running_research_team(state: State):
         return "researcher"
     if step.step_type and step.step_type == StepType.PROCESSING:
         return "coder"
+    if step.step_type and step.step_type == StepType.IMAGE:
+        return "image_agent"
+    if step.step_type and step.step_type == StepType.SPEECH:
+        return "speech_agent"
     return "planner"
 
 
@@ -45,12 +51,14 @@ def _build_base_graph():
     builder.add_node("research_team", research_team_node)
     builder.add_node("researcher", researcher_node)
     builder.add_node("coder", coder_node)
+    builder.add_node("image_agent", image_agent_node)
+    builder.add_node("speech_agent", speech_agent_node)
     builder.add_node("human_feedback", human_feedback_node)
     builder.add_edge("background_investigator", "planner")
     builder.add_conditional_edges(
         "research_team",
         continue_to_running_research_team,
-        ["planner", "researcher", "coder"],
+        ["planner", "researcher", "coder", "image_agent", "speech_agent"],
     )
     builder.add_edge("reporter", END)
     return builder
