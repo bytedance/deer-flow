@@ -142,6 +142,8 @@ bootstrap.bat -d
 
 ## 支持的搜索引擎
 
+### 公域搜索引擎
+
 DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`变量进行配置：
 
 - **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
@@ -169,6 +171,30 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 SEARCH_API=tavily
 ```
 
+### 私域知识库引擎
+
+DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多种私有知识库中，以便在研究过程中使用，当前支持的私域知识库有：
+
+- **[RAGFlow](https://ragflow.io/docs/dev/)**：开源的基于检索增强生成的知识库引擎
+   ```
+   # 参照示例进行配置 .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   ```
+
+- **[VikingDB 知识库](https://www.volcengine.com/docs/84313/1254457)**：火山引擎提供的公有云知识库引擎
+   > 注意先从 [火山引擎](https://www.volcengine.com/docs/84313/1254485) 获取账号 AK/SK
+   ```
+   # 参照示例进行配置 .env.example
+   RAG_PROVIDER=vikingdb_knowledge_base
+   VIKINGDB_KNOWLEDGE_BASE_API_URL="api-knowledgebase.mlp.cn-beijing.volces.com"
+   VIKINGDB_KNOWLEDGE_BASE_API_AK="volcengine-ak-xxx"
+   VIKINGDB_KNOWLEDGE_BASE_API_SK="volcengine-sk-xxx"
+   VIKINGDB_KNOWLEDGE_BASE_RETRIEVAL_SIZE=15
+   ```
+
 ## 特性
 
 ### 核心能力
@@ -182,10 +208,14 @@ SEARCH_API=tavily
 ### 工具和 MCP 集成
 
 - 🔍 **搜索和检索**
-
   - 通过 Tavily、Brave Search 等进行网络搜索
   - 使用 Jina 进行爬取
   - 高级内容提取
+  - 支持检索指定私有知识库
+
+- 📃 **RAG 集成**
+  - 支持 [RAGFlow](https://github.com/infiniflow/ragflow) 知识库
+  - 支持 [VikingDB](https://www.volcengine.com/docs/84313/1254457) 火山知识库
 
 - 🔗 **MCP 无缝集成**
   - 扩展私有域访问、知识图谱、网页浏览等能力
