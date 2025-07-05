@@ -10,19 +10,7 @@ from src.utils.file_descriptors import file2resource, resources2user_input
 import uuid
 import shutil
 from langgraph.types import Command
-
-
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Default level is INFO
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-
-
-def enable_debug_logging():
-    """Enable debug level logging for more detailed execution information."""
-    logging.getLogger("src").setLevel(logging.DEBUG)
+from src.utils.logger_utils import enable_debug_logging
 
 
 logger = logging.getLogger(__name__)

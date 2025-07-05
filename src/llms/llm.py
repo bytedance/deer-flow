@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Dict
 import os
 
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
+from databricks_langchain import ChatDatabricks
+from langchain_anthropic import ChatAnthropic
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
@@ -46,8 +48,22 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> ChatOpenAI:
 
     if not merged_conf:
         raise ValueError(f"Unknown LLM Conf: {llm_type}")
-
-    return ChatOpenAI(**merged_conf)
+    
+    model_type = merged_conf.pop("type")
+    if model_type == "ChatOpenAI":
+        return ChatOpenAI(**merged_conf)
+    elif model_type == "ChatAnthropic":
+        return ChatAnthropic(**merged_conf)
+    elif model_type == "AzureChatOpenAI":
+        return AzureChatOpenAI(**merged_conf)
+    elif model_type == "ChatDatabricks":
+        DATABRICKS_HOST = merged_conf.pop("DATABRICKS_HOST")
+        DATABRICKS_TOKEN = merged_conf.pop("DATABRICKS_TOKEN")
+        os.environ["DATABRICKS_HOST"] = DATABRICKS_HOST
+        os.environ["DATABRICKS_TOKEN"] = DATABRICKS_TOKEN
+        return ChatDatabricks(**merged_conf)
+    else:
+        raise ValueError(f"Unknown LLM Type: {model_type}")
 
 
 def get_llm_by_type(

@@ -13,15 +13,7 @@ from src.config.agents import NodeConfig
 from src.graph.tools.tool_manager import ToolManager
 from src.prompts.planner_model import Plan, Action, Goal, TaskStatus
 
-log_filename = datetime.now().strftime("logs/log_%Y-%m-%d_%H-%M.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_filename),  # 将日志写入文件
-        logging.StreamHandler()  # 同时输出到终端
-    ]
-)
+
 logger = logging.getLogger(__name__)
 
 class BaseNode(ABC):

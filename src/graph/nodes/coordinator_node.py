@@ -168,7 +168,7 @@ class CoordinatorNode(BaseNode):
                     background_summary = filter_garbled_text(background_summary)
                     return Command(
                         update={
-                            "messages": [ToolMessage(content=background_summary, tool_call_id=tool_call["id"])],
+                            "messages": [response, ToolMessage(content=background_summary, tool_call_id=tool_call["id"])],
                             "tool_call_iterate_time" : iterate_times
                         },
                         goto="coordinator"

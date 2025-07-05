@@ -15,6 +15,9 @@ from InquirerPy import inquirer
 
 from src.config.questions import BUILT_IN_QUESTIONS, BUILT_IN_QUESTIONS_ZH_CN
 from src.workflow import run_agent_workflow_async
+from src.utils.logger_utils import configure_logging
+
+configure_logging(log_root='logs')
 
 def get_all_file_paths(folder_path):
     file_paths = []

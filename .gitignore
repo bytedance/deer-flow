@@ -33,3 +33,5 @@ sessions/
 
 tests/test_cases/
 logs
+log*
+tmp/
