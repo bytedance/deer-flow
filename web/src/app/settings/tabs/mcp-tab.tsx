@@ -179,6 +179,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
   );
 };
 MCPTab.icon = Blocks;
+MCPTab.displayName = "MCP";
 MCPTab.badge = "Beta";
 MCPTab.displayName = "MCP";
 
