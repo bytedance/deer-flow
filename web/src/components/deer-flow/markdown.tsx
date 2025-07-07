@@ -122,17 +122,35 @@ function processKatexInMarkdown(markdown?: string | null) {
   return markdownWithKatexSyntax;
 }
 
-function dropMarkdownQuote(markdown?: string | null) {
+function dropMarkdownQuote(markdown?: string | null): string | null {
   if (!markdown) return markdown;
+
+  const patterns = [
+    { prefix: "```markdown\n", len: 12 },
+    { prefix: "```text\n", len: 8 },
+    { prefix: "```\n", len: 4 },
+  ];
+
   let result = markdown;
-  if (result.startsWith('```markdown\n') && result.endsWith('\n```')) {
-    result = result.slice(12, -4);
-  }
-  else if (result.startsWith('```text\n') && result.endsWith('\n```')) {
-    result = result.slice(8, -4);
-  }
-  else if (result.startsWith('```\n') && result.endsWith('\n```')) {
-    result = result.slice(4, -4);
+  let first = true;
+
+  while (true) {
+    let matched = false;
+    for (const { prefix, len } of patterns) {
+      if (result.startsWith(prefix)) {
+        if (result.endsWith("\n```") && result.length > len + 4) {
+          result = result.slice(len, -4);
+          matched = true;
+          break;
+        } else if (first) {
+          result = result.slice(len);
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched) break;
+    first = false;
   }
   return result;
 }
