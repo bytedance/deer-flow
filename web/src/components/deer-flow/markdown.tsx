@@ -123,34 +123,45 @@ function processKatexInMarkdown(markdown?: string | null) {
 }
 
 function dropMarkdownQuote(markdown?: string | null): string | null {
-  if (!markdown) return markdown;
+  if (!markdown) return null;
 
-  const patterns = [
-    { prefix: "```markdown\n", len: 12 },
-    { prefix: "```text\n", len: 8 },
-    { prefix: "```\n", len: 4 },
+  const patternsToRemove = [
+    { prefix: "```markdown\n", suffix: "\n```", prefixLen: 12 },
+    { prefix: "```\n", suffix: "\n```", prefixLen: 4 },
   ];
 
   let result = markdown;
-  let first = true;
+  
+  for (const { prefix, suffix, prefixLen } of patternsToRemove) {
+    if (result.startsWith(prefix) && !result.endsWith(suffix)) {
+      result = result.slice(prefixLen);
+      break;  // remove prefix without suffix only once
+    }
+  }
+  
+  let changed = true;
 
-  while (true) {
-    let matched = false;
-    for (const { prefix, len } of patterns) {
-      if (result.startsWith(prefix)) {
-        if (result.endsWith("\n```") && result.length > len + 4) {
-          result = result.slice(len, -4);
-          matched = true;
-          break;
-        } else if (first) {
-          result = result.slice(len);
-          matched = true;
-          break;
+  while (changed) {
+    changed = false;
+    
+    for (const { prefix, suffix, prefixLen } of patternsToRemove) {
+      let startIndex = 0;
+      while ((startIndex = result.indexOf(prefix, startIndex)) !== -1) {
+        const endIndex = result.indexOf(suffix, startIndex + prefixLen);
+        if (endIndex !== -1) {
+          // only remove fully matched code blocks
+          const before = result.slice(0, startIndex);
+          const content = result.slice(startIndex + prefixLen, endIndex);
+          const after = result.slice(endIndex + suffix.length);
+          result = before + content + after;
+          changed = true;
+          startIndex = before.length + content.length;
+        } else {
+          startIndex += prefixLen;
         }
       }
     }
-    if (!matched) break;
-    first = false;
   }
+  
   return result;
 }
