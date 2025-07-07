@@ -16,7 +16,7 @@ jobs:
     - uses: actions/checkout@v3
 
     - name: Install the latest version of uv
-      uses: astral-sh/setup-uv@v5
+      uses: stral-sh/setup-uv@bd01e18f51369ad5a26f1651c3cb451d3417e3bba #v6.3.1
       with:
         version: "latest"
 
