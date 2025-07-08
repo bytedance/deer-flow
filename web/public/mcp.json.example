@@ -1,0 +1,29 @@
+{
+    "servers": [
+        {
+            "name": "example-sse-mcp-server",
+            "transport": "sse",
+            "url": "https://example.com/mcp",
+            "enabled": true,
+            "env": {},
+            "tools": [],
+            "createdAt": 0,
+            "updatedAt": 0
+        },
+        {
+            "name": "example-stdio-mcp-server",
+            "transport": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "mcp-remote",
+                "https://example.com/mcp"
+            ],
+            "enabled": true,
+            "env": {},
+            "tools": [],
+            "createdAt": 0,
+            "updatedAt": 0
+        }
+    ]
+}
