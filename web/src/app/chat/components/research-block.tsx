@@ -1,13 +1,14 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
-import { Check, Copy, Headphones, Pencil, Undo2, X, Download } from "lucide-react";
+import { Check, Copy, Headphones, Pencil, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { ScrollContainer } from "~/components/deer-flow/scroll-container";
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Button } from "~/components/ui/button";
 import { Card } from "~/components/ui/card";
+import { DownloadDropdown } from "~/components/ui/download-dropdown";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { useReplay } from "~/core/replay";
 import { closeResearch, listenToPodcast, useStore } from "~/core/store";
@@ -49,6 +50,11 @@ export function ResearchBlock({
 
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
+  
+  // 获取报告内容用于下载
+  const reportContent = useStore((state) => 
+    reportId ? (state.messages.get(reportId)?.content ?? "") : ""
+  );
   const handleCopy = useCallback(() => {
     if (!reportId) {
       return;
@@ -64,31 +70,7 @@ export function ResearchBlock({
     }, 1000);
   }, [reportId]);
 
-  // Download report as markdown
-  const handleDownload = useCallback(() => {
-    if (!reportId) {
-      return;
-    }
-    const report = useStore.getState().messages.get(reportId);
-    if (!report) {
-      return;
-    }
-    const now = new Date();
-    const pad = (n: number) => n.toString().padStart(2, '0');
-    const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-    const filename = `research-report-${timestamp}.md`;
-    const blob = new Blob([report.content], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 0);
-  }, [reportId]);
+
 
     
   const handleEdit = useCallback(() => {
@@ -140,16 +122,10 @@ export function ResearchBlock({
                   {copied ? <Check /> : <Copy />}
                 </Button>
               </Tooltip>
-              <Tooltip title="Download report as markdown">
-                <Button
-                  className="text-gray-400"
-                  size="icon"
-                  variant="ghost"
-                  onClick={handleDownload}
-                >
-                  <Download />
-                </Button>
-              </Tooltip>
+              <DownloadDropdown
+                content={reportContent}
+                className="text-gray-400"
+              />
             </>
           )}
           <Tooltip title="Close">
