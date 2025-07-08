@@ -127,6 +127,7 @@ function dropMarkdownQuote(markdown?: string | null): string | null {
 
   const patternsToRemove = [
     { prefix: "```markdown\n", suffix: "\n```", prefixLen: 12 },
+    { prefix: "```text\n", suffix: "\n```", prefixLen: 8 },
     { prefix: "```\n", suffix: "\n```", prefixLen: 4 },
   ];
 
