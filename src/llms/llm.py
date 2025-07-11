@@ -72,7 +72,7 @@ def _create_llm_use_conf(
 
     # Add max_retries to handle rate limit errors
     if "max_retries" not in merged_conf:
-        merged_conf["max_retries"] = 10
+        merged_conf["max_retries"] = 3
 
     if llm_type == "reasoning":
         merged_conf["api_base"] = merged_conf.pop("base_url", None)
