@@ -22,9 +22,8 @@ BASIC_MODEL:
 #   api_key: xxxx
 
 # OTHER SETTINGS:
-# Search engine configuration
+# Search engine configuration (Only supports Tavily currently)
 # SEARCH_ENGINE:
-#   # Can be: tavily, duckduckgo, brave_search, arxiv
 #   engine: tavily
 #   # Only include results from these domains
 #   include_domains:
