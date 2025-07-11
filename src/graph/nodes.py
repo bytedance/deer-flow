@@ -352,7 +352,9 @@ async def _execute_agent_step(
                 HumanMessage(
                     content=resources_info
                     + "\n\n"
-                    + "You MUST use the **local_search_tool** to retrieve the information from the resource files.",
+                    + "You MUST use the **local_search_tool** to retrieve the information from the resource files."
+                    + "\n"
+                    + "If you need additional context or information, you may also use other tools to search for and supplement external information.",
                 )
             )
 
@@ -444,7 +446,8 @@ async def _setup_and_execute_agent_step(
         for server_name, server_config in configurable.mcp_settings["servers"].items():
             if (
                 server_config["enabled_tools"]
-                and agent_type in server_config["add_to_agents"]
+                # todo: 细化 add_to_agents 配置, 将 coder 和 researcher 分开, 暂时通过注释规避.
+                # and agent_type in server_config["add_to_agents"]
             ):
                 mcp_servers[server_name] = {
                     k: v
@@ -454,8 +457,11 @@ async def _setup_and_execute_agent_step(
                 for tool_name in server_config["enabled_tools"]:
                     enabled_tools[tool_name] = server_name
 
+    print(f"✅ mcp servers: {mcp_servers}")
+
     # Create and execute agent with MCP tools if available
     if mcp_servers:
+        print(f"✅ this is mcp-server create agent.")
         async with MultiServerMCPClient(mcp_servers) as client:
             loaded_tools = default_tools[:]
             for tool in client.get_tools():
@@ -467,6 +473,7 @@ async def _setup_and_execute_agent_step(
             agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
             return await _execute_agent_step(state, agent, agent_type)
     else:
+        print(f"❌ this is no mcp-server create agent.")
         # Use default tools if no MCP servers are configured
         agent = create_agent(agent_type, agent_type, default_tools, agent_type)
         return await _execute_agent_step(state, agent, agent_type)
@@ -496,9 +503,16 @@ async def coder_node(
 ) -> Command[Literal["research_team"]]:
     """Coder node that do code analysis."""
     logger.info("Coder node is coding.")
+    configurable = Configuration.from_runnable_config(config)
+    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool, python_repl_tool]
+    retriever_tool = get_retriever_tool(state.get("resources", []))
+    if retriever_tool:
+        tools.insert(0, retriever_tool)
+    logger.info(f"Coder tools: {tools}")
     return await _setup_and_execute_agent_step(
         state,
         config,
         "coder",
-        [python_repl_tool],
+        # [python_repl_tool],
+        tools,
     )
