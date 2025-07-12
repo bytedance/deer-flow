@@ -19,21 +19,17 @@ def repair_json_output(content: str) -> str:
         str: Repaired JSON string, or original content if not JSON
     """
     content = content.strip()
-    if content.startswith(("{", "[")) or "```json" in content or "```ts" in content:
-        try:
-            # If content is wrapped in ```json code block, extract the JSON part
-            if content.startswith("```json"):
-                content = content.removeprefix("```json")
 
-            if content.startswith("```ts"):
-                content = content.removeprefix("```ts")
+    try:
+        # Try to repair and parse JSON
+        repaired_content = json_repair.loads(content)
+        if not isinstance(repaired_content, dict) and not isinstance(
+            repaired_content, list
+        ):
+            logger.warning("Repaired content is not a valid JSON object or array.")
+            return content
+        content = json.dumps(repaired_content, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"JSON repair failed: {e}")
 
-            if content.endswith("```"):
-                content = content.removesuffix("```")
-
-            # Try to repair and parse JSON
-            repaired_content = json_repair.loads(content)
-            return json.dumps(repaired_content, ensure_ascii=False)
-        except Exception as e:
-            logger.warning(f"JSON repair failed: {e}")
     return content
