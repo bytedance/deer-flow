@@ -43,6 +43,15 @@
       "maxSearchResults": "最大搜索结果数",
       "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。"
     },
+    "mcp": {
+      "title": "MCP 服务器",
+      "description": "模型上下文协议通过集成外部工具来增强 DeerFlow，用于私域搜索、网页浏览、订餐等任务。点击这里",
+      "learnMore": "了解更多关于 MCP 的信息。",
+      "enableDisable": "启用/禁用服务器",
+      "deleteServer": "删除服务器",
+      "disabled": "已禁用",
+      "new": "新增"
+    },
     "about": {
       "title": "关于"
     },

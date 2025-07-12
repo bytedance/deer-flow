@@ -43,6 +43,15 @@
       "maxSearchResults": "Max search results",
       "maxSearchResultsDescription": "By default, each search step has 3 results."
     },
+    "mcp": {
+      "title": "MCP Servers",
+      "description": "The Model Context Protocol boosts DeerFlow by integrating external tools for tasks like private domain searches, web browsing, food ordering, and more. Click here to",
+      "learnMore": "learn more about MCP.",
+      "enableDisable": "Enable/disable server",
+      "deleteServer": "Delete server",
+      "disabled": "Disabled",
+      "new": "New"
+    },
     "about": {
       "title": "About"
     },
