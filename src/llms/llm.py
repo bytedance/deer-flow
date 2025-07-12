@@ -70,6 +70,10 @@ def _create_llm_use_conf(
     if not merged_conf:
         raise ValueError(f"No configuration found for LLM type: {llm_type}")
 
+    # Add max_retries to handle rate limit errors
+    if "max_retries" not in merged_conf:
+        merged_conf["max_retries"] = 3
+
     if llm_type == "reasoning":
         merged_conf["api_base"] = merged_conf.pop("base_url", None)
 
