@@ -10,6 +10,7 @@ BASIC_MODEL:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: "doubao-1-5-pro-32k-250115"
   api_key: xxxx
+  # max_retries: 3 # Maximum number of retries for LLM calls
   # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
  
 # Reasoning model is optional.
@@ -20,6 +21,8 @@ BASIC_MODEL:
 #   base_url: https://ark-cn-beijing.bytedance.net/api/v3
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
+#   max_retries: 3 # Maximum number of retries for LLM calls
+
 
 # OTHER SETTINGS:
 # Search engine configuration (Only supports Tavily currently)
