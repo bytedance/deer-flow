@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import json
-import pytest
 from unittest.mock import patch, MagicMock
-import uuid
 import base64
 
 from src.tools.tts import VolcengineTTS

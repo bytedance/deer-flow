@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "ruff",
     "black>=24.2.0",
     "langgraph-cli[inmem]>=0.2.10",
 ]

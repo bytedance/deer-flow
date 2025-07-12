@@ -20,7 +20,7 @@ Por favor, visite [Nosso Site Oficial](https://deerflow.tech/) para maiores deta
 
 ### Video
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 Nesse demo, nós demonstramos como usar o DeerFlow para:
 In this demo, we showcase how to use DeerFlow to:
@@ -148,13 +148,12 @@ Explore mais detalhes no diretório [`web`](./web/) .
 
 ## Mecanismos de Busca Suportados
 
-
 DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no seu arquivo `.env` usando a variável `SEARCH_API`:
 
 - **Tavily** (padrão): Uma API de busca especializada para aplicações de IA
 
   - Requer `TAVILY_API_KEY` no seu arquivo `.env`
-  - Inscreva-se em: https://app.tavily.com/home
+  - Inscreva-se em: <https://app.tavily.com/home>
 
 - **DuckDuckGo**: Mecanismo de busca focado em privacidade
 
@@ -163,7 +162,7 @@ DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no se
 - **Brave Search**: Mecanismo de busca focado em privacidade com funcionalidades avançadas
 
   - Requer `BRAVE_SEARCH_API_KEY` no seu arquivo `.env`
-  - Inscreva-se em: https://brave.com/search/api/
+  - Inscreva-se em: <https://brave.com/search/api/>
 
 - **Arxiv**: Busca de artigos científicos para pesquisa acadêmica
   - Não requer chave API
@@ -203,7 +202,6 @@ SEARCH_API=tavily
 ### Colaboração Humana
 
 - 🧠 **Humano-no-processo**
-
 
   - Suporta modificação interativa de planos de pesquisa usando linguagem natural
   - Suporta auto-aceite de planos de pesquisa
@@ -333,16 +331,15 @@ langgraph dev
 
 Após iniciar o servidor LangGraph, você verá diversas URLs no seu terminal:
 
-- API: http://127.0.0.1:2024
-- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- API Docs: http://127.0.0.1:2024/docs
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- API Docs: <http://127.0.0.1:2024/docs>
 
 Abra o link do Studio UI no seu navegador para acessar a interface de depuração.
 
 #### Usando o LangGraph Studio
 
 No Studio UI, você pode:
-
 
 1. Visualizar o grafo do fluxo de trabalho e como seus componentes se conectam
 2. Rastrear a execução em tempo-real e ver como os dados fluem através do sistema
@@ -391,7 +388,7 @@ docker compose build
 docker compose up
 ```
 
-## Exemplos:
+## Exemplos
 
 Os seguintes exemplos demonstram as capacidades do DeerFlow:
 
@@ -494,7 +491,8 @@ DeerFlow inclue um mecanismo de humano no processo que permite a você revisar, 
 
    - Via API: Defina `auto_accepted_plan: true` na sua requisição
 
-4. **Integração de API**: Quanto usar a API, você pode fornecer um feedback através do parâmetro `feedback`:   
+4. **Integração de API**: Quanto usar a API, você pode fornecer um feedback através do parâmetro `feedback`:
+
 ```json
    {
      "messages": [{ "role": "user", "content": "O que é computação quântica?" }],
