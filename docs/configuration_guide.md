@@ -115,3 +115,25 @@ BASIC_MODEL:
   api_version: $AZURE_API_VERSION
   api_key: $AZURE_API_KEY
 ```
+## About Search Engine
+
+### How to control search domains for Tavily?
+
+DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.
+
+`Tips`: it only supports Tavily currently. 
+
+You can configure domain filtering in your `conf.yaml` file as follows:
+
+```yaml
+SEARCH_ENGINE:
+  engine: tavily
+  # Only include results from these domains (whitelist)
+  include_domains:
+    - trusted-news.com
+    - gov.org
+    - reliable-source.edu
+  # Exclude results from these domains (blacklist)
+  exclude_domains:
+    - unreliable-site.com
+    - spam-domain.net

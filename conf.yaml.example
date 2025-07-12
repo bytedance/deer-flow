@@ -22,3 +22,19 @@ BASIC_MODEL:
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
 #   max_retries: 3 # Maximum number of retries for LLM calls
+
+
+# OTHER SETTINGS:
+# Search engine configuration (Only supports Tavily currently)
+# SEARCH_ENGINE:
+#   engine: tavily
+#   # Only include results from these domains
+#   include_domains:
+#     - example.com
+#     - trusted-news.com
+#     - reliable-source.org
+#     - gov.cn
+#     - edu.cn
+#   # Exclude results from these domains
+#   exclude_domains:
+#     - example.com
