@@ -12,6 +12,8 @@
 
 **DeerFlow** (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) é um framework de Pesquisa Profunda orientado-a-comunidade que baseia-se em um íncrivel trabalho da comunidade open source. Nosso objetivo é combinar modelos de linguagem com ferramentas especializadas para tarefas como busca na web, crawling, e execução de código Python, enquanto retribui com a comunidade que o tornou possível.
 
+Atualmente, o DeerFlow entrou oficialmente no Centro de Aplicações FaaS da Volcengine. Os usuários podem experimentá-lo online através do link de experiência para sentir intuitivamente suas funções poderosas e operações convenientes. Ao mesmo tempo, para atender às necessidades de implantação de diferentes usuários, o DeerFlow suporta implantação com um clique baseada na Volcengine. Clique no link de implantação para completar rapidamente o processo de implantação e iniciar uma jornada de pesquisa eficiente.
+
 Por favor, visite [Nosso Site Oficial](https://deerflow.tech/) para maiores detalhes.
 
 ## Demo

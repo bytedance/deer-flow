@@ -9,6 +9,8 @@
 
 **DeerFlow**（**D**eep **E**xploration and **E**fficient **R**esearch **Flow**）是一个社区驱动的深度研究框架，它建立在开源社区的杰出工作基础之上。我们的目标是将语言模型与专业工具（如网络搜索、爬虫和 Python 代码执行）相结合，同时回馈使这一切成为可能的社区。
 
+目前，DeerFlow 已正式入驻[火山引擎的 FaaS 应用中心](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market)，用户可通过[体验链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow)进行在线体验，直观感受其强大功能与便捷操作；同时，为满足不同用户的部署需求，DeerFlow 支持基于火山引擎一键部署，点击[部署链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow)即可快速完成部署流程，开启高效研究之旅。
+
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
 
 ## 演示
@@ -139,6 +141,8 @@ bootstrap.bat -d
 
 ## 支持的搜索引擎
 
+### 公域搜索引擎
+
 DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`变量进行配置：
 
 - **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
@@ -163,6 +167,30 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 SEARCH_API=tavily
 ```
 
+### 私域知识库引擎
+
+DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多种私有知识库中，以便在研究过程中使用，当前支持的私域知识库有：
+
+- **[RAGFlow](https://ragflow.io/docs/dev/)**：开源的基于检索增强生成的知识库引擎
+   ```
+   # 参照示例进行配置 .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   ```
+
+- **[VikingDB 知识库](https://www.volcengine.com/docs/84313/1254457)**：火山引擎提供的公有云知识库引擎
+   > 注意先从 [火山引擎](https://www.volcengine.com/docs/84313/1254485) 获取账号 AK/SK
+   ```
+   # 参照示例进行配置 .env.example
+   RAG_PROVIDER=vikingdb_knowledge_base
+   VIKINGDB_KNOWLEDGE_BASE_API_URL="api-knowledgebase.mlp.cn-beijing.volces.com"
+   VIKINGDB_KNOWLEDGE_BASE_API_AK="volcengine-ak-xxx"
+   VIKINGDB_KNOWLEDGE_BASE_API_SK="volcengine-sk-xxx"
+   VIKINGDB_KNOWLEDGE_BASE_RETRIEVAL_SIZE=15
+   ```
+
 ## 特性
 
 ### 核心能力
@@ -179,6 +207,11 @@ SEARCH_API=tavily
   - 通过 Tavily、Brave Search 等进行网络搜索
   - 使用 Jina 进行爬取
   - 高级内容提取
+  - 支持检索指定私有知识库
+
+- 📃 **RAG 集成**
+  - 支持 [RAGFlow](https://github.com/infiniflow/ragflow) 知识库
+  - 支持 [VikingDB](https://www.volcengine.com/docs/84313/1254457) 火山知识库
 
 - 🔗 **MCP 无缝集成**
   - 扩展私有域访问、知识图谱、网页浏览等能力

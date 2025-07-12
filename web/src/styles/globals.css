@@ -187,7 +187,7 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --brand: #5494f3;
+  --brand: rgb(17, 103, 234);
 
   --novel-highlight-default: #000000;
   --novel-highlight-purple: #3f2c4b;

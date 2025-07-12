@@ -23,19 +23,19 @@ event: message_chunk
 data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " reason it's trending, and some key statistics (stars, forks, contributors, etc.).\",\n  \"title\": \"Research Plan: Top Trending GitHub Repository Today"}
 
 event: message_chunk
-data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": "\",\n  \"steps\": [\n    {\n      \"need_web_search\": true,\n      \"title\": \"Identify and Profile the Top Trending Repository\",\n      \"description\": \"Identify the #1 trending repository on"}
+data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": "\",\n  \"steps\": [\n    {\n      \"need_search\": true,\n      \"title\": \"Identify and Profile the Top Trending Repository\",\n      \"description\": \"Identify the #1 trending repository on"}
 
 event: message_chunk
 data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " GitHub today. Collect the following information: repository name, repository owner/organization, a short description of the repository's purpose, the primary programming language used, and the reason GitHub marks it as trending (e.g., 'X new stars today"}
 
 event: message_chunk
-data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": "'). Note: ensure to filter for 'today' to get the current trending repo.\",\n      \"step_type\": \"research\"\n    },\n    {\n      \"need_web_search\": true,\n      \"title\": \"Gather Repository Statistics and Community Data\",\n      \"description\": \"Collect"}
+data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": "'). Note: ensure to filter for 'today' to get the current trending repo.\",\n      \"step_type\": \"research\"\n    },\n    {\n      \"need_search\": true,\n      \"title\": \"Gather Repository Statistics and Community Data\",\n      \"description\": \"Collect"}
 
 event: message_chunk
 data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " detailed statistics for the top trending repository. This includes the total number of stars, forks, open issues, closed issues, contributors, and recent commit activity. Also, gather data about the community's involvement, such as the number of active contributors in the last month, and any available information on significant discussions or contributions happening"}
 
 event: message_chunk
-data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " within the project. Check for recent release notes or announcements.\",\n      \"step_type\": \"research\"\n    },\n    {\n      \"need_web_search\": true,\n      \"title\": \"Determine Context and Significance\",\n      \"description\": \"Research the broader context and significance of the trending"}
+data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " within the project. Check for recent release notes or announcements.\",\n      \"step_type\": \"research\"\n    },\n    {\n      \"need_search\": true,\n      \"title\": \"Determine Context and Significance\",\n      \"description\": \"Research the broader context and significance of the trending"}
 
 event: message_chunk
 data: {"thread_id": "LmC3xxJCFljoFXggnmvst", "agent": "planner", "id": "run-33af75e6-c1b5-4276-9749-7cfb7a967402", "role": "assistant", "content": " repository. Determine the repository's purpose or function. Investigate the project's background, the problem it solves, or the features it provides. Identify the industry, user base, or application area it serves. Search for recent news, articles, or blog posts mentioning the repository and its impact or potential. Identify its license"}

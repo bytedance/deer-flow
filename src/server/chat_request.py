@@ -5,6 +5,9 @@ from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from src.rag.retriever import Resource
+from src.config.report_style import ReportStyle
+
 
 class ContentItem(BaseModel):
     type: str = Field(..., description="The type of content (text, image, etc.)")
@@ -27,6 +30,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: Optional[List[ChatMessage]] = Field(
         [], description="History of messages between the user and the assistant"
+    )
+    resources: Optional[List[Resource]] = Field(
+        [], description="Resources to be used for the research"
     )
     debug: Optional[bool] = Field(False, description="Whether to enable debug logging")
     thread_id: Optional[str] = Field(
@@ -52,6 +58,12 @@ class ChatRequest(BaseModel):
     )
     enable_background_investigation: Optional[bool] = Field(
         True, description="Whether to get background investigation before plan"
+    )
+    report_style: Optional[ReportStyle] = Field(
+        ReportStyle.ACADEMIC, description="The style of the report"
+    )
+    enable_deep_thinking: Optional[bool] = Field(
+        False, description="Whether to enable deep thinking"
     )
 
 
@@ -84,4 +96,14 @@ class GenerateProseRequest(BaseModel):
     option: str = Field(..., description="The option of the prose writer")
     command: Optional[str] = Field(
         "", description="The user custom command of the prose writer"
+    )
+
+
+class EnhancePromptRequest(BaseModel):
+    prompt: str = Field(..., description="The original prompt to enhance")
+    context: Optional[str] = Field(
+        "", description="Additional context about the intended use"
+    )
+    report_style: Optional[str] = Field(
+        "academic", description="The style of the report"
     )

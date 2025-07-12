@@ -17,10 +17,13 @@ export interface Message {
   isStreaming?: boolean;
   content: string;
   contentChunks: string[];
+  reasoningContent?: string;
+  reasoningContentChunks?: string[];
   toolCalls?: ToolCallRuntime[];
   options?: Option[];
   finishReason?: "stop" | "interrupt" | "tool_calls";
   interruptFeedback?: string;
+  resources?: Array<Resource>;
 }
 
 export interface Option {
@@ -34,4 +37,9 @@ export interface ToolCallRuntime {
   args: Record<string, unknown>;
   argsChunks?: string[];
   result?: string;
+}
+
+export interface Resource {
+  uri: string;
+  title: string;
 }

@@ -53,10 +53,7 @@ export function ResearchReportBlock({
   // }, [isCompleted]);
 
   return (
-    <div
-      ref={contentRef}
-      className={cn("relative flex flex-col pt-4 pb-8", className)}
-    >
+    <div ref={contentRef} className={cn("w-full pt-4 pb-8", className)}>
       {!isReplay && isCompleted && editing ? (
         <ReportEditor
           content={message?.content}

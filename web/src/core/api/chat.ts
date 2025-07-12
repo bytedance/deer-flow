@@ -4,6 +4,7 @@
 import { env } from "~/env";
 
 import type { MCPServerMetadata } from "../mcp";
+import type { Resource } from "../messages";
 import { extractReplayIdFromSearchParams } from "../replay/get-replay-id";
 import { fetchStream } from "../sse";
 import { sleep } from "../utils";
@@ -15,12 +16,15 @@ export async function* chatStream(
   userMessage: string,
   params: {
     thread_id: string;
+    resources?: Array<Resource>;
     auto_accepted_plan: boolean;
     max_plan_iterations: number;
     max_step_num: number;
     max_search_results?: number;
     interrupt_feedback?: string;
+    enable_deep_thinking?: boolean;
     enable_background_investigation: boolean;
+    report_style?: "academic" | "popular_science" | "news" | "social_media";
     mcp_settings?: {
       servers: Record<
         string,
@@ -37,21 +41,26 @@ export async function* chatStream(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY ||
     location.search.includes("mock") ||
     location.search.includes("replay=")
-  ) {
+  ) 
     return yield* chatReplayStream(userMessage, params, options);
-  }
-  const stream = fetchStream(resolveServiceURL("chat/stream"), {
-    body: JSON.stringify({
-      messages: [{ role: "user", content: userMessage }],
-      ...params,
-    }),
-    signal: options.abortSignal,
-  });
-  for await (const event of stream) {
-    yield {
-      type: event.event,
-      data: JSON.parse(event.data),
-    } as ChatEvent;
+  
+  try{
+    const stream = fetchStream(resolveServiceURL("chat/stream"), {
+      body: JSON.stringify({
+        messages: [{ role: "user", content: userMessage }],
+        ...params,
+      }),
+      signal: options.abortSignal,
+    });
+    
+    for await (const event of stream) {
+      yield {
+        type: event.event,
+        data: JSON.parse(event.data),
+      } as ChatEvent;
+    }
+  }catch(e){
+    console.error(e);
   }
 }
 
@@ -101,7 +110,8 @@ async function* chatReplayStream(
   const text = await fetchReplay(replayFilePath, {
     abortSignal: options.abortSignal,
   });
-  const chunks = text.split("\n\n");
+  const normalizedText = text.replace(/\r\n/g, "\n");
+  const chunks = normalizedText.split("\n\n");
   for (const chunk of chunks) {
     const [eventRaw, dataRaw] = chunk.split("\n") as [string, string];
     const [, event] = eventRaw.split("event: ", 2) as [string, string];

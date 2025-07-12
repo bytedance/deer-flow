@@ -83,7 +83,7 @@ event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "\": [\n    {\n      \""}
 
 event: message_chunk
-data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_web_search\":"}
+data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_search\":"}
 
 event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": " true,\n      \""}
@@ -134,7 +134,7 @@ event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "    {\n      \""}
 
 event: message_chunk
-data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_web_search\":"}
+data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_search\":"}
 
 event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": " true,\n      \"title"}
@@ -194,7 +194,7 @@ event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "\"\n    },\n    {\n      \""}
 
 event: message_chunk
-data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_web_search\":"}
+data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": "need_search\":"}
 
 event: message_chunk
 data: {"thread_id": "5CG_qm7snTVKbpVCrWTon", "agent": "planner", "id": "run-3006007c-5c06-4500-ba23-3fab94c70ae7", "role": "assistant", "content": " true,\n      \"title"}

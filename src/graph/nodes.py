@@ -17,13 +17,14 @@ from src.tools.search import LoggedTavilySearch
 from src.tools import (
     crawl_tool,
     get_web_search_tool,
+    get_retriever_tool,
     python_repl_tool,
 )
 
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
 from src.llms.llm import get_llm_by_type
-from src.prompts.planner_model import Plan, StepType
+from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
 from src.utils.json_utils import repair_json_output
 
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 @tool
 def handoff_to_planner(
-    task_title: Annotated[str, "The title of the task to be handed off."],
+    research_topic: Annotated[str, "The topic of the research task to be handed off."],
     locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
 ):
     """Handoff to planner agent to do plan."""
@@ -44,22 +45,24 @@ def handoff_to_planner(
     return
 
 
-def background_investigation_node(
-    state: State, config: RunnableConfig
-) -> Command[Literal["planner"]]:
+def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
-    query = state["messages"][-1].content
-    if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY:
+    query = state.get("research_topic")
+    background_investigation_results = None
+    if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         searched_content = LoggedTavilySearch(
             max_results=configurable.max_search_results
-        ).invoke({"query": query})
-        background_investigation_results = None
+        ).invoke(query)
         if isinstance(searched_content, list):
             background_investigation_results = [
-                {"title": elem["title"], "content": elem["content"]}
-                for elem in searched_content
+                f"## {elem['title']}\n\n{elem['content']}" for elem in searched_content
             ]
+            return {
+                "background_investigation_results": "\n\n".join(
+                    background_investigation_results
+                )
+            }
         else:
             logger.error(
                 f"Tavily search returned malformed response: {searched_content}"
@@ -68,14 +71,11 @@ def background_investigation_node(
         background_investigation_results = get_web_search_tool(
             configurable.max_search_results
         ).invoke(query)
-    return Command(
-        update={
-            "background_investigation_results": json.dumps(
-                background_investigation_results, ensure_ascii=False
-            )
-        },
-        goto="planner",
-    )
+    return {
+        "background_investigation_results": json.dumps(
+            background_investigation_results, ensure_ascii=False
+        )
+    }
 
 
 def planner_node(
@@ -87,10 +87,8 @@ def planner_node(
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
     messages = apply_prompt_template("planner", state, configurable)
 
-    if (
-        plan_iterations == 0
-        and state.get("enable_background_investigation")
-        and state.get("background_investigation_results")
+    if state.get("enable_background_investigation") and state.get(
+        "background_investigation_results"
     ):
         messages += [
             {
@@ -103,8 +101,10 @@ def planner_node(
             }
         ]
 
-    if AGENT_LLM_MAP["planner"] == "basic":
-        llm = get_llm_by_type(AGENT_LLM_MAP["planner"]).with_structured_output(
+    if configurable.enable_deep_thinking:
+        llm = get_llm_by_type("reasoning")
+    elif AGENT_LLM_MAP["planner"] == "basic":
+        llm = get_llm_by_type("basic").with_structured_output(
             Plan,
             method="json_mode",
         )
@@ -116,7 +116,7 @@ def planner_node(
         return Command(goto="reporter")
 
     full_response = ""
-    if AGENT_LLM_MAP["planner"] == "basic":
+    if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
         response = llm.invoke(messages)
         full_response = response.model_dump_json(indent=4, exclude_none=True)
     else:
@@ -190,7 +190,7 @@ def human_feedback_node(
             goto = "reporter"
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 0:
+        if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
@@ -206,10 +206,11 @@ def human_feedback_node(
 
 
 def coordinator_node(
-    state: State,
+    state: State, config: RunnableConfig
 ) -> Command[Literal["planner", "background_investigator", "__end__"]]:
     """Coordinator node that communicate with customers."""
     logger.info("Coordinator talking.")
+    configurable = Configuration.from_runnable_config(config)
     messages = apply_prompt_template("coordinator", state)
     response = (
         get_llm_by_type(AGENT_LLM_MAP["coordinator"])
@@ -220,6 +221,7 @@ def coordinator_node(
 
     goto = "__end__"
     locale = state.get("locale", "en-US")  # Default locale if not specified
+    research_topic = state.get("research_topic", "")
 
     if len(response.tool_calls) > 0:
         goto = "planner"
@@ -230,8 +232,11 @@ def coordinator_node(
             for tool_call in response.tool_calls:
                 if tool_call.get("name", "") != "handoff_to_planner":
                     continue
-                if tool_locale := tool_call.get("args", {}).get("locale"):
-                    locale = tool_locale
+                if tool_call.get("args", {}).get("locale") and tool_call.get(
+                    "args", {}
+                ).get("research_topic"):
+                    locale = tool_call.get("args", {}).get("locale")
+                    research_topic = tool_call.get("args", {}).get("research_topic")
                     break
         except Exception as e:
             logger.error(f"Error processing tool calls: {e}")
@@ -242,14 +247,19 @@ def coordinator_node(
         logger.debug(f"Coordinator response: {response}")
 
     return Command(
-        update={"locale": locale},
+        update={
+            "locale": locale,
+            "research_topic": research_topic,
+            "resources": configurable.resources,
+        },
         goto=goto,
     )
 
 
-def reporter_node(state: State):
+def reporter_node(state: State, config: RunnableConfig):
     """Reporter node that write a final report."""
     logger.info("Reporter write final report")
+    configurable = Configuration.from_runnable_config(config)
     current_plan = state.get("current_plan")
     input_ = {
         "messages": [
@@ -259,7 +269,7 @@ def reporter_node(state: State):
         ],
         "locale": state.get("locale", "en-US"),
     }
-    invoke_messages = apply_prompt_template("reporter", input_)
+    invoke_messages = apply_prompt_template("reporter", input_, configurable)
     observations = state.get("observations", [])
 
     # Add a reminder about the new report format, citation style, and table usage
@@ -285,24 +295,10 @@ def reporter_node(state: State):
     return {"final_report": response_content}
 
 
-def research_team_node(
-    state: State,
-) -> Command[Literal["planner", "researcher", "coder"]]:
+def research_team_node(state: State):
     """Research team node that collaborates on tasks."""
     logger.info("Research team is collaborating on tasks.")
-    current_plan = state.get("current_plan")
-    if not current_plan or not current_plan.steps:
-        return Command(goto="planner")
-    if all(step.execution_res for step in current_plan.steps):
-        return Command(goto="planner")
-    for step in current_plan.steps:
-        if not step.execution_res:
-            break
-    if step.step_type and step.step_type == StepType.RESEARCH:
-        return Command(goto="researcher")
-    if step.step_type and step.step_type == StepType.PROCESSING:
-        return Command(goto="coder")
-    return Command(goto="planner")
+    pass
 
 
 async def _execute_agent_step(
@@ -326,14 +322,14 @@ async def _execute_agent_step(
         logger.warning("No unexecuted step found")
         return Command(goto="research_team")
 
-    logger.info(f"Executing step: {current_step.title}")
+    logger.info(f"Executing step: {current_step.title}, agent: {agent_name}")
 
     # Format completed steps information
     completed_steps_info = ""
     if completed_steps:
         completed_steps_info = "# Existing Research Findings\n\n"
         for i, step in enumerate(completed_steps):
-            completed_steps_info += f"## Existing Finding {i+1}: {step.title}\n\n"
+            completed_steps_info += f"## Existing Finding {i + 1}: {step.title}\n\n"
             completed_steps_info += f"<finding>\n{step.execution_res}\n</finding>\n\n"
 
     # Prepare the input for the agent with completed steps info
@@ -347,6 +343,19 @@ async def _execute_agent_step(
 
     # Add citation reminder for researcher agent
     if agent_name == "researcher":
+        if state.get("resources"):
+            resources_info = "**The user mentioned the following resource files:**\n\n"
+            for resource in state.get("resources"):
+                resources_info += f"- {resource.title} ({resource.description})\n"
+
+            agent_input["messages"].append(
+                HumanMessage(
+                    content=resources_info
+                    + "\n\n"
+                    + "You MUST use the **local_search_tool** to retrieve the information from the resource files.",
+                )
+            )
+
         agent_input["messages"].append(
             HumanMessage(
                 content="IMPORTANT: DO NOT include inline citations in the text. Instead, track all sources and include a References section at the end using link reference format. Include an empty line between each citation for better readability. Use this format for each reference:\n- [Source Title](URL)\n\n- [Another Source](URL)",
@@ -377,6 +386,7 @@ async def _execute_agent_step(
         )
         recursion_limit = default_recursion_limit
 
+    logger.info(f"Agent input: {agent_input}")
     result = await agent.ainvoke(
         input=agent_input, config={"recursion_limit": recursion_limit}
     )
@@ -468,11 +478,16 @@ async def researcher_node(
     """Researcher node that do research"""
     logger.info("Researcher node is researching.")
     configurable = Configuration.from_runnable_config(config)
+    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+    retriever_tool = get_retriever_tool(state.get("resources", []))
+    if retriever_tool:
+        tools.insert(0, retriever_tool)
+    logger.info(f"Researcher tools: {tools}")
     return await _setup_and_execute_agent_step(
         state,
         config,
         "researcher",
-        [get_web_search_tool(configurable.max_search_results), crawl_tool],
+        tools,
     )
 
 

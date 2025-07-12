@@ -62,12 +62,21 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.2.0
         version: 1.2.0(@types/react-dom@19.1.1(@types/react@19.1.2))(@types/react@19.1.2)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/mentions':
+        specifier: ^1.2.0
+        version: 1.2.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       '@t3-oss/env-nextjs':
         specifier: ^0.11.0
         version: 0.11.1(typescript@5.8.3)(zod@3.24.3)
       '@tailwindcss/typography':
         specifier: ^0.5.16
         version: 0.5.16(tailwindcss@4.1.4)
+      '@tiptap/extension-document':
+        specifier: ^2.12.0
+        version: 2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
+      '@tiptap/extension-mention':
+        specifier: ^2.12.0
+        version: 2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)(@tiptap/suggestion@2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7))
       '@tiptap/extension-table':
         specifier: ^2.11.7
         version: 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)
@@ -80,6 +89,9 @@ importers:
       '@tiptap/extension-table-row':
         specifier: ^2.11.7
         version: 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
+      '@tiptap/extension-text':
+        specifier: ^2.12.0
+        version: 2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/react':
         specifier: ^2.11.7
         version: 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
@@ -167,6 +179,9 @@ importers:
       tailwind-merge:
         specifier: ^3.2.0
         version: 3.2.0
+      tippy.js:
+        specifier: ^6.3.7
+        version: 6.3.7
       tiptap-markdown:
         specifier: ^0.8.10
         version: 0.8.10(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
@@ -210,6 +225,9 @@ importers:
       '@types/react-syntax-highlighter':
         specifier: ^15.5.13
         version: 15.5.13
+      dotenv-cli:
+        specifier: ^8.0.0
+        version: 8.0.0
       eslint:
         specifier: ^9.23.0
         version: 9.24.0(jiti@2.4.2)
@@ -1193,6 +1211,56 @@ packages:
   '@radix-ui/rect@1.1.1':
     resolution: {integrity: sha512-HPwpGIzkl28mWyZqG52jiqDJ12waP11Pa1lGoiyUkIEuMLBP0oeK/C89esbXrxsky5we7dfd8U58nm0SgAWpVw==}
 
+  '@rc-component/input@1.0.1':
+    resolution: {integrity: sha512-omxsjWpB+RamzDDB0NzgV6qI7Ok/U6nrN2KLL/hLZJcI7sZZgLYAN+Xs1pN7OYBnUeyn25PizcntEE0nofHv8Q==}
+    peerDependencies:
+      react: '>=16.0.0'
+      react-dom: '>=16.0.0'
+
+  '@rc-component/mentions@1.2.0':
+    resolution: {integrity: sha512-dSr9mX5bQWDegeVLr+NoffjZO5paG/nzM5f+RVslpznfVqR5d3c+xan+f6ZqZWHJqJOfROqNGAkUb8pqqAV7wQ==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  '@rc-component/menu@1.1.3':
+    resolution: {integrity: sha512-NN/J0nJFwwDfQBycl9mordDTBdSai5Ie4nxaGkH2eHVa37KjyhpU98EtcVb/ss393I7SZTDCvoylS3MQOjgYkw==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  '@rc-component/motion@1.1.4':
+    resolution: {integrity: sha512-rz3+kqQ05xEgIAB9/UKQZKCg5CO/ivGNU78QWYKVfptmbjJKynZO4KXJ7pJD3oMxE9aW94LD/N3eppXWeysTjw==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  '@rc-component/portal@2.0.0':
+    resolution: {integrity: sha512-337ADhBfgH02S8OujUl33OT+8zVJ67eyuUq11j/dE71rXKYNihMsggW8R2VfI2aL3SciDp8gAFsmPVoPkxLUGw==}
+    engines: {node: '>=12.x'}
+    peerDependencies:
+      react: '>=18.0.0'
+      react-dom: '>=18.0.0'
+
+  '@rc-component/resize-observer@1.0.0':
+    resolution: {integrity: sha512-inR8Ka87OOwtrDJzdVp2VuEVlc5nK20lHolvkwFUnXwV50p+nLhKny1NvNTCKvBmS/pi/rTn/1Hvsw10sRRnXA==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  '@rc-component/textarea@1.0.0':
+    resolution: {integrity: sha512-GuXakeRWZuWUnF2sqfC8RjtzfAh5UI89dPk6r5SgosyQGfQIueuN8LkWmFq5OKTOJIlc82MOjHiPBigKB9+KGw==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  '@rc-component/trigger@3.4.0':
+    resolution: {integrity: sha512-Vu+RS7bGAHHNtzP6EzrMwH+xiZl+SHQgR98oAUXtoQIy4+4lsSppwQPcl6Q7ORZuZevil1BSw4GHXNWD8BJOXw==}
+    engines: {node: '>=8.x'}
+    peerDependencies:
+      react: '>=18.0.0'
+      react-dom: '>=18.0.0'
+
   '@rc-component/util@1.2.1':
     resolution: {integrity: sha512-AUVu6jO+lWjQnUOOECwu8iR0EdElQgWW5NBv5vP/Uf9dWbAX3udhMutRlkVXjuac2E40ghkFy+ve00mc/3Fymg==}
     peerDependencies:
@@ -1399,8 +1467,8 @@ packages:
       '@tiptap/core': ^2.7.0
       '@tiptap/extension-text-style': ^2.7.0
 
-  '@tiptap/extension-document@2.11.7':
-    resolution: {integrity: sha512-95ouJXPjdAm9+VBRgFo4lhDoMcHovyl/awORDI8gyEn0Rdglt+ZRZYoySFzbVzer9h0cre+QdIwr9AIzFFbfdA==}
+  '@tiptap/extension-document@2.12.0':
+    resolution: {integrity: sha512-sA1Q+mxDIv0Y3qQTBkYGwknNbDcGFiJ/fyAFholXpqbrcRx3GavwR/o0chBdsJZlFht0x7AWGwUYWvIo7wYilA==}
     peerDependencies:
       '@tiptap/core': ^2.7.0
 
@@ -1470,6 +1538,13 @@ packages:
     peerDependencies:
       '@tiptap/core': ^2.7.0
 
+  '@tiptap/extension-mention@2.12.0':
+    resolution: {integrity: sha512-+b/fqOU+pRWWAo0ZfyInkhkvV0Ub5RpNrYZ45v2nn5PjbXbxyxNQ51zT6cGk2F6Jmc6UBmlR8iqqNTIQY9ieEg==}
+    peerDependencies:
+      '@tiptap/core': ^2.7.0
+      '@tiptap/pm': ^2.7.0
+      '@tiptap/suggestion': ^2.7.0
+
   '@tiptap/extension-ordered-list@2.11.7':
     resolution: {integrity: sha512-bLGCHDMB0vbJk7uu8bRg8vES3GsvxkX7Cgjgm/6xysHFbK98y0asDtNxkW1VvuRreNGz4tyB6vkcVCfrxl4jKw==}
     peerDependencies:
@@ -1528,8 +1603,8 @@ packages:
     peerDependencies:
       '@tiptap/core': ^2.7.0
 
-  '@tiptap/extension-text@2.11.7':
-    resolution: {integrity: sha512-wObCn8qZkIFnXTLvBP+X8KgaEvTap/FJ/i4hBMfHBCKPGDx99KiJU6VIbDXG8d5ZcFZE0tOetK1pP5oI7qgMlQ==}
+  '@tiptap/extension-text@2.12.0':
+    resolution: {integrity: sha512-0ytN9V1tZYTXdiYDQg4FB2SQ56JAJC9r/65snefb9ztl+gZzDrIvih7CflHs1ic9PgyjexfMLeH+VzuMccNyZw==}
     peerDependencies:
       '@tiptap/core': ^2.7.0
 
@@ -2220,6 +2295,18 @@ packages:
   doctrine@2.1.0:
     resolution: {integrity: sha512-35mSku4ZXK0vfCuHEDAwt55dg2jNajHZ1odvF+8SSr82EsZY4QmXfuWso8oEd8zRhVObSN18aM0CjSdoBX7zIw==}
     engines: {node: '>=0.10.0'}
+
+  dotenv-cli@8.0.0:
+    resolution: {integrity: sha512-aLqYbK7xKOiTMIRf1lDPbI+Y+Ip/wo5k3eyp6ePysVaSqbyxjyK3dK35BTxG+rmd7djf5q2UPs4noPNH+cj0Qw==}
+    hasBin: true
+
+  dotenv-expand@10.0.0:
+    resolution: {integrity: sha512-GopVGCpVS1UKH75VKHGuQFqS1Gusej0z4FyQkPdwjil2gNIv+LNsqBlboOzpJFZKVT95GkCyWJbBSdFEFUWI2A==}
+    engines: {node: '>=12'}
+
+  dotenv@16.5.0:
+    resolution: {integrity: sha512-m/C+AwOAr9/W1UOIZUo232ejMNnJAJtYQjUbHoNTBNTJSvqzzDh7vnrei3o3r3m9blf6ZoDkvcw0VmozNRFJxg==}
+    engines: {node: '>=12'}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -3520,6 +3607,24 @@ packages:
     peerDependencies:
       webpack: ^4.0.0 || ^5.0.0
 
+  rc-overflow@1.4.1:
+    resolution: {integrity: sha512-3MoPQQPV1uKyOMVNd6SZfONi+f3st0r8PksexIdBTeIYbMX0Jr+k7pHEDvsXtR4BpCv90/Pv2MovVNhktKrwvw==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  rc-resize-observer@1.4.3:
+    resolution: {integrity: sha512-YZLjUbyIWox8E9i9C3Tm7ia+W7euPItNWSPX5sCcQTYbnwDb5uNpnLHQCG1f22oZWUhLw4Mv2tFmeWe68CDQRQ==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
+  rc-util@5.44.4:
+    resolution: {integrity: sha512-resueRJzmHG9Q6rI/DfK6Kdv9/Lfls05vzMs1Sk3M2P+3cJa+MakaZyWY8IPfehVuhPJFKrIY1IK4GqbiaiY5w==}
+    peerDependencies:
+      react: '>=16.9.0'
+      react-dom: '>=16.9.0'
+
   react-css-styled@1.1.9:
     resolution: {integrity: sha512-M7fJZ3IWFaIHcZEkoFOnkjdiUFmwd8d+gTh2bpqMOcnxy/0Gsykw4dsL4QBiKsxcGow6tETUa4NAUcmJF+/nfw==}
 
@@ -3638,6 +3743,9 @@ packages:
   require-from-string@2.0.2:
     resolution: {integrity: sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==}
     engines: {node: '>=0.10.0'}
+
+  resize-observer-polyfill@1.5.1:
+    resolution: {integrity: sha512-LwZrotdHOo12nQuZlHEmtuXdqGoOD0OhaxopaNFxWzInpEgaLWoVuAMbTzixuosCx2nEG58ngzW3vxdWoxIgdg==}
 
   resolve-from@4.0.0:
     resolution: {integrity: sha512-pb/MYmXstAkysRFx8piNI1tGFNQIFA3vkE3Gq4EuA1dF6gHp/+vgZqsCGJapvy8N3Q+4o7FwvquPJcnZ7RYy4g==}
@@ -5047,6 +5155,74 @@ snapshots:
 
   '@radix-ui/rect@1.1.1': {}
 
+  '@rc-component/input@1.0.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/mentions@1.2.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/input': 1.0.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/menu': 1.1.3(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/textarea': 1.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/trigger': 3.4.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/menu@1.1.3(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/motion': 1.1.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/trigger': 3.4.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      rc-overflow: 1.4.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/motion@1.1.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/portal@2.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/resize-observer@1.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/textarea@1.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/input': 1.0.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/resize-observer': 1.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  '@rc-component/trigger@3.4.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
+    dependencies:
+      '@rc-component/motion': 1.1.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/portal': 2.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/resize-observer': 1.0.0(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      '@rc-component/util': 1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      classnames: 2.5.1
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
   '@rc-component/util@1.2.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0)':
     dependencies:
       react: 19.1.0
@@ -5216,7 +5392,7 @@ snapshots:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
       '@tiptap/extension-text-style': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
 
-  '@tiptap/extension-document@2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))':
+  '@tiptap/extension-document@2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))':
     dependencies:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
 
@@ -5276,6 +5452,12 @@ snapshots:
     dependencies:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
 
+  '@tiptap/extension-mention@2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)(@tiptap/suggestion@2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7))':
+    dependencies:
+      '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
+      '@tiptap/pm': 2.11.7
+      '@tiptap/suggestion': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)
+
   '@tiptap/extension-ordered-list@2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))':
     dependencies:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
@@ -5323,7 +5505,7 @@ snapshots:
     dependencies:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
 
-  '@tiptap/extension-text@2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))':
+  '@tiptap/extension-text@2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))':
     dependencies:
       '@tiptap/core': 2.11.7(@tiptap/pm@2.11.7)
 
@@ -5376,7 +5558,7 @@ snapshots:
       '@tiptap/extension-bullet-list': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-code': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-code-block': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)
-      '@tiptap/extension-document': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
+      '@tiptap/extension-document': 2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-dropcursor': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)
       '@tiptap/extension-gapcursor': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))(@tiptap/pm@2.11.7)
       '@tiptap/extension-hard-break': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
@@ -5388,7 +5570,7 @@ snapshots:
       '@tiptap/extension-ordered-list': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-paragraph': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-strike': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
-      '@tiptap/extension-text': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
+      '@tiptap/extension-text': 2.12.0(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/extension-text-style': 2.11.7(@tiptap/core@2.11.7(@tiptap/pm@2.11.7))
       '@tiptap/pm': 2.11.7
 
@@ -6105,6 +6287,17 @@ snapshots:
   doctrine@2.1.0:
     dependencies:
       esutils: 2.0.3
+
+  dotenv-cli@8.0.0:
+    dependencies:
+      cross-spawn: 7.0.6
+      dotenv: 16.5.0
+      dotenv-expand: 10.0.0
+      minimist: 1.2.8
+
+  dotenv-expand@10.0.0: {}
+
+  dotenv@16.5.0: {}
 
   dunder-proto@1.0.1:
     dependencies:
@@ -7816,6 +8009,31 @@ snapshots:
       schema-utils: 3.3.0
       webpack: 5.99.6
 
+  rc-overflow@1.4.1(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@babel/runtime': 7.27.0
+      classnames: 2.5.1
+      rc-resize-observer: 1.4.3(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      rc-util: 5.44.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  rc-resize-observer@1.4.3(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@babel/runtime': 7.27.0
+      classnames: 2.5.1
+      rc-util: 5.44.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+      resize-observer-polyfill: 1.5.1
+
+  rc-util@5.44.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@babel/runtime': 7.27.0
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+      react-is: 18.3.1
+
   react-css-styled@1.1.9:
     dependencies:
       css-styled: 1.0.8
@@ -8019,6 +8237,8 @@ snapshots:
       unified: 11.0.5
 
   require-from-string@2.0.2: {}
+
+  resize-observer-polyfill@1.5.1: {}
 
   resolve-from@4.0.0: {}
 

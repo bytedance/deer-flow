@@ -140,7 +140,7 @@ event: message_chunk
 data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "research\"\n    },\n    {\n"}
 
 event: message_chunk
-data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "      \"need_web_search\":"}
+data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "      \"need_search\":"}
 
 event: message_chunk
 data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": " true,\n      \"title"}
@@ -200,7 +200,7 @@ event: message_chunk
 data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "research\"\n    },\n    {\n"}
 
 event: message_chunk
-data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "      \"need_web_search\":"}
+data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": "      \"need_search\":"}
 
 event: message_chunk
 data: {"thread_id": "01uPkjxNhUsYZHQ1DrkhK", "agent": "planner", "id": "run-77b32288-ec82-4b8e-b815-d403687915bd", "role": "assistant", "content": " true,\n      \"title"}

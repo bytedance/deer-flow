@@ -12,6 +12,9 @@
 
 **DeerFlow** (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is a community-driven Deep Research framework that builds upon the incredible work of the open source community. Our goal is to combine language models with specialized tools for tasks like web search, crawling, and Python code execution, while giving back to the community that made this possible.
 
+Currently, DeerFlow has officially entered the [FaaS Application Center of Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market). Users can experience it online through the [experience link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) to intuitively feel its powerful functions and convenient operations. At the same time, to meet the deployment needs of different users, DeerFlow supports one-click deployment based on Volcengine. Click the [deployment link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow) to quickly complete the deployment process and start an efficient research journey.
+
+
 Please visit [our official website](https://deerflow.tech/) for more details.
 
 ## Demo
@@ -144,6 +147,8 @@ Explore more details in the [`web`](./web/) directory.
 
 ## Supported Search Engines
 
+### Web Search
+
 DeerFlow supports multiple search engines that can be configured in your `.env` file using the `SEARCH_API` variable:
 
 - **Tavily** (default): A specialized search API for AI applications
@@ -168,6 +173,19 @@ To configure your preferred search engine, set the `SEARCH_API` variable in your
 SEARCH_API=tavily
 ```
 
+### Private Knowledgebase
+
+DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you can use your private documents to answer questions.
+
+- **[RAGFlow](https://ragflow.io/docs/dev/)**：open source RAG engine
+   ```
+   # examples in .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   ```
+
 ## Features
 
 ### Core Capabilities
@@ -184,6 +202,11 @@ SEARCH_API=tavily
   - Web search via Tavily, Brave Search and more
   - Crawling with Jina
   - Advanced content extraction
+  - Support for private knowledgebase
+
+- 📃 **RAG Integration**
+
+  - Supports mentioning files from [RAGFlow](https://github.com/infiniflow/ragflow) within the input box. [Start up RAGFlow server](https://ragflow.io/docs/dev/).
 
 - 🔗 **MCP Seamless Integration**
   - Expand capabilities for private domain access, knowledge graph, web browsing and more
@@ -347,6 +370,7 @@ When you submit a research topic in the Studio UI, you'll be able to see the ent
 DeerFlow supports LangSmith tracing to help you debug and monitor your workflows. To enable LangSmith tracing:
 
 1. Make sure your `.env` file has the following configurations (see `.env.example`):
+
    ```bash
    LANGSMITH_TRACING=true
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
@@ -534,6 +558,8 @@ We would like to extend our sincere appreciation to the following projects for t
 
 - **[LangChain](https://github.com/langchain-ai/langchain)**: Their exceptional framework powers our LLM interactions and chains, enabling seamless integration and functionality.
 - **[LangGraph](https://github.com/langchain-ai/langgraph)**: Their innovative approach to multi-agent orchestration has been instrumental in enabling DeerFlow's sophisticated workflows.
+- **[Novel](https://github.com/steven-tey/novel)**: Their Notion-style WYSIWYG editor supports our report editing and AI-assisted rewriting.
+- **[RAGFlow](https://github.com/infiniflow/ragflow)**: We have achieved support for research on users' private knowledge bases through integration with RAGFlow.
 
 These projects exemplify the transformative power of open-source collaboration, and we are proud to build upon their foundations.
 

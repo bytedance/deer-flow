@@ -49,7 +49,7 @@ BASIC_MODEL:
 BASIC_MODEL:
   base_url: "https://api.deepseek.com"
   model: "deepseek-chat"
-  api_key: YOU_API_KEY
+  api_key: YOUR_API_KEY
 
 # An example of Google Gemini models using OpenAI-Compatible interface
 BASIC_MODEL:
@@ -58,15 +58,31 @@ BASIC_MODEL:
   api_key: YOUR_API_KEY
 ```
 
-### How to use Ollama models?
+### How to use models with self-signed SSL certificates?
 
-DeerFlow supports the integration of Ollama models. You can refer to [litellm Ollama](https://docs.litellm.ai/docs/providers/ollama). <br>
-The following is a configuration example of `conf.yaml` for using Ollama models:
+If your LLM server uses self-signed SSL certificates, you can disable SSL certificate verification by adding the `verify_ssl: false` parameter to your model configuration:
 
 ```yaml
 BASIC_MODEL:
-  model: "ollama/ollama-model-name"
-  base_url: "http://localhost:11434" # Local service address of Ollama, which can be started/viewed via ollama serve
+  base_url: "https://your-llm-server.com/api/v1"
+  model: "your-model-name"
+  api_key: YOUR_API_KEY
+  verify_ssl: false  # Disable SSL certificate verification for self-signed certificates
+```
+
+> [!WARNING]
+> Disabling SSL certificate verification reduces security and should only be used in development environments or when you trust the LLM server. In production environments, it's recommended to use properly signed SSL certificates.
+
+### How to use Ollama models?
+
+DeerFlow supports the integration of Ollama models. You can refer to [litellm Ollama](https://docs.litellm.ai/docs/providers/ollama). <br>
+The following is a configuration example of `conf.yaml` for using Ollama models(you might need to run the 'ollama serve' first):
+
+```yaml
+BASIC_MODEL:
+  model: "model-name"  # Model name, which supports the completions API(important), such as: qwen3:8b, mistral-small3.1:24b, qwen2.5:3b
+  base_url: "http://localhost:11434/v1" # Local service address of Ollama, which can be started/viewed via ollama serve
+  api_key: "whatever"  # Mandatory, fake api_key with a random string you like :-)
 ```
 
 ### How to use OpenRouter models?
@@ -99,3 +115,25 @@ BASIC_MODEL:
   api_version: $AZURE_API_VERSION
   api_key: $AZURE_API_KEY
 ```
+## About Search Engine
+
+### How to control search domains for Tavily?
+
+DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.
+
+`Tips`: it only supports Tavily currently. 
+
+You can configure domain filtering in your `conf.yaml` file as follows:
+
+```yaml
+SEARCH_ENGINE:
+  engine: tavily
+  # Only include results from these domains (whitelist)
+  include_domains:
+    - trusted-news.com
+    - gov.org
+    - reliable-source.edu
+  # Exclude results from these domains (blacklist)
+  exclude_domains:
+    - unreliable-site.com
+    - spam-domain.net

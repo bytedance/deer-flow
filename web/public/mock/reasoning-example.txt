@@ -1,0 +1,93 @@
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "reasoning_content": "我需要仔细分析用户的问题。用户想了解什么是vibe coding。这是一个相对较新的概念，我需要收集相关信息来提供全面的答案。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "reasoning_content": "\n\n首先，我应该理解vibe coding的基本定义和概念。这可能涉及编程文化、开发方法论或者特定的编程风格。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "reasoning_content": "\n\n然后，我需要研究它的起源、核心理念，以及在实际开发中的应用。这将帮助我提供一个全面而准确的答案。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "reasoning_content": "\n\n让我思考一下需要收集哪些具体信息：\n1. Vibe coding的定义和起源\n2. 核心理念和哲学\n3. 实际应用场景和案例\n4. 与传统编程方法的区别\n5. 社区和工具支持"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "reasoning_content": "\n\n基于这些思考，我认为需要进行深入的研究来收集足够的信息。现在我将制定一个详细的研究计划。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "{"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  \"locale\": \"zh-CN\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  \"has_enough_context\": false,"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  \"thought\": \"用户想了解vibe coding的概念。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "由于目前没有足够的信息来全面回答这个问题，"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "我需要收集更多相关数据。\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  \"title\": \"Vibe Coding 概念研究\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  \"steps\": ["}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n    {"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"need_search\": true,"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"title\": \"Vibe Coding 基本定义和概念\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"description\": \"收集关于vibe coding的基本定义、"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "起源、核心概念和目标的信息。"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "查找官方定义、行业专家的解释以及相关的编程文化背景。\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"step_type\": \"research\""}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n    },"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n    {"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"need_search\": true,"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"title\": \"实际应用案例和最佳实践\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"description\": \"研究vibe coding在实际项目中的应用案例，"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "了解最佳实践和常见的实现方法。\","}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n      \"step_type\": \"research\""}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n    }"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n  ]"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "content": "\n}"}
+
+event: message_chunk
+data: {"thread_id": "test-thread", "agent": "planner", "id": "test-id", "role": "assistant", "finish_reason": "stop"}
+

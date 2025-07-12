@@ -23,6 +23,8 @@ export const Link = ({
       if (call && call.name === "web_search" && call.result) {
         const result = JSON.parse(call.result) as Array<{ url: string }>;
         result.forEach((r) => {
+          // encodeURI is used to handle the case where the link contains chinese or other special characters
+          links.add(encodeURI(r.url));
           links.add(r.url);
         });
       }
@@ -37,7 +39,7 @@ export const Link = ({
   }, [credibleLinks, href, responding, checkLinkCredibility]);
 
   return (
-    <span className="flex items-center gap-1.5">
+    <span className="inline-flex items-center gap-1.5">
       <a href={href} target="_blank" rel="noopener noreferrer">
         {children}
       </a>
