@@ -173,8 +173,8 @@ class TestVikingDBKnowledgeBaseProviderPrepareRequest:
         """Test basic request preparation"""
         with (
             patch("src.rag.vikingdb_knowledge_base.Request") as mock_request,
-            patch("src.rag.vikingdb_knowledge_base.Credentials") as mock_credentials,
-            patch("src.rag.vikingdb_knowledge_base.SignerV4.sign") as mock_sign,
+            patch("src.rag.vikingdb_knowledge_base.Credentials") as _mock_credentials,
+            patch("src.rag.vikingdb_knowledge_base.SignerV4.sign") as _mock_sign,
         ):
 
             mock_req_instance = MagicMock()

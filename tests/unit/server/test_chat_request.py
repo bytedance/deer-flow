@@ -1,7 +1,6 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import asyncio  # Ensure asyncio is imported
 import pytest
 from pydantic import ValidationError
 from src.config.report_style import ReportStyle
