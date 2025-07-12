@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Lightbulb,
 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { LoadingAnimation } from "~/components/deer-flow/loading-animation";
@@ -252,6 +253,7 @@ function ResearchCard({
   researchId: string;
   onToggleResearch?: () => void;
 }) {
+  const t = useTranslations("chat.research");
   const reportId = useStore((state) => state.researchReportIds.get(researchId));
   const hasReport = reportId !== undefined;
   const reportGenerating = useStore(
@@ -260,10 +262,10 @@ function ResearchCard({
   const openResearchId = useStore((state) => state.openResearchId);
   const state = useMemo(() => {
     if (hasReport) {
-      return reportGenerating ? "Generating report..." : "Report generated";
+      return reportGenerating ? t("generatingReport") : t("reportGenerated");
     }
-    return "Researching...";
-  }, [hasReport, reportGenerating]);
+    return t("researching");
+  }, [hasReport, reportGenerating, t]);
   const msg = useResearchMessage(researchId);
   const title = useMemo(() => {
     if (msg) {
@@ -283,8 +285,8 @@ function ResearchCard({
     <Card className={cn("w-full", className)}>
       <CardHeader>
         <CardTitle>
-          <RainbowText animated={state !== "Report generated"}>
-            {title !== undefined && title !== "" ? title : "Deep Research"}
+          <RainbowText animated={state !== t("reportGenerated")}>
+            {title !== undefined && title !== "" ? title : t("deepResearch")}
           </RainbowText>
         </CardTitle>
       </CardHeader>
@@ -297,7 +299,7 @@ function ResearchCard({
             variant={!openResearchId ? "default" : "outline"}
             onClick={handleOpen}
           >
-            {researchId !== openResearchId ? "Open" : "Close"}
+            {researchId !== openResearchId ? t("open") : t("close")}
           </Button>
         </div>
       </CardFooter>
@@ -316,6 +318,7 @@ function ThoughtBlock({
   isStreaming?: boolean;
   hasMainContent?: boolean;
 }) {
+  const t = useTranslations("chat.research");
   const [isOpen, setIsOpen] = useState(true);
 
   const [hasAutoCollapsed, setHasAutoCollapsed] = useState(false);
@@ -359,7 +362,7 @@ function ThoughtBlock({
                   isStreaming ? "text-primary" : "text-foreground",
                 )}
               >
-                Deep Thinking
+                {t("deepThinking")}
               </span>
               {isStreaming && <LoadingAnimation className="ml-2 scale-75" />}
               <div className="flex-grow" />
@@ -432,6 +435,7 @@ function PlanCard({
   ) => void;
   waitForFeedback?: boolean;
 }) {
+  const t = useTranslations("chat.research");
   const plan = useMemo<{
     title?: string;
     thought?: string;
@@ -482,7 +486,7 @@ function PlanCard({
                   {`### ${
                     plan.title !== undefined && plan.title !== ""
                       ? plan.title
-                      : "Deep Research"
+                      : t("deepResearch")
                   }`}
                 </Markdown>
               </CardTitle>

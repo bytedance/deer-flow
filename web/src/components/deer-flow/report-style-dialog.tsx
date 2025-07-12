@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import { Check, FileText, Newspaper, Users, GraduationCap } from "lucide-react";
 
@@ -21,31 +22,32 @@ import { Tooltip } from "./tooltip";
 const REPORT_STYLES = [
   {
     value: "academic" as const,
-    label: "Academic",
-    description: "Formal, objective, and analytical with precise terminology",
+    labelKey: "academic",
+    descriptionKey: "academicDesc",
     icon: GraduationCap,
   },
   {
     value: "popular_science" as const,
-    label: "Popular Science",
-    description: "Engaging and accessible for general audience",
+    labelKey: "popularScience",
+    descriptionKey: "popularScienceDesc",
     icon: FileText,
   },
   {
     value: "news" as const,
-    label: "News",
-    description: "Factual, concise, and impartial journalistic style",
+    labelKey: "news",
+    descriptionKey: "newsDesc",
     icon: Newspaper,
   },
   {
     value: "social_media" as const,
-    label: "Social Media",
-    description: "Concise, attention-grabbing, and shareable",
+    labelKey: "socialMedia",
+    descriptionKey: "socialMediaDesc",
     icon: Users,
   },
 ];
 
 export function ReportStyleDialog() {
+  const t = useTranslations("settings.reportStyle");
   const [open, setOpen] = useState(false);
   const currentStyle = useSettingsStore((state) => state.general.reportStyle);
 
@@ -68,12 +70,9 @@ export function ReportStyleDialog() {
         title={
           <div>
             <h3 className="mb-2 font-bold">
-              Writing Style: {currentStyleConfig.label}
+              {t("writingStyle")}: {t(currentStyleConfig.labelKey)}
             </h3>
-            <p>
-              Choose the writing style for your research reports. Different
-              styles are optimized for different audiences and purposes.
-            </p>
+            <p>{t("chooseDesc")}</p>
           </div>
         }
       >
@@ -82,17 +81,14 @@ export function ReportStyleDialog() {
             className="!border-brand !text-brand rounded-2xl"
             variant="outline"
           >
-            <CurrentIcon className="h-4 w-4" /> {currentStyleConfig.label}
+            <CurrentIcon className="h-4 w-4" /> {t(currentStyleConfig.labelKey)}
           </Button>
         </DialogTrigger>
       </Tooltip>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle>Choose Writing Style</DialogTitle>
-          <DialogDescription>
-            Select the writing style for your research reports. Each style is
-            optimized for different audiences and purposes.
-          </DialogDescription>
+          <DialogTitle>{t("chooseTitle")}</DialogTitle>
+          <DialogDescription>{t("chooseDesc")}</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 py-4">
           {REPORT_STYLES.map((style) => {
@@ -111,11 +107,11 @@ export function ReportStyleDialog() {
                 <Icon className="mt-0.5 h-5 w-5 shrink-0" />
                 <div className="flex-1 space-y-1">
                   <div className="flex items-center gap-2">
-                    <h4 className="font-medium">{style.label}</h4>
+                    <h4 className="font-medium">{t(style.labelKey)}</h4>
                     {isSelected && <Check className="text-primary h-4 w-4" />}
                   </div>
                   <p className="text-muted-foreground text-sm">
-                    {style.description}
+                    {t(style.descriptionKey)}
                   </p>
                 </div>
               </button>

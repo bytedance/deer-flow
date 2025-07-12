@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { Settings } from "lucide-react";
+import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
@@ -29,6 +30,8 @@ import { cn } from "~/lib/utils";
 import { SETTINGS_TABS } from "../tabs";
 
 export function SettingsDialog() {
+  const t = useTranslations('settings');
+  const tCommon = useTranslations('common');
   const { isReplay } = useReplay();
   const [activeTabId, setActiveTabId] = useState(SETTINGS_TABS[0]!.id);
   const [open, setOpen] = useState(false);
@@ -92,7 +95,7 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Tooltip title="Settings">
+      <Tooltip title={tCommon('settings')}>
         <DialogTrigger asChild>
           <Button variant="ghost" size="icon">
             <Settings />
@@ -101,9 +104,9 @@ export function SettingsDialog() {
       </Tooltip>
       <DialogContent className="sm:max-w-[850px]">
         <DialogHeader>
-          <DialogTitle>DeerFlow Settings</DialogTitle>
+          <DialogTitle>{t('title')}</DialogTitle>
           <DialogDescription>
-            Manage your DeerFlow settings here.
+            {t('description')}
           </DialogDescription>
         </DialogHeader>
         <Tabs value={activeTabId}>
@@ -157,10 +160,10 @@ export function SettingsDialog() {
         </Tabs>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
+            {tCommon('cancel')}
           </Button>
           <Button className="w-24" type="submit" onClick={handleSave}>
-            Save
+            {tCommon('save')}
           </Button>
         </DialogFooter>
       </DialogContent>
