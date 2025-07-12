@@ -1,9 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
 import src.crawler as crawler_module
-from src.crawler import Crawler
 
 
 def test_crawler_sets_article_url(monkeypatch):

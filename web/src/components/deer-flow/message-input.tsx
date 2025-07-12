@@ -15,6 +15,7 @@ import {
 } from "novel";
 import { Markdown } from "tiptap-markdown";
 import { useDebouncedCallback } from "use-debounce";
+import { useTranslations } from "next-intl";
 
 import "~/styles/prosemirror.css";
 import { resourceSuggestion } from "./resource-suggestion";
@@ -82,6 +83,7 @@ const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     { className, loading, config, onChange, onEnter }: MessageInputProps,
     ref,
   ) => {
+    const t = useTranslations("messageInput");
     const editorRef = useRef<Editor>(null);
     const handleEnterRef = useRef<
       ((message: string, resources: Array<Resource>) => void) | undefined
@@ -136,9 +138,7 @@ const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         }),
         Placeholder.configure({
           showOnlyCurrent: false,
-          placeholder: config?.rag.provider
-            ? "What can I do for you? \nYou may refer to RAG resources by using @."
-            : "What can I do for you?",
+          placeholder: config?.rag.provider ? t("placeholderWithRag") : t("placeholder"),
           emptyEditorClass: "placeholder",
         }),
         Extension.create({

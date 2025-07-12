@@ -2,17 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 import { motion } from "framer-motion";
+import { useTranslations } from "next-intl";
 
 import { cn } from "~/lib/utils";
 
 import { Welcome } from "./welcome";
 
-const questions = [
-  "How many times taller is the Eiffel Tower than the tallest building in the world?",
-  "How many years does an average Tesla battery last compared to a gasoline engine?",
-  "How many liters of water are required to produce 1 kg of beef?",
-  "How many times faster is the speed of light compared to the speed of sound?",
-];
 export function ConversationStarter({
   className,
   onSend,
@@ -20,6 +15,9 @@ export function ConversationStarter({
   className?: string;
   onSend?: (message: string) => void;
 }) {
+  const t = useTranslations("chat");
+  const questions = t.raw("conversationStarters") as string[];
+
   return (
     <div className={cn("flex flex-col items-center", className)}>
       <div className="pointer-events-none fixed inset-0 flex items-center justify-center">
@@ -41,7 +39,7 @@ export function ConversationStarter({
             }}
           >
             <div
-              className="bg-card text-muted-foreground cursor-pointer rounded-2xl border px-4 py-4 opacity-75 transition-all duration-300 hover:opacity-100 hover:shadow-md"
+              className="bg-card text-muted-foreground h-full w-full cursor-pointer rounded-2xl border px-4 py-4 opacity-75 transition-all duration-300 hover:opacity-100 hover:shadow-md"
               onClick={() => {
                 onSend?.(question);
               }}

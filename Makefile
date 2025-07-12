@@ -8,6 +8,7 @@ format:
 
 lint:
 	uv run black --check .
+	uv run ruff check .
 
 serve:
 	uv run server.py --reload

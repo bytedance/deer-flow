@@ -6,6 +6,8 @@ import "~/styles/globals.css";
 import { type Metadata } from "next";
 import { Geist } from "next/font/google";
 import Script from "next/script";
+import { NextIntlClientProvider } from 'next-intl';
+import { getLocale, getMessages } from 'next-intl/server';
 
 import { ThemeProviderWrapper } from "~/components/deer-flow/theme-provider-wrapper";
 import { env } from "~/env";
@@ -27,8 +29,11 @@ const geist = Geist({
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  const locale = await getLocale();
+  const messages = await getMessages();
+  
   return (
-    <html lang="en" className={`${geist.variable}`} suppressHydrationWarning>
+    <html lang={locale} className={`${geist.variable}`} suppressHydrationWarning>
       <head>
         {/* Define isSpace function globally to fix markdown-it issues with Next.js + Turbopack
           https://github.com/markdown-it/markdown-it/issues/1082#issuecomment-2749656365 */}
@@ -43,8 +48,10 @@ export default async function RootLayout({
         </Script>
       </head>
       <body className="bg-app">
-        <ThemeProviderWrapper>{children}</ThemeProviderWrapper>
-        <Toaster />
+        <NextIntlClientProvider messages={messages}>
+          <ThemeProviderWrapper>{children}</ThemeProviderWrapper>
+          <Toaster />
+        </NextIntlClientProvider>
         {
           // NO USER BEHAVIOR TRACKING OR PRIVATE DATA COLLECTION BY DEFAULT
           //
