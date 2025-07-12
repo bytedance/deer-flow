@@ -19,7 +19,7 @@ Por favor, visita [nuestra página web oficial](https://deerflow.tech/) para má
 
 ### Video
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 En esta demostración, mostramos cómo usar DeerFlow para:
 
@@ -150,7 +150,7 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
 - **Tavily** (predeterminado): Una API de búsqueda especializada para aplicaciones de IA
 
   - Requiere `TAVILY_API_KEY` en tu archivo `.env`
-  - Regístrate en: https://app.tavily.com/home
+  - Regístrate en: <https://app.tavily.com/home>
 
 - **DuckDuckGo**: Motor de búsqueda centrado en la privacidad
 
@@ -159,7 +159,7 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
 - **Brave Search**: Motor de búsqueda centrado en la privacidad con características avanzadas
 
   - Requiere `BRAVE_SEARCH_API_KEY` en tu archivo `.env`
-  - Regístrate en: https://brave.com/search/api/
+  - Regístrate en: <https://brave.com/search/api/>
 
 - **Arxiv**: Búsqueda de artículos científicos para investigación académica
   - No requiere clave API
@@ -325,9 +325,9 @@ langgraph dev
 
 Después de iniciar el servidor LangGraph, verás varias URLs en la terminal:
 
-- API: http://127.0.0.1:2024
-- UI de Studio: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- Docs de API: http://127.0.0.1:2024/docs
+- API: <http://127.0.0.1:2024>
+- UI de Studio: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- Docs de API: <http://127.0.0.1:2024/docs>
 
 Abre el enlace de UI de Studio en tu navegador para acceder a la interfaz de depuración.
 
@@ -353,6 +353,7 @@ Cuando envías un tema de investigación en la UI de Studio, podrás ver toda la
 DeerFlow soporta el rastreo de LangSmith para ayudarte a depurar y monitorear tus flujos de trabajo. Para habilitar el rastreo de LangSmith:
 
 1. Asegúrate de que tu archivo `.env` tenga las siguientes configuraciones (ver `.env.example`):
+
    ```bash
    LANGSMITH_TRACING=true
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
@@ -361,6 +362,7 @@ DeerFlow soporta el rastreo de LangSmith para ayudarte a depurar y monitorear tu
    ```
 
 2. Inicia el rastreo y visualiza el grafo localmente con LangSmith ejecutando:
+
    ```bash
    langgraph dev
    ```
@@ -504,6 +506,7 @@ DeerFlow incluye un mecanismo de humano en el bucle que te permite revisar, edit
    - Vía API: Establece `auto_accepted_plan: true` en tu solicitud
 
 4. **Integración API**: Cuando uses la API, puedes proporcionar retroalimentación a través del parámetro `feedback`:
+
    ```json
    {
      "messages": [{ "role": "user", "content": "¿Qué es la computación cuántica?" }],
@@ -553,4 +556,4 @@ Su compromiso inquebrantable y experiencia han sido la fuerza impulsora detrás 
 
 ## Historial de Estrellas
 
-[![Gráfico de Historial de Estrellas](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date) 
+[![Gráfico de Historial de Estrellas](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
