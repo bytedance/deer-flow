@@ -101,8 +101,6 @@ def test_current_time_format():
     messages = apply_prompt_template("coder", test_state)
     system_content = messages[0]["content"]
 
-    # Time format should be like: Mon Jan 01 2024 12:34:56 +0000
-    time_format = r"\w{3} \w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}"
     assert any(
         line.strip().startswith("CURRENT_TIME:") for line in system_content.split("\n")
     )

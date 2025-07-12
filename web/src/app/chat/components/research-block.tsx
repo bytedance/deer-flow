@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { Check, Copy, Headphones, Pencil, Undo2, X, Download } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
 
 import { ScrollContainer } from "~/components/deer-flow/scroll-container";
@@ -23,6 +24,7 @@ export function ResearchBlock({
   className?: string;
   researchId: string | null;
 }) {
+  const t = useTranslations("chat.research");
   const reportId = useStore((state) =>
     researchId ? state.researchReportIds.get(researchId) : undefined,
   );
@@ -108,7 +110,7 @@ export function ResearchBlock({
         <div className="absolute right-4 flex h-9 items-center justify-center">
           {hasReport && !reportStreaming && (
             <>
-              <Tooltip title="Generate podcast">
+              <Tooltip title={t("generatePodcast")}>
                 <Button
                   className="text-gray-400"
                   size="icon"
@@ -119,7 +121,7 @@ export function ResearchBlock({
                   <Headphones />
                 </Button>
               </Tooltip>
-              <Tooltip title="Edit">
+              <Tooltip title={t("edit")}>
                 <Button
                   className="text-gray-400"
                   size="icon"
@@ -130,7 +132,7 @@ export function ResearchBlock({
                   {editing ? <Undo2 /> : <Pencil />}
                 </Button>
               </Tooltip>
-              <Tooltip title="Copy">
+              <Tooltip title={t("copy")}>
                 <Button
                   className="text-gray-400"
                   size="icon"
@@ -140,7 +142,7 @@ export function ResearchBlock({
                   {copied ? <Check /> : <Copy />}
                 </Button>
               </Tooltip>
-              <Tooltip title="Download report as markdown">
+              <Tooltip title={t("downloadReport")}>
                 <Button
                   className="text-gray-400"
                   size="icon"
@@ -152,7 +154,7 @@ export function ResearchBlock({
               </Tooltip>
             </>
           )}
-          <Tooltip title="Close">
+          <Tooltip title={t("close")}>
             <Button
               className="text-gray-400"
               size="sm"
@@ -177,10 +179,10 @@ export function ResearchBlock({
                 value="report"
                 disabled={!hasReport}
               >
-                Report
+                {t("report")}
               </TabsTrigger>
               <TabsTrigger className="px-8" value="activities">
-                Activities
+                {t("activities")}
               </TabsTrigger>
             </TabsList>
           </div>

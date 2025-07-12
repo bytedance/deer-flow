@@ -3,7 +3,7 @@
 
 import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from src.tools.search import get_web_search_tool
 from src.config import SearchEngine
 

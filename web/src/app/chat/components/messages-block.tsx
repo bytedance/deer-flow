@@ -3,6 +3,7 @@
 
 import { motion } from "framer-motion";
 import { FastForward, Play } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
 import { RainbowText } from "~/components/deer-flow/rainbow-text";
@@ -27,6 +28,7 @@ import { MessageListView } from "./message-list-view";
 import { Welcome } from "./welcome";
 
 export function MessagesBlock({ className }: { className?: string }) {
+  const t = useTranslations("chat.messages");
   const messageIds = useMessageIds();
   const messageCount = messageIds.length;
   const responding = useStore((state) => state.responding);
@@ -152,16 +154,16 @@ export function MessagesBlock({ className }: { className?: string }) {
                   <CardHeader className={cn("flex-grow", responding && "pl-3")}>
                     <CardTitle>
                       <RainbowText animated={responding}>
-                        {responding ? "Replaying" : `${replayTitle}`}
+                        {responding ? t("replaying") : `${replayTitle}`}
                       </RainbowText>
                     </CardTitle>
                     <CardDescription>
                       <RainbowText animated={responding}>
                         {responding
-                          ? "DeerFlow is now replaying the conversation..."
+                          ? t("replayDescription")
                           : replayStarted
-                            ? "The replay has been stopped."
-                            : `You're now in DeerFlow's replay mode. Click the "Play" button on the right to start.`}
+                            ? t("replayHasStopped")
+                            : t("replayModeDescription")}
                       </RainbowText>
                     </CardDescription>
                   </CardHeader>
@@ -175,13 +177,13 @@ export function MessagesBlock({ className }: { className?: string }) {
                         onClick={handleFastForwardReplay}
                       >
                         <FastForward size={16} />
-                        Fast Forward
+                        {t("fastForward")}
                       </Button>
                     )}
                     {!replayStarted && (
                       <Button className="w-24" onClick={handleStartReplay}>
                         <Play size={16} />
-                        Play
+                        {t("play")}
                       </Button>
                     )}
                   </div>
@@ -190,17 +192,16 @@ export function MessagesBlock({ className }: { className?: string }) {
             </Card>
             {!replayStarted && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && (
               <div className="text-muted-foreground w-full text-center text-xs">
-                * This site is for demo purposes only. If you want to try your
-                own question, please{" "}
+                {t("demoNotice")}{" "}
                 <a
                   className="underline"
                   href="https://github.com/bytedance/deer-flow"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  click here
+                  {t("clickHere")}
                 </a>{" "}
-                to clone it locally and run it.
+                {t("cloneLocally")}
               </div>
             )}
           </motion.div>
