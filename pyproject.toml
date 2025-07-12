@@ -48,6 +48,9 @@ test = [
     "pytest-asyncio>=1.0.0",
 ]
 
+[tool.uv]
+required-version = ">=0.6.15"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
