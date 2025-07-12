@@ -4,7 +4,6 @@
 from pathlib import Path
 from typing import Any, Dict
 import os
-import ssl
 import httpx
 
 from langchain_openai import ChatOpenAI

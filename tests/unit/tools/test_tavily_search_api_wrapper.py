@@ -3,7 +3,6 @@
 import json
 import pytest
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
-import aiohttp
 import requests
 from src.tools.tavily_search.tavily_search_api_wrapper import (
     EnhancedTavilySearchAPIWrapper,
