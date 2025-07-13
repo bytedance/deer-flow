@@ -47,9 +47,7 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
     return conf
 
 
-def _create_llm_use_conf(
-    llm_type: LLMType, conf: Dict[str, Any]
-) -> BaseChatModel :
+def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatModel:
     """Create LLM instance using configuration."""
     llm_type_config_keys = _get_llm_type_config_keys()
     config_key = llm_type_config_keys.get(llm_type)
@@ -91,9 +89,9 @@ def _create_llm_use_conf(
         return AzureChatOpenAI(**merged_conf)
     if llm_type == "reasoning":
         return ChatDeepSeek(**merged_conf)
-    else 
+    else:
         return ChatOpenAI(**merged_conf)
-        
+
 
 def get_llm_by_type(
     llm_type: LLMType,
