@@ -12,7 +12,7 @@ def replace_env_vars(value: str) -> str:
         return value
     if value.startswith("$"):
         env_var = value[1:]
-        return os.getenv(env_var, value)
+        return os.getenv(env_var, env_var)
     return value
 
 
