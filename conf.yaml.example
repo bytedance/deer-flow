@@ -18,7 +18,7 @@ BASIC_MODEL:
 # for planning.
 
 # REASONING_MODEL:
-#   base_url: https://ark-cn-beijing.bytedance.net/api/v3
+#   base_url: https://ark.cn-beijing.volces.com/api/v3
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
 #   max_retries: 3 # Maximum number of retries for LLM calls
