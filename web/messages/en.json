@@ -75,6 +75,11 @@
     "copyright": "DeerFlow"
   },
   "chat": {
+    "page": {
+        "loading": "Loading DeerFlow...",
+        "welcomeUser": "Welcome, {username}",
+        "starOnGitHub": "Star on GitHub"
+    },
     "welcome": {
       "greeting": "👋 Hello, there!",
       "description": "Welcome to 🦌 DeerFlow, a deep research assistant built on cutting-edge language models, helps you search on web, browse information, and handle complex tasks."
