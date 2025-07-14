@@ -4,6 +4,7 @@
 import { GithubFilled } from "@ant-design/icons";
 import { ChevronRight } from "lucide-react";
 import Link from "next/link";
+import { useTranslations } from 'next-intl';
 
 import { AuroraText } from "~/components/magicui/aurora-text";
 import { FlickeringGrid } from "~/components/magicui/flickering-grid";
@@ -11,6 +12,9 @@ import { Button } from "~/components/ui/button";
 import { env } from "~/env";
 
 export function Jumbotron() {
+  const t = useTranslations('hero');
+  const tCommon = useTranslations('common');
+  
   return (
     <section className="flex h-[95vh] w-full flex-col items-center justify-center pb-15">
       <FlickeringGrid
@@ -34,15 +38,12 @@ export function Jumbotron() {
       <div className="relative z-10 flex flex-col items-center justify-center gap-12">
         <h1 className="text-center text-4xl font-bold md:text-6xl">
           <span className="bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">
-            Deep Research{" "}
+            {t('title')}{" "}
           </span>
-          <AuroraText>at Your Fingertips</AuroraText>
+          <AuroraText>{t('subtitle')}</AuroraText>
         </h1>
         <p className="max-w-4xl p-2 text-center text-sm opacity-85 md:text-2xl">
-          Meet DeerFlow, your personal Deep Research assistant. With powerful
-          tools like search engines, web crawlers, Python and MCP services, it
-          delivers instant insights, comprehensive reports, and even captivating
-          podcasts.
+          {t('description')}
         </p>
         <div className="flex gap-6">
           <Button className="hidden text-lg md:flex md:w-42" size="lg" asChild>
@@ -56,7 +57,7 @@ export function Jumbotron() {
                   : "/chat"
               }
             >
-              Get Started <ChevronRight />
+              {tCommon('getStarted')} <ChevronRight />
             </Link>
           </Button>
           {!env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && (
@@ -71,14 +72,14 @@ export function Jumbotron() {
                 target="_blank"
               >
                 <GithubFilled />
-                Learn More
+                {tCommon('learnMore')}
               </Link>
             </Button>
           )}
         </div>
       </div>
       <div className="absolute bottom-8 flex text-xs opacity-50">
-        <p>* DEER stands for Deep Exploration and Efficient Research.</p>
+        <p>{t('footnote')}</p>
       </div>
     </section>
   );

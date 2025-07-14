@@ -1,13 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
-import pytest
 import sys
 import types
-from pathlib import Path
-import builtins
-import importlib
 from src.config.configuration import Configuration
 
 # Patch sys.path so relative import works

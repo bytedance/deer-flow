@@ -1,0 +1,229 @@
+{
+  "common": {
+    "cancel": "取消",
+    "save": "保存",
+    "settings": "设置",
+    "getStarted": "开始使用",
+    "learnMore": "了解更多",
+    "starOnGitHub": "在 GitHub 上点赞",
+    "send": "发送",
+    "stop": "停止",
+    "linkNotReliable": "此链接可能是 AI 生成的幻觉，可能并不可靠。",
+    "noResult": "无结果"
+  },
+  "messageInput": {
+    "placeholder": "我能帮你做什么？",
+    "placeholderWithRag": "我能帮你做什么？\n你可以通过 @ 引用 RAG 资源。"
+  },
+  "header": {
+    "title": "DeerFlow"
+  },
+  "hero": {
+    "title": "深度研究",
+    "subtitle": "触手可及",
+    "description": "认识 DeerFlow，您的个人深度研究助手。凭借搜索引擎、网络爬虫、Python 和 MCP 服务等强大工具，它能提供即时洞察、全面报告，甚至制作引人入胜的播客。",
+    "footnote": "* DEER 代表深度探索和高效研究。"
+  },
+  "settings": {
+    "title": "DeerFlow 设置",
+    "description": "在这里管理您的 DeerFlow 设置。",
+    "cancel": "取消",
+    "addServers": "添加服务器",
+    "addNewMCPServers": "添加新的 MCP 服务器",
+    "mcpConfigDescription": "DeerFlow 使用标准 JSON MCP 配置来创建新服务器。",
+    "pasteConfigBelow": "将您的配置粘贴到下面，然后点击\"添加\"来添加新服务器。",
+    "add": "添加",
+    "general": {
+      "title": "通用",
+      "autoAcceptPlan": "允许自动接受计划",
+      "maxPlanIterations": "最大计划迭代次数",
+      "maxPlanIterationsDescription": "设置为 1 进行单步规划。设置为 2 或更多以启用重新规划。",
+      "maxStepsOfPlan": "研究计划的最大步骤数",
+      "maxStepsDescription": "默认情况下，每个研究计划有 3 个步骤。",
+      "maxSearchResults": "最大搜索结果数",
+      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。"
+    },
+    "mcp": {
+      "title": "MCP 服务器",
+      "description": "模型上下文协议通过集成外部工具来增强 DeerFlow，用于私域搜索、网页浏览、订餐等任务。点击这里",
+      "learnMore": "了解更多关于 MCP 的信息。",
+      "enableDisable": "启用/禁用服务器",
+      "deleteServer": "删除服务器",
+      "disabled": "已禁用",
+      "new": "新增"
+    },
+    "about": {
+      "title": "关于"
+    },
+    "reportStyle": {
+      "writingStyle": "写作风格",
+      "chooseTitle": "选择写作风格",
+      "chooseDesc": "请选择您的研究报告的写作风格。不同风格适用于不同受众和用途。",
+      "academic": "学术",
+      "academicDesc": "正式、客观、分析性强，术语精确",
+      "popularScience": "科普",
+      "popularScienceDesc": "生动有趣，适合大众阅读",
+      "news": "新闻",
+      "newsDesc": "事实、简明、公正的新闻风格",
+      "socialMedia": "社交媒体",
+      "socialMediaDesc": "简洁有趣，易于传播"
+    }
+  },
+  "footer": {
+    "quote": "源于开源，回馈开源。",
+    "license": "基于 MIT 许可证授权",
+    "copyright": "DeerFlow"
+  },
+  "chat": {
+    "page": {
+      "loading": "正在加载 DeerFlow...",
+      "welcomeUser": "欢迎，{username}",
+      "starOnGitHub": "在 GitHub 上点赞"
+    },
+    "welcome": {
+      "greeting": "👋 你好！",
+      "description": "欢迎来到 🦌 DeerFlow，一个基于前沿语言模型构建的深度研究助手，帮助您搜索网络、浏览信息并处理复杂任务。"
+    },
+    "conversationStarters": [
+      "埃菲尔铁塔比世界最高建筑高多少倍？",
+      "特斯拉电池的平均寿命比汽油发动机长多少年？",
+      "生产1公斤牛肉需要多少升水？",
+      "光速比声速快多少倍？"
+    ],
+    "inputBox": {
+      "deepThinking": "深度思考",
+      "deepThinkingTooltip": {
+        "title": "深度思考模式：{status}",
+        "description": "启用后，DeerFlow 将使用推理模型（{model}）生成更深思熟虑的计划。"
+      },
+      "investigation": "调研",
+      "investigationTooltip": {
+        "title": "调研模式：{status}",
+        "description": "启用后，DeerFlow 将在规划前进行快速搜索。这对于与时事和新闻相关的研究很有用。"
+      },
+      "enhancePrompt": "用 AI 增强提示",
+      "on": "开启",
+      "off": "关闭"
+    },
+    "research": {
+      "deepResearch": "深度研究",
+      "researching": "研究中...",
+      "generatingReport": "生成报告中...",
+      "reportGenerated": "报告已生成",
+      "open": "打开",
+      "close": "关闭",
+      "deepThinking": "深度思考",
+      "report": "报告",
+      "activities": "活动",
+      "generatePodcast": "生成播客",
+      "edit": "编辑",
+      "copy": "复制",
+      "downloadReport": "下载报告为 Markdown",
+      "searchingFor": "搜索",
+      "reading": "阅读中",
+      "runningPythonCode": "运行 Python 代码",
+      "errorExecutingCode": "执行上述代码时出错",
+      "executionOutput": "执行输出",
+      "retrievingDocuments": "从 RAG 检索文档",
+      "running": "运行",
+      "generatingPodcast": "生成播客中...",
+      "nowPlayingPodcast": "正在播放播客...",
+      "podcast": "播客",
+      "errorGeneratingPodcast": "生成播客时出错。请重试。",
+      "downloadPodcast": "下载播客"
+    },
+    "messages": {
+      "replaying": "回放中",
+      "replayDescription": "DeerFlow 正在回放对话...",
+      "replayHasStopped": "回放已停止。",
+      "replayModeDescription": "您现在处于 DeerFlow 的回放模式。点击右侧的\"播放\"按钮开始。",
+      "play": "播放",
+      "fastForward": "快进",
+      "demoNotice": "* 此网站仅用于演示目的。如果您想尝试自己的问题，请",
+      "clickHere": "点击这里",
+      "cloneLocally": "在本地克隆并运行它。"
+    },
+    "multiAgent": {
+      "moveToPrevious": "移动到上一步",
+      "playPause": "播放 / 暂停",
+      "moveToNext": "移动到下一步",
+      "toggleFullscreen": "切换全屏"
+    }
+  },
+  "landing": {
+    "caseStudies": {
+      "title": "案例研究",
+      "description": "通过回放查看 DeerFlow 的实际应用。",
+      "clickToWatch": "点击观看回放",
+      "cases": [
+        {
+          "title": "埃菲尔铁塔与最高建筑相比有多高？",
+          "description": "该研究比较了埃菲尔铁塔和哈利法塔的高度和全球意义，并使用 Python 代码计算倍数。"
+        },
+        {
+          "title": "GitHub 上最热门的仓库有哪些？",
+          "description": "该研究利用 MCP 服务识别最受欢迎的 GitHub 仓库，并使用搜索引擎详细记录它们。"
+        },
+        {
+          "title": "写一篇关于南京传统菜肴的文章",
+          "description": "该研究通过丰富的内容和图像生动地展示了南京的著名菜肴，揭示了它们隐藏的历史和文化意义。"
+        },
+        {
+          "title": "如何装饰小型出租公寓？",
+          "description": "该研究为读者提供了实用而直接的公寓装饰方法，并配有鼓舞人心的图像。"
+        },
+        {
+          "title": "介绍电影《这个杀手不太冷》",
+          "description": "该研究全面介绍了电影《这个杀手不太冷》，包括其情节、角色和主题。"
+        },
+        {
+          "title": "你如何看待中国的外卖大战？（中文）",
+          "description": "该研究分析了京东和美团之间日益激烈的竞争，突出了它们的策略、技术创新和挑战。"
+        },
+        {
+          "title": "超加工食品与健康有关吗？",
+          "description": "该研究检查了超加工食品消费增加的健康风险，敦促对长期影响和个体差异进行更多研究。"
+        },
+        {
+          "title": "写一篇关于\"你会为你的 AI 双胞胎投保吗？\"的文章",
+          "description": "该研究探讨了为 AI 双胞胎投保的概念，突出了它们的好处、风险、伦理考虑和不断发展的监管。"
+        }
+      ]
+    },
+    "coreFeatures": {
+      "title": "核心功能",
+      "description": "了解是什么让 DeerFlow 如此有效。",
+      "features": [
+        {
+          "name": "深入挖掘，触及更广",
+          "description": "使用高级工具解锁更深层的洞察。我们强大的搜索+爬取和 Python 工具收集全面的数据，提供深入的报告来增强您的研究。"
+        },
+        {
+          "name": "人机协作",
+          "description": "通过简单的自然语言完善您的研究计划或调整重点领域。"
+        },
+        {
+          "name": "Lang 技术栈",
+          "description": "使用 LangChain 和 LangGraph 框架自信地构建。"
+        },
+        {
+          "name": "MCP 集成",
+          "description": "通过无缝的 MCP 集成增强您的研究工作流程并扩展您的工具包。"
+        },
+        {
+          "name": "播客生成",
+          "description": "从报告中即时生成播客。非常适合移动学习或轻松分享发现。"
+        }
+      ]
+    },
+    "multiAgent": {
+      "title": "多智能体架构",
+      "description": "通过我们的监督者 + 交接设计模式体验智能体团队合作。"
+    },
+    "joinCommunity": {
+      "title": "加入 DeerFlow 社区",
+      "description": "贡献精彩想法，塑造 DeerFlow 的未来。协作、创新并产生影响。",
+      "contributeNow": "立即贡献"
+    }
+  }
+}

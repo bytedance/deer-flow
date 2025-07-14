@@ -39,6 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "ruff",
     "black>=24.2.0",
     "langgraph-cli[inmem]>=0.2.10",
 ]
@@ -47,6 +48,9 @@ test = [
     "pytest-cov>=4.1.0",
     "pytest-asyncio>=1.0.0",
 ]
+
+[tool.uv]
+required-version = ">=0.6.15"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

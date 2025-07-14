@@ -48,12 +48,12 @@ class VikingDBKnowledgeBaseProvider(Retriever):
         if params:
             for key in params:
                 if (
-                    type(params[key]) == int
-                    or type(params[key]) == float
-                    or type(params[key]) == bool
+                    type(params[key]) is int
+                    or type(params[key]) is float
+                    or type(params[key]) is bool
                 ):
                     params[key] = str(params[key])
-                elif type(params[key]) == list:
+                elif type(params[key]) is list:
                     if not doseq:
                         params[key] = ",".join(params[key])
 

@@ -1,9 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
 import json
-from unittest.mock import patch
 from src.utils.json_utils import repair_json_output
 
 

@@ -122,11 +122,47 @@ function processKatexInMarkdown(markdown?: string | null) {
   return markdownWithKatexSyntax;
 }
 
-function dropMarkdownQuote(markdown?: string | null) {
-  if (!markdown) return markdown;
-  return markdown
-    .replace(/^```markdown\n/gm, "")
-    .replace(/^```text\n/gm, "")
-    .replace(/^```\n/gm, "")
-    .replace(/\n```$/gm, "");
+function dropMarkdownQuote(markdown?: string | null): string | null {
+  if (!markdown) return null;
+
+  const patternsToRemove = [
+    { prefix: "```markdown\n", suffix: "\n```", prefixLen: 12 },
+    { prefix: "```text\n", suffix: "\n```", prefixLen: 8 },
+    { prefix: "```\n", suffix: "\n```", prefixLen: 4 },
+  ];
+
+  let result = markdown;
+  
+  for (const { prefix, suffix, prefixLen } of patternsToRemove) {
+    if (result.startsWith(prefix) && !result.endsWith(suffix)) {
+      result = result.slice(prefixLen);
+      break;  // remove prefix without suffix only once
+    }
+  }
+  
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    
+    for (const { prefix, suffix, prefixLen } of patternsToRemove) {
+      let startIndex = 0;
+      while ((startIndex = result.indexOf(prefix, startIndex)) !== -1) {
+        const endIndex = result.indexOf(suffix, startIndex + prefixLen);
+        if (endIndex !== -1) {
+          // only remove fully matched code blocks
+          const before = result.slice(0, startIndex);
+          const content = result.slice(startIndex + prefixLen, endIndex);
+          const after = result.slice(endIndex + suffix.length);
+          result = before + content + after;
+          changed = true;
+          startIndex = before.length + content.length;
+        } else {
+          startIndex += prefixLen;
+        }
+      }
+    }
+  }
+  
+  return result;
 }

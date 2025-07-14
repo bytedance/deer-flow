@@ -17,11 +17,11 @@
 
 ### ビデオ
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
-このデモでは、DeerFlow の使用方法を紹介しています：
+このデモでは、DeerFlowの使用方法を紹介しています：
 
-- MCP サービスとのシームレスな統合
+- MCPサービスとのシームレスな統合
 - 深層研究プロセスの実施と画像を含む包括的なレポートの作成
 - 生成されたレポートに基づくポッドキャストオーディオの作成
 
@@ -145,21 +145,18 @@ bootstrap.bat -d
 DeerFlow は複数の検索エンジンをサポートしており、`.env`ファイルの`SEARCH_API`変数で設定できます：
 
 - **Tavily**（デフォルト）：AI アプリケーション向けの専門検索 API
-
   - `.env`ファイルに`TAVILY_API_KEY`が必要
-  - 登録先：https://app.tavily.com/home
+  - 登録先：<https://app.tavily.com/home>
 
 - **DuckDuckGo**：プライバシー重視の検索エンジン
-
-  - API キー不要
+  - APIキー不要
 
 - **Brave Search**：高度な機能を備えたプライバシー重視の検索エンジン
-
   - `.env`ファイルに`BRAVE_SEARCH_API_KEY`が必要
-  - 登録先：https://brave.com/search/api/
+  - 登録先：<https://brave.com/search/api/>
 
 - **Arxiv**：学術研究用の科学論文検索
-  - API キー不要
+  - APIキー不要
   - 科学・学術論文専用
 
 お好みの検索エンジンを設定するには、`.env`ファイルで`SEARCH_API`変数を設定します：
@@ -173,41 +170,39 @@ SEARCH_API=tavily
 
 ### コア機能
 
-- 🤖 **LLM 統合**
+- 🤖 **LLM統合**
   - [litellm](https://docs.litellm.ai/docs/providers)を通じてほとんどのモデルの統合をサポート
-  - Qwen などのオープンソースモデルをサポート
-  - OpenAI 互換の API インターフェース
-  - 異なるタスクの複雑さに対応するマルチティア LLM システム
+  - Qwenなどのオープンソースモデルをサポート
+  - OpenAI互換のAPIインターフェース
+  - 異なるタスクの複雑さに対応するマルチティアLLMシステム
 
 ### ツールと MCP 統合
 
 - 🔍 **検索と取得**
-
-  - Tavily、Brave Search などを通じた Web 検索
-  - Jina を使用したクローリング
+  - Tavily、Brave Searchなどを通じたWeb検索
+  - Jinaを使用したクローリング
   - 高度なコンテンツ抽出
 
-- 🔗 **MCP シームレス統合**
-  - プライベートドメインアクセス、ナレッジグラフ、Web ブラウジングなどの機能を拡張
+- 🔗 **MCPシームレス統合**
+  - プライベートドメインアクセス、ナレッジグラフ、Webブラウジングなどの機能を拡張
   - 多様な研究ツールと方法論の統合を促進
 
 ### 人間との協力
 
 - 🧠 **人間参加型ループ**
-
   - 自然言語を使用した研究計画の対話的修正をサポート
   - 研究計画の自動承認をサポート
 
 - 📝 **レポート後編集**
-  - Notion ライクなブロック編集をサポート
-  - AI 支援による洗練、文の短縮、拡張などの AI 改良を可能に
+  - Notionライクなブロック編集をサポート
+  - AI支援による洗練、文の短縮、拡張などのAI改良を可能に
   - [tiptap](https://tiptap.dev/)を活用
 
 ### コンテンツ作成
 
 - 🎙️ **ポッドキャストとプレゼンテーション生成**
-  - AI 駆動のポッドキャストスクリプト生成と音声合成
-  - シンプルな PowerPoint プレゼンテーションの自動作成
+  - AI駆動のポッドキャストスクリプト生成と音声合成
+  - シンプルなPowerPointプレゼンテーションの自動作成
   - カスタマイズ可能なテンプレートで個別のコンテンツに対応
 
 ## アーキテクチャ
@@ -242,6 +237,27 @@ DeerFlow は、自動研究とコード分析のためのモジュラーなマ�
    - 研究チームの調査結果を集約
    - 収集した情報を処理および構造化
    - 包括的な研究レポートを生成
+
+## テキスト読み上げ統合
+
+DeerFlowには現在、研究レポートを音声に変換できるテキスト読み上げ（TTS）機能が含まれています。この機能は火山引擎TTS APIを使用して高品質なテキストオーディオを生成します。速度、音量、ピッチなどの特性もカスタマイズ可能です。
+
+### TTS APIの使用
+
+`/api/tts`エンドポイントからTTS機能にアクセスできます：
+
+```bash
+# curlを使用したAPI呼び出し例
+curl --location 'http://localhost:8000/api/tts' \
+--header 'Content-Type: application/json' \
+--data '{
+    "text": "これはテキスト読み上げ機能のテストです。",
+    "speed_ratio": 1.0,
+    "volume_ratio": 1.0,
+    "pitch_ratio": 1.0
+}' \
+--output speech.mp3
+```
 
 ## 開発
 
@@ -299,11 +315,15 @@ pip install -U "langgraph-cli[inmem]"
 langgraph dev
 ```
 
-LangGraph サーバーを開始すると、端末にいくつかの URL が表示されます：
+LangGraphサーバーを開始すると、端末にいくつかのURLが表示されます：
 
-- API: http://127.0.0.1:2024
-- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- API ドキュメント: http://127.0.0.1:2024/docs
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- APIドキュメント: <http://127.0.0.1:2024/docs>
+
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- APIドキュメント: <http://127.0.0.1:2024/docs>
 
 ブラウザで Studio UI リンクを開いてデバッグインターフェースにアクセスします。
 
@@ -317,7 +337,7 @@ Studio UI では、次のことができます：
 4. 各コンポーネントの入力と出力を検査して問題をデバッグ
 5. 計画段階でフィードバックを提供して研究計画を洗練
 
-Studio UI で研究トピックを送信すると、次を含む全ワークフロー実行プロセスを見ることができます：
+Studio UIで研究トピックを送信すると、次を含む全ワークフロー実行プロセスを見ることができます：
 
 - 研究計画を作成する計画段階
 - 計画を修正できるフィードバックループ
@@ -329,6 +349,7 @@ Studio UI で研究トピックを送信すると、次を含む全ワークフ�
 DeerFlow は LangSmith トレース機能をサポートしており、ワークフローのデバッグとモニタリングに役立ちます。LangSmith トレースを有効にするには：
 
 1. `.env` ファイルに次の設定があることを確認してください（`.env.example` を参照）：
+
    ```bash
    LANGSMITH_TRACING=true
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
@@ -337,6 +358,7 @@ DeerFlow は LangSmith トレース機能をサポートしており、ワーク
    ```
 
 2. 次のコマンドを実行して LangSmith トレースを開始します：
+
    ```bash
    langgraph dev
    ```
@@ -498,9 +520,8 @@ DeerFlow には人間参加型ループメカニズムが含まれており、�
 
 3. **自動承認**：レビュープロセスをスキップするために自動承認を有効にできます：
 
-   - API 経由：リクエストで`auto_accepted_plan: true`を設定
+4. **API統合**：APIを使用する場合、`feedback`パラメータでフィードバックを提供できます：
 
-4. **API 統合**：API を使用する場合、`feedback`パラメータでフィードバックを提供できます：
    ```json
    {
      "messages": [

@@ -1,10 +1,9 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
 import sys
 import os
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 # Import MessagesState directly from langgraph rather than through our application
 from langgraph.graph import MessagesState

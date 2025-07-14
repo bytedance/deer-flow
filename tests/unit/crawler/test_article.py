@@ -1,6 +1,5 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
-import pytest
 from src.crawler.article import Article
 
 

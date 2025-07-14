@@ -1,9 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
 import pytest
-import requests
 from unittest.mock import patch, MagicMock
 from src.rag.ragflow import RAGFlowProvider, parse_uri
 
@@ -118,30 +116,6 @@ def test_query_relevant_documents_error(mock_post, monkeypatch):
     mock_post.return_value = mock_response
     with pytest.raises(Exception):
         provider.query_relevant_documents("query", [])
-
-
-@patch("src.rag.ragflow.requests.get")
-def test_list_resources_success(mock_get, monkeypatch):
-    monkeypatch.setenv("RAGFLOW_API_URL", "http://api")
-    monkeypatch.setenv("RAGFLOW_API_KEY", "key")
-    provider = RAGFlowProvider()
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "data": [
-            {"id": "123", "name": "Dataset1", "description": "desc1"},
-            {"id": "456", "name": "Dataset2", "description": "desc2"},
-        ]
-    }
-    mock_get.return_value = mock_response
-    resources = provider.list_resources()
-    assert len(resources) == 2
-    assert resources[0].uri == "rag://dataset/123"
-    assert resources[0].title == "Dataset1"
-    assert resources[0].description == "desc1"
-    assert resources[1].uri == "rag://dataset/456"
-    assert resources[1].title == "Dataset2"
-    assert resources[1].description == "desc2"
 
 
 @patch("src.rag.ragflow.requests.get")

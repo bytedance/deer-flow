@@ -1,10 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
-import logging
-from unittest.mock import Mock, call, patch, MagicMock
-from src.tools.decorators import LoggedToolMixin, create_logged_tool
+from unittest.mock import Mock, call, patch
+from src.tools.decorators import create_logged_tool
 
 
 class MockBaseTool:
@@ -58,7 +56,7 @@ class TestLoggedToolMixin:
         tool = LoggedTool()
 
         with patch("src.tools.decorators.logger.debug") as mock_debug:
-            result = tool._run("test_arg")
+            tool._run("test_arg")
 
             # Verify debug log was called with correct message
             mock_debug.assert_has_calls(

@@ -17,7 +17,7 @@
 
 ### 视频
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 在此演示中，我们展示了如何使用 DeerFlow：
 
@@ -46,7 +46,7 @@ https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
 - [❓ 常见问题](#常见问题)
 - [📜 许可证](#许可证)
 - [💖 致谢](#致谢)
-- [⭐ Star History](#star-History)
+- [⭐ Star History](#star-history)
 
 ## 快速开始
 
@@ -108,7 +108,7 @@ pnpm install
 
 请参阅[配置指南](docs/configuration_guide.md)获取更多详情。
 
-> [!注意]
+> [! 注意]
 > 在启动项目之前，请仔细阅读指南，并更新配置以匹配您的特定设置和要求。
 
 ### 控制台 UI
@@ -123,8 +123,7 @@ uv run main.py
 ### Web UI
 
 本项目还包括一个 Web UI，提供更加动态和引人入胜的交互体验。
-
-> [!注意]
+> [! 注意]
 > 您需要先安装 Web UI 的依赖。
 
 ```bash
@@ -147,18 +146,15 @@ bootstrap.bat -d
 DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`变量进行配置：
 
 - **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
-
   - 需要在`.env`文件中设置`TAVILY_API_KEY`
-  - 注册地址：https://app.tavily.com/home
+  - 注册地址：<https://app.tavily.com/home>
 
 - **DuckDuckGo**：注重隐私的搜索引擎
-
   - 无需 API 密钥
 
 - **Brave Search**：具有高级功能的注重隐私的搜索引擎
-
   - 需要在`.env`文件中设置`BRAVE_SEARCH_API_KEY`
-  - 注册地址：https://brave.com/search/api/
+  - 注册地址：<https://brave.com/search/api/>
 
 - **Arxiv**：用于学术研究的科学论文搜索
   - 无需 API 密钥
@@ -224,7 +220,6 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
 ### 人机协作
 
 - 🧠 **人在环中**
-
   - 支持使用自然语言交互式修改研究计划
   - 支持自动接受研究计划
 
@@ -263,15 +258,35 @@ DeerFlow 实现了一个模块化的多智能体系统架构，专为自动化�
    - 管理研究流程并决定何时生成最终报告
 
 3. **研究团队**：执行计划的专业智能体集合：
-
    - **研究员**：使用网络搜索引擎、爬虫甚至 MCP 服务等工具进行网络搜索和信息收集。
    - **编码员**：使用 Python REPL 工具处理代码分析、执行和技术任务。
-     每个智能体都可以访问针对其角色优化的特定工具，并在 LangGraph 框架内运行
+   每个智能体都可以访问针对其角色优化的特定工具，并在 LangGraph 框架内运行
 
 4. **报告员**：研究输出的最终阶段处理器
    - 汇总研究团队的发现
    - 处理和组织收集的信息
    - 生成全面的研究报告
+
+## 文本转语音集成
+
+DeerFlow 现在包含一个文本转语音 (TTS) 功能，允许您将研究报告转换为语音。此功能使用火山引擎 TTS API 生成高质量的文本音频。速度、音量和音调等特性也可以自定义。
+
+### 使用 TTS API
+
+您可以通过`/api/tts`端点访问 TTS 功能：
+
+```bash
+# 使用curl的API调用示例
+curl --location 'http://localhost:8000/api/tts' \
+--header 'Content-Type: application/json' \
+--data '{
+    "text": "这是文本转语音功能的测试。",
+    "speed_ratio": 1.0,
+    "volume_ratio": 1.0,
+    "pitch_ratio": 1.0
+}' \
+--output speech.mp3
+```
 
 ## 开发
 
@@ -331,9 +346,9 @@ langgraph dev
 
 启动 LangGraph 服务器后，您将在终端中看到几个 URL：
 
-- API: http://127.0.0.1:2024
-- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-- API 文档: http://127.0.0.1:2024/docs
+- API: <http://127.0.0.1:2024>
+- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
+- API 文档：<http://127.0.0.1:2024/docs>
 
 在浏览器中打开 Studio UI 链接以访问调试界面。
 
@@ -359,6 +374,7 @@ langgraph dev
 DeerFlow 支持 LangSmith 追踪功能，帮助您调试和监控工作流。要启用 LangSmith 追踪：
 
 1. 确保您的 `.env` 文件中有以下配置（参见 `.env.example`）：
+
    ```bash
    LANGSMITH_TRACING=true
    LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
@@ -367,6 +383,7 @@ DeerFlow 支持 LangSmith 追踪功能，帮助您调试和监控工作流。要
    ```
 
 2. 通过运行以下命令本地启动 LangSmith 追踪：
+
    ```bash
    langgraph dev
    ```
@@ -409,7 +426,7 @@ docker compose up
 
 ## 文本转语音集成
 
-DeerFlow 现在包含一个文本转语音(TTS)功能，允许您将研究报告转换为语音。此功能使用火山引擎 TTS API 生成高质量的文本音频。速度、音量和音调等特性也可以自定义。
+DeerFlow 现在包含一个文本转语音 (TTS) 功能，允许您将研究报告转换为语音。此功能使用火山引擎 TTS API 生成高质量的文本音频。速度、音量和音调等特性也可以自定义。
 
 ### 使用 TTS API
 
@@ -435,17 +452,14 @@ curl --location 'http://localhost:8000/api/tts' \
 ### 研究报告
 
 1. **OpenAI Sora 报告** - OpenAI 的 Sora AI 工具分析
-
    - 讨论功能、访问方式、提示工程、限制和伦理考虑
    - [查看完整报告](examples/openai_sora_report.md)
 
-2. **Google 的 Agent to Agent 协议报告** - Google 的 Agent to Agent (A2A)协议概述
-
-   - 讨论其在 AI 智能体通信中的作用及其与 Anthropic 的 Model Context Protocol (MCP)的关系
+2. **Google 的 Agent to Agent 协议报告** - Google 的 Agent to Agent (A2A) 协议概述
+   - 讨论其在 AI 智能体通信中的作用及其与 Anthropic 的 Model Context Protocol (MCP) 的关系
    - [查看完整报告](examples/what_is_agent_to_agent_protocol.md)
 
 3. **什么是 MCP？** - 对"MCP"一词在多个上下文中的全面分析
-
    - 探讨 AI 中的 Model Context Protocol、化学中的 Monocalcium Phosphate 和电子学中的 Micro-channel Plate
    - [查看完整报告](examples/what_is_mcp.md)
 
@@ -456,17 +470,14 @@ curl --location 'http://localhost:8000/api/tts' \
    - [查看完整报告](examples/bitcoin_price_fluctuation.md)
 
 5. **什么是 LLM？** - 对大型语言模型的深入探索
-
    - 讨论架构、训练、应用和伦理考虑
    - [查看完整报告](examples/what_is_llm.md)
 
 6. **如何使用 Claude 进行深度研究？** - 在深度研究中使用 Claude 的最佳实践和工作流程
-
    - 涵盖提示工程、数据分析和与其他工具的集成
    - [查看完整报告](examples/how_to_use_claude_deep_research.md)
 
 7. **医疗保健中的 AI 采用：影响因素** - 影响医疗保健中 AI 采用的因素分析
-
    - 讨论 AI 技术、数据质量、伦理考虑、经济评估、组织准备度和数字基础设施
    - [查看完整报告](examples/AI_adoption_in_healthcare.md)
 
@@ -527,10 +538,10 @@ DeerFlow 包含一个人在环中机制，允许您在执行研究计划前审�
    - 系统将整合您的反馈并生成修订后的计划
 
 3. **自动接受**：您可以启用自动接受以跳过审查过程：
-
    - 通过 API：在请求中设置`auto_accepted_plan: true`
 
 4. **API 集成**：使用 API 时，您可以通过`feedback`参数提供反馈：
+
    ```json
    {
      "messages": [{ "role": "user", "content": "什么是量子计算？" }],
