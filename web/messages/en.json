@@ -78,7 +78,7 @@
     "page": {
         "loading": "Loading DeerFlow...",
         "welcomeUser": "Welcome, {username}",
-        "starOnGitHub": "Star on GitHub"
+        "starOnGitHub": "Star DeerFlow on GitHub"
     },
     "welcome": {
       "greeting": "👋 Hello, there!",
