@@ -22,20 +22,20 @@ def continue_to_running_research_team(state: State):
     current_plan = state.get("current_plan")
     if not current_plan or not current_plan.steps:
         return "planner"
-    
+
     if all(step.execution_res for step in current_plan.steps):
         return "planner"
-    
+
     # Find first incomplete step
     incomplete_step = None
     for step in current_plan.steps:
         if not step.execution_res:
             incomplete_step = step
             break
-    
+
     if not incomplete_step:
         return "planner"
-        
+
     if incomplete_step.step_type == StepType.RESEARCH:
         return "researcher"
     if incomplete_step.step_type == StepType.PROCESSING:

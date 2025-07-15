@@ -76,6 +76,7 @@ def test_continue_to_running_research_team_next_coder_withresult(mock_state):
     state = {"current_plan": Plan(steps=steps)}
     assert builder_mod.continue_to_running_research_team(state) == "planner"
 
+
 def test_continue_to_running_research_team_default_planner(mock_state):
     Step = mock_state["Step"]
     Plan = mock_state["Plan"]
