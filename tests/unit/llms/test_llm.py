@@ -28,6 +28,11 @@ def dummy_conf():
 
 
 def test_get_env_llm_conf(monkeypatch):
+    # Clear any existing environment variables that might interfere
+    monkeypatch.delenv("BASIC_MODEL__API_KEY", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
+
     monkeypatch.setenv("BASIC_MODEL__API_KEY", "env_key")
     monkeypatch.setenv("BASIC_MODEL__BASE_URL", "http://env")
     conf = llm._get_env_llm_conf("basic")
@@ -36,6 +41,9 @@ def test_get_env_llm_conf(monkeypatch):
 
 
 def test_create_llm_use_conf_merges_env(monkeypatch, dummy_conf):
+    # Clear any existing environment variables that might interfere
+    monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
     monkeypatch.setenv("BASIC_MODEL__API_KEY", "env_key")
     result = llm._create_llm_use_conf("basic", dummy_conf)
     assert isinstance(result, DummyChatOpenAI)
@@ -43,12 +51,22 @@ def test_create_llm_use_conf_merges_env(monkeypatch, dummy_conf):
     assert result.kwargs["base_url"] == "http://test"
 
 
-def test_create_llm_use_conf_invalid_type(dummy_conf):
+def test_create_llm_use_conf_invalid_type(monkeypatch, dummy_conf):
+    # Clear any existing environment variables that might interfere
+    monkeypatch.delenv("BASIC_MODEL__API_KEY", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
+
     with pytest.raises(ValueError):
         llm._create_llm_use_conf("unknown", dummy_conf)
 
 
 def test_create_llm_use_conf_empty_conf(monkeypatch):
+    # Clear any existing environment variables that might interfere
+    monkeypatch.delenv("BASIC_MODEL__API_KEY", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
+
     with pytest.raises(ValueError):
         llm._create_llm_use_conf("basic", {})
 
