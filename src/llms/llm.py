@@ -4,10 +4,10 @@
 from pathlib import Path
 from typing import Any, Dict
 import os
-import ssl
 import httpx
 
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from typing import get_args
 
@@ -15,7 +15,7 @@ from src.config import load_yaml_config
 from src.config.agents import LLMType
 
 # Cache for LLM instances
-_llm_cache: dict[LLMType, ChatOpenAI] = {}
+_llm_cache: dict[LLMType, BaseChatModel] = {}
 
 
 def _get_config_file_path() -> str:
@@ -47,9 +47,7 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
     return conf
 
 
-def _create_llm_use_conf(
-    llm_type: LLMType, conf: Dict[str, Any]
-) -> ChatOpenAI | ChatDeepSeek:
+def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatModel:
     """Create LLM instance using configuration."""
     llm_type_config_keys = _get_llm_type_config_keys()
     config_key = llm_type_config_keys.get(llm_type)
@@ -70,6 +68,10 @@ def _create_llm_use_conf(
     if not merged_conf:
         raise ValueError(f"No configuration found for LLM type: {llm_type}")
 
+    # Add max_retries to handle rate limit errors
+    if "max_retries" not in merged_conf:
+        merged_conf["max_retries"] = 3
+
     if llm_type == "reasoning":
         merged_conf["api_base"] = merged_conf.pop("base_url", None)
 
@@ -83,16 +85,17 @@ def _create_llm_use_conf(
         merged_conf["http_client"] = http_client
         merged_conf["http_async_client"] = http_async_client
 
-    return (
-        ChatOpenAI(**merged_conf)
-        if llm_type != "reasoning"
-        else ChatDeepSeek(**merged_conf)
-    )
+    if "azure_endpoint" in merged_conf or os.getenv("AZURE_OPENAI_ENDPOINT"):
+        return AzureChatOpenAI(**merged_conf)
+    if llm_type == "reasoning":
+        return ChatDeepSeek(**merged_conf)
+    else:
+        return ChatOpenAI(**merged_conf)
 
 
 def get_llm_by_type(
     llm_type: LLMType,
-) -> ChatOpenAI:
+) -> BaseChatModel:
     """
     Get LLM instance by type. Returns cached instance if available.
     """

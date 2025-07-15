@@ -4,7 +4,6 @@
 import json
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
-from typing import Dict, Any
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchResultsWithImages,
 )

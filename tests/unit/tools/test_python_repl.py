@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 from src.tools.python_repl import python_repl_tool
 
 

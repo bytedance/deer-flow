@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { Loader2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
@@ -29,6 +30,7 @@ export function AddMCPServerDialog({
 }: {
   onAdd?: (servers: MCPServerMetadata[]) => void;
 }) {
+  const t = useTranslations("settings");
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const [validationError, setValidationError] = useState<string | null>("");
@@ -50,7 +52,7 @@ export function AddMCPServerDialog({
         return;
       }
     } catch {
-      setValidationError("Invalid JSON");
+      setValidationError(t("invalidJson"));
       return;
     }
     const result = MCPConfigSchema.safeParse(JSON.parse(value));
@@ -65,17 +67,17 @@ export function AddMCPServerDialog({
         }
       }
       const errorMessage =
-        result.error.errors[0]?.message ?? "Validation failed";
+        result.error.errors[0]?.message ?? t("validationFailed");
       setValidationError(errorMessage);
       return;
     }
 
     const keys = Object.keys(result.data.mcpServers);
     if (keys.length === 0) {
-      setValidationError("Missing server name in `mcpServers`");
+      setValidationError(t("missingServerName"));
       return;
     }
-  }, []);
+  }, [t]);
 
   const handleAdd = useCallback(async () => {
     abortControllerRef.current = new AbortController();
@@ -139,21 +141,21 @@ export function AddMCPServerDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm">Add Servers</Button>
+        <Button size="sm">{t("addServers")}</Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle>Add New MCP Servers</DialogTitle>
+          <DialogTitle>{t("addNewMCPServers")}</DialogTitle>
         </DialogHeader>
         <DialogDescription>
-          DeerFlow uses the standard JSON MCP config to create a new server.
+          {t("mcpConfigDescription")}
           <br />
-          Paste your config below and click &quot;Add&quot; to add new servers.
+          {t("pasteConfigBelow")}
         </DialogDescription>
 
         <main>
           <Textarea
-            className="h-[360px] sm:max-w-[510px] break-all"
+            className="h-[360px] break-all sm:max-w-[510px]"
             placeholder={
               'Example:\n\n{\n  "mcpServers": {\n    "My Server": {\n      "command": "python",\n      "args": [\n        "-m", "mcp_server"\n      ],\n      "env": {\n        "API_KEY": "YOUR_API_KEY"\n      }\n    }\n  }\n}'
             }
@@ -169,7 +171,7 @@ export function AddMCPServerDialog({
             </div>
             <div className="flex items-center gap-2">
               <Button variant="outline" onClick={() => setOpen(false)}>
-                Cancel
+                {t("cancel", { defaultValue: "Cancel" })}
               </Button>
               <Button
                 className="w-24"
@@ -178,7 +180,7 @@ export function AddMCPServerDialog({
                 onClick={handleAdd}
               >
                 {processing && <Loader2 className="animate-spin" />}
-                Add
+                {t("add")}
               </Button>
               {
                 processing && (
