@@ -14,13 +14,14 @@
 
 Currently, DeerFlow has officially entered the [FaaS Application Center of Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market). Users can experience it online through the [experience link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) to intuitively feel its powerful functions and convenient operations. At the same time, to meet the deployment needs of different users, DeerFlow supports one-click deployment based on Volcengine. Click the [deployment link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow) to quickly complete the deployment process and start an efficient research journey.
 
+
 Please visit [our official website](https://deerflow.tech/) for more details.
 
 ## Demo
 
 ### Video
 
-[https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e](https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e)
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 In this demo, we showcase how to use DeerFlow to:
 
@@ -60,8 +61,10 @@ DeerFlow is developed in Python, and comes with a web UI written in Node.js. To 
 
 - **[`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
   Simplify Python environment and dependency management. `uv` automatically creates a virtual environment in the root directory and installs all required packages for you—no need to manually install Python environments.
+
 - **[`nvm`](https://github.com/nvm-sh/nvm):**
   Manage multiple versions of the Node.js runtime effortlessly.
+
 - **[`pnpm`](https://pnpm.io/installation):**
   Install and manage dependencies of Node.js project.
 
@@ -152,18 +155,17 @@ Explore more details in the [`web`](./web/) directory.
 DeerFlow supports multiple search engines that can be configured in your `.env` file using the `SEARCH_API` variable:
 
 - **Tavily** (default): A specialized search API for AI applications
-
   - Requires `TAVILY_API_KEY` in your `.env` file
   - Sign up at: https://app.tavily.com/home
+
 - **DuckDuckGo**: Privacy-focused search engine
-
   - No API key required
-- **Brave Search**: Privacy-focused search engine with advanced features
 
+- **Brave Search**: Privacy-focused search engine with advanced features
   - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file
   - Sign up at: https://brave.com/search/api/
-- **Arxiv**: Scientific paper search for academic research
 
+- **Arxiv**: Scientific paper search for academic research
   - No API key required
   - Specialized for scientific and academic papers
 
@@ -179,13 +181,13 @@ SEARCH_API=tavily
 DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you can use your private documents to answer questions.
 
 - **[RAGFlow](https://ragflow.io/docs/dev/)**：open source RAG engine
-  ```
-  # examples in .env.example
-  RAG_PROVIDER=ragflow
-  RAGFLOW_API_URL="http://localhost:9388"
-  RAGFLOW_API_KEY="ragflow-xxx"
-  RAGFLOW_RETRIEVAL_SIZE=10
-  ```
+   ```
+   # examples in .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   ```
 
 ## Features
 
@@ -200,27 +202,26 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 ### Tools and MCP Integrations
 
 - 🔍 **Search and Retrieval**
-
   - Web search via Tavily, Brave Search and more
   - Crawling with Jina
   - Advanced content extraction
   - Support for private knowledgebase
+
 - 📃 **RAG Integration**
 
   - Supports mentioning files from [RAGFlow](https://github.com/infiniflow/ragflow) within the input box. [Start up RAGFlow server](https://ragflow.io/docs/dev/).
-- 🔗 **MCP Seamless Integration**
 
+- 🔗 **MCP Seamless Integration**
   - Expand capabilities for private domain access, knowledge graph, web browsing and more
   - Facilitates integration of diverse research tools and methodologies
 
 ### Human Collaboration
 
 - 🧠 **Human-in-the-loop**
-
   - Supports interactive modification of research plans using natural language
   - Supports auto-acceptance of research plans
-- 📝 **Report Post-Editing**
 
+- 📝 **Report Post-Editing**
   - Supports Notion-like block editing
   - Allows AI refinements, including AI-assisted polishing, sentence shortening, and expansion
   - Powered by [tiptap](https://tiptap.dev/)
@@ -247,18 +248,20 @@ The system employs a streamlined workflow with the following components:
    - Initiates the research process based on user input
    - Delegates tasks to the planner when appropriate
    - Acts as the primary interface between the user and the system
+
 2. **Planner**: Strategic component for task decomposition and planning
 
    - Analyzes research objectives and creates structured execution plans
    - Determines if enough context is available or if more research is needed
    - Manages the research flow and decides when to generate the final report
+
 3. **Research Team**: A collection of specialized agents that execute the plan:
 
    - **Researcher**: Conducts web searches and information gathering using tools like web search engines, crawling and even MCP services.
    - **Coder**: Handles code analysis, execution, and technical tasks using Python REPL tool.
      Each agent has access to specific tools optimized for their role and operates within the LangGraph framework
-4. **Reporter**: Final stage processor for research outputs
 
+4. **Reporter**: Final stage processor for research outputs
    - Aggregates findings from the research team
    - Processes and structures the collected information
    - Generates comprehensive research reports
@@ -377,8 +380,8 @@ DeerFlow supports LangSmith tracing to help you debug and monitor your workflows
    LANGSMITH_API_KEY="xxx"
    LANGSMITH_PROJECT="xxx"
    ```
-2. Start tracing and visualize the graph locally with LangSmith by running:
 
+2. Start tracing and visualize the graph locally with LangSmith by running:
    ```bash
    langgraph dev
    ```
@@ -429,37 +432,44 @@ The following examples demonstrate the capabilities of DeerFlow:
 
    - Discusses features, access, prompt engineering, limitations, and ethical considerations
    - [View full report](examples/openai_sora_report.md)
+
 2. **Google's Agent to Agent Protocol Report** - Overview of Google's Agent to Agent (A2A) protocol
 
    - Discusses its role in AI agent communication and its relationship with Anthropic's Model Context Protocol (MCP)
    - [View full report](examples/what_is_agent_to_agent_protocol.md)
+
 3. **What is MCP?** - A comprehensive analysis of the term "MCP" across multiple contexts
 
    - Explores Model Context Protocol in AI, Monocalcium Phosphate in chemistry, and Micro-channel Plate in electronics
    - [View full report](examples/what_is_mcp.md)
+
 4. **Bitcoin Price Fluctuations** - Analysis of recent Bitcoin price movements
 
    - Examines market trends, regulatory influences, and technical indicators
    - Provides recommendations based on historical data
    - [View full report](examples/bitcoin_price_fluctuation.md)
+
 5. **What is LLM?** - An in-depth exploration of Large Language Models
 
    - Discusses architecture, training, applications, and ethical considerations
    - [View full report](examples/what_is_llm.md)
+
 6. **How to Use Claude for Deep Research?** - Best practices and workflows for using Claude in deep research
 
    - Covers prompt engineering, data analysis, and integration with other tools
    - [View full report](examples/how_to_use_claude_deep_research.md)
+
 7. **AI Adoption in Healthcare: Influencing Factors** - Analysis of factors driving AI adoption in healthcare
 
    - Discusses AI technologies, data quality, ethical considerations, economic evaluations, organizational readiness, and digital infrastructure
    - [View full report](examples/AI_adoption_in_healthcare.md)
+
 8. **Quantum Computing Impact on Cryptography** - Analysis of quantum computing's impact on cryptography
 
    - Discusses vulnerabilities of classical cryptography, post-quantum cryptography, and quantum-resistant cryptographic solutions
    - [View full report](examples/Quantum_Computing_Impact_on_Cryptography.md)
-9. **Cristiano Ronaldo's Performance Highlights** - Analysis of Cristiano Ronaldo's performance highlights
 
+9. **Cristiano Ronaldo's Performance Highlights** - Analysis of Cristiano Ronaldo's performance highlights
    - Discusses his career achievements, international goals, and performance in various matches
    - [View full report](examples/Cristiano_Ronaldo's_Performance_Highlights.md)
 
@@ -491,8 +501,11 @@ The application now supports an interactive mode with built-in questions in both
    ```bash
    uv run main.py --interactive
    ```
+
 2. Select your preferred language (English or 中文)
+
 3. Choose from a list of built-in questions or select the option to ask your own question
+
 4. The system will process your question and generate a comprehensive research report
 
 ### Human in the Loop
@@ -500,14 +513,17 @@ The application now supports an interactive mode with built-in questions in both
 DeerFlow includes a human in the loop mechanism that allows you to review, edit, and approve research plans before they are executed:
 
 1. **Plan Review**: When human in the loop is enabled, the system will present the generated research plan for your review before execution
+
 2. **Providing Feedback**: You can:
 
    - Accept the plan by responding with `[ACCEPTED]`
    - Edit the plan by providing feedback (e.g., `[EDIT PLAN] Add more steps about technical implementation`)
    - The system will incorporate your feedback and generate a revised plan
+
 3. **Auto-acceptance**: You can enable auto-acceptance to skip the review process:
 
    - Via API: Set `auto_accepted_plan: true` in your request
+
 4. **API Integration**: When using the API, you can provide feedback through the `feedback` parameter:
 
    ```json
