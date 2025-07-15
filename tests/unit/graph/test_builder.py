@@ -90,7 +90,7 @@ def test_build_base_graph_adds_nodes_and_edges(MockStateGraph):
     mock_builder = MagicMock()
     MockStateGraph.return_value = mock_builder
 
-    builder_mod._build_base_graph()
+    builder_mod.build_base_graph()
 
     # Check that all nodes and edges are added
     assert mock_builder.add_edge.call_count >= 2
@@ -98,7 +98,7 @@ def test_build_base_graph_adds_nodes_and_edges(MockStateGraph):
     mock_builder.add_conditional_edges.assert_called_once()
 
 
-@patch("src.graph.builder._build_base_graph")
+@patch("src.graph.builder.build_base_graph")
 @patch("src.graph.builder.MemorySaver")
 def test_build_graph_with_memory_uses_memory(MockMemorySaver, mock_build_base_graph):
     mock_builder = MagicMock()
@@ -111,7 +111,7 @@ def test_build_graph_with_memory_uses_memory(MockMemorySaver, mock_build_base_gr
     mock_builder.compile.assert_called_once_with(checkpointer=mock_memory)
 
 
-@patch("src.graph.builder._build_base_graph")
+@patch("src.graph.builder.build_base_graph")
 def test_build_graph_without_memory(mock_build_base_graph):
     mock_builder = MagicMock()
     mock_build_base_graph.return_value = mock_builder
@@ -123,7 +123,7 @@ def test_build_graph_without_memory(mock_build_base_graph):
 
 def test_graph_is_compiled():
     # The graph object should be the result of build_graph()
-    with patch("src.graph.builder._build_base_graph") as mock_base:
+    with patch("src.graph.builder.build_base_graph") as mock_base:
         mock_builder = MagicMock()
         mock_base.return_value = mock_builder
         mock_builder.compile.return_value = "compiled_graph"

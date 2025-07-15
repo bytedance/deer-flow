@@ -38,3 +38,21 @@ BASIC_MODEL:
 #   # Exclude results from these domains
 #   exclude_domains:
 #     - example.com
+
+
+# CHECKPOINTER support 4 types: local, postgres, mongo, redis
+CHECKPOINTER_MEMORY:
+  db_type: "sqlite"
+  db_uri: ":memory:"
+  
+  # Please run `uv add langgraph-checkpoint-postgres "psycopg[binary,pool]"` first
+  # db_type: "postgres"
+  # db_uri: "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable"
+
+  # Please run `uv add langgraph-checkpoint-mongodb pymongo` first
+  # db_type: "mongo"
+  # db_uri: "localhost:27017"
+
+  # Please run `uv add langgraph-checkpoint-redis` first
+  # db_type: "redis"
+  # db_uri: "redis://localhost:6379"

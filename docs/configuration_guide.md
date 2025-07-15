@@ -139,4 +139,21 @@ SEARCH_ENGINE:
   exclude_domains:
     - unreliable-site.com
     - spam-domain.net
+```
+
+## About short-term memory
+### How to use a checkpointer backed by a database:
+
+1. Add necessary module
+```shell
+uv add langgraph-checkpoint-postgres "psycopg[binary,pool]"
+```
+
+2. Configure db type and db uri in your `conf.yaml` file as follows:
+```yaml
+CHECKPOINTER_MEMORY:  
+  db_type: "postgres"
+  db_uri: "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable"
+```
+
 
