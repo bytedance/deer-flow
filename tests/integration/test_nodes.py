@@ -400,7 +400,7 @@ def mock_state_base():
     return {
         "current_plan": json.dumps(
             {
-                "has_enough_context": True,
+                "has_enough_context": False,
                 "title": "Test Plan",
                 "thought": "Test Thought",
                 "steps": [],
@@ -417,9 +417,9 @@ def test_human_feedback_node_auto_accepted(monkeypatch, mock_state_base):
     state["auto_accepted_plan"] = True
     result = human_feedback_node(state)
     assert isinstance(result, Command)
-    assert result.goto == "reporter"
+    assert result.goto == "research_team"
     assert result.update["plan_iterations"] == 1
-    assert result.update["current_plan"]["has_enough_context"] is True
+    assert result.update["current_plan"]["has_enough_context"] is False
 
 
 def test_human_feedback_node_edit_plan(monkeypatch, mock_state_base):
@@ -441,9 +441,9 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base):
     with patch("src.graph.nodes.interrupt", return_value="[ACCEPTED] Looks good!"):
         result = human_feedback_node(state)
         assert isinstance(result, Command)
-        assert result.goto == "reporter"
+        assert result.goto == "research_team"
         assert result.update["plan_iterations"] == 1
-        assert result.update["current_plan"]["has_enough_context"] is True
+        assert result.update["current_plan"]["has_enough_context"] is False
 
 
 def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base):
