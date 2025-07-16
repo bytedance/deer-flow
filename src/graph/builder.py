@@ -1,9 +1,12 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
-
+import logging
+logger = logging.getLogger(__file__)
+from pathlib import Path
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from src.prompts.planner_model import StepType
+from src.config import load_yaml_config
 
 from .types import State
 from .nodes import (
@@ -16,6 +19,11 @@ from .nodes import (
     human_feedback_node,
     background_investigation_node,
 )
+
+
+def _get_config_file_path() -> str:
+    """Get the path to the configuration file."""
+    return str((Path(__file__).parent.parent.parent / "conf.yaml").resolve())
 
 
 def continue_to_running_research_team(state: State):
@@ -74,6 +82,30 @@ def build_graph_with_memory():
     # build state graph
     builder = _build_base_graph()
     return builder.compile(checkpointer=memory)
+
+
+def get_checkpointer():
+    # use persistent memory to save conversation history
+    conf = load_yaml_config(_get_config_file_path())
+    checkpointer_conf = conf.get("CHECKPOINTER_MEMORY", {})
+    DB_TYPE = checkpointer_conf.get("db_type", "")
+    DB_URI = checkpointer_conf.get("db_uri", "")
+    match DB_TYPE.lower():
+        case "postgres":
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver as AsyncSaver
+        case "mongo":
+            from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver as AsyncSaver
+        case "redis":
+            from langgraph.checkpoint.redis.aio import AsyncRedisSaver as AsyncSaver
+        case _:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver as AsyncSaver
+
+    return AsyncSaver, DB_URI
+
+
+def get_base_graph_builder():
+    builder = _build_base_graph()
+    return builder
 
 
 def build_graph():
