@@ -116,6 +116,7 @@ async def _astream_workflow_generator(
         if messages:
             resume_msg += f" {messages[-1]['content']}"
         input_ = Command(resume=resume_msg)
+
     builder = build_base_graph()
     saver, db_uri = get_checkpointer()
     async with saver.from_conn_string(db_uri) as checkpointer:
@@ -154,6 +155,25 @@ async def _astream_workflow_generator(
                 continue
             message_chunk, message_metadata = cast(
                 tuple[BaseMessage, dict[str, any]], event_data
+            )
+            # Handle empty agent tuple gracefully
+            agent_name = "unknown"
+            if agent and len(agent) > 0:
+                agent_name = agent[0].split(":")[0] if ":" in agent[0] else agent[0]
+            event_stream_message: dict[str, any] = {
+                "thread_id": thread_id,
+                "agent": agent_name,
+                "id": message_chunk.id,
+                "role": "assistant",
+                "content": message_chunk.content,
+            }
+            if message_chunk.additional_kwargs.get("reasoning_content"):
+                event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
+                    "reasoning_content"
+                ]
+            if message_chunk.response_metadata.get("finish_reason"):
+                event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
+                    "finish_reason"
             )
             event_stream_message: dict[str, any] = {
                 "thread_id": thread_id,
