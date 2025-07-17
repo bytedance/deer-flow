@@ -153,9 +153,13 @@ async def _astream_workflow_generator(
         message_chunk, message_metadata = cast(
             tuple[BaseMessage, dict[str, any]], event_data
         )
+        # Handle empty agent tuple gracefully
+        agent_name = "unknown"
+        if agent and len(agent) > 0:
+            agent_name = agent[0].split(":")[0] if ":" in agent[0] else agent[0]
         event_stream_message: dict[str, any] = {
             "thread_id": thread_id,
-            "agent": agent[0].split(":")[0],
+            "agent": agent_name,
             "id": message_chunk.id,
             "role": "assistant",
             "content": message_chunk.content,

@@ -188,8 +188,6 @@ def human_feedback_node(
         plan_iterations += 1
         # parse the plan
         new_plan = json.loads(current_plan)
-        if new_plan["has_enough_context"]:
-            goto = "reporter"
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
@@ -247,9 +245,16 @@ def coordinator_node(
             "Coordinator response contains no tool calls. Terminating workflow execution."
         )
         logger.debug(f"Coordinator response: {response}")
-
+    old_messages = state.get("messages", [])
+    new_messages = old_messages + [
+        {
+            "role": "assistant",
+            "content": response.content,
+        }
+    ]
     return Command(
         update={
+            "messages": new_messages,
             "locale": locale,
             "research_topic": research_topic,
             "resources": configurable.resources,
