@@ -243,9 +243,16 @@ def coordinator_node(
             "Coordinator response contains no tool calls. Terminating workflow execution."
         )
         logger.debug(f"Coordinator response: {response}")
-
+    old_messages = state.get("messages", [])
+    new_messages = old_messages + [
+        {
+            "role": "assistant",
+            "content": response.content,
+        }
+    ]
     return Command(
         update={
+            "messages": new_messages,
             "locale": locale,
             "research_topic": research_topic,
             "resources": configurable.resources,
