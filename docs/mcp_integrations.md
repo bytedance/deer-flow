@@ -1,5 +1,8 @@
 # MCP Integrations
 
+This feature is diabled by default. You can enable it by setting the environment ENABLE_MCP_SERVER_CONFIGURATION
+Please enable this feature before securing your frond-end and back-end in an internal environment.q
+
 ## Example of MCP Server Configuration
 
 ```json
