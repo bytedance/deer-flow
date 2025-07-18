@@ -330,7 +330,9 @@ class TestMCPEndpoint:
         os.environ,
         {"ENABLE_MCP_SERVER_CONFIGURATION": ""},
     )
-    def test_mcp_server_metadata_with_exception(self, mock_load_tools, client):
+    def test_mcp_server_metadata_without_enable_configuration(
+        self, mock_load_tools, client
+    ):
 
         request_data = {
             "transport": "stdio",
