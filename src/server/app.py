@@ -378,7 +378,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
 async def mcp_server_metadata(request: MCPServerMetadataRequest):
     """Get information about an MCP server."""
     # Check if MCP server configuration is enabled
-    if not os.getenv("ENABLE_MCP_SERVER_CONFIGURATION", "false").lower() in [
+    if os.getenv("ENABLE_MCP_SERVER_CONFIGURATION", "false").lower() not in [
         "true",
         "1",
         "yes",
