@@ -346,7 +346,7 @@ class TestMCPEndpoint:
         assert response.status_code == 403
         assert (
             response.json()["detail"]
-            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable."
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features."
         )
 
 
@@ -432,16 +432,14 @@ class TestChatStreamEndpoint:
             "interrupt_feedback": "",
             "mcp_settings": {
                 "servers": {
-                "mcp-github-trending": {
-                    "transport": "stdio",
-                    "command": "uvx",
-                    "args": ["mcp-github-trending"],
-                    "env": {
-                    "MCP_SERVER_ID": "mcp-github-trending"
-                    },
-                    "enabled_tools": ["get_github_trending_repositories"],
-                    "add_to_agents": ["researcher"]
-                }
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
                 }
             },
             "enable_background_investigation": False,
@@ -479,16 +477,14 @@ class TestChatStreamEndpoint:
             "interrupt_feedback": "",
             "mcp_settings": {
                 "servers": {
-                "mcp-github-trending": {
-                    "transport": "stdio",
-                    "command": "uvx",
-                    "args": ["mcp-github-trending"],
-                    "env": {
-                    "MCP_SERVER_ID": "mcp-github-trending"
-                    },
-                    "enabled_tools": ["get_github_trending_repositories"],
-                    "add_to_agents": ["researcher"]
-                }
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
                 }
             },
             "enable_background_investigation": False,
@@ -499,6 +495,7 @@ class TestChatStreamEndpoint:
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+
 
 class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
