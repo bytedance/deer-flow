@@ -260,6 +260,10 @@ class TestEnhancePromptEndpoint:
 
 class TestMCPEndpoint:
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_success(self, mock_load_tools, client):
         mock_load_tools.return_value = [
             {"name": "test_tool", "description": "Test tool"}
@@ -281,6 +285,10 @@ class TestMCPEndpoint:
         assert len(response_data["tools"]) == 1
 
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_with_custom_timeout(self, mock_load_tools, client):
         mock_load_tools.return_value = []
 
@@ -296,6 +304,10 @@ class TestMCPEndpoint:
         mock_load_tools.assert_called_once()
 
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_with_exception(self, mock_load_tools, client):
         mock_load_tools.side_effect = HTTPException(
             status_code=400, detail="MCP Server Error"
@@ -312,6 +324,30 @@ class TestMCPEndpoint:
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Internal Server Error"
+
+    @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": ""},
+    )
+    def test_mcp_server_metadata_without_enable_configuration(
+        self, mock_load_tools, client
+    ):
+
+        request_data = {
+            "transport": "stdio",
+            "command": "test_command",
+            "args": ["arg1", "arg2"],
+            "env": {"ENV_VAR": "value"},
+        }
+
+        response = client.post("/api/mcp/server/metadata", json=request_data)
+
+        assert response.status_code == 403
+        assert (
+            response.json()["detail"]
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable."
+        )
 
 
 class TestRAGEndpoints:
