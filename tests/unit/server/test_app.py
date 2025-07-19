@@ -346,7 +346,7 @@ class TestMCPEndpoint:
         assert response.status_code == 403
         assert (
             response.json()["detail"]
-            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable."
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features."
         )
 
 
@@ -404,6 +404,89 @@ class TestChatStreamEndpoint:
             "auto_accepted_plan": True,
             "interrupt_feedback": "",
             "mcp_settings": {},
+            "enable_background_investigation": False,
+            "report_style": "academic",
+        }
+
+        response = client.post("/api/chat/stream", json=request_data)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+
+    @patch("src.server.app.graph")
+    def test_chat_stream_with_mcp_settings(self, mock_graph, client):
+        # Mock the async stream
+        async def mock_astream(*args, **kwargs):
+            yield ("agent1", "step1", {"test": "data"})
+
+        mock_graph.astream = mock_astream
+
+        request_data = {
+            "thread_id": "__default__",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "resources": [],
+            "max_plan_iterations": 3,
+            "max_step_num": 10,
+            "max_search_results": 5,
+            "auto_accepted_plan": True,
+            "interrupt_feedback": "",
+            "mcp_settings": {
+                "servers": {
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
+                }
+            },
+            "enable_background_investigation": False,
+            "report_style": "academic",
+        }
+
+        response = client.post("/api/chat/stream", json=request_data)
+
+        assert response.status_code == 403
+        assert (
+            response.json()["detail"]
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features."
+        )
+
+    @patch("src.server.app.graph")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
+    def test_chat_stream_with_mcp_settings_enabled(self, mock_graph, client):
+        # Mock the async stream
+        async def mock_astream(*args, **kwargs):
+            yield ("agent1", "step1", {"test": "data"})
+
+        mock_graph.astream = mock_astream
+
+        request_data = {
+            "thread_id": "__default__",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "resources": [],
+            "max_plan_iterations": 3,
+            "max_step_num": 10,
+            "max_search_results": 5,
+            "auto_accepted_plan": True,
+            "interrupt_feedback": "",
+            "mcp_settings": {
+                "servers": {
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
+                }
+            },
             "enable_background_investigation": False,
             "report_style": "academic",
         }

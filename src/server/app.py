@@ -385,7 +385,7 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
     ]:
         raise HTTPException(
             status_code=403,
-            detail="MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable.",
+            detail="MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features.",
         )
 
     try:
