@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
-from src.graph.builder import build_graph_with_memory
+from src.graph.builder import get_checkpointer, get_base_graph_builder
 from src.llms.llm import get_configured_llm_models
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
@@ -67,8 +67,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
     allow_headers=["*"],  # Now allow all headers, but can be restricted further
 )
-
-graph = build_graph_with_memory()
 
 
 @app.post("/api/chat/stream")
@@ -139,82 +137,87 @@ async def _astream_workflow_generator(
         if messages:
             resume_msg += f" {messages[-1]['content']}"
         input_ = Command(resume=resume_msg)
-    async for agent, _, event_data in graph.astream(
-        input_,
-        config={
-            "thread_id": thread_id,
-            "resources": resources,
-            "max_plan_iterations": max_plan_iterations,
-            "max_step_num": max_step_num,
-            "max_search_results": max_search_results,
-            "mcp_settings": mcp_settings,
-            "report_style": report_style.value,
-            "enable_deep_thinking": enable_deep_thinking,
-        },
-        stream_mode=["messages", "updates"],
-        subgraphs=True,
-    ):
-        if isinstance(event_data, dict):
-            if "__interrupt__" in event_data:
-                yield _make_event(
-                    "interrupt",
-                    {
-                        "thread_id": thread_id,
-                        "id": event_data["__interrupt__"][0].ns[0],
-                        "role": "assistant",
-                        "content": event_data["__interrupt__"][0].value,
-                        "finish_reason": "interrupt",
-                        "options": [
-                            {"text": "Edit plan", "value": "edit_plan"},
-                            {"text": "Start research", "value": "accepted"},
-                        ],
-                    },
-                )
-            continue
-        message_chunk, message_metadata = cast(
-            tuple[BaseMessage, dict[str, any]], event_data
-        )
-        # Handle empty agent tuple gracefully
-        agent_name = "unknown"
-        if agent and len(agent) > 0:
-            agent_name = agent[0].split(":")[0] if ":" in agent[0] else agent[0]
-        event_stream_message: dict[str, any] = {
-            "thread_id": thread_id,
-            "agent": agent_name,
-            "id": message_chunk.id,
-            "role": "assistant",
-            "content": message_chunk.content,
-        }
-        if message_chunk.additional_kwargs.get("reasoning_content"):
-            event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
-                "reasoning_content"
-            ]
-        if message_chunk.response_metadata.get("finish_reason"):
-            event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
-                "finish_reason"
+
+    builder = get_base_graph_builder()
+    saver, db_uri = get_checkpointer()
+    async with saver.from_conn_string(db_uri) as checkpointer:
+        graph = builder.compile(checkpointer=checkpointer)
+        async for agent, _, event_data in graph.astream(
+            input_,
+            config={
+                "thread_id": thread_id,
+                "resources": resources,
+                "max_plan_iterations": max_plan_iterations,
+                "max_step_num": max_step_num,
+                "max_search_results": max_search_results,
+                "mcp_settings": mcp_settings,
+                "report_style": report_style.value,
+                "enable_deep_thinking": enable_deep_thinking,
+            },
+            stream_mode=["messages", "updates"],
+            subgraphs=True,
+        ):
+            if isinstance(event_data, dict):
+                if "__interrupt__" in event_data:
+                    yield _make_event(
+                        "interrupt",
+                        {
+                            "thread_id": thread_id,
+                            "id": event_data["__interrupt__"][0].ns[0],
+                            "role": "assistant",
+                            "content": event_data["__interrupt__"][0].value,
+                            "finish_reason": "interrupt",
+                            "options": [
+                                {"text": "Edit plan", "value": "edit_plan"},
+                                {"text": "Start research", "value": "accepted"},
+                            ],
+                        },
+                    )
+                continue
+            message_chunk, message_metadata = cast(
+                tuple[BaseMessage, dict[str, any]], event_data
             )
-        if isinstance(message_chunk, ToolMessage):
-            # Tool Message - Return the result of the tool call
-            event_stream_message["tool_call_id"] = message_chunk.tool_call_id
-            yield _make_event("tool_call_result", event_stream_message)
-        elif isinstance(message_chunk, AIMessageChunk):
-            # AI Message - Raw message tokens
-            if message_chunk.tool_calls:
-                # AI Message - Tool Call
-                event_stream_message["tool_calls"] = message_chunk.tool_calls
-                event_stream_message["tool_call_chunks"] = (
-                    message_chunk.tool_call_chunks
+            # Handle empty agent tuple gracefully
+            agent_name = "unknown"
+            if agent and len(agent) > 0:
+                agent_name = agent[0].split(":")[0] if ":" in agent[0] else agent[0]
+            event_stream_message: dict[str, any] = {
+                "thread_id": thread_id,
+                "agent": agent_name,
+                "id": message_chunk.id,
+                "role": "assistant",
+                "content": message_chunk.content,
+            }
+            if message_chunk.additional_kwargs.get("reasoning_content"):
+                event_stream_message["reasoning_content"] = message_chunk.additional_kwargs[
+                    "reasoning_content"
+                ]
+            if message_chunk.response_metadata.get("finish_reason"):
+                event_stream_message["finish_reason"] = message_chunk.response_metadata.get(
+                    "finish_reason"
                 )
-                yield _make_event("tool_calls", event_stream_message)
-            elif message_chunk.tool_call_chunks:
-                # AI Message - Tool Call Chunks
-                event_stream_message["tool_call_chunks"] = (
-                    message_chunk.tool_call_chunks
-                )
-                yield _make_event("tool_call_chunks", event_stream_message)
-            else:
+            if isinstance(message_chunk, ToolMessage):
+                # Tool Message - Return the result of the tool call
+                event_stream_message["tool_call_id"] = message_chunk.tool_call_id
+                yield _make_event("tool_call_result", event_stream_message)
+            elif isinstance(message_chunk, AIMessageChunk):
                 # AI Message - Raw message tokens
-                yield _make_event("message_chunk", event_stream_message)
+                if message_chunk.tool_calls:
+                    # AI Message - Tool Call
+                    event_stream_message["tool_calls"] = message_chunk.tool_calls
+                    event_stream_message["tool_call_chunks"] = (
+                        message_chunk.tool_call_chunks
+                    )
+                    yield _make_event("tool_calls", event_stream_message)
+                elif message_chunk.tool_call_chunks:
+                    # AI Message - Tool Call Chunks
+                    event_stream_message["tool_call_chunks"] = (
+                        message_chunk.tool_call_chunks
+                    )
+                    yield _make_event("tool_call_chunks", event_stream_message)
+                else:
+                    # AI Message - Raw message tokens
+                    yield _make_event("message_chunk", event_stream_message)
 
 
 def _make_event(event_type: str, data: dict[str, any]):
