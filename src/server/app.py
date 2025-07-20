@@ -55,15 +55,19 @@ app = FastAPI(
 # Add CORS middleware
 # It's recommended to load the allowed origins from an environment variable
 # for better security and flexibility across different environments.
-allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins_str = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000"
+)
 allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
+logger.info(f"Allowed origins: {allowed_origins}")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,  # Restrict to specific origins
     allow_credentials=True,
-    allow_methods=["GET", "POST"],  # Be specific about allowed methods
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],  # Be specific
+    allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
+    allow_headers=["text/event-stream"],  # Now it supports SSE
 )
 
 graph = build_graph_with_memory()
