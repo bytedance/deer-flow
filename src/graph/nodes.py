@@ -34,13 +34,13 @@ logger = logging.getLogger(__name__)
 
 
 async def get_mcp_tools(config: RunnableConfig) -> []:
-    """拿到所有可用的 MCP 工具信息。
+    """拿到所有可用的 MCP 工具信息.
     
     Args:
         config: 运行时配置
         
     Returns:
-        包含工具名称、描述和所属服务器的字典
+        包含工具名称、描述和所属 MCP-Server 的列表.
     """
     try:
         configurable = Configuration.from_runnable_config(config)
@@ -150,10 +150,10 @@ async def planner_node(
         available_mcp_tools = await get_mcp_tools(config)
     else:
         logger.info("MCP planner integration is disabled, skipping tool collection")
-        
+
     # 将工具信息添加到状态中
     state["mcp_tools_info"] = available_mcp_tools
-    
+
     messages = apply_prompt_template("planner", state, configurable)
 
     if state.get("enable_background_investigation") and state.get(
@@ -422,7 +422,7 @@ async def _execute_agent_step(
                 HumanMessage(
                     content=resources_info
                     + "\n\n"
-                    + "You MUST use the **local_search_tool** to retrieve the information from the resource files."
+                    + "You MUST use the **local_search_tool** to retrieve the information from the resource files.",
                 )
             )
 
