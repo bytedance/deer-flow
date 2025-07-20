@@ -208,7 +208,7 @@ interface Plan {
 - Carefully assess each step's web search or retrieve from URL requirement based on its nature:
   - Research steps (`need_search: true`) for gathering information
   - Processing steps (`need_search: false`) for calculations and data processing
-- **MCP Tool Usage**:
+- MCP Tool Usage:
   - Consider using available MCP tools when they can provide specialized capabilities for your research
   - Include relevant tools in the `tools` array for steps where they would be beneficial
   - Specify appropriate parameters for tools when needed

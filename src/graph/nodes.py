@@ -1,6 +1,5 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
-import inspect
 import json
 import logging
 import os
@@ -13,7 +12,6 @@ from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from src.agents import create_agent
-
 from src.tools.search import LoggedTavilySearch
 from src.tools import (
     crawl_tool,
@@ -33,42 +31,6 @@ from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 
 logger = logging.getLogger(__name__)
-
-
-def _create_fallback_plan(curr_plan: dict) -> dict:
-    """创建回退计划，移除可能导致验证失败的工具信息。
-    
-    Args:
-        curr_plan: 原始计划字典
-        
-    Returns:
-        清理后的计划字典，如果无法创建则返回 None
-    """
-    try:
-        if not isinstance(curr_plan, dict):
-            return None
-        
-        # 创建计划的深拷贝
-        fallback_plan = curr_plan.copy()
-        
-        # 清理步骤中的工具信息
-        if "steps" in fallback_plan and isinstance(fallback_plan["steps"], list):
-            cleaned_steps = []
-            for step in fallback_plan["steps"]:
-                if isinstance(step, dict):
-                    # 创建步骤的副本并移除工具信息
-                    cleaned_step = {k: v for k, v in step.items() if k != "tools"}
-                    cleaned_steps.append(cleaned_step)
-                else:
-                    cleaned_steps.append(step)
-            fallback_plan["steps"] = cleaned_steps
-        
-        logger.debug(f"Created fallback plan with {len(fallback_plan.get('steps', []))} steps")
-        return fallback_plan
-        
-    except Exception as e:
-        logger.error(f"Error creating fallback plan: {e}")
-        return None
 
 
 async def get_mcp_tools(config: RunnableConfig) -> []:
@@ -115,8 +77,7 @@ async def get_mcp_tools(config: RunnableConfig) -> []:
         # Get MCP tools if available
         if mcp_servers:
             async with MultiServerMCPClient(mcp_servers) as client:
-                tools = client.get_tools()
-                for tool in tools:
+                for tool in client.get_tools():
                     if tool.name in enabled_tools:
                         tool.description = (
                             f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
@@ -236,9 +197,8 @@ async def planner_node(
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
-    except json.JSONDecodeError as e:
-        logger.warning(f"Planner response is not a valid JSON: {e}")
-        logger.debug(f"Failed to parse response: {full_response}")
+    except json.JSONDecodeError:
+        logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 0:
             return Command(goto="reporter")
         else:
@@ -463,8 +423,6 @@ async def _execute_agent_step(
                     content=resources_info
                     + "\n\n"
                     + "You MUST use the **local_search_tool** to retrieve the information from the resource files."
-                    + "\n"
-                    + "If you need additional context or information, you may also use other tools to search for and supplement external information.",
                 )
             )
 
@@ -547,42 +505,14 @@ async def _setup_and_execute_agent_step(
     Returns:
         Command to update state and go to research_team
     """
-    # configurable = Configuration.from_runnable_config(config)
-    # mcp_servers = {}
-    # enabled_tools = {}
-
-    # # Extract MCP server configuration for this agent type
-    # if configurable.mcp_settings:
-    #     for server_name, server_config in configurable.mcp_settings["servers"].items():
-    #         if (
-    #             server_config["enabled_tools"]
-    #             # todo: 细化 add_to_agents 配置, 将 coder 和 researcher 分开, 暂时通过注释规避.
-    #             # and agent_type in server_config["add_to_agents"]
-    #         ):
-    #             mcp_servers[server_name] = {
-    #                 k: v
-    #                 for k, v in server_config.items()
-    #                 if k in ("transport", "command", "args", "url", "env")
-    #             }
-    #             for tool_name in server_config["enabled_tools"]:
-    #                 enabled_tools[tool_name] = server_name
-    # print(f"✅ mcp servers: {mcp_servers}")
-
     # Create and execute agent with MCP tools if available
     available_mcp_tools = await get_mcp_tools(config)
     if len(available_mcp_tools) > 0:
         loaded_tools = default_tools[:]
-        # for tool in tools:
-        #     if tool.name in enabled_tools:
-        #         tool.description = (
-        #             f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-        #         )
-        #         loaded_tools.append(tool)
         loaded_tools.extend(available_mcp_tools)
         agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
         return await _execute_agent_step(state, agent, agent_type)
     else:
-        print(f"❌ this is no mcp-server create agent.")
         # Use default tools if no MCP servers are configured
         agent = create_agent(agent_type, agent_type, default_tools, agent_type)
         return await _execute_agent_step(state, agent, agent_type)
@@ -622,6 +552,5 @@ async def coder_node(
         state,
         config,
         "coder",
-        # [python_repl_tool],
         tools,
     )
