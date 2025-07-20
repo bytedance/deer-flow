@@ -53,12 +53,17 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+# It's recommended to load the allowed origins from an environment variable
+# for better security and flexibility across different environments.
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=allowed_origins,  # Restrict to specific origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["GET", "POST"],  # Be specific about allowed methods
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],  # Be specific
 )
 
 graph = build_graph_with_memory()
@@ -66,6 +71,20 @@ graph = build_graph_with_memory()
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
+    # Check if MCP server configuration is enabled
+    mcp_enabled = os.getenv("ENABLE_MCP_SERVER_CONFIGURATION", "false").lower() in [
+        "true",
+        "1",
+        "yes",
+    ]
+
+    # Validate MCP settings if provided
+    if request.mcp_settings and not mcp_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features.",
+        )
+
     thread_id = request.thread_id
     if thread_id == "__default__":
         thread_id = str(uuid4())
@@ -79,7 +98,7 @@ async def chat_stream(request: ChatRequest):
             request.max_search_results,
             request.auto_accepted_plan,
             request.interrupt_feedback,
-            request.mcp_settings,
+            request.mcp_settings if mcp_enabled else {},
             request.enable_background_investigation,
             request.report_style,
             request.enable_deep_thinking,
@@ -358,6 +377,17 @@ async def enhance_prompt(request: EnhancePromptRequest):
 @app.post("/api/mcp/server/metadata", response_model=MCPServerMetadataResponse)
 async def mcp_server_metadata(request: MCPServerMetadataRequest):
     """Get information about an MCP server."""
+    # Check if MCP server configuration is enabled
+    if os.getenv("ENABLE_MCP_SERVER_CONFIGURATION", "false").lower() not in [
+        "true",
+        "1",
+        "yes",
+    ]:
+        raise HTTPException(
+            status_code=403,
+            detail="MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features.",
+        )
+
     try:
         # Set default timeout with a longer value for this endpoint
         timeout = 300  # Default to 300 seconds for this endpoint

@@ -4,7 +4,6 @@ import inspect
 import json
 import logging
 import os
-import time
 from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -22,7 +21,6 @@ from src.tools import (
     get_retriever_tool,
     python_repl_tool,
 )
-from src.tools.decorators import retry_with_backoff, with_error_handling
 
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
@@ -35,28 +33,6 @@ from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 
 logger = logging.getLogger(__name__)
-
-
-# 简化的错误处理
-# class MCPError(Exception):
-#     """简化的 MCP 错误类"""
-#     pass
-
-
-# def validate_tool_info(tool_info: dict) -> tuple[bool, list]:
-#     """验证工具信息的有效性"""
-#     errors = []
-#
-#     if not tool_info.get("name"):
-#         errors.append("Tool name is required")
-#
-#     if not tool_info.get("description"):
-#         errors.append("Tool description is required")
-#
-#     if not tool_info.get("server"):
-#         errors.append("Tool server is required")
-#
-#     return len(errors) == 0, errors
 
 
 def _create_fallback_plan(curr_plan: dict) -> dict:
@@ -152,175 +128,6 @@ async def get_mcp_tools(config: RunnableConfig) -> []:
     except Exception as e:
         logger.error(f"Failed to collect MCP tools info: {e}")
         return []
-
-
-# async def _collect_tools_from_servers(servers: dict) -> dict:
-#     """批量从多个服务器收集工具信息。
-#
-#     Args:
-#         servers: 服务器配置字典
-#
-#     Returns:
-#         工具信息字典
-#
-#     Raises:
-#         Exception: 批量处理失败时抛出异常
-#     """
-#     tools_info = {}
-#     cache = MCPToolsCache()
-#
-#     # 首先尝试从缓存获取所有工具
-#     cached_tools = {}
-#     servers_to_fetch = {}
-#
-#     for server_name, server_config in servers.items():
-#         if not server_config.get("enabled_tools"):
-#             continue
-#
-#         # 尝试从缓存获取
-#         cached_server_tools = cache.get_tools(server_name)
-#         if cached_server_tools:
-#             cached_tools.update(cached_server_tools)
-#             logger.debug(f"Using cached tools for server '{server_name}'")
-#         else:
-#             servers_to_fetch[server_name] = server_config
-#
-#     # 如果所有工具都在缓存中，直接返回
-#     if not servers_to_fetch:
-#         return cached_tools
-#
-#     # 构建 MCP 服务器配置
-#     mcp_servers = {}
-#     for server_name, server_config in servers_to_fetch.items():
-#         mcp_servers[server_name] = {
-#             k: v for k, v in server_config.items()
-#             if k in ("transport", "command", "args", "url", "env")
-#         }
-#
-#     # 批量获取工具信息
-#     client = MultiServerMCPClient(mcp_servers)
-#     tools = await client.get_tools()
-#     for tool in tools:
-#             for server_name, server_config in servers_to_fetch.items():
-#                 if tool.name in server_config.get("enabled_tools", []):
-#                     tool_info = {
-#                         "name": tool.name,
-#                         "description": tool.description,
-#                         "server": server_name,
-#                         "parameters": getattr(tool, 'parameters', {})
-#                     }
-#
-#                     # 验证工具信息
-#                     is_valid, errors = validate_tool_info(tool_info)
-#                     if is_valid:
-#                         tools_info[tool.name] = tool_info
-#                     else:
-#                         logger.warning(f"Invalid tool info for '{tool.name}': {errors}")
-#                         raise MCPValidationError(
-#                             f"Tool validation failed: {', '.join(errors)}",
-#                             server_name=server_name,
-#                             tool_name=tool.name,
-#                             details={"errors": errors}
-#                         )
-#
-#     # 更新缓存
-#     for server_name in servers_to_fetch.keys():
-#         server_tools = {k: v for k, v in tools_info.items() if v["server"] == server_name}
-#         if server_tools:
-#             cache.set_tools(server_name, server_tools)
-#
-#     # 合并缓存的工具和新获取的工具
-#     tools_info.update(cached_tools)
-#     return tools_info
-
-
-# @retry_with_backoff(max_retries=3, initial_backoff=1.0, exceptions=(ConnectionError, TimeoutError))
-# @with_error_handling
-# def _collect_tools_from_single_server(server_name: str, server_config: dict, tools_info: dict) -> None:
-#     """从单个服务器收集工具信息。
-#
-#     Args:
-#         server_name: 服务器名称
-#         server_config: 服务器配置
-#         tools_info: 工具信息字典（会被修改）
-#
-#     Raises:
-#         MCPConnectionError: 连接错误
-#         MCPTimeoutError: 超时错误
-#         MCPParsingError: 解析错误
-#         MCPValidationError: 验证错误
-#     """
-#     if not server_config.get("enabled_tools"):
-#         logger.debug(f"No enabled tools for server '{server_name}'")
-#         return
-#
-#     cache = MCPToolsCache()
-#
-#     # 尝试从缓存获取
-#     cached_tools = cache.get_tools(server_name)
-#     if cached_tools:
-#         tools_info.update(cached_tools)
-#         logger.debug(f"Using cached tools for server '{server_name}'")
-#         return
-#
-#     # 构建 MCP 服务器配置
-#     mcp_server_config = {
-#         server_name: {
-#             k: v for k, v in server_config.items()
-#             if k in ("transport", "command", "args", "url", "env")
-#         }
-#     }
-#
-#     server_tools = {}
-#
-#     try:
-#         # 连接到 MCP 服务器并获取工具
-#         client = MultiServerMCPClient(mcp_server_config)
-#         tools = client.get_tools()
-#         for tool in tools:
-#                 if tool.name in server_config.get("enabled_tools", []):
-#                     try:
-#                         tool_info = {
-#                             "name": tool.name,
-#                             "description": tool.description,
-#                             "server": server_name,
-#                             "parameters": getattr(tool, 'parameters', {})
-#                         }
-#
-#                         # 验证工具信息
-#                         is_valid, errors = validate_tool_info(tool_info)
-#                         if is_valid:
-#                             server_tools[tool.name] = tool_info
-#                             tools_info[tool.name] = tool_info
-#                         else:
-#                             logger.warning(f"Invalid tool info for '{tool.name}': {errors}")
-#                     except Exception as tool_error:
-#                         logger.error(f"Error processing tool '{tool.name}' from server '{server_name}': {tool_error}")
-#                         continue
-#
-#         # 更新缓存
-#         if server_tools:
-#             cache.set_tools(server_name, server_tools)
-#             logger.debug(f"Cached {len(server_tools)} tools for server '{server_name}'")
-#
-#     except ConnectionError as e:
-#         raise MCPConnectionError(
-#             f"Failed to connect to MCP server '{server_name}': {str(e)}",
-#             server_name=server_name,
-#             details={"original_error": str(e)}
-#         )
-#     except TimeoutError as e:
-#         raise MCPTimeoutError(
-#             f"Timeout connecting to MCP server '{server_name}': {str(e)}",
-#             server_name=server_name,
-#             details={"original_error": str(e)}
-#         )
-#     except json.JSONDecodeError as e:
-#         raise MCPParsingError(
-#             f"JSON parsing error for server '{server_name}': {str(e)}",
-#             server_name=server_name,
-#             details={"original_error": str(e), "position": e.pos, "line": e.lineno, "column": e.colno}
-#         )
 
 
 @tool
@@ -436,55 +243,16 @@ async def planner_node(
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
-
-    # 验证和处理工具感知计划
-    try:
-        if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
-            logger.info("Planner response has enough context.")
-            # 尝试验证包含工具信息的计划
-            new_plan = Plan.model_validate(curr_plan)
-            logger.info(f"Successfully parsed plan with {len(new_plan.steps)} steps")
-            
-            # 记录工具使用情况
-            total_tools = 0
-            for step in new_plan.steps:
-                if step.tools:
-                    total_tools += len(step.tools)
-                    logger.debug(f"Step '{step.title}' uses {len(step.tools)} tools")
-            
-            if total_tools > 0:
-                logger.info(f"Plan includes {total_tools} MCP tools across all steps")
-            
-            return Command(
-                update={
-                    "messages": [AIMessage(content=full_response, name="planner")],
-                    "current_plan": new_plan,
-                },
-                goto="reporter",
-            )
-    except Exception as validation_error:
-        logger.error(f"Failed to validate plan with tools: {validation_error}")
-        logger.debug(f"Plan validation error details: {curr_plan}")
-        
-        # 回退机制：尝试创建不包含工具的计划
-        try:
-            # 移除工具信息并重新验证
-            fallback_plan = _create_fallback_plan(curr_plan)
-            if fallback_plan:
-                logger.warning("Using fallback plan without MCP tools due to validation error")
-                new_plan = Plan.model_validate(fallback_plan)
-                return Command(
-                    update={
-                        "messages": [AIMessage(content=full_response, name="planner")],
-                        "current_plan": new_plan,
-                    },
-                    goto="reporter",
-                )
-        except Exception as fallback_error:
-            logger.error(f"Fallback plan creation also failed: {fallback_error}")
-        
-        # 如果所有解析尝试都失败，继续到人工反馈
-        logger.warning("All plan parsing attempts failed, proceeding to human feedback")
+    if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
+        logger.info("Planner response has enough context.")
+        new_plan = Plan.model_validate(curr_plan)
+        return Command(
+            update={
+                "messages": [AIMessage(content=full_response, name="planner")],
+                "current_plan": new_plan,
+            },
+            goto="reporter",
+        )
     return Command(
         update={
             "messages": [AIMessage(content=full_response, name="planner")],
@@ -527,63 +295,21 @@ def human_feedback_node(
         plan_iterations += 1
         # parse the plan
         new_plan = json.loads(current_plan)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Planner response is not a valid JSON: {e}")
+    except json.JSONDecodeError:
+        logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
 
-    # 验证和处理工具感知计划
-    try:
-        validated_plan = Plan.model_validate(new_plan)
-        logger.info(f"Successfully validated plan with {len(validated_plan.steps)} steps")
-        
-        # 记录工具使用情况
-        total_tools = 0
-        for step in validated_plan.steps:
-            if step.tools:
-                total_tools += len(step.tools)
-                logger.debug(f"Step '{step.title}' uses {len(step.tools)} tools")
-        
-        if total_tools > 0:
-            logger.info(f"Validated plan includes {total_tools} MCP tools across all steps")
-        
-        return Command(
-            update={
-                "current_plan": validated_plan,
-                "plan_iterations": plan_iterations,
-                "locale": new_plan["locale"],
-            },
-            goto=goto,
-        )
-        
-    except Exception as validation_error:
-        logger.error(f"Failed to validate plan with tools in human feedback: {validation_error}")
-        
-        # 回退机制：尝试创建不包含工具的计划
-        try:
-            fallback_plan = _create_fallback_plan(new_plan)
-            if fallback_plan:
-                logger.warning("Using fallback plan without MCP tools in human feedback due to validation error")
-                validated_plan = Plan.model_validate(fallback_plan)
-                return Command(
-                    update={
-                        "current_plan": validated_plan,
-                        "plan_iterations": plan_iterations,
-                        "locale": fallback_plan["locale"],
-                    },
-                    goto=goto,
-                )
-        except Exception as fallback_error:
-            logger.error(f"Fallback plan creation also failed in human feedback: {fallback_error}")
-        
-        # 如果所有验证尝试都失败，终止或返回报告节点
-        logger.error("All plan validation attempts failed in human feedback")
-        if plan_iterations > 1:
-            return Command(goto="reporter")
-        else:
-            return Command(goto="__end__")
+    return Command(
+        update={
+            "current_plan": Plan.model_validate(new_plan),
+            "plan_iterations": plan_iterations,
+            "locale": new_plan["locale"],
+        },
+        goto=goto,
+    )
 
 
 def coordinator_node(
@@ -626,16 +352,12 @@ def coordinator_node(
             "Coordinator response contains no tool calls. Terminating workflow execution."
         )
         logger.debug(f"Coordinator response: {response}")
-    old_messages = state.get("messages", [])
-    new_messages = old_messages + [
-        {
-            "role": "assistant",
-            "content": response.content,
-        }
-    ]
+    messages = state.get("messages", [])
+    if response.content:
+        messages.append(HumanMessage(content=response.content, name="coordinator"))
     return Command(
         update={
-            "messages": new_messages,
+            "messages": messages,
             "locale": locale,
             "research_topic": research_topic,
             "resources": configurable.resources,
