@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useStore, useToolCalls } from "~/core/store";
+import { parseJSON } from "~/core/utils/json";
 import { Tooltip } from "./tooltip";
 import { WarningFilled } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
@@ -23,7 +24,7 @@ export const Link = ({
     (toolCalls || []).forEach((call) => {
       if (call && call.name === "web_search" && call.result) {
         try {
-          const result = JSON.parse(call.result) as Array<{ url: string }>;
+          const result = parseJSON(call.result, []) as Array<{ url: string }>;
           if (Array.isArray(result)) {
             result.forEach((r) => {
               if (r && typeof r.url === 'string') {
