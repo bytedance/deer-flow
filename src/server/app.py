@@ -67,7 +67,7 @@ app.add_middleware(
     allow_origins=allowed_origins,  # Restrict to specific origins
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
-    allow_headers=["*"],  # Now allow all headers, but can be restricted furtherq
+    allow_headers=["*"],  # Now allow all headers, but can be restricted further
 )
 
 graph = build_graph_with_memory()
