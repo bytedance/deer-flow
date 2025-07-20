@@ -50,7 +50,12 @@
       "enableDisable": "Enable/disable server",
       "deleteServer": "Delete server",
       "disabled": "Disabled",
-      "new": "New"
+      "new": "New",
+      "plannerIntegration": {
+        "title": "Planner Integration",
+        "description": "Enable MCP tools to be considered and used during research planning. When enabled, the planner will suggest appropriate tools for each research step.",
+        "enabledNote": "The planner will now consider available MCP tools when creating research plans and suggest the most appropriate tools for each step."
+      }
     },
     "about": {
       "title": "About"

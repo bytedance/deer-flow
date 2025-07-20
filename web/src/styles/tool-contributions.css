@@ -1,0 +1,53 @@
+/* Tool contribution styles */
+.tool-contribution {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--primary);
+  background-color: color-mix(in srgb, var(--primary) 5%, transparent);
+  border-radius: 0.25rem;
+  transition: background-color 0.2s ease;
+  cursor: pointer;
+}
+
+.tool-contribution:hover {
+  background-color: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.tool-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.tool-name {
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.tool-server {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.tool-text {
+  font-size: 0.875rem;
+}
+
+/* Tool effectiveness rating styles */
+.tool-rating {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.rating-stars {
+  display: flex;
+  color: #f59e0b; /* Amber-500 */
+}
+
+.rating-text {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}

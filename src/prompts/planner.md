@@ -53,6 +53,21 @@ Before creating a detailed plan, assess if there is sufficient context to answer
      - The volume of information is too limited for a comprehensive report
    - When in doubt, always err on the side of gathering more information
 
+## Available MCP Tools
+
+{% if mcp_tools_info %}
+The following MCP (Model Context Protocol) tools are available for use in your research plan:
+
+{% for tool in mcp_tools_info %}
+- **Tool Name**: {{ tool.name }}
+  **Tool Description**: {{ tool.description }}
+{% endfor %}
+
+When creating steps, consider whether any of these specialized tools would be beneficial for gathering specific types of information. You can specify tools to use in each step by including them in the step's tool configuration.
+{% else %}
+No MCP tools are currently available.
+{% endif %}
+
 ## Step Types and Web Search
 
 Different types of steps have different web search requirements:
@@ -64,6 +79,7 @@ Different types of steps have different web search requirements:
    - Collecting competitor analysis
    - Researching current events or news
    - Finding statistical data or reports
+   - Using specialized MCP tools for domain-specific research
 
 2. **Data Processing Steps** (`need_search: false`):
    - API calls and data extraction
@@ -71,6 +87,7 @@ Different types of steps have different web search requirements:
    - Raw data collection from existing sources
    - Mathematical calculations and analysis
    - Statistical computations and data processing
+   - Using MCP tools for data processing and analysis
 
 ## Exclusions
 
@@ -156,11 +173,19 @@ When planning information gathering, consider these key aspects and ensure COMPR
 Directly output the raw JSON format of `Plan` without "```json". The `Plan` interface is defined as follows:
 
 ```ts
+interface StepTool {
+  name: string; // Tool name
+  description: string; // Tool description
+  server: string; // MCP server name
+  parameters?: object; // Optional tool parameters
+}
+
 interface Step {
   need_search: boolean; // Must be explicitly set for each step
   title: string;
   description: string; // Specify exactly what data to collect. If the user input contains a link, please retain the full Markdown format when necessary.
   step_type: "research" | "processing"; // Indicates the nature of the step
+  tools?: StepTool[]; // Optional MCP tools to use for this step
 }
 
 interface Plan {
@@ -183,5 +208,10 @@ interface Plan {
 - Carefully assess each step's web search or retrieve from URL requirement based on its nature:
   - Research steps (`need_search: true`) for gathering information
   - Processing steps (`need_search: false`) for calculations and data processing
+- **MCP Tool Usage**:
+  - Consider using available MCP tools when they can provide specialized capabilities for your research
+  - Include relevant tools in the `tools` array for steps where they would be beneficial
+  - Specify appropriate parameters for tools when needed
+  - Tools can enhance both research and processing steps with domain-specific functionality
 - Default to gathering more information unless the strictest sufficient context criteria are met
 - Always use the language specified by the locale = **{{ locale }}**.
