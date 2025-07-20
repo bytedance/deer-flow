@@ -33,30 +33,29 @@ from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 logger = logging.getLogger(__name__)
 
 
-async def get_mcp_tools(config: RunnableConfig) -> []:
-    """拿到所有可用的 MCP 工具信息.
+def get_mcp_servers(config: RunnableConfig) -> tuple[dict, dict]:
+    """获取可用的 MCP 服务器配置和启用的工具信息.
     
     Args:
         config: 运行时配置
         
     Returns:
-        包含工具名称、描述和所属 MCP-Server 的列表.
+        包含 MCP 服务器配置和启用工具的元组 (mcp_servers, enabled_tools).
     """
     try:
         configurable = Configuration.from_runnable_config(config)
         mcp_servers = {}
         enabled_tools = {}
-        tools_ = []
 
         # 检查是否有 MCP 设置
         if not configurable.mcp_settings:
             logger.debug("No MCP settings found in configuration")
-            return {}
+            return {}, {}
 
         servers = configurable.mcp_settings.get("servers", {})
         if not servers:
             logger.debug("No MCP servers configured")
-            return {}
+            return {}, {}
 
         # Extract MCP server configuration for this agent type
         if configurable.mcp_settings:
@@ -73,6 +72,26 @@ async def get_mcp_tools(config: RunnableConfig) -> []:
                     }
                     for tool_name in server_config["enabled_tools"]:
                         enabled_tools[tool_name] = server_name
+                        
+        return mcp_servers, enabled_tools
+        
+    except Exception as e:
+        logger.error(f"Failed to collect MCP servers info: {e}")
+        return {}, {}
+
+
+async def get_mcp_tools(config: RunnableConfig) -> []:
+    """拿到所有可用的 MCP 工具信息.
+    
+    Args:
+        config: 运行时配置
+        
+    Returns:
+        包含工具名称、描述和所属 MCP-Server 的列表.
+    """
+    try:
+        tools_ = []
+        mcp_servers, enabled_tools = get_mcp_servers(config)
 
         # Get MCP tools if available
         if mcp_servers:
@@ -506,12 +525,18 @@ async def _setup_and_execute_agent_step(
         Command to update state and go to research_team
     """
     # Create and execute agent with MCP tools if available
-    available_mcp_tools = await get_mcp_tools(config)
-    if len(available_mcp_tools) > 0:
-        loaded_tools = default_tools[:]
-        loaded_tools.extend(available_mcp_tools)
-        agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
-        return await _execute_agent_step(state, agent, agent_type)
+    mcp_servers, enabled_tools = get_mcp_servers(config)
+    if mcp_servers:
+        async with MultiServerMCPClient(mcp_servers) as client:
+            loaded_tools = default_tools[:]
+            for tool in client.get_tools():
+                if tool.name in enabled_tools:
+                    tool.description = (
+                        f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
+                    )
+                    loaded_tools.append(tool)
+            agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
+            return await _execute_agent_step(state, agent, agent_type)
     else:
         # Use default tools if no MCP servers are configured
         agent = create_agent(agent_type, agent_type, default_tools, agent_type)
