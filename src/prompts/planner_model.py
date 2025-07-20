@@ -69,10 +69,9 @@ class Step(BaseModel):
     def validate_tools(cls, v):
         """验证工具列表的合理性"""
         if v is not None:
-            # todo: 检查工具名称是否重复
+            # todo: 检查工具名称是否重复, 如果名称和参数完全一致, 要有对应的策略.
             # tool_names = [tool.name for tool in v]
             # if len(tool_names) != len(set(tool_names)):
-            #     raise ValueError("步骤中不能包含重复的工具")
             
             # 检查工具列表不能为空
             if len(v) == 0:

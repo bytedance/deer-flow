@@ -441,8 +441,8 @@ function PlanCard({
   const plan = useMemo<{
     title?: string;
     thought?: string;
-    steps?: { 
-      title?: string; 
+    steps?: {
+      title?: string;
       description?: string;
       tools?: Array<{
         name: string;
@@ -512,13 +512,15 @@ function PlanCard({
                     <li key={`step-${i}`}>
                       <div className="flex items-start gap-2">
                         <div className="flex-1">
-                          <h3 className="mb text-lg font-medium flex items-center gap-2">
+                          <h3 className="mb flex items-center gap-2 text-lg font-medium">
                             <Markdown animated={message.isStreaming}>
                               {step.title}
                             </Markdown>
                             {step.tools && step.tools.length > 0 && (
-                              <Tooltip title={`Uses ${step.tools.length} MCP tool${step.tools.length > 1 ? 's' : ''}`}>
-                                <div className="flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-xs">
+                              <Tooltip
+                                title={`Uses ${step.tools.length} MCP tool${step.tools.length > 1 ? "s" : ""}`}
+                              >
+                                <div className="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-800">
                                   <Wrench size={12} />
                                   <span>{step.tools.length}</span>
                                 </div>
@@ -531,19 +533,7 @@ function PlanCard({
                             </Markdown>
                           </div>
                           {step.tools && step.tools.length > 0 && (
-                            <div className="mt-2">
-                              <div className="flex flex-wrap gap-1">
-                                {step.tools.map((tool, toolIndex) => (
-                                  <div
-                                    key={`tool-${toolIndex}`}
-                                    className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs border border-blue-200 transition-colors flex items-center gap-1"
-                                  >
-                                    <Wrench size={10} />
-                                    {tool.name}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
+                            <ToolsDisplay tools={step.tools} />
                           )}
                         </div>
                       </div>
@@ -584,6 +574,83 @@ function PlanCard({
               )}
             </CardFooter>
           </Card>
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
+function ToolsDisplay({
+  tools,
+}: {
+  tools: Array<{
+    name: string;
+    description: string;
+    server: string;
+    parameters?: any;
+  }>;
+}) {
+  const [expandedTool, setExpandedTool] = useState<string | null>(null);
+
+  return (
+    <div className="mt-2">
+      <div className="mb-2 flex flex-wrap gap-1">
+        {tools.map((tool, toolIndex) => (
+          <button
+            key={`tool-${toolIndex}`}
+            onClick={() =>
+              setExpandedTool(expandedTool === tool.name ? null : tool.name)
+            }
+            className="flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700 transition-colors hover:bg-blue-100"
+          >
+            <Wrench size={10} />
+            {tool.name}
+            {expandedTool === tool.name ? (
+              <ChevronDown size={10} />
+            ) : (
+              <ChevronRight size={10} />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {expandedTool && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          exit={{ opacity: 0, height: 0 }}
+          transition={{ duration: 0.2 }}
+          className="rounded-lg border bg-gray-50 p-3 text-sm"
+        >
+          {tools
+            .filter((tool) => tool.name === expandedTool)
+            .map((tool, index) => (
+              <div key={index}>
+                <div className="mb-2 flex items-center gap-2">
+                  <Wrench size={14} className="text-blue-600" />
+                  <span className="font-medium text-gray-900">{tool.name}</span>
+                  <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-600">
+                    {tool.server}
+                  </span>
+                </div>
+                <p className="mb-2 text-gray-700">{tool.description}</p>
+                {tool.parameters && Object.keys(tool.parameters).length > 0 && (
+                  <div>
+                    <div className="mb-1 flex items-center gap-1">
+                      <Info size={12} className="text-gray-500" />
+                      <span className="text-xs font-medium text-gray-600">
+                        Parameters:
+                      </span>
+                    </div>
+                    <div className="rounded border bg-white p-2 font-mono text-xs">
+                      <pre className="whitespace-pre-wrap text-gray-800">
+                        {JSON.stringify(tool.parameters, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
         </motion.div>
       )}
     </div>
@@ -666,5 +733,3 @@ function PodcastCard({
     </Card>
   );
 }
-
-

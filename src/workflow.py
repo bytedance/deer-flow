@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import logging
+from src.config.configuration import get_recursion_limit
 from src.graph import build_graph
 
 # Configure logging
@@ -17,6 +18,7 @@ def enable_debug_logging():
 
 
 logger = logging.getLogger(__name__)
+
 
 # Create the graph
 graph = build_graph()
@@ -71,7 +73,7 @@ async def run_agent_workflow_async(
                 }
             },
         },
-        "recursion_limit": 100,
+        "recursion_limit": get_recursion_limit(default=100),
     }
     last_message_cnt = 0
     async for s in graph.astream(
