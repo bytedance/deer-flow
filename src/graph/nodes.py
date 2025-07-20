@@ -33,11 +33,12 @@ from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 logger = logging.getLogger(__name__)
 
 
-def get_mcp_servers(config: RunnableConfig) -> tuple[dict, dict]:
+def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dict, dict]:
     """获取可用的 MCP 服务器配置和启用的工具信息.
     
     Args:
         config: 运行时配置
+        agent_type: 代理类型，用于过滤适用的工具
         
     Returns:
         包含 MCP 服务器配置和启用工具的元组 (mcp_servers, enabled_tools).
@@ -57,21 +58,23 @@ def get_mcp_servers(config: RunnableConfig) -> tuple[dict, dict]:
             logger.debug("No MCP servers configured")
             return {}, {}
 
-        # Extract MCP server configuration for this agent type
-        if configurable.mcp_settings:
-            for server_name, server_config in configurable.mcp_settings["servers"].items():
-                if (
-                    server_config["enabled_tools"]
-                    # todo: 细化 add_to_agents 配置, 将 coder 和 researcher 分开, 暂时通过注释规避.
-                    # and agent_type in server_config["add_to_agents"]
-                ):
-                    mcp_servers[server_name] = {
-                        k: v
-                        for k, v in server_config.items()
-                        if k in ("transport", "command", "args", "url", "env")
-                    }
-                    for tool_name in server_config["enabled_tools"]:
-                        enabled_tools[tool_name] = server_name
+        # Extract MCP server configuration
+        for server_name, server_config in servers.items():
+            if not server_config.get("enabled_tools"):
+                continue
+                
+            # 检查是否指定了特定的agent类型，如果指定了则进行过滤
+            if agent_type and server_config.get("add_to_agents"):
+                if agent_type not in server_config["add_to_agents"]:
+                    continue
+            
+            mcp_servers[server_name] = {
+                k: v
+                for k, v in server_config.items()
+                if k in ("transport", "command", "args", "url", "env")
+            }
+            for tool_name in server_config["enabled_tools"]:
+                enabled_tools[tool_name] = server_name
                         
         return mcp_servers, enabled_tools
         
@@ -158,20 +161,30 @@ async def planner_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["human_feedback", "reporter"]]:
     """Planner node that generate the full plan."""
-    logger.info("Planner generating full plan")
+    current_plan = state.get("current_plan")
+    
+    # 检查是否是重新评估模式（所有步骤都已完成）
+    is_reevaluation = (
+        isinstance(current_plan, Plan) and 
+        current_plan.steps and 
+        all(step.execution_res for step in current_plan.steps)
+    )
+    
+    if is_reevaluation:
+        logger.info("Planner re-evaluating completed research for sufficiency")
+    else:
+        logger.info("Planner generating full plan")
+        
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
     
     # 根据配置决定是否收集 MCP 工具信息
-    available_mcp_tools = []
     if configurable.mcp_planner_integration:
         logger.info("MCP planner integration is enabled, collecting tool information")
-        available_mcp_tools = await get_mcp_tools(config)
+        state["mcp_tools_info"] = await get_mcp_tools(config)
     else:
-        logger.info("MCP planner integration is disabled, skipping tool collection")
-
-    # 将工具信息添加到状态中
-    state["mcp_tools_info"] = available_mcp_tools
+        logger.info("MCP planner integration is disabled")
+        state["mcp_tools_info"] = []
 
     messages = apply_prompt_template("planner", state, configurable)
 
@@ -216,29 +229,29 @@ async def planner_node(
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
-    except json.JSONDecodeError:
-        logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 0:
-            return Command(goto="reporter")
-        else:
-            return Command(goto="__end__")
-    if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
-        logger.info("Planner response has enough context.")
-        new_plan = Plan.model_validate(curr_plan)
+        if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
+            logger.info("Planner response has enough context.")
+            new_plan = Plan.model_validate(curr_plan)
+            return Command(
+                update={
+                    "messages": [AIMessage(content=full_response, name="planner")],
+                    "current_plan": new_plan,
+                },
+                goto="reporter",
+            )
+        # 计划需要进一步执行
         return Command(
             update={
                 "messages": [AIMessage(content=full_response, name="planner")],
-                "current_plan": new_plan,
+                "current_plan": full_response,
             },
-            goto="reporter",
+            goto="human_feedback",
         )
-    return Command(
-        update={
-            "messages": [AIMessage(content=full_response, name="planner")],
-            "current_plan": full_response,
-        },
-        goto="human_feedback",
-    )
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Planner response parsing failed: {e}")
+        # 如果有历史迭代，直接生成报告；否则终止
+        goto_target = "reporter" if plan_iterations > 0 else "__end__"
+        return Command(goto=goto_target)
 
 
 def human_feedback_node(

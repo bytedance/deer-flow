@@ -26,6 +26,7 @@ export const useStore = create<{
   researchActivityIds: Map<string, string[]>;
   ongoingResearchId: string | null;
   openResearchId: string | null;
+  currentAgent: string | null;
 
   appendMessage: (message: Message) => void;
   updateMessage: (message: Message) => void;
@@ -33,6 +34,7 @@ export const useStore = create<{
   openResearch: (researchId: string | null) => void;
   closeResearch: () => void;
   setOngoingResearch: (researchId: string | null) => void;
+  setCurrentAgent: (agent: string | null) => void;
 }>((set) => ({
   responding: false,
   threadId: THREAD_ID,
@@ -44,6 +46,7 @@ export const useStore = create<{
   researchActivityIds: new Map<string, string[]>(),
   ongoingResearchId: null,
   openResearchId: null,
+  currentAgent: null,
 
   appendMessage(message: Message) {
     set((state) => ({
@@ -71,6 +74,9 @@ export const useStore = create<{
   },
   setOngoingResearch(researchId: string | null) {
     set({ ongoingResearchId: researchId });
+  },
+  setCurrentAgent(agent: string | null) {
+    set({ currentAgent: agent });
   },
 }));
 
@@ -122,6 +128,12 @@ export async function sendMessage(
     for await (const event of stream) {
       const { type, data } = event;
       messageId = data.id;
+
+      // Update current agent when receiving messages
+      if (data.agent && data.agent !== "unknown") {
+        useStore.getState().setCurrentAgent(data.agent);
+      }
+
       let message: Message | undefined;
       if (type === "tool_call_result") {
         message = findMessageByToolCallId(data.tool_call_id);
@@ -160,6 +172,7 @@ export async function sendMessage(
     useStore.getState().setOngoingResearch(null);
   } finally {
     setResponding(false);
+    useStore.getState().setCurrentAgent(null);
   }
 }
 

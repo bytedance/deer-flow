@@ -137,6 +137,16 @@
       "errorGeneratingPodcast": "Error when generating podcast. Please try again.",
       "downloadPodcast": "Download podcast"
     },
+    "agents": {
+      "working": "Working...",
+      "coordinator": "Coordinator",
+      "backgroundInvestigator": "Background Investigator",
+      "planner": "Planner",
+      "researcher": "Researcher",
+      "coder": "Coder",
+      "reporter": "Reporter",
+      "unknown": "Processing"
+    },
     "messages": {
       "replaying": "Replaying",
       "replayDescription": "DeerFlow is now replaying the conversation...",

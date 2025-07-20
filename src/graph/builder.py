@@ -23,6 +23,7 @@ def continue_to_running_research_team(state: State):
     if not current_plan or not current_plan.steps:
         return "planner"
 
+    # 当所有步骤都完成时，回到planner让LLM重新评估是否有足够信息
     if all(step.execution_res for step in current_plan.steps):
         return "planner"
 
