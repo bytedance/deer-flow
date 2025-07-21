@@ -175,7 +175,7 @@ async def _astream_workflow_generator(
             tuple[BaseMessage, dict[str, any]], event_data
         )
         # Handle empty agent tuple gracefully
-        agent_name = "unknown"
+        agent_name = "planner"
         if agent and len(agent) > 0:
             agent_name = agent[0].split(":")[0] if ":" in agent[0] else agent[0]
         event_stream_message: dict[str, any] = {
