@@ -86,24 +86,65 @@ export function AgentStatus({ className }: { className?: string }) {
     }
 
     try {
-      const plan = JSON.parse(planMessage.content);
+      // Handle potential streaming content that might have incomplete JSON
+      let content = planMessage.content.trim();
+      if (!content || !content.startsWith("{")) {
+        return null;
+      }
+
+      // Try to find the end of the JSON object to handle streaming content
+      let braceCount = 0;
+      let jsonEnd = -1;
+      for (let i = 0; i < content.length; i++) {
+        if (content[i] === "{") braceCount++;
+        if (content[i] === "}") braceCount--;
+        if (braceCount === 0) {
+          jsonEnd = i;
+          break;
+        }
+      }
+
+      if (jsonEnd === -1) {
+        return null; // Incomplete JSON
+      }
+
+      // Extract only the complete JSON part
+      content = content.substring(0, jsonEnd + 1);
+
+      const plan = JSON.parse(content);
       if (!plan.steps || !Array.isArray(plan.steps)) {
         return null;
       }
 
       const totalSteps = plan.steps.length;
-      const completedSteps = plan.steps.filter((step: any) => step.execution_res).length;
-      const currentStep = completedSteps + 1;
 
-      // Only show progress for research/coder agents (actual execution steps)
-      if (currentAgent === "researcher" || currentAgent === "coder") {
+      // Find which step is currently being executed
+      let currentStepIndex = -1;
+      for (let i = 0; i < plan.steps.length; i++) {
+        if (!plan.steps[i].execution_res) {
+          // This is the first unfinished step, so it's currently being executed
+          currentStepIndex = i;
+          break;
+        }
+      }
+
+      // If all steps are completed, we're in the final phase
+      if (currentStepIndex === -1) {
+        // All steps completed, show final step
         return {
-          current: Math.min(currentStep, totalSteps),
+          current: totalSteps,
           total: totalSteps,
         };
       }
+
+      // Show current step being executed (1-based index)
+      return {
+        current: currentStepIndex + 1,
+        total: totalSteps,
+      };
     } catch (e) {
-      // Ignore JSON parse errors
+      // Silently ignore JSON parse errors during streaming
+      return null;
     }
 
     return null;
@@ -121,13 +162,25 @@ export function AgentStatus({ className }: { className?: string }) {
     >
       <Card className={cn("shadow-lg", config.bgClass)}>
         <CardContent className="flex items-center gap-3 p-3">
-          <div className={cn("flex items-center justify-center", config.colorClass)}>
+          <div
+            className={cn(
+              "flex items-center justify-center",
+              config.colorClass,
+            )}
+          >
             <Icon size={18} />
           </div>
           <div className="flex flex-col">
-            <span className="text-sm font-medium text-gray-900">
-              {t(config.nameKey)}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-gray-900">
+                {t(config.nameKey)}
+              </span>
+              {progressInfo && (
+                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                  {progressInfo.current}/{progressInfo.total}
+                </span>
+              )}
+            </div>
             <span className="text-xs text-gray-600">{t("working")}</span>
           </div>
           <LoadingAnimation className="scale-75" />
