@@ -1,5 +1,6 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
+import copy
 import json
 import logging
 import os
@@ -63,10 +64,10 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
             if not server_config.get("enabled_tools"):
                 continue
                 
-            # 检查是否指定了特定的agent类型，如果指定了则进行过滤
-            if agent_type and server_config.get("add_to_agents"):
-                if agent_type not in server_config["add_to_agents"]:
-                    continue
+            # todo: 精细化根据特定的 agent 类型进行过滤
+            # if agent_type and server_config.get("add_to_agents"):
+            #     if agent_type not in server_config["add_to_agents"]:
+            #         continue
             
             mcp_servers[server_name] = {
                 k: v
@@ -74,8 +75,9 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
                 if k in ("transport", "command", "args", "url", "env")
             }
             for tool_name in server_config["enabled_tools"]:
-                enabled_tools[tool_name] = server_name
-                        
+                prefixed_name = f"{server_name}_{tool_name}"
+                enabled_tools[prefixed_name] = server_name
+        
         return mcp_servers, enabled_tools
         
     except Exception as e:
@@ -83,31 +85,37 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
         return {}, {}
 
 
-async def get_mcp_tools(config: RunnableConfig) -> []:
+async def get_mcp_tools_info(config: RunnableConfig) -> []:
     """拿到所有可用的 MCP 工具信息.
     
     Args:
         config: 运行时配置
         
     Returns:
-        包含工具名称、描述和所属 MCP-Server 的列表.
+        包含工具名称、描述的列表.
     """
     try:
-        tools_ = []
+        tools = []
         mcp_servers, enabled_tools = get_mcp_servers(config)
-
         # Get MCP tools if available
         if mcp_servers:
             async with MultiServerMCPClient(mcp_servers) as client:
                 for tool in client.get_tools():
-                    if tool.name in enabled_tools:
-                        tool.description = (
-                            f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-                        )
-                        tools_.append(tool)
-                logger.info(f"Successfully collected {len(tools_)} MCP tools")
-        return tools_
-        
+                    for server_name in mcp_servers:
+                        prefixed_name = f"{server_name}_{tool.name}"
+                        if prefixed_name in enabled_tools:
+                            # Create a copy of the tool for this specific server
+                            import copy
+                            tool_copy = copy.deepcopy(tool)
+                            tool_copy.name = prefixed_name
+                            tool_copy.description = (
+                                f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                            )
+                            tools.append(tool_copy)
+                        else:
+                            logger.debug(f"Tool {prefixed_name} NOT found in enabled_tools")
+                logger.info(f"Successfully collected {len(tools)} MCP tools")
+        return tools
     except Exception as e:
         logger.error(f"Failed to collect MCP tools info: {e}")
         return []
@@ -169,7 +177,7 @@ async def planner_node(
     # 根据配置决定是否收集 MCP 工具信息
     if configurable.mcp_planner_integration:
         logger.info("MCP planner integration is enabled, collecting tool information")
-        state["mcp_tools_info"] = await get_mcp_tools(config)
+        state["mcp_tools_info"] = await get_mcp_tools_info(config)
     else:
         logger.info("MCP planner integration is disabled")
         state["mcp_tools_info"] = []
@@ -526,16 +534,23 @@ async def _setup_and_execute_agent_step(
         Command to update state and go to research_team
     """
     # Create and execute agent with MCP tools if available
+    loaded_tools = default_tools[:]
     mcp_servers, enabled_tools = get_mcp_servers(config)
     if mcp_servers:
         async with MultiServerMCPClient(mcp_servers) as client:
-            loaded_tools = default_tools[:]
             for tool in client.get_tools():
-                if tool.name in enabled_tools:
-                    tool.description = (
-                        f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-                    )
-                    loaded_tools.append(tool)
+                for server_name in mcp_servers:
+                    prefixed_name = f"{server_name}_{tool.name}"
+                    if prefixed_name in enabled_tools:
+                        # Create a copy of the tool for this specific server
+                        import copy
+                        tool_copy = copy.deepcopy(tool)
+                        tool_copy.name = prefixed_name
+                        tool_copy.description = (
+                            f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                        )
+                        loaded_tools.append(tool_copy)
+            logger.info(f"{agent_type} successfully collected {len(loaded_tools)} MCP tools")
             agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
             return await _execute_agent_step(state, agent, agent_type)
     else:

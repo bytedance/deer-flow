@@ -6,7 +6,7 @@ import { PencilRuler } from "lucide-react";
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Badge } from "~/components/ui/badge";
 import { cn } from "~/lib/utils";
-import { findMCPTool } from "~/core/mcp";
+import { findMCPTool, parseToolName, formatToolDisplayName } from "~/core/mcp";
 
 interface ToolBadgeProps {
   toolName: string;
@@ -24,9 +24,9 @@ export function ToolBadge({
   size = "default",
 }: ToolBadgeProps) {
   const tool = findMCPTool(toolName);
-  
-  // Format the display name by removing the mcp_ prefix
-  const displayName = toolName.replace(/^mcp_/, "");
+  const { serverName: extractedServerName } = parseToolName(toolName);
+  const displayName = formatToolDisplayName(toolName);
+  const serverName = server || extractedServerName;
   
   return (
     <Tooltip title={tool?.description || toolName}>
@@ -42,12 +42,12 @@ export function ToolBadge({
       >
         <PencilRuler className={cn("h-3 w-3", size === "sm" && "h-2.5 w-2.5")} />
         <span className={cn("text-xs", size === "sm" && "text-[10px]")}>{displayName}</span>
-        {server && (
+        {serverName && (
           <span className={cn(
             "text-muted-foreground rounded-full bg-muted px-1 text-[10px]",
             size === "sm" && "text-[8px]"
           )}>
-            {server}
+            {serverName}
           </span>
         )}
       </Badge>
