@@ -161,19 +161,7 @@ async def planner_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["human_feedback", "reporter"]]:
     """Planner node that generate the full plan."""
-    current_plan = state.get("current_plan")
-    
-    # 检查是否是重新评估模式（所有步骤都已完成）
-    is_reevaluation = (
-        isinstance(current_plan, Plan) and 
-        current_plan.steps and 
-        all(step.execution_res for step in current_plan.steps)
-    )
-    
-    if is_reevaluation:
-        logger.info("Planner re-evaluating completed research for sufficiency")
-    else:
-        logger.info("Planner generating full plan")
+    logger.info("Planner generating full plan")
         
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
