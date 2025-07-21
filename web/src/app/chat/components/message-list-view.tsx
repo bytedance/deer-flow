@@ -145,11 +145,10 @@ function MessageListItem({
       message.agent === "coordinator" ||
       message.agent === "planner" ||
       message.agent === "podcast" ||
-      message.agent === "unknown" ||
       startOfResearch
     ) {
       let content: React.ReactNode;
-      if (message.agent === "planner" || message.agent === "unknown") {
+      if (message.agent === "planner") {
         content = (
           <div className="w-full px-4">
             <PlanCard
