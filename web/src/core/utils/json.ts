@@ -1,9 +1,8 @@
-import { parse } from "best-effort-json-parser";
-
-export function parseJSON<T>(json: string | null | undefined, fallback: T) {
+export function parseJSON<T>(json: string | null | undefined, fallback: T): T {
   if (!json) {
     return fallback;
   }
+
   try {
     let raw = json
       .trim()
@@ -14,32 +13,67 @@ export function parseJSON<T>(json: string | null | undefined, fallback: T) {
       .replace(/^```\s*/, "")
       .replace(/\s*```$/, "");
 
-    // Handle streaming JSON content - find the complete JSON object
-    if (raw.startsWith('{')) {
+    // Early return for empty or invalid content
+    if (!raw || raw.length === 0) {
+      return fallback;
+    }
+
+    // For streaming content, try to extract complete JSON
+    if (raw.startsWith("{")) {
+      // Find the matching closing brace
       let braceCount = 0;
       let jsonEnd = -1;
-      
+      let inString = false;
+      let escapeNext = false;
+
       for (let i = 0; i < raw.length; i++) {
-        if (raw[i] === '{') braceCount++;
-        if (raw[i] === '}') braceCount--;
-        if (braceCount === 0) {
-          jsonEnd = i;
-          break;
+        const char = raw[i];
+
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+
+        if (char === "\\") {
+          escapeNext = true;
+          continue;
+        }
+
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+
+        if (!inString) {
+          if (char === "{") braceCount++;
+          if (char === "}") braceCount--;
+          if (braceCount === 0) {
+            jsonEnd = i;
+            break;
+          }
         }
       }
-      
+
       // If we found a complete JSON object, extract only that part
       if (jsonEnd !== -1) {
         raw = raw.substring(0, jsonEnd + 1);
       } else {
-        // Incomplete JSON, return fallback
+        // Incomplete JSON during streaming, return fallback
         return fallback;
       }
     }
 
-    return parse(raw) as T;
+    // Validate that it looks like valid JSON before parsing
+    if (!raw.startsWith("{") && !raw.startsWith("[")) {
+      return fallback;
+    }
+
+    // Use native JSON.parse only
+    const result = JSON.parse(raw);
+    return result as T;
   } catch (error) {
-    // Silently return fallback for any parsing errors
+    // For any parsing errors, silently return fallback
+    // This prevents console errors during streaming
     return fallback;
   }
 }
