@@ -14,6 +14,7 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.types import Command
 
+from src.config.configuration import get_recursion_limit
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
@@ -150,6 +151,7 @@ async def _astream_workflow_generator(
             "mcp_settings": mcp_settings,
             "report_style": report_style.value,
             "enable_deep_thinking": enable_deep_thinking,
+            "recursion_limit": get_recursion_limit(),
         },
         stream_mode=["messages", "updates"],
         subgraphs=True,

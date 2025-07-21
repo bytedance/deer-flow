@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
@@ -9,6 +10,39 @@ from langchain_core.runnables import RunnableConfig
 
 from src.rag.retriever import Resource
 from src.config.report_style import ReportStyle
+
+logger = logging.getLogger(__name__)
+
+
+def get_recursion_limit(default: int = 25) -> int:
+    """Get the recursion limit from environment variable or use default.
+
+    Args:
+        default: Default recursion limit if environment variable is not set or invalid
+
+    Returns:
+        int: The recursion limit to use
+    """
+    try:
+        env_value_str = os.getenv("AGENT_RECURSION_LIMIT", str(default))
+        parsed_limit = int(env_value_str)
+
+        if parsed_limit > 0:
+            logger.info(f"Recursion limit set to: {parsed_limit}")
+            return parsed_limit
+        else:
+            logger.warning(
+                f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
+                f"Using default value {default}."
+            )
+            return default
+    except ValueError:
+        raw_env_value = os.getenv("AGENT_RECURSION_LIMIT")
+        logger.warning(
+            f"Invalid AGENT_RECURSION_LIMIT value: '{raw_env_value}'. "
+            f"Using default value {default}."
+        )
+        return default
 
 
 @dataclass(kw_only=True)
