@@ -583,15 +583,9 @@ async def coder_node(
 ) -> Command[Literal["research_team"]]:
     """Coder node that do code analysis."""
     logger.info("Coder node is coding.")
-    configurable = Configuration.from_runnable_config(config)
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool, python_repl_tool]
-    retriever_tool = get_retriever_tool(state.get("resources", []))
-    if retriever_tool:
-        tools.insert(0, retriever_tool)
-    logger.info(f"Coder tools: {tools}")
     return await _setup_and_execute_agent_step(
         state,
         config,
         "coder",
-        tools,
+        [python_repl_tool],
     )
