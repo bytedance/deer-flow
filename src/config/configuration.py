@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 
 def get_recursion_limit(default: int = 25) -> int:
     """Get the recursion limit from environment variable or use default.
-    
+
     Args:
         default: Default recursion limit if environment variable is not set or invalid
-        
+
     Returns:
         int: The recursion limit to use
     """

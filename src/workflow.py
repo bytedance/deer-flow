@@ -19,7 +19,6 @@ def enable_debug_logging():
 
 logger = logging.getLogger(__name__)
 
-
 # Create the graph
 graph = build_graph()
 
