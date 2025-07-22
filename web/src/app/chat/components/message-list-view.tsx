@@ -185,7 +185,7 @@ function MessageListItem({
             )}
           >
             <MessageBubble message={message}>
-              <div className="flex w-full flex-col text-wrap break-words">
+              <div className="flex w-full flex-col break-words">
                 <Markdown
                   className={cn(
                     message.role === "user" &&
@@ -233,11 +233,12 @@ function MessageBubble({
   return (
     <div
       className={cn(
-        `group flex w-fit max-w-[85%] flex-col rounded-2xl px-4 py-3 text-nowrap shadow`,
+        "group flex w-auto max-w-[90vw] flex-col rounded-2xl px-4 py-3 break-words",
         message.role === "user" && "bg-brand rounded-ee-none",
         message.role === "assistant" && "bg-card rounded-es-none",
         className,
       )}
+      style={{ wordBreak: "break-all" }}
     >
       {children}
     </div>
