@@ -145,7 +145,7 @@
       "researcher": "Researcher",
       "coder": "Coder",
       "reporter": "Reporter",
-      "unknown": "Processing"
+      "unknown": "Processing..."
     },
     "messages": {
       "replaying": "Replaying",

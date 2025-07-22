@@ -138,14 +138,14 @@
       "downloadPodcast": "下载播客"
     },
     "agents": {
-      "working": "工作中...",
-      "coordinator": "协调员",
+      "working": "working...",
+      "coordinator": "主管",
       "backgroundInvestigator": "背景调研员",
-      "planner": "规划师",
+      "planner": "规划者",
       "researcher": "研究员",
-      "coder": "操作员",
-      "reporter": "报告员",
-      "unknown": "处理中"
+      "coder": "程序员",
+      "reporter": "作家",
+      "unknown": "处理中..."
     },
     "messages": {
       "replaying": "回放中",
