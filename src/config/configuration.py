@@ -44,6 +44,39 @@ def get_recursion_limit(default: int = 25) -> int:
         )
         return default
 
+logger = logging.getLogger(__name__)
+
+
+def get_recursion_limit(default: int = 25) -> int:
+    """Get the recursion limit from environment variable or use default.
+
+    Args:
+        default: Default recursion limit if environment variable is not set or invalid
+
+    Returns:
+        int: The recursion limit to use
+    """
+    try:
+        env_value_str = os.getenv("AGENT_RECURSION_LIMIT", str(default))
+        parsed_limit = int(env_value_str)
+
+        if parsed_limit > 0:
+            logger.info(f"Recursion limit set to: {parsed_limit}")
+            return parsed_limit
+        else:
+            logger.warning(
+                f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
+                f"Using default value {default}."
+            )
+            return default
+    except ValueError:
+        raw_env_value = os.getenv("AGENT_RECURSION_LIMIT")
+        logger.warning(
+            f"Invalid AGENT_RECURSION_LIMIT value: '{raw_env_value}'. "
+            f"Using default value {default}."
+        )
+        return default
+
 
 @dataclass(kw_only=True)
 class Configuration:
