@@ -92,18 +92,21 @@ def test_from_runnable_config_with_no_config():
 
 def test_get_recursion_limit_default():
     from src.config.configuration import get_recursion_limit
+
     result = get_recursion_limit()
     assert result == 25
 
 
 def test_get_recursion_limit_custom_default():
     from src.config.configuration import get_recursion_limit
+
     result = get_recursion_limit(50)
     assert result == 50
 
 
 def test_get_recursion_limit_from_env(monkeypatch):
     from src.config.configuration import get_recursion_limit
+
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "100")
     result = get_recursion_limit()
     assert result == 100
@@ -111,6 +114,7 @@ def test_get_recursion_limit_from_env(monkeypatch):
 
 def test_get_recursion_limit_invalid_env_value(monkeypatch):
     from src.config.configuration import get_recursion_limit
+
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "invalid")
     result = get_recursion_limit()
     assert result == 25
@@ -118,6 +122,7 @@ def test_get_recursion_limit_invalid_env_value(monkeypatch):
 
 def test_get_recursion_limit_negative_env_value(monkeypatch):
     from src.config.configuration import get_recursion_limit
+
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "-5")
     result = get_recursion_limit()
     assert result == 25
@@ -125,6 +130,7 @@ def test_get_recursion_limit_negative_env_value(monkeypatch):
 
 def test_get_recursion_limit_zero_env_value(monkeypatch):
     from src.config.configuration import get_recursion_limit
+
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "0")
     result = get_recursion_limit()
     assert result == 25
