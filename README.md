@@ -85,6 +85,9 @@ cd deer-flow
 # Install dependencies, uv will take care of the python interpreter and venv creation, and install the required packages
 uv sync
 
+# Install 'volcengine' without its dependencies to avoid unnecessary or conflicting packages.
+uv pip install --no-deps volcengine>=1.0.191
+
 # Configure .env with your API keys
 # Tavily: https://app.tavily.com/home
 # Brave_SEARCH: https://brave.com/search/api/
