@@ -307,6 +307,7 @@ async def _execute_agent_step(
 ) -> Command[Literal["research_team"]]:
     """Helper function to execute a step using the specified agent."""
     current_plan = state.get("current_plan")
+    plan_title = current_plan.title
     observations = state.get("observations", [])
 
     # Find the first unexecuted step
@@ -328,16 +329,16 @@ async def _execute_agent_step(
     # Format completed steps information
     completed_steps_info = ""
     if completed_steps:
-        completed_steps_info = "# Existing Research Findings\n\n"
+        completed_steps_info = "# Completed Research Steps\n\n"
         for i, step in enumerate(completed_steps):
-            completed_steps_info += f"## Existing Finding {i + 1}: {step.title}\n\n"
+            completed_steps_info += f"## Completed Step {i + 1}: {step.title}\n\n"
             completed_steps_info += f"<finding>\n{step.execution_res}\n</finding>\n\n"
 
     # Prepare the input for the agent with completed steps info
     agent_input = {
         "messages": [
             HumanMessage(
-                content=f"{completed_steps_info}# Current Task\n\n## Title\n\n{current_step.title}\n\n## Description\n\n{current_step.description}\n\n## Locale\n\n{state.get('locale', 'en-US')}"
+                content=f"# Research Topic\n\n{plan_title}\n\n{completed_steps_info}# Current Step\n\n## Title\n\n{current_step.title}\n\n## Description\n\n{current_step.description}\n\n## Locale\n\n{state.get('locale', 'en-US')}"
             )
         ]
     }
