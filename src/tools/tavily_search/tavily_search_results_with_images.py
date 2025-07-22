@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import logging
 import json
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -14,6 +15,8 @@ from pydantic import Field
 from src.tools.tavily_search.tavily_search_api_wrapper import (
     EnhancedTavilySearchAPIWrapper,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[override, override]
@@ -123,7 +126,9 @@ class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[overri
         except Exception as e:
             return repr(e), {}
         cleaned_results = self.api_wrapper.clean_results_with_images(raw_results)
-        print("sync", json.dumps(cleaned_results, indent=2, ensure_ascii=False))
+        logger.debug(
+            "sync: %s", json.dumps(cleaned_results, indent=2, ensure_ascii=False)
+        )
         return cleaned_results, raw_results
 
     async def _arun(
@@ -147,5 +152,7 @@ class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[overri
         except Exception as e:
             return repr(e), {}
         cleaned_results = self.api_wrapper.clean_results_with_images(raw_results)
-        print("async", json.dumps(cleaned_results, indent=2, ensure_ascii=False))
+        logger.debug(
+            "async: %s", json.dumps(cleaned_results, indent=2, ensure_ascii=False)
+        )
         return cleaned_results, raw_results
