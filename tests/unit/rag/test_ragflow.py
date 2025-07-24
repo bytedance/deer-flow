@@ -68,6 +68,14 @@ def test_init_page_size(monkeypatch):
     assert provider.page_size == 5
 
 
+def test_init_cross_language(monkeypatch):
+    monkeypatch.setenv("RAGFLOW_API_URL", "http://api")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "key")
+    monkeypatch.setenv("RAGFLOW_CROSS_LANGUAGES", "lang1,lang2")
+    provider = RAGFlowProvider()
+    assert provider.cross_languages == ["lang1", "lang2"]
+
+
 def test_init_missing_env(monkeypatch):
     monkeypatch.delenv("RAGFLOW_API_URL", raising=False)
     monkeypatch.setenv("RAGFLOW_API_KEY", "key")

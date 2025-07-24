@@ -184,6 +184,7 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
    RAGFLOW_API_URL="http://localhost:9388"
    RAGFLOW_API_KEY="ragflow-xxx"
    RAGFLOW_RETRIEVAL_SIZE=10
+   RAGFLOW_CROSS_LANGUAGES=English,Chinese,Spanish,French,German,Japanese,Korean
    ```
 
 ## Features
