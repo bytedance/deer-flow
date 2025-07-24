@@ -199,7 +199,7 @@ export function ResearchBlock({
             >
               {reportId && researchId && (
                 <ResearchReportBlock
-                  className="mt-4"
+                  className="mt-4 px-4"
                   researchId={researchId}
                   messageId={reportId}
                   editing={editing}
@@ -220,7 +220,7 @@ export function ResearchBlock({
             >
               {researchId && (
                 <ResearchActivitiesBlock
-                  className="mt-4"
+                  className="mt-4 px-4"
                   researchId={researchId}
                 />
               )}
