@@ -47,6 +47,11 @@ export const MCPConfigSchema = z.object({
               message: "`env` must be an object of key-value pairs",
             })
             .optional(),
+          transport: z
+            .enum(["sse", "streamable_http"], {
+              message: "transport must be either sse or streamable_http"
+            })
+            .default("sse"),
         }),
       ],
       {

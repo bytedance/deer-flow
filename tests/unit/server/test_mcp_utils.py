@@ -13,8 +13,13 @@ import src.server.mcp_utils as mcp_utils
 async def test__get_tools_from_client_session_success(mock_ClientSession):
     mock_read = AsyncMock()
     mock_write = AsyncMock()
+    mock_callback = AsyncMock()
     mock_context_manager = AsyncMock()
-    mock_context_manager.__aenter__.return_value = (mock_read, mock_write)
+    mock_context_manager.__aenter__.return_value = (
+        mock_read,
+        mock_write,
+        mock_callback,
+    )
     mock_context_manager.__aexit__.return_value = None
 
     mock_session = AsyncMock()
