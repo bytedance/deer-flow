@@ -16,6 +16,7 @@ from src.tools.tavily_search.tavily_search_results_with_images import (
 )
 
 from src.tools.decorators import create_logged_tool
+from src.tools.generic_search import GenericSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ LoggedTavilySearch = create_logged_tool(TavilySearchResultsWithImages)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
+LoggedGenericSearch = create_logged_tool(GenericSearchTool)
 
 
 def get_search_config():
@@ -75,6 +77,11 @@ def get_web_search_tool(max_search_results: int):
                 load_max_docs=max_search_results,
                 load_all_available_meta=True,
             ),
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.GENERIC_SEARCH.value:
+        return LoggedGenericSearch(
+            name="web_search",
+            max_results=max_search_results,
         )
     else:
         raise ValueError(f"Unsupported search engine: {SELECTED_SEARCH_ENGINE}")
