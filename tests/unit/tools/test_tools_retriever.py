@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from langchain_core.callbacks import (
     CallbackManagerForToolRun,
     AsyncCallbackManagerForToolRun,

@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import Mock, patch
 from src.tools.crawl import crawl_tool
 

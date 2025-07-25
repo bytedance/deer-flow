@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { useTranslations } from "next-intl";
 import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
 import type { Resource } from "~/core/messages";
 import { cn } from "~/lib/utils";
@@ -14,6 +15,7 @@ export const ResourceMentions = forwardRef<
   { onKeyDown: (args: { event: KeyboardEvent }) => boolean },
   ResourceMentionsProps
 >((props, ref) => {
+  const t = useTranslations("common")
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   const selectItem = (index: number) => {
@@ -79,7 +81,7 @@ export const ResourceMentions = forwardRef<
         ))
       ) : (
         <div className="items-center justify-center text-gray-500">
-          No result
+          {t("noResult")}
         </div>
       )}
     </div>

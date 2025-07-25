@@ -1,9 +1,7 @@
 from collections import namedtuple
 import json
 import pytest
-import asyncio
-import types
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from src.graph.nodes import planner_node
 from src.graph.nodes import human_feedback_node
 from src.graph.nodes import coordinator_node
@@ -39,7 +37,7 @@ def mock_state():
 @pytest.fixture
 def mock_configurable():
     mock = MagicMock()
-    mock.max_search_results = 5
+    mock.max_search_results = 7
     return mock
 
 
@@ -402,7 +400,7 @@ def mock_state_base():
     return {
         "current_plan": json.dumps(
             {
-                "has_enough_context": True,
+                "has_enough_context": False,
                 "title": "Test Plan",
                 "thought": "Test Thought",
                 "steps": [],
@@ -419,9 +417,9 @@ def test_human_feedback_node_auto_accepted(monkeypatch, mock_state_base):
     state["auto_accepted_plan"] = True
     result = human_feedback_node(state)
     assert isinstance(result, Command)
-    assert result.goto == "reporter"
+    assert result.goto == "research_team"
     assert result.update["plan_iterations"] == 1
-    assert result.update["current_plan"]["has_enough_context"] is True
+    assert result.update["current_plan"]["has_enough_context"] is False
 
 
 def test_human_feedback_node_edit_plan(monkeypatch, mock_state_base):
@@ -443,9 +441,9 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base):
     with patch("src.graph.nodes.interrupt", return_value="[ACCEPTED] Looks good!"):
         result = human_feedback_node(state)
         assert isinstance(result, Command)
-        assert result.goto == "reporter"
+        assert result.goto == "research_team"
         assert result.update["plan_iterations"] == 1
-        assert result.update["current_plan"]["has_enough_context"] is True
+        assert result.update["current_plan"]["has_enough_context"] is False
 
 
 def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base):
@@ -668,8 +666,6 @@ def test_coordinator_node_tool_calls_exception_handling(
     patch_handoff_to_planner,
     patch_logger,
 ):
-    # tool_calls raises exception in processing
-    tool_calls = [{"name": "handoff_to_planner", "args": None}]
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
         patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
@@ -1038,24 +1034,6 @@ async def test_execute_agent_step_recursion_limit_env_negative(
 
 
 @pytest.fixture
-def mock_state_with_steps(mock_step, mock_completed_step):
-    # Simulate a plan with one completed and one unexecuted step
-    Plan = MagicMock()
-    Plan.steps = [mock_completed_step, mock_step]
-    return {
-        "current_plan": Plan,
-        "observations": ["obs1"],
-        "locale": "en-US",
-        "resources": [],
-    }
-
-
-@pytest.fixture
-def mock_config():
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_configurable_with_mcp():
     mock = MagicMock()
     mock.mcp_settings = {
@@ -1295,27 +1273,6 @@ def mock_state_with_resources():
 @pytest.fixture
 def mock_state_without_resources():
     return {"other": "value"}
-
-
-@pytest.fixture
-def mock_config():
-    return MagicMock()
-
-
-@pytest.fixture
-def mock_configurable():
-    mock = MagicMock()
-    mock.max_search_results = 7
-    return mock
-
-
-@pytest.fixture
-def patch_config_from_runnable_config(mock_configurable):
-    with patch(
-        "src.graph.nodes.Configuration.from_runnable_config",
-        return_value=mock_configurable,
-    ):
-        yield
 
 
 @pytest.fixture

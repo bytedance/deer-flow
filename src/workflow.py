@@ -1,8 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import asyncio
 import logging
+from src.config.configuration import get_recursion_limit
 from src.graph import build_graph
 
 # Configure logging
@@ -72,7 +72,7 @@ async def run_agent_workflow_async(
                 }
             },
         },
-        "recursion_limit": 100,
+        "recursion_limit": get_recursion_limit(default=100),
     }
     last_message_cnt = 0
     async for s in graph.astream(
