@@ -8,8 +8,8 @@ import { useCallback, useState } from "react";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Button } from "~/components/ui/button";
-import { Switch } from "~/components/ui/switch";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Switch } from "~/components/ui/switch";
 import type { MCPServerMetadata } from "~/core/mcp";
 import { setMcpPlannerIntegration } from "~/core/store/settings-store";
 import { cn } from "~/lib/utils";

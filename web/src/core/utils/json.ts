@@ -71,7 +71,7 @@ export function parseJSON<T>(json: string | null | undefined, fallback: T): T {
     // Use native JSON.parse only
     const result = JSON.parse(raw);
     return result as T;
-  } catch (error) {
+  } catch {
     // For any parsing errors, silently return fallback
     // This prevents console errors during streaming
     return fallback;

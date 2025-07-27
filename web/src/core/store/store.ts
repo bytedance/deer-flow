@@ -130,7 +130,7 @@ export async function sendMessage(
       messageId = data.id;
 
       // Update current agent when receiving messages
-      if (data.agent && data.agent !== "unknown") {
+      if (data.agent) {
         useStore.getState().setCurrentAgent(data.agent);
       }
 

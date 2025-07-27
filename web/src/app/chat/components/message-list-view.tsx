@@ -449,7 +449,7 @@ function PlanCard({
         name: string;
         description: string;
         server: string;
-        parameters?: any;
+        parameters?: Record<string, unknown>;
       }>;
     }[];
   }>(() => {
@@ -590,7 +590,7 @@ function ToolsDisplay({
     name: string;
     description: string;
     server: string;
-    parameters?: any;
+    parameters?: Record<string, unknown>;
   }>;
 }) {
   const [expandedTool, setExpandedTool] = useState<string | null>(null);

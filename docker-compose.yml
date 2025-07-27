@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - ./conf.yaml:/app/conf.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks:
       - deer-flow-network

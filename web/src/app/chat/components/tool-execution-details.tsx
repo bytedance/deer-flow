@@ -1,11 +1,11 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
-import { useTranslations } from "next-intl";
 import { Info } from "lucide-react";
+import { useTranslations } from "next-intl";
+import { useTheme } from "next-themes";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { docco, dark } from "react-syntax-highlighter/dist/esm/styles/hljs";
-import { useTheme } from "next-themes";
 
 import { ToolBadge } from "~/components/deer-flow/tool-badge";
 import { Tooltip } from "~/components/deer-flow/tooltip";
@@ -17,7 +17,7 @@ import { cn } from "~/lib/utils";
 export interface ToolExecutionResult {
   toolName: string;
   serverName?: string;
-  parameters: Record<string, any>;
+  parameters: Record<string, unknown>;
   result: string;
   executionTime?: number;
   status: "success" | "error" | "partial";
@@ -32,11 +32,10 @@ export function ToolExecutionDetails({
   execution,
   className,
 }: ToolExecutionDetailsProps) {
-  const t = useTranslations("chat.research");
   const { resolvedTheme } = useTheme();
   
   // Get tool details from MCP registry
-  const tool = findMCPTool(execution.toolName);
+  findMCPTool(execution.toolName);
   
   // Format execution time
   const formattedTime = execution.executionTime 
