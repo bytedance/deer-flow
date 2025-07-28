@@ -33,6 +33,7 @@ dependencies = [
     "mcp>=1.6.0",
     "langchain-mcp-adapters>=0.0.9",
     "langchain-deepseek>=0.1.3",
+    "wikipedia>=1.4.0",
 ]
 
 [project.optional-dependencies]
