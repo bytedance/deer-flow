@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # platforms:
+      #   - linux/amd64
     container_name: deer-flow-backend
     ports:
       - "8000:8000"
@@ -19,6 +21,8 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+      # platforms:
+      #   - linux/amd64
       args:
         - NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
     container_name: deer-flow-frontend
