@@ -33,6 +33,7 @@ dependencies = [
     "mcp>=1.11.0",
     "langchain-mcp-adapters>=0.0.9",
     "langchain-deepseek>=0.1.3",
+    "alibabacloud-iqs20241111>=1.3.0",
     "wikipedia>=1.4.0",
 ]
 
