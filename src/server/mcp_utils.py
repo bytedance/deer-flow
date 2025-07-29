@@ -96,7 +96,7 @@ async def load_mcp_tools(
         elif server_type == "streamable_http":
             if not url:
                 raise HTTPException(
-                    status_code=400, detail="URL is required for sse type"
+                    status_code=400, detail="URL is required for streamable_http type"
                 )
 
             return await _get_tools_from_client_session(
