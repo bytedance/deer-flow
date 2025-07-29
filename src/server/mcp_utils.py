@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def _get_tools_from_client_session(
     Raises:
         Exception: If there's an error during the process
     """
-    async with client_context_manager as (read, write):
+    async with client_context_manager as (read, write, _):
         async with ClientSession(
             read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)
         ) as session:
@@ -90,6 +91,16 @@ async def load_mcp_tools(
 
             return await _get_tools_from_client_session(
                 sse_client(url=url), timeout_seconds
+            )
+
+        elif server_type == "streamable_http":
+            if not url:
+                raise HTTPException(
+                    status_code=400, detail="URL is required for streamable_http type"
+                )
+
+            return await _get_tools_from_client_session(
+                streamablehttp_client(url=url), timeout_seconds
             )
 
         else:
