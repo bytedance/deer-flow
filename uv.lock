@@ -393,6 +393,7 @@ dependencies = [
     { name = "socksio" },
     { name = "sse-starlette" },
     { name = "uvicorn" },
+    { name = "wikipedia" },
     { name = "yfinance" },
 ]
 
@@ -439,6 +440,7 @@ requires-dist = [
     { name = "socksio", specifier = ">=1.0.0" },
     { name = "sse-starlette", specifier = ">=1.6.5" },
     { name = "uvicorn", specifier = ">=0.27.1" },
+    { name = "wikipedia", specifier = ">=1.4.0" },
     { name = "yfinance", specifier = ">=0.2.54" },
 ]
 provides-extras = ["dev", "test"]
@@ -974,10 +976,10 @@ name = "langgraph"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "langchain-core", marker = "python_full_version < '4.0'" },
+    { name = "langchain-core", marker = "python_full_version < '4'" },
     { name = "langgraph-checkpoint" },
-    { name = "langgraph-prebuilt", marker = "python_full_version < '4.0'" },
-    { name = "langgraph-sdk", marker = "python_full_version < '4.0'" },
+    { name = "langgraph-prebuilt", marker = "python_full_version < '4'" },
+    { name = "langgraph-sdk", marker = "python_full_version < '4'" },
     { name = "pydantic" },
     { name = "xxhash" },
 ]
@@ -995,11 +997,11 @@ dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "jsonschema-rs" },
-    { name = "langchain-core", marker = "python_full_version < '4.0'" },
-    { name = "langgraph", marker = "python_full_version < '4.0'" },
-    { name = "langgraph-checkpoint", marker = "python_full_version < '4.0'" },
+    { name = "langchain-core", marker = "python_full_version < '4'" },
+    { name = "langgraph", marker = "python_full_version < '4'" },
+    { name = "langgraph-checkpoint", marker = "python_full_version < '4'" },
     { name = "langgraph-runtime-inmem" },
-    { name = "langgraph-sdk", marker = "python_full_version < '4.0'" },
+    { name = "langgraph-sdk", marker = "python_full_version < '4'" },
     { name = "langsmith" },
     { name = "orjson" },
     { name = "pyjwt" },
@@ -1043,8 +1045,8 @@ wheels = [
 
 [package.optional-dependencies]
 inmem = [
-    { name = "langgraph-api", marker = "python_full_version < '4.0'" },
-    { name = "langgraph-runtime-inmem", marker = "python_full_version < '4.0'" },
+    { name = "langgraph-api", marker = "python_full_version < '4'" },
+    { name = "langgraph-runtime-inmem", marker = "python_full_version < '4'" },
     { name = "python-dotenv" },
 ]
 
@@ -1067,8 +1069,8 @@ version = "0.0.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "blockbuster" },
-    { name = "langgraph", marker = "python_full_version < '4.0'" },
-    { name = "langgraph-checkpoint", marker = "python_full_version < '4.0'" },
+    { name = "langgraph", marker = "python_full_version < '4'" },
+    { name = "langgraph-checkpoint", marker = "python_full_version < '4'" },
     { name = "sse-starlette" },
     { name = "starlette" },
     { name = "structlog" },
@@ -2234,6 +2236,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/0b/02/ae6ceac1baeda5308
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl", hash = "sha256:a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78", size = 11774, upload-time = "2017-04-05T20:21:32.581Z" },
 ]
+
+[[package]]
+name = "wikipedia"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/67/35/25e68fbc99e672127cc6fbb14b8ec1ba3dfef035bf1e4c90f78f24a80b7d/wikipedia-1.4.0.tar.gz", hash = "sha256:db0fad1829fdd441b1852306e9856398204dc0786d2996dd2e0c8bb8e26133b2", size = 27748, upload-time = "2014-11-15T15:59:49.808Z" }
 
 [[package]]
 name = "xxhash"
