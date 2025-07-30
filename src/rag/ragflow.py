@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 import os
-import requests
-from src.rag.retriever import Chunk, Document, Resource, Retriever
 from typing import List, Optional
 from urllib.parse import urlparse
+
+import requests
+
+from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 
 class RAGFlowProvider(Retriever):
