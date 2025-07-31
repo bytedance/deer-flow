@@ -101,15 +101,15 @@ export const getChatStreamSettings = () => {
             name: cur.name,
             transport,
             env,
-            command: (cur as any).command,
-            args: (cur as any).args,
+            command: cur.command,
+            args: cur.args,
           };
         } else {
           server = {
             name: cur.name,
             transport,
             env,
-            url: (cur as any).url,
+            url: cur.url,
           };
         }
         return {
