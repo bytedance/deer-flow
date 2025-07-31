@@ -28,10 +28,11 @@ export type SimpleStdioMCPServerMetadata = Omit<
   "enabled" | "tools" | "createdAt" | "updatedAt"
 >;
 
-export interface SSEMCPServerMetadata extends GenericMCPServerMetadata<string> {
-  transport: string;
+export interface SSEMCPServerMetadata extends GenericMCPServerMetadata<"sse"|"streamable_http"> {
+  transport: "sse"|"streamable_http"
   url: string;
 }
+
 export type SimpleSSEMCPServerMetadata = Omit<
   SSEMCPServerMetadata,
   "enabled" | "tools" | "createdAt" | "updatedAt"
