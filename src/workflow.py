@@ -42,19 +42,21 @@ async def run_agent_workflow_async(
     Returns:
         The final state after the workflow completes
     """
+    logger.info(f"[ENTRY] user_input={user_input}")
     if not user_input:
         raise ValueError("Input could not be empty")
 
     if debug:
         enable_debug_logging()
 
-    logger.info(f"Starting async workflow with user input: {user_input}")
+    logger.info(f"[INIT] max_plan_iterations={max_plan_iterations}, max_step_num={max_step_num}, enable_background_investigation={enable_background_investigation}")
     initial_state = {
         # Runtime Variables
         "messages": [{"role": "user", "content": user_input}],
         "auto_accepted_plan": True,
         "enable_background_investigation": enable_background_investigation,
     }
+    logger.info(f"[INIT_STATE] {initial_state}")
     config = {
         "configurable": {
             "thread_id": "default",
@@ -78,6 +80,7 @@ async def run_agent_workflow_async(
     async for s in graph.astream(
         input=initial_state, config=config, stream_mode="values"
     ):
+        logger.info(f"[STATE_STREAM] {s}")
         try:
             if isinstance(s, dict) and "messages" in s:
                 if len(s["messages"]) <= last_message_cnt:
@@ -94,8 +97,7 @@ async def run_agent_workflow_async(
         except Exception as e:
             logger.error(f"Error processing stream output: {e}")
             print(f"Error processing output: {str(e)}")
-
-    logger.info("Async workflow completed successfully")
+    logger.info("[COMPLETE] Async workflow completed successfully")
 
 
 if __name__ == "__main__":
