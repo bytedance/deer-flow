@@ -7,9 +7,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
 

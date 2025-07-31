@@ -1,13 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from src.tools.python_repl import python_repl_tool
 
 
 class TestPythonReplTool:
-
     @patch("src.tools.python_repl.repl")
     @patch("src.tools.python_repl.logger")
     def test_successful_code_execution(self, mock_logger, mock_repl):

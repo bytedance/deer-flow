@@ -1,10 +1,11 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
-from unittest.mock import MagicMock, patch
 import importlib
 import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 import src.graph.builder as builder_mod
 

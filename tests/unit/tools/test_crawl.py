@@ -1,9 +1,9 @@
 from unittest.mock import Mock, patch
+
 from src.tools.crawl import crawl_tool
 
 
 class TestCrawlTool:
-
     @patch("src.tools.crawl.Crawler")
     def test_crawl_tool_success(self, mock_crawler_class):
         # Arrange

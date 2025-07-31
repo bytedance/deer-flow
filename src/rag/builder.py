@@ -3,8 +3,8 @@
 
 from src.config.tools import SELECTED_RAG_PROVIDER, RAGProvider
 from src.rag.ragflow import RAGFlowProvider
-from src.rag.vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
 from src.rag.retriever import Retriever
+from src.rag.vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
 
 
 def build_retriever() -> Retriever | None:
