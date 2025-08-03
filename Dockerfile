@@ -18,7 +18,8 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked
 
-EXPOSE 8000
+ARG BACKEND_PORT=8000
+EXPOSE ${BACKEND_PORT}
 
 # Run the application.
-CMD ["uv", "run", "python", "server.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uv run python server.py --host 0.0.0.0 --port ${BACKEND_PORT:-8000}"]

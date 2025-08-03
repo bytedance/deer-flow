@@ -5,8 +5,9 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        FRONTEND_PORT: ${FRONTEND_PORT:-3000}
     image: deer-flow-web
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
     env_file:
       - .env
