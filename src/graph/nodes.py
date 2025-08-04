@@ -464,8 +464,8 @@ async def _setup_and_execute_agent_step(
         for tool in all_tools:
             if tool.name in enabled_tools:
                 tool.description = (
-                        f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-                    )
+                    f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
+                )
                 loaded_tools.append(tool)
         agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
         return await _execute_agent_step(state, agent, agent_type)
