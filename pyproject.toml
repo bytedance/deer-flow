@@ -33,6 +33,7 @@ dependencies = [
     "mcp>=1.11.0",
     "langchain-mcp-adapters>=0.0.9",
     "langchain-deepseek>=0.1.3",
+    "langchain-google-genai>=2.0.6",
     "wikipedia>=1.4.0",
 ]
 
