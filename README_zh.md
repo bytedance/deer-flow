@@ -424,6 +424,9 @@ docker compose build
 docker compose up
 ```
 
+> [!WARNING]
+> 如果您想将 DeerFlow 部署到生产环境中，请为网站添加身份验证，并评估 MCPServer 和 Python Repl 的安全检查。
+
 ## 文本转语音集成
 
 DeerFlow 现在包含一个文本转语音 (TTS) 功能，允许您将研究报告转换为语音。此功能使用火山引擎 TTS API 生成高质量的文本音频。速度、音量和音调等特性也可以自定义。

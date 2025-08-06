@@ -420,6 +420,9 @@ docker compose build
 docker compose up
 ```
 
+> [!WARNING]
+> If you want to deploy the deer flow into production environments, please add authentication to the website and evaluate your security check of the MCPServer and Python Repl. 
+
 ## Examples
 
 The following examples demonstrate the capabilities of DeerFlow:
