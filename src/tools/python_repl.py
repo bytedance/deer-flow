@@ -4,7 +4,6 @@
 import logging
 import os
 from typing import Annotated, Optional
-from typing import Annotated
 from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
 from .decorators import log_io
