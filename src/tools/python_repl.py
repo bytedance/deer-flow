@@ -2,13 +2,24 @@
 # SPDX-License-Identifier: MIT
 
 import logging
-from typing import Annotated
+import os
+from typing import Annotated, Optional
 from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
 from .decorators import log_io
 
+
+def _is_python_repl_enabled() -> bool:
+    """Check if Python REPL tool is enabled from configuration."""
+    # Check environment variable first
+    env_enabled = os.getenv("ENABLE_PYTHON_REPL", "false").lower()
+    if env_enabled in ("true", "1", "yes", "on"):
+        return True
+    return False
+
+
 # Initialize REPL and logger
-repl = PythonREPL()
+repl: Optional[PythonREPL] = PythonREPL() if _is_python_repl_enabled() else None
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +32,13 @@ def python_repl_tool(
 ):
     """Use this to execute python code and do data analysis or calculation. If you want to see the output of a value,
     you should print it out with `print(...)`. This is visible to the user."""
+
+    # Check if the tool is enabled
+    if not _is_python_repl_enabled():
+        error_msg = "Python REPL tool is disabled. Please enable it in environment configuration."
+        logger.warning(error_msg)
+        return f"Tool disabled: {error_msg}"
+
     if not isinstance(code, str):
         error_msg = f"Invalid input: code must be a string, got {type(code)}"
         logger.error(error_msg)

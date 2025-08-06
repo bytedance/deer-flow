@@ -403,6 +403,9 @@ docker compose build
 docker compose up
 ```
 
+> [!WARNING]
+> Si desea implementar DeerFlow en entornos de producción, agregue autenticación al sitio web y evalúe su verificación de seguridad del MCPServer y Python Repl.
+
 ## Ejemplos
 
 Los siguientes ejemplos demuestran las capacidades de DeerFlow:

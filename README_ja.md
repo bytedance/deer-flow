@@ -399,6 +399,9 @@ docker compose build
 docker compose up
 ```
 
+> [!WARNING]
+> DeerFlow を本番環境にデプロイする場合は、ウェブサイトに認証を追加し、MCPServer と Python Repl のセキュリティチェックを評価してください。
+
 ## テキスト読み上げ統合
 
 DeerFlow には現在、研究レポートを音声に変換できるテキスト読み上げ（TTS）機能が含まれています。この機能は火山引擎 TTS API を使用して高品質なテキストオーディオを生成します。速度、音量、ピッチなどの特性もカスタマイズ可能です。

@@ -11,7 +11,7 @@
 
 **DeerFlow** (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) ist ein Community-getriebenes Framework für tiefgehende Recherche, das auf der großartigen Arbeit der Open-Source-Community aufbaut. Unser Ziel ist es, Sprachmodelle mit spezialisierten Werkzeugen für Aufgaben wie Websuche, Crawling und Python-Code-Ausführung zu kombinieren und gleichzeitig der Community, die dies möglich gemacht hat, etwas zurückzugeben.
 
-Derzeit ist DeerFlow offiziell in das FaaS-Anwendungszentrum von Volcengine eingezogen. Benutzer können es über den Erfahrungslink online erleben, um seine leistungsstarken Funktionen und bequemen Operationen intuitiv zu spüren. Gleichzeitig unterstützt DeerFlow zur Erfüllung der Bereitstellungsanforderungen verschiedener Benutzer die Ein-Klick-Bereitstellung basierend auf Volcengine. Klicken Sie auf den Bereitstellungslink, um den Bereitstellungsprozess schnell abzuschließen und eine effiziente Forschungsreise zu beginnen.
+Derzeit ist DeerFlow offiziell in das [FaaS-Anwendungszentrum von Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market) eingezogen. Benutzer können es über den [Erfahrungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) online erleben, um seine leistungsstarken Funktionen und bequemen Operationen intuitiv zu spüren. Gleichzeitig unterstützt DeerFlow zur Erfüllung der Bereitstellungsanforderungen verschiedener Benutzer die Ein-Klick-Bereitstellung basierend auf Volcengine. Klicken Sie auf den [Bereitstellungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow), um den Bereitstellungsprozess schnell abzuschließen und eine effiziente Forschungsreise zu beginnen.
 
 Besuchen Sie [unsere offizielle Website](https://deerflow.tech/) für weitere Details.
 
@@ -43,6 +43,7 @@ In dieser Demo zeigen wir, wie man DeerFlow nutzt, um:
 - [🌟 Funktionen](#funktionen)
 - [🏗️ Architektur](#architektur)
 - [🛠️ Entwicklung](#entwicklung)
+- [🐳 Docker](#docker)
 - [🗣️ Text-zu-Sprache-Integration](#text-zu-sprache-integration)
 - [📚 Beispiele](#beispiele)
 - [❓ FAQ](#faq)
@@ -125,6 +126,7 @@ uv run main.py
 ### Web-UI
 
 Dieses Projekt enthält auch eine Web-UI, die ein dynamischeres und ansprechenderes interaktives Erlebnis bietet.
+
 > [!HINWEIS]
 > Sie müssen zuerst die Abhängigkeiten der Web-UI installieren.
 
@@ -143,18 +145,20 @@ Weitere Details finden Sie im Verzeichnis [`web`](./web/).
 
 ## Unterstützte Suchmaschinen
 
+### Websuche
+
 DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die Variable `SEARCH_API` konfiguriert werden können:
 
 - **Tavily** (Standard): Eine spezialisierte Such-API für KI-Anwendungen
   - Erfordert `TAVILY_API_KEY` in Ihrer `.env`-Datei
-  - Registrieren Sie sich unter: <https://app.tavily.com/home>
+  - Registrieren Sie sich unter: https://app.tavily.com/home
 
 - **DuckDuckGo**: Datenschutzorientierte Suchmaschine
   - Kein API-Schlüssel erforderlich
 
 - **Brave Search**: Datenschutzorientierte Suchmaschine mit erweiterten Funktionen
   - Erfordert `BRAVE_SEARCH_API_KEY` in Ihrer `.env`-Datei
-  - Registrieren Sie sich unter: <https://brave.com/search/api/>
+  - Registrieren Sie sich unter: https://brave.com/search/api/
 
 - **Arxiv**: Wissenschaftliche Papiersuche für akademische Forschung
   - Kein API-Schlüssel erforderlich
@@ -166,6 +170,20 @@ Um Ihre bevorzugte Suchmaschine zu konfigurieren, setzen Sie die Variable `SEARC
 # Wählen Sie eine: tavily, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
+
+### Private Wissensbasis
+
+DeerFlow unterstützt private Wissensbasen wie RAGFlow und VikingDB, sodass Sie Ihre privaten Dokumente zur Beantwortung von Fragen verwenden können.
+
+- **[RAGFlow](https://ragflow.io/docs/dev/)**：Open-Source-RAG-Engine
+   ```
+   # Beispiele in .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   RAGFLOW_CROSS_LANGUAGES=English,Chinese,Spanish,French,German,Japanese,Korean
+   ```
 
 ## Funktionen
 
@@ -183,6 +201,11 @@ SEARCH_API=tavily
   - Websuche über Tavily, Brave Search und mehr
   - Crawling mit Jina
   - Fortgeschrittene Inhaltsextraktion
+  - Unterstützung für private Wissensbasis
+
+- 📃 **RAG-Integration**
+
+  - Unterstützt die Erwähnung von Dateien aus [RAGFlow](https://github.com/infiniflow/ragflow) innerhalb der Eingabebox. [RAGFlow-Server starten](https://ragflow.io/docs/dev/).
 
 - 🔗 **MCP Nahtlose Integration**
   - Erweiterte Fähigkeiten für privaten Domänenzugriff, Wissensgraphen, Webbrowsing und mehr
@@ -211,6 +234,7 @@ SEARCH_API=tavily
 DeerFlow implementiert eine modulare Multi-Agenten-Systemarchitektur, die für automatisierte Forschung und Codeanalyse konzipiert ist. Das System basiert auf LangGraph und ermöglicht einen flexiblen zustandsbasierten Workflow, bei dem Komponenten über ein klar definiertes Nachrichtenübermittlungssystem kommunizieren.
 
 ![Architekturdiagramm](./assets/architecture.png)
+
 > Sehen Sie es live auf [deerflow.tech](https://deerflow.tech/#multi-agent-architecture)
 
 Das System verwendet einen optimierten Workflow mit den folgenden Komponenten:
@@ -314,9 +338,9 @@ langgraph dev
 
 Nach dem Start des LangGraph-Servers sehen Sie mehrere URLs im Terminal:
 
-- API: <http://127.0.0.1:2024>
-- Studio UI: <https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024>
-- API-Dokumentation: <http://127.0.0.1:2024/docs>
+- API: http://127.0.0.1:2024
+- Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- API-Dokumentation: http://127.0.0.1:2024/docs
 
 Öffnen Sie den Studio UI-Link in Ihrem Browser, um auf die Debugging-Schnittstelle zuzugreifen.
 
@@ -351,12 +375,48 @@ DeerFlow unterstützt LangSmith-Tracing, um Ihnen beim Debuggen und Überwachen 
    ```
 
 2. Starten Sie das Tracing mit LangSmith lokal, indem Sie folgenden Befehl ausführen:
-
    ```bash
    langgraph dev
    ```
 
 Dies aktiviert die Trace-Visualisierung in LangGraph Studio und sendet Ihre Traces zur Überwachung und Analyse an LangSmith.
+
+## Docker
+
+Sie können dieses Projekt auch mit Docker ausführen.
+
+Zuerst müssen Sie die [Konfiguration](docs/configuration_guide.md) unten lesen. Stellen Sie sicher, dass die Dateien `.env` und `.conf.yaml` bereit sind.
+
+Zweitens, um ein Docker-Image Ihres eigenen Webservers zu erstellen:
+
+```bash
+docker build -t deer-flow-api .
+```
+
+Schließlich starten Sie einen Docker-Container, der den Webserver ausführt:
+
+```bash
+# Ersetzen Sie deer-flow-api-app durch Ihren bevorzugten Container-Namen
+docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+
+# Server stoppen
+docker stop deer-flow-api-app
+```
+
+### Docker Compose (umfasst sowohl Backend als auch Frontend)
+
+DeerFlow bietet ein docker-compose-Setup, um sowohl das Backend als auch das Frontend einfach zusammen auszuführen:
+
+```bash
+# Docker-Image erstellen
+docker compose build
+
+# Server starten
+docker compose up
+```
+
+> [!WARNING]
+> Wenn Sie DeerFlow in Produktionsumgebungen bereitstellen möchten, fügen Sie bitte Authentifizierung zur Website hinzu und bewerten Sie Ihre Sicherheitsüberprüfung des MCPServer und Python Repl.
 
 ## Beispiele
 
@@ -487,6 +547,8 @@ Wir möchten unsere aufrichtige Wertschätzung den folgenden Projekten für ihre
 
 - **[LangChain](https://github.com/langchain-ai/langchain)**: Ihr außergewöhnliches Framework unterstützt unsere LLM-Interaktionen und -Ketten und ermöglicht nahtlose Integration und Funktionalität.
 - **[LangGraph](https://github.com/langchain-ai/langgraph)**: Ihr innovativer Ansatz zur Multi-Agenten-Orchestrierung war maßgeblich für die Ermöglichung der ausgeklügelten Workflows von DeerFlow.
+- **[Novel](https://github.com/steven-tey/novel)**: Ihr Notion-artiger WYSIWYG-Editor unterstützt unsere Berichtbearbeitung und KI-unterstützte Umschreibung.
+- **[RAGFlow](https://github.com/infiniflow/ragflow)**: Wir haben durch die Integration mit RAGFlow die Unterstützung für Forschung auf privaten Wissensdatenbanken der Benutzer erreicht.
 
 Diese Projekte veranschaulichen die transformative Kraft der Open-Source-Zusammenarbeit, und wir sind stolz darauf, auf ihren Grundlagen aufzubauen.
 
