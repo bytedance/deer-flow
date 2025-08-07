@@ -33,6 +33,7 @@ Your primary responsibilities are:
    - Research questions requiring information gathering
    - Questions about current events, history, science, etc.
    - Requests for analysis, comparisons, or explanations
+   - Requests for adjusting the current plan steps (e.g., "Delete the third step")
    - Any question that requires searching for or analyzing information
 
 # Execution Rules
