@@ -3,9 +3,31 @@
 
 import logging
 import json
+from typing import Any
 import json_repair
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_args(args: Any) -> str:
+    """
+    Sanitize tool call arguments to prevent special character issues.
+
+    Args:
+        args: Tool call arguments string
+
+    Returns:
+        str: Sanitized arguments string
+    """
+    if not isinstance(args, str):
+        return ""
+    else:
+        return (
+            args.replace("[", "&#91;")
+            .replace("]", "&#93;")
+            .replace("{", "&#123;")
+            .replace("}", "&#125;")
+        )
 
 
 def repair_json_output(content: str) -> str:

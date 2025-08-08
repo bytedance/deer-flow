@@ -4,7 +4,8 @@
 """
 Server script for running the DeerFlow API.
 """
-
+import os
+import asyncio
 import argparse
 import logging
 import signal
@@ -18,6 +19,13 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+if os.name == "nt":
+    logger.info("Setting Windows event loop policy for asyncio")
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# if sys.platform == "win32":
+#    logger.info("Setting Windows32 event loop policy for asyncio")
+#    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
 def handle_shutdown(signum, frame):
