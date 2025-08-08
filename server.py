@@ -7,6 +7,7 @@ Server script for running the DeerFlow API.
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import uvicorn
@@ -47,8 +48,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
-        help="Port to bind the server to (default: 8000)",
+        default=int(os.getenv("BACKEND_PORT", "8000")),
+        help="Port to bind the server to (default: from BACKEND_PORT env var or 8000)",
     )
     parser.add_argument(
         "--log-level",

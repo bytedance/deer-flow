@@ -49,7 +49,8 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-EXPOSE 3000
-ENV PORT=3000
+ARG FRONTEND_PORT=3000
+EXPOSE ${FRONTEND_PORT}
+ENV PORT=${FRONTEND_PORT}
 
 CMD ["server.js"]

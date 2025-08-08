@@ -143,6 +143,27 @@ bootstrap.bat -d
 
 Open your browser and visit [`http://localhost:3000`](http://localhost:3000) to explore the web UI.
 
+### Port Configuration
+
+DeerFlow allows you to customize the ports used by both the backend and frontend services through environment variables:
+
+```bash
+# In your .env file
+BACKEND_PORT=8080    # Default: 8000
+FRONTEND_PORT=3001   # Default: 3000
+
+# The API URL will automatically adjust based on the backend port
+NEXT_PUBLIC_API_URL="http://localhost:${BACKEND_PORT}/api"
+ALLOWED_ORIGINS=http://localhost:${FRONTEND_PORT}
+```
+
+This is particularly useful when:
+- You have port conflicts with other services
+- You want to run multiple instances of DeerFlow
+- You need to deploy on specific ports for your infrastructure
+
+The port configuration works across all deployment methods (development, Docker, and Docker Compose).
+
 Explore more details in the [`web`](./web/) directory.
 
 ## Supported Search Engines
