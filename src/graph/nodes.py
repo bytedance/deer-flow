@@ -23,7 +23,7 @@ from src.tools import (
 
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
-from src.llms.llm import get_llm_by_type
+from src.llms.llm import get_llm_by_type, get_llm_by_thinking
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
 from src.utils.json_utils import repair_json_output
@@ -102,7 +102,7 @@ def planner_node(
         ]
 
     if configurable.enable_deep_thinking:
-        llm = get_llm_by_type("reasoning")
+        llm = get_llm_by_thinking("reasoning", enable_thinking=True)
     elif AGENT_LLM_MAP["planner"] == "basic":
         llm = get_llm_by_type("basic").with_structured_output(
             Plan,

@@ -45,7 +45,7 @@ def test_create_llm_use_conf_merges_env(monkeypatch, dummy_conf):
     monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
     monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
     monkeypatch.setenv("BASIC_MODEL__API_KEY", "env_key")
-    result = llm._create_llm_use_conf("basic", dummy_conf)
+    result = llm._create_llm_use_conf("basic", dummy_conf, enable_thinking=False)
     assert isinstance(result, DummyChatOpenAI)
     assert result.kwargs["api_key"] == "env_key"
     assert result.kwargs["base_url"] == "http://test"
@@ -58,7 +58,7 @@ def test_create_llm_use_conf_invalid_type(monkeypatch, dummy_conf):
     monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
 
     with pytest.raises(ValueError):
-        llm._create_llm_use_conf("unknown", dummy_conf)
+        llm._create_llm_use_conf("unknown", dummy_conf, enable_thinking=False)
 
 
 def test_create_llm_use_conf_empty_conf(monkeypatch):
@@ -68,7 +68,7 @@ def test_create_llm_use_conf_empty_conf(monkeypatch):
     monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
 
     with pytest.raises(ValueError):
-        llm._create_llm_use_conf("basic", {})
+        llm._create_llm_use_conf("basic", {}, enable_thinking=False)
 
 
 def test_get_llm_by_type_caches(monkeypatch, dummy_conf):

@@ -13,6 +13,7 @@ from typing import get_args
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
+from src.llms.providers.dashscope import ChatDashscope
 
 # Cache for LLM instances
 _llm_cache: dict[LLMType, BaseChatModel] = {}
@@ -29,6 +30,7 @@ def _get_llm_type_config_keys() -> dict[str, str]:
         "reasoning": "REASONING_MODEL",
         "basic": "BASIC_MODEL",
         "vision": "VISION_MODEL",
+        "code": "CODE_MODEL",
     }
 
 
@@ -47,7 +49,9 @@ def _get_env_llm_conf(llm_type: str) -> Dict[str, Any]:
     return conf
 
 
-def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatModel:
+def _create_llm_use_conf(
+    llm_type: LLMType, conf: Dict[str, Any], enable_thinking: bool
+) -> BaseChatModel:
     """Create LLM instance using configuration."""
     llm_type_config_keys = _get_llm_type_config_keys()
     config_key = llm_type_config_keys.get(llm_type)
@@ -87,15 +91,35 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     if "azure_endpoint" in merged_conf or os.getenv("AZURE_OPENAI_ENDPOINT"):
         return AzureChatOpenAI(**merged_conf)
+    if "dashscope" in merged_conf:
+        if enable_thinking:
+            merged_conf["extra_body"] = {"enable_thinking": True}
+        else:
+            merged_conf["extra_body"] = {"enable_thinking": False}
+        return ChatDashscope(**merged_conf)
     if llm_type == "reasoning":
         return ChatDeepSeek(**merged_conf)
     else:
         return ChatOpenAI(**merged_conf)
 
 
-def get_llm_by_type(
-    llm_type: LLMType,
+def get_llm_by_thinking(
+    llm_type: LLMType, enable_thinking: bool = False
 ) -> BaseChatModel:
+    """
+    Get LLM instance by type with optional thinking capability.
+    Returns cached instance if available.
+    """
+    if llm_type in _llm_cache:
+        return _llm_cache[llm_type]
+
+    conf = load_yaml_config(_get_config_file_path())
+    llm = _create_llm_use_conf(llm_type, conf, enable_thinking)
+    _llm_cache[llm_type] = llm
+    return llm
+
+
+def get_llm_by_type(llm_type: LLMType) -> BaseChatModel:
     """
     Get LLM instance by type. Returns cached instance if available.
     """
@@ -103,7 +127,7 @@ def get_llm_by_type(
         return _llm_cache[llm_type]
 
     conf = load_yaml_config(_get_config_file_path())
-    llm = _create_llm_use_conf(llm_type, conf)
+    llm = _create_llm_use_conf(llm_type, conf, enable_thinking=False)
     _llm_cache[llm_type] = llm
     return llm
 
