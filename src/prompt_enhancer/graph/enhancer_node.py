@@ -8,8 +8,8 @@ from langchain.schema import HumanMessage
 
 from src.config.agents import AGENT_LLM_MAP
 from src.llms.llm import get_llm_by_type
-from src.prompts.template import apply_prompt_template
 from src.prompt_enhancer.graph.state import PromptEnhancerState
+from src.prompts.template import apply_prompt_template
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ def prompt_enhancer_node(state: PromptEnhancerState):
     model = get_llm_by_type(AGENT_LLM_MAP["prompt_enhancer"])
 
     try:
-
         # Create messages with context if provided
         context_info = ""
         if state.get("context"):
