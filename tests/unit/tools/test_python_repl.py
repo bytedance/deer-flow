@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 import os
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from src.tools.python_repl import python_repl_tool
 
 
 class TestPythonReplTool:
-
     @patch.dict(os.environ, {"ENABLE_PYTHON_REPL": "true"})
     @patch("src.tools.python_repl.repl")
     @patch("src.tools.python_repl.logger")

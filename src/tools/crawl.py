@@ -5,9 +5,10 @@ import logging
 from typing import Annotated
 
 from langchain_core.tools import tool
-from .decorators import log_io
 
 from src.crawler import Crawler
+
+from .decorators import log_io
 
 logger = logging.getLogger(__name__)
 
