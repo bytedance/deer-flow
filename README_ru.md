@@ -385,7 +385,8 @@ docker build -t deer-flow-api .
 
 ```bash
 # Замените deer-flow-api-app на предпочитаемое вами имя контейнера
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# Запустите сервер и привяжите к localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # остановить сервер
 docker stop deer-flow-api-app
