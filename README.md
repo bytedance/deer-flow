@@ -402,7 +402,8 @@ Final, start up a docker container running the web server:
 
 ```bash
 # Replace deer-flow-api-app with your preferred container name
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# Start the server then bind to localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # stop the server
 docker stop deer-flow-api-app
