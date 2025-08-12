@@ -1,15 +1,17 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
-import requests
-import json
 import hashlib
 import hmac
+import json
+import os
 import urllib.parse
 from datetime import datetime
-from src.rag.retriever import Chunk, Document, Resource, Retriever
 from urllib.parse import urlparse
+
+import requests
+
+from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 
 class VikingDBKnowledgeBaseProvider(Retriever):

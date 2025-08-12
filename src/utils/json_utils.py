@@ -1,8 +1,9 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import logging
 import json
+import logging
+
 import json_repair
 
 logger = logging.getLogger(__name__)

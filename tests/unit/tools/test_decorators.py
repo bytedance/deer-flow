@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from unittest.mock import Mock, call, patch
+
 from src.tools.decorators import create_logged_tool
 
 
@@ -13,7 +14,6 @@ class MockBaseTool:
 
 
 class TestLoggedToolMixin:
-
     def test_run_calls_log_operation(self):
         """Test that _run calls _log_operation with correct parameters."""
         # Create a logged tool instance

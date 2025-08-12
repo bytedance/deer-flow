@@ -3,6 +3,7 @@
 
 import sys
 import types
+
 from src.config.configuration import Configuration
 
 # Patch sys.path so relative import works
