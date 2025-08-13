@@ -26,7 +26,7 @@ def get_recursion_limit(default: int = 25) -> int:
     try:
         env_value_str = os.getenv("AGENT_RECURSION_LIMIT", str(default))
         parsed_limit = int(env_value_str)
-
+        
         if parsed_limit > 0:
             logger.info(f"Recursion limit set to: {parsed_limit}")
             return parsed_limit
@@ -58,6 +58,32 @@ class Configuration:
     mcp_settings: dict = None  # MCP settings, including dynamic loaded tools
     report_style: str = ReportStyle.ACADEMIC.value  # Report style
     enable_deep_thinking: bool = False  # Whether to enable deep thinking
+    mcp_planner_integration: bool = True  # Whether to enable MCP tool integration in planner
+
+    def validate_mcp_planner_integration(self) -> bool:
+        """验证 MCP planner 集成配置的有效性。
+        
+        Returns:
+            bool: 配置是否有效
+        """
+        if not self.mcp_planner_integration:
+            return True  # 如果禁用，则总是有效
+        
+        # 检查是否有 MCP 设置
+        if not self.mcp_settings:
+            return False
+        
+        # 检查是否有配置的服务器
+        servers = self.mcp_settings.get("servers", {})
+        if not servers:
+            return False
+        
+        # 检查是否至少有一个服务器启用了工具
+        for server_name, server_config in servers.items():
+            if server_config.get("enabled_tools"):
+                return True
+        
+        return False
 
     @classmethod
     def from_runnable_config(
@@ -72,4 +98,16 @@ class Configuration:
             for f in fields(cls)
             if f.init
         }
-        return cls(**{k: v for k, v in values.items() if v})
+        instance = cls(**{k: v for k, v in values.items() if v})
+        
+        # 验证 MCP planner 集成配置
+        if instance.mcp_planner_integration:
+            if instance.validate_mcp_planner_integration():
+                logger.info("MCP planner integration is enabled and configured correctly")
+            else:
+                logger.warning("MCP planner integration is enabled but configuration is invalid, disabling it")
+                instance.mcp_planner_integration = False
+        else:
+            logger.info("MCP planner integration is disabled")
+        
+        return instance

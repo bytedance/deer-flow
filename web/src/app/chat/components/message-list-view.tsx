@@ -9,6 +9,8 @@ import {
   ChevronDown,
   ChevronRight,
   Lightbulb,
+  Wrench,
+  Info,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import React, { useCallback, useMemo, useRef, useState } from "react";
@@ -185,7 +187,7 @@ function MessageListItem({
             )}
           >
             <MessageBubble message={message}>
-              <div className="flex w-full flex-col text-wrap break-words">
+              <div className="flex w-full flex-col break-words">
                 <Markdown
                   className={cn(
                     message.role === "user" &&
@@ -233,11 +235,12 @@ function MessageBubble({
   return (
     <div
       className={cn(
-        `group flex w-fit max-w-[85%] flex-col rounded-2xl px-4 py-3 text-nowrap shadow`,
+        "group flex w-auto max-w-[90vw] flex-col rounded-2xl px-4 py-3 break-words",
         message.role === "user" && "bg-brand rounded-ee-none",
         message.role === "assistant" && "bg-card rounded-es-none",
         className,
       )}
+      style={{ wordBreak: "break-all" }}
     >
       {children}
     </div>
@@ -439,7 +442,16 @@ function PlanCard({
   const plan = useMemo<{
     title?: string;
     thought?: string;
-    steps?: { title?: string; description?: string }[];
+    steps?: {
+      title?: string;
+      description?: string;
+      tools?: Array<{
+        name: string;
+        description: string;
+        server: string;
+        parameters?: Record<string, unknown>;
+      }>;
+    }[];
   }>(() => {
     return parseJSON(message.content ?? "", {});
   }, [message.content]);
@@ -492,27 +504,46 @@ function PlanCard({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <Markdown className="opacity-80" animated={message.isStreaming}>
-                {plan.thought}
-              </Markdown>
-              {plan.steps && (
-                <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
-                  {plan.steps.map((step, i) => (
-                    <li key={`step-${i}`}>
-                      <h3 className="mb text-lg font-medium">
-                        <Markdown animated={message.isStreaming}>
-                          {step.title}
-                        </Markdown>
-                      </h3>
-                      <div className="text-muted-foreground text-sm">
-                        <Markdown animated={message.isStreaming}>
-                          {step.description}
-                        </Markdown>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                <Markdown className="opacity-80" animated={message.isStreaming}>
+                  {plan.thought}
+                </Markdown>
+                {plan.steps && (
+                  <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
+                    {plan.steps.map((step, i) => (
+                      <li key={`step-${i}`} style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                        <div className="flex items-start gap-2">
+                          <div className="flex-1">
+                            <h3 className="mb flex items-center gap-2 text-lg font-medium">
+                              <Markdown animated={message.isStreaming}>
+                                {step.title}
+                              </Markdown>
+                              {step.tools && step.tools.length > 0 && (
+                                <Tooltip
+                                  title={`Uses ${step.tools.length} MCP tool${step.tools.length > 1 ? "s" : ""}`}
+                                >
+                                  <div className="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-800">
+                                    <Wrench size={12} />
+                                    <span>{step.tools.length}</span>
+                                  </div>
+                                </Tooltip>
+                              )}
+                            </h3>
+                            <div className="text-muted-foreground text-sm" style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                              <Markdown animated={message.isStreaming}>
+                                {step.description}
+                              </Markdown>
+                            </div>
+                            {step.tools && step.tools.length > 0 && (
+                              <ToolsDisplay tools={step.tools} />
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </CardContent>
             <CardFooter className="flex justify-end">
               {!message.isStreaming && interruptMessage?.options?.length && (
@@ -546,6 +577,83 @@ function PlanCard({
               )}
             </CardFooter>
           </Card>
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
+function ToolsDisplay({
+  tools,
+}: {
+  tools: Array<{
+    name: string;
+    description: string;
+    server: string;
+    parameters?: Record<string, unknown>;
+  }>;
+}) {
+  const [expandedTool, setExpandedTool] = useState<string | null>(null);
+
+  return (
+    <div className="mt-2">
+      <div className="mb-2 flex flex-wrap gap-1">
+        {tools.map((tool, toolIndex) => (
+          <button
+            key={`tool-${toolIndex}`}
+            onClick={() =>
+              setExpandedTool(expandedTool === tool.name ? null : tool.name)
+            }
+            className="flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700 transition-colors hover:bg-blue-100"
+          >
+            <Wrench size={10} />
+            {tool.name}
+            {expandedTool === tool.name ? (
+              <ChevronDown size={10} />
+            ) : (
+              <ChevronRight size={10} />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {expandedTool && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          exit={{ opacity: 0, height: 0 }}
+          transition={{ duration: 0.2 }}
+          className="rounded-lg border bg-gray-50 p-3 text-sm"
+        >
+          {tools
+            .filter((tool) => tool.name === expandedTool)
+            .map((tool, index) => (
+              <div key={index}>
+                <div className="mb-2 flex items-center gap-2">
+                  <Wrench size={14} className="text-blue-600" />
+                  <span className="font-medium text-gray-900">{tool.name}</span>
+                  <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-600">
+                    {tool.server}
+                  </span>
+                </div>
+                <p className="mb-2 text-gray-700">{tool.description}</p>
+                {tool.parameters && Object.keys(tool.parameters).length > 0 && (
+                  <div>
+                    <div className="mb-1 flex items-center gap-1">
+                      <Info size={12} className="text-gray-500" />
+                      <span className="text-xs font-medium text-gray-600">
+                        Parameters:
+                      </span>
+                    </div>
+                    <div className="rounded border bg-white p-2 font-mono text-xs">
+                      <pre className="whitespace-pre-wrap text-gray-800">
+                        {JSON.stringify(tool.parameters, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
         </motion.div>
       )}
     </div>
