@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: MIT
 
 import os
-import pytest
 from unittest.mock import patch
-from src.tools.search import get_web_search_tool
+
+import pytest
+
 from src.config import SearchEngine
+from src.tools.search import get_web_search_tool
 
 
 class TestGetWebSearchTool:
-
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
     def test_get_web_search_tool_tavily(self):
         tool = get_web_search_tool(max_search_results=5)

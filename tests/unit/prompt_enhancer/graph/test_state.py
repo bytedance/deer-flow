@@ -1,8 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from src.prompt_enhancer.graph.state import PromptEnhancerState
 from src.config.report_style import ReportStyle
+from src.prompt_enhancer.graph.state import PromptEnhancerState
 
 
 def test_prompt_enhancer_state_creation():

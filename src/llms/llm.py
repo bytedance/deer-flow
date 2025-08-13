@@ -1,15 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from pathlib import Path
-from typing import Any, Dict
 import os
-import httpx
+from pathlib import Path
+from typing import Any, Dict, get_args
 
+import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from typing import get_args
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType

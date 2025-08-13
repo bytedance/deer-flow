@@ -4,11 +4,10 @@ install-dev:
 	uv pip install -e ".[dev]" && uv pip install -e ".[test]"
 
 format:
-	uv run black --preview .
+	uv run ruff format --config pyproject.toml .
 
 lint:
-	uv run black --check .
-	uv run ruff check .
+	uv run ruff check --fix --select I --config pyproject.toml .
 
 serve:
 	uv run server.py --reload
