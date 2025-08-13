@@ -193,7 +193,7 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 
 - 🤖 **LLM Integration**
   - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
-  - Support for open source models like Qwen
+  - Support for open source models like Qwen, you need to read the [configuration](docs/configuration_guide.md) for more details.
   - OpenAI-compatible API interface
   - Multi-tier LLM system for different task complexities
 

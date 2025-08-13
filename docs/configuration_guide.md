@@ -15,7 +15,7 @@ In DeerFlow, we currently only support non-reasoning models. This means models l
 
 ### Supported Models
 
-`doubao-1.5-pro-32k-250115`, `gpt-4o`, `qwen-max-latest`, `gemini-2.0-flash`, `deepseek-v3`, and theoretically any other non-reasoning chat models that implement the OpenAI API specification.
+`doubao-1.5-pro-32k-250115`, `gpt-4o`, `qwen-max-latest`,`qwen3-235b-a22b`,`qwen3-coder`, `gemini-2.0-flash`, `deepseek-v3`, and theoretically any other non-reasoning chat models that implement the OpenAI API specification.
 
 > [!NOTE]
 > The Deep Research process requires the model to have a **longer context window**, which is not supported by all models.
@@ -57,7 +57,47 @@ BASIC_MODEL:
   model: "gemini-2.0-flash"
   api_key: YOUR_API_KEY
 ```
+The following is a configuration example of `conf.yaml` for using best opensource OpenAI-Compatible models:
+```yaml
+# Use latest deepseek-v3 to handle basic tasks, the open source SOTA model for basic tasks
+BASIC_MODEL:
+  base_url: https://api.deepseek.com
+  model: "deepseek-v3"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+# Use qwen3-235b-a22b to handle reasoning tasks, the open source SOTA model for reasoning
+REASONING_MODEL:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: "qwen3-235b-a22b-thinking-2507"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+# Use qwen3-coder-480b-a35b-instruct to handle coding tasks, the open source SOTA model for coding
+CODE_MODEL:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: "qwen3-coder-480b-a35b-instruct"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+```
+In addition, you need to set the `AGENT_LLM_MAP` in `src/config/agents.py` to use the correct model for each agent. For example:
 
+```python
+# Define agent-LLM mapping
+AGENT_LLM_MAP: dict[str, LLMType] = {
+    "coordinator": "reasoning",
+    "planner": "reasoning",
+    "researcher": "reasoning",
+    "coder": "basic",
+    "reporter": "basic",
+    "podcast_script_writer": "basic",
+    "ppt_composer": "basic",
+    "prose_writer": "basic",
+    "prompt_enhancer": "basic",
+}
+
+```
 ### How to use models with self-signed SSL certificates?
 
 If your LLM server uses self-signed SSL certificates, you can disable SSL certificate verification by adding the `verify_ssl: false` parameter to your model configuration:
