@@ -13,6 +13,33 @@ from src.config.report_style import ReportStyle
 
 logger = logging.getLogger(__name__)
 
+_TRUTHY = {"1", "true", "yes", "y", "on"}
+
+
+def get_bool_env(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in _TRUTHY
+
+
+def get_str_env(name: str, default: str = "") -> str:
+    val = os.getenv(name)
+    return default if val is None else str(val).strip()
+
+
+def get_int_env(name: str, default: int = 0) -> int:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return int(val.strip())
+    except ValueError:
+        logger.warning(
+            f"Invalid integer value for {name}: {val}. Using default {default}."
+        )
+        return default
+
 
 def get_recursion_limit(default: int = 25) -> int:
     """Get the recursion limit from environment variable or use default.
@@ -23,23 +50,15 @@ def get_recursion_limit(default: int = 25) -> int:
     Returns:
         int: The recursion limit to use
     """
-    try:
-        env_value_str = os.getenv("AGENT_RECURSION_LIMIT", str(default))
-        parsed_limit = int(env_value_str)
+    env_value_str = get_str_env("AGENT_RECURSION_LIMIT", str(default))
+    parsed_limit = get_int_env("AGENT_RECURSION_LIMIT", default)
 
-        if parsed_limit > 0:
-            logger.info(f"Recursion limit set to: {parsed_limit}")
-            return parsed_limit
-        else:
-            logger.warning(
-                f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
-                f"Using default value {default}."
-            )
-            return default
-    except ValueError:
-        raw_env_value = os.getenv("AGENT_RECURSION_LIMIT")
+    if parsed_limit > 0:
+        logger.info(f"Recursion limit set to: {parsed_limit}")
+        return parsed_limit
+    else:
         logger.warning(
-            f"Invalid AGENT_RECURSION_LIMIT value: '{raw_env_value}'. "
+            f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
             f"Using default value {default}."
         )
         return default
