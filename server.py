@@ -4,7 +4,8 @@
 """
 Server script for running the DeerFlow API.
 """
-
+import os
+import asyncio
 import argparse
 import logging
 import signal
@@ -18,6 +19,17 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# To ensure compatibility with Windows event loop issues when using Uvicorn and Asyncio Checkpointer,
+# This is necessary because some libraries expect a selector-based event loop.
+# This is a workaround for issues with Uvicorn and Watchdog on Windows.
+# See:
+# Since Python 3.8 the default on Windows is the Proactor event loop,
+# which lacks add_reader/add_writer and can break libraries that expect selector-based I/O (e.g., some Uvicorn/Watchdog/stdio integrations).
+# For compatibility, this forces the selector loop.
+if os.name == "nt":
+    logger.info("Setting Windows event loop policy for asyncio")
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def handle_shutdown(signum, frame):

@@ -406,7 +406,8 @@ docker build -t deer-flow-api .
 
 ```bash
 # 将deer-flow-api-app替换为您首选的容器名称
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# 启动服务器并绑定到localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # 停止服务器
 docker stop deer-flow-api-app
