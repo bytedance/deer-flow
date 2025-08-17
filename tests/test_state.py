@@ -1,8 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import sys
 import os
+import sys
 from typing import Annotated
 
 # Import MessagesState directly from langgraph rather than through our application

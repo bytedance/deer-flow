@@ -9,27 +9,26 @@ from typing import Annotated, Literal
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
-from src.tools.search import LoggedTavilySearch
-from src.tools import (
-    crawl_tool,
-    get_web_search_tool,
-    get_retriever_tool,
-    python_repl_tool,
-)
-
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
 from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
+from src.tools import (
+    crawl_tool,
+    get_retriever_tool,
+    get_web_search_tool,
+    python_repl_tool,
+)
+from src.tools.search import LoggedTavilySearch
 from src.utils.json_utils import repair_json_output
 
-from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
+from .types import State
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ def planner_node(
     elif AGENT_LLM_MAP["planner"] == "basic":
         llm = get_llm_by_type("basic").with_structured_output(
             Plan,
-            method="json_mode",
+            # method="json_mode",
         )
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])

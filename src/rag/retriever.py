@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import abc
+
 from pydantic import BaseModel, Field
 
 

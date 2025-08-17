@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: MIT
 
 from unittest.mock import Mock, patch
-from langchain_core.callbacks import (
-    CallbackManagerForToolRun,
-    AsyncCallbackManagerForToolRun,
-)
+
 import pytest
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForToolRun,
+    CallbackManagerForToolRun,
+)
+
+from src.rag import Chunk, Document, Resource, Retriever
 from src.tools.retriever import RetrieverInput, RetrieverTool, get_retriever_tool
-from src.rag import Document, Retriever, Resource, Chunk
 
 
 def test_retriever_input_model():

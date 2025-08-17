@@ -1,18 +1,19 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, AsyncMock
-from src.tools.tavily_search.tavily_search_results_with_images import (
-    TavilySearchResultsWithImages,
-)
+
 from src.tools.tavily_search.tavily_search_api_wrapper import (
     EnhancedTavilySearchAPIWrapper,
 )
+from src.tools.tavily_search.tavily_search_results_with_images import (
+    TavilySearchWithImages,
+)
 
 
-class TestTavilySearchResultsWithImages:
-
+class TestTavilySearchWithImages:
     @pytest.fixture
     def mock_api_wrapper(self):
         """Create a mock API wrapper."""
@@ -21,8 +22,8 @@ class TestTavilySearchResultsWithImages:
 
     @pytest.fixture
     def search_tool(self, mock_api_wrapper):
-        """Create a TavilySearchResultsWithImages instance with mocked dependencies."""
-        tool = TavilySearchResultsWithImages(
+        """Create a TavilySearchWithImages instance with mocked dependencies."""
+        tool = TavilySearchWithImages(
             max_results=5,
             include_answer=True,
             include_raw_content=True,
@@ -64,15 +65,13 @@ class TestTavilySearchResultsWithImages:
 
     def test_init_default_values(self):
         """Test initialization with default values."""
-        tool = TavilySearchResultsWithImages()
+        tool = TavilySearchWithImages()
         assert tool.include_image_descriptions is False
         assert isinstance(tool.api_wrapper, EnhancedTavilySearchAPIWrapper)
 
     def test_init_custom_values(self):
         """Test initialization with custom values."""
-        tool = TavilySearchResultsWithImages(
-            max_results=10, include_image_descriptions=True
-        )
+        tool = TavilySearchWithImages(max_results=10, include_image_descriptions=True)
         assert tool.max_results == 10
         assert tool.include_image_descriptions is True
 

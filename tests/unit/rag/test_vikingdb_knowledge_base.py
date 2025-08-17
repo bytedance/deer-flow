@@ -1,13 +1,15 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
-import pytest
-import json
 import hashlib
 import hmac
-from unittest.mock import patch, MagicMock
+import json
+import os
 from datetime import datetime
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from src.rag.vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider, parse_uri
 
 
