@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   },
   mcp: {
     servers: [],
+    plannerIntegration: true,
   },
 };
 
@@ -34,6 +35,7 @@ export type SettingsState = {
   };
   mcp: {
     servers: MCPServerMetadata[];
+    plannerIntegration: boolean;
   };
 };
 
@@ -126,6 +128,7 @@ export const getChatStreamSettings = () => {
   return {
     ...general,
     mcpSettings,
+    mcpPlannerIntegration: mcp.plannerIntegration,
   };
 };
 
@@ -160,4 +163,15 @@ export function setEnableBackgroundInvestigation(value: boolean) {
   }));
   saveSettings();
 }
+
+export function setMcpPlannerIntegration(value: boolean) {
+  useSettingsStore.setState((state) => ({
+    mcp: {
+      ...state.mcp,
+      plannerIntegration: value,
+    },
+  }));
+  saveSettings();
+}
+
 loadSettings();

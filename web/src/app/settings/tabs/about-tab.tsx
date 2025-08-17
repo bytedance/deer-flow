@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { BadgeInfo } from "lucide-react";
-import { useLocale, useTranslations } from "next-intl";
+import { useLocale } from "next-intl";
 
 import { Markdown } from "~/components/deer-flow/markdown";
 
@@ -12,7 +12,6 @@ import type { Tab } from "./types";
 
 export const AboutTab: Tab = () => {
   const locale = useLocale();
-  const t = useTranslations("settings.about");
 
   const aboutContent = locale === "zh" ? aboutZh : aboutEn;
 
