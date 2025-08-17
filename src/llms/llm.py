@@ -12,6 +12,7 @@ from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
+from src.llms.providers.dashscope import ChatDashscope
 
 # Cache for LLM instances
 _llm_cache: dict[LLMType, BaseChatModel] = {}
@@ -28,6 +29,7 @@ def _get_llm_type_config_keys() -> dict[str, str]:
         "reasoning": "REASONING_MODEL",
         "basic": "BASIC_MODEL",
         "vision": "VISION_MODEL",
+        "code": "CODE_MODEL",
     }
 
 
@@ -71,9 +73,6 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
     if "max_retries" not in merged_conf:
         merged_conf["max_retries"] = 3
 
-    if llm_type == "reasoning":
-        merged_conf["api_base"] = merged_conf.pop("base_url", None)
-
     # Handle SSL verification settings
     verify_ssl = merged_conf.pop("verify_ssl", True)
 
@@ -86,15 +85,23 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     if "azure_endpoint" in merged_conf or os.getenv("AZURE_OPENAI_ENDPOINT"):
         return AzureChatOpenAI(**merged_conf)
+
+    # Check if base_url is dashscope endpoint
+    if "base_url" in merged_conf and "dashscope." in merged_conf["base_url"]:
+        if llm_type == "reasoning":
+            merged_conf["extra_body"] = {"enable_thinking": True}
+        else:
+            merged_conf["extra_body"] = {"enable_thinking": False}
+        return ChatDashscope(**merged_conf)
+
     if llm_type == "reasoning":
+        merged_conf["api_base"] = merged_conf.pop("base_url", None)
         return ChatDeepSeek(**merged_conf)
     else:
         return ChatOpenAI(**merged_conf)
 
 
-def get_llm_by_type(
-    llm_type: LLMType,
-) -> BaseChatModel:
+def get_llm_by_type(llm_type: LLMType) -> BaseChatModel:
     """
     Get LLM instance by type. Returns cached instance if available.
     """
