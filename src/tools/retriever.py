@@ -3,15 +3,16 @@
 
 import logging
 from typing import List, Optional, Type
-from langchain_core.tools import BaseTool
+
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
     CallbackManagerForToolRun,
 )
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from src.config.tools import SELECTED_RAG_PROVIDER
-from src.rag import Document, Retriever, Resource, build_retriever
+from src.rag import Document, Resource, Retriever, build_retriever
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,7 @@ class RetrieverInput(BaseModel):
 
 class RetrieverTool(BaseTool):
     name: str = "local_search_tool"
-    description: str = (
-        "Useful for retrieving information from the file with `rag://` uri prefix, it should be higher priority than the web search or writing code. Input should be a search keywords."
-    )
+    description: str = "Useful for retrieving information from the file with `rag://` uri prefix, it should be higher priority than the web search or writing code. Input should be a search keywords."
     args_schema: Type[BaseModel] = RetrieverInput
 
     retriever: Retriever = Field(default_factory=Retriever)

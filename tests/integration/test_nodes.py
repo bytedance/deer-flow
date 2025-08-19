@@ -1,21 +1,26 @@
-from collections import namedtuple
 import json
+from collections import namedtuple
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from src.graph.nodes import planner_node
-from src.graph.nodes import human_feedback_node
-from src.graph.nodes import coordinator_node
-from src.graph.nodes import reporter_node
-from src.graph.nodes import _execute_agent_step
-from src.graph.nodes import _setup_and_execute_agent_step
-from src.graph.nodes import researcher_node
+
+from src.graph.nodes import (
+    _execute_agent_step,
+    _setup_and_execute_agent_step,
+    coordinator_node,
+    human_feedback_node,
+    planner_node,
+    reporter_node,
+    researcher_node,
+)
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
 with patch("src.llms.llm.get_llm_by_type", return_value=MagicMock()):
-    from langgraph.types import Command
-    from src.graph.nodes import background_investigation_node
-    from src.config import SearchEngine
     from langchain_core.messages import HumanMessage
+    from langgraph.types import Command
+
+    from src.config import SearchEngine
+    from src.graph.nodes import background_investigation_node
 
 
 # Mock data

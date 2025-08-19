@@ -1,24 +1,25 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
+
+import src.server.mcp_utils as mcp_utils  # Assuming mcp_utils is the module to test
 from src.config.report_style import ReportStyle
 from src.rag.retriever import Resource
-from unittest.mock import AsyncMock, patch, MagicMock
-from fastapi import HTTPException
-
 from src.server.chat_request import (
-    ContentItem,
     ChatMessage,
     ChatRequest,
-    TTSRequest,
+    ContentItem,
+    EnhancePromptRequest,
     GeneratePodcastRequest,
     GeneratePPTRequest,
     GenerateProseRequest,
-    EnhancePromptRequest,
+    TTSRequest,
 )
-import src.server.mcp_utils as mcp_utils  # Assuming mcp_utils is the module to test
 
 
 def test_content_item_text_and_image():

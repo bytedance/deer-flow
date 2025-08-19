@@ -8,8 +8,8 @@ from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 
-from src.rag.retriever import Resource
 from src.config.report_style import ReportStyle
+from src.rag.retriever import Resource
 
 logger = logging.getLogger(__name__)
 

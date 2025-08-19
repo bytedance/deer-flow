@@ -1,8 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import logging
 import json
+import logging
 from typing import Any
 import json_repair
 

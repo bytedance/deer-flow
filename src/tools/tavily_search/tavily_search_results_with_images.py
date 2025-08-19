@@ -1,15 +1,15 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import logging
 import json
+import logging
 from typing import Dict, List, Optional, Tuple, Union
 
 from langchain.callbacks.manager import (
     AsyncCallbackManagerForToolRun,
     CallbackManagerForToolRun,
 )
-from langchain_community.tools.tavily_search.tool import TavilySearchResults
+from langchain_tavily.tavily_search import TavilySearch
 from pydantic import Field
 
 from src.tools.tavily_search.tavily_search_api_wrapper import (
@@ -19,7 +19,7 @@ from src.tools.tavily_search.tavily_search_api_wrapper import (
 logger = logging.getLogger(__name__)
 
 
-class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[override, override]
+class TavilySearchWithImages(TavilySearch):  # type: ignore[override, override]
     """Tool that queries the Tavily Search API and gets back json.
 
     Setup:
@@ -34,9 +34,9 @@ class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[overri
 
         .. code-block:: python
 
-            from langchain_community.tools import TavilySearchResults
+            from langchain_tavily.tavily_search import TavilySearch
 
-            tool = TavilySearchResults(
+            tool = TavilySearch(
                 max_results=5,
                 include_answer=True,
                 include_raw_content=True,
@@ -102,7 +102,9 @@ class TavilySearchResultsWithImages(TavilySearchResults):  # type: ignore[overri
     Default is False.
     """
 
-    api_wrapper: EnhancedTavilySearchAPIWrapper = Field(default_factory=EnhancedTavilySearchAPIWrapper)  # type: ignore[arg-type]
+    api_wrapper: EnhancedTavilySearchAPIWrapper = Field(
+        default_factory=EnhancedTavilySearchAPIWrapper
+    )  # type: ignore[arg-type]
 
     def _run(
         self,
