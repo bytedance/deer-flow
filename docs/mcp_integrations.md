@@ -46,7 +46,18 @@ For `sse` type:
 {
   "transport": "sse",
   "url": "http://localhost:3000/sse",
-  "env": {
+  "headers": {
+    "API_KEY": "value"
+  }
+}
+```
+
+For `streamable_http` type:
+```json
+{
+  "transport": "streamable_http",
+  "url": "http://localhost:3000/mcp",
+  "headers": {
     "API_KEY": "value"
   }
 }

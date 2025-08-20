@@ -450,7 +450,7 @@ async def _setup_and_execute_agent_step(
                 mcp_servers[server_name] = {
                     k: v
                     for k, v in server_config.items()
-                    if k in ("transport", "command", "args", "url", "env")
+                    if k in ("transport", "command", "args", "url", "env", "headers")
                 }
                 for tool_name in server_config["enabled_tools"]:
                     enabled_tools[tool_name] = server_name
