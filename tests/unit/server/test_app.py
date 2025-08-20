@@ -3,15 +3,16 @@
 
 import base64
 import os
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, mock_open, patch
+
 import pytest
-from fastapi.testclient import TestClient
 from fastapi import HTTPException
-from src.server.app import app, _make_event, _astream_workflow_generator
-from src.config.report_style import ReportStyle
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.types import Command
-from langchain_core.messages import ToolMessage
-from langchain_core.messages import AIMessageChunk
+
+from src.config.report_style import ReportStyle
+from src.server.app import _astream_workflow_generator, _make_event, app
 
 
 @pytest.fixture
@@ -260,6 +261,10 @@ class TestEnhancePromptEndpoint:
 
 class TestMCPEndpoint:
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_success(self, mock_load_tools, client):
         mock_load_tools.return_value = [
             {"name": "test_tool", "description": "Test tool"}
@@ -281,6 +286,10 @@ class TestMCPEndpoint:
         assert len(response_data["tools"]) == 1
 
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_with_custom_timeout(self, mock_load_tools, client):
         mock_load_tools.return_value = []
 
@@ -296,6 +305,10 @@ class TestMCPEndpoint:
         mock_load_tools.assert_called_once()
 
     @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
     def test_mcp_server_metadata_with_exception(self, mock_load_tools, client):
         mock_load_tools.side_effect = HTTPException(
             status_code=400, detail="MCP Server Error"
@@ -312,6 +325,29 @@ class TestMCPEndpoint:
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Internal Server Error"
+
+    @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": ""},
+    )
+    def test_mcp_server_metadata_without_enable_configuration(
+        self, mock_load_tools, client
+    ):
+        request_data = {
+            "transport": "stdio",
+            "command": "test_command",
+            "args": ["arg1", "arg2"],
+            "env": {"ENV_VAR": "value"},
+        }
+
+        response = client.post("/api/mcp/server/metadata", json=request_data)
+
+        assert response.status_code == 403
+        assert (
+            response.json()["detail"]
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features."
+        )
 
 
 class TestRAGEndpoints:
@@ -377,6 +413,89 @@ class TestChatStreamEndpoint:
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
 
+    @patch("src.server.app.graph")
+    def test_chat_stream_with_mcp_settings(self, mock_graph, client):
+        # Mock the async stream
+        async def mock_astream(*args, **kwargs):
+            yield ("agent1", "step1", {"test": "data"})
+
+        mock_graph.astream = mock_astream
+
+        request_data = {
+            "thread_id": "__default__",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "resources": [],
+            "max_plan_iterations": 3,
+            "max_step_num": 10,
+            "max_search_results": 5,
+            "auto_accepted_plan": True,
+            "interrupt_feedback": "",
+            "mcp_settings": {
+                "servers": {
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
+                }
+            },
+            "enable_background_investigation": False,
+            "report_style": "academic",
+        }
+
+        response = client.post("/api/chat/stream", json=request_data)
+
+        assert response.status_code == 403
+        assert (
+            response.json()["detail"]
+            == "MCP server configuration is disabled. Set ENABLE_MCP_SERVER_CONFIGURATION=true to enable MCP features."
+        )
+
+    @patch("src.server.app.graph")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
+    def test_chat_stream_with_mcp_settings_enabled(self, mock_graph, client):
+        # Mock the async stream
+        async def mock_astream(*args, **kwargs):
+            yield ("agent1", "step1", {"test": "data"})
+
+        mock_graph.astream = mock_astream
+
+        request_data = {
+            "thread_id": "__default__",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "resources": [],
+            "max_plan_iterations": 3,
+            "max_step_num": 10,
+            "max_search_results": 5,
+            "auto_accepted_plan": True,
+            "interrupt_feedback": "",
+            "mcp_settings": {
+                "servers": {
+                    "mcp-github-trending": {
+                        "transport": "stdio",
+                        "command": "uvx",
+                        "args": ["mcp-github-trending"],
+                        "env": {"MCP_SERVER_ID": "mcp-github-trending"},
+                        "enabled_tools": ["get_github_trending_repositories"],
+                        "add_to_agents": ["researcher"],
+                    }
+                }
+            },
+            "enable_background_investigation": False,
+            "report_style": "academic",
+        }
+
+        response = client.post("/api/chat/stream", json=request_data)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+
 
 class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
@@ -428,7 +547,6 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_with_interrupt_feedback(self, mock_graph):
-
         # Mock the async stream
         async def mock_astream(*args, **kwargs):
             # Verify that Command is passed as input when interrupt_feedback is provided
@@ -501,7 +619,6 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_tool_message(self, mock_graph):
-
         # Mock tool message
         mock_tool_message = ToolMessage(content="Tool result", tool_call_id="tool_123")
         mock_tool_message.id = "msg_456"
@@ -540,7 +657,6 @@ class TestAstreamWorkflowGenerator:
     async def test_astream_workflow_generator_ai_message_with_tool_calls(
         self, mock_graph
     ):
-
         # Mock AI message with tool calls
         mock_ai_message = AIMessageChunk(content="Making tool call")
         mock_ai_message.id = "msg_789"
@@ -582,7 +698,6 @@ class TestAstreamWorkflowGenerator:
     async def test_astream_workflow_generator_ai_message_with_tool_call_chunks(
         self, mock_graph
     ):
-
         # Mock AI message with only tool call chunks
         mock_ai_message = AIMessageChunk(content="Streaming tool call")
         mock_ai_message.id = "msg_101"
@@ -621,7 +736,6 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_with_finish_reason(self, mock_graph):
-
         # Mock AI message with finish reason
         mock_ai_message = AIMessageChunk(content="Complete response")
         mock_ai_message.id = "msg_finish"
@@ -661,7 +775,6 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_config_passed_correctly(self, mock_graph):
-
         mock_ai_message = AIMessageChunk(content="Test")
         mock_ai_message.id = "test_id"
         mock_ai_message.response_metadata = {}

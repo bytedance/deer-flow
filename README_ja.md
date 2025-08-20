@@ -381,7 +381,8 @@ docker build -t deer-flow-api .
 
 ```bash
 # deer-flow-api-appを希望のコンテナ名に置き換えてください
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# サーバーを起動してlocalhost:8000にバインド
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # サーバーを停止
 docker stop deer-flow-api-app
@@ -398,6 +399,9 @@ docker compose build
 # サーバーを起動
 docker compose up
 ```
+
+> [!WARNING]
+> DeerFlow を本番環境にデプロイする場合は、ウェブサイトに認証を追加し、MCPServer と Python Repl のセキュリティチェックを評価してください。
 
 ## テキスト読み上げ統合
 

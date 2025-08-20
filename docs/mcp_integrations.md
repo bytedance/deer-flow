@@ -1,4 +1,13 @@
-# MCP Integrations
+# MCP Integrations（Beta）
+
+Now This feature is diabled by default. You can enable it by setting the environment ENABLE_MCP_SERVER_CONFIGURATION to be true
+
+> [!WARNING]
+> Please enable this feature before securing your frond-end and back-end in a managed environment.
+> Otherwise, you system could be compromised.
+
+This feature is diabled by default. You can enable it by setting the environment ENABLE_MCP_SERVER_CONFIGURATION
+Please enable this feature before securing your frond-end and back-end in an internal environment.q
 
 ## Example of MCP Server Configuration
 
@@ -37,7 +46,18 @@ For `sse` type:
 {
   "transport": "sse",
   "url": "http://localhost:3000/sse",
-  "env": {
+  "headers": {
+    "API_KEY": "value"
+  }
+}
+```
+
+For `streamable_http` type:
+```json
+{
+  "transport": "streamable_http",
+  "url": "http://localhost:3000/mcp",
+  "headers": {
     "API_KEY": "value"
   }
 }

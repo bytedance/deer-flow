@@ -1,8 +1,10 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from src.rag.ragflow import RAGFlowProvider, parse_uri
 
 
@@ -66,6 +68,14 @@ def test_init_page_size(monkeypatch):
     monkeypatch.setenv("RAGFLOW_PAGE_SIZE", "5")
     provider = RAGFlowProvider()
     assert provider.page_size == 5
+
+
+def test_init_cross_language(monkeypatch):
+    monkeypatch.setenv("RAGFLOW_API_URL", "http://api")
+    monkeypatch.setenv("RAGFLOW_API_KEY", "key")
+    monkeypatch.setenv("RAGFLOW_CROSS_LANGUAGES", "lang1,lang2")
+    provider = RAGFlowProvider()
+    assert provider.cross_languages == ["lang1", "lang2"]
 
 
 def test_init_missing_env(monkeypatch):

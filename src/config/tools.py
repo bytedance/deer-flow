@@ -1,8 +1,9 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
 import enum
+import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +14,7 @@ class SearchEngine(enum.Enum):
     DUCKDUCKGO = "duckduckgo"
     BRAVE_SEARCH = "brave_search"
     ARXIV = "arxiv"
+    WIKIPEDIA = "wikipedia"
 
 
 # Tool configuration

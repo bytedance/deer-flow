@@ -1,13 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 from langchain.schema import HumanMessage, SystemMessage
 
+from src.config.report_style import ReportStyle
 from src.prompt_enhancer.graph.enhancer_node import prompt_enhancer_node
 from src.prompt_enhancer.graph.state import PromptEnhancerState
-from src.config.report_style import ReportStyle
 
 
 @pytest.fixture

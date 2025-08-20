@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
+
 from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 

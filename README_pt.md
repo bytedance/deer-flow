@@ -370,7 +370,8 @@ E por fim, inicie um container docker rodando o servidor web:
 
 ```bash
 # substitua deer-flow-api-app com seu nome de container preferido
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# Inicie o servidor e faça o bind com localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # pare o servidor
 docker stop deer-flow-api-app
@@ -387,6 +388,9 @@ docker compose build
 # start the server
 docker compose up
 ```
+
+> [!WARNING]
+> Se você quiser implantar o DeerFlow em ambientes de produção, adicione autenticação ao site e avalie sua verificação de segurança do MCPServer e Python Repl.
 
 ## Exemplos
 
