@@ -193,7 +193,7 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 
 - 🤖 **LLM Integration**
   - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
-  - Support for open source models like Qwen
+  - Support for open source models like Qwen, you need to read the [configuration](docs/configuration_guide.md) for more details.
   - OpenAI-compatible API interface
   - Multi-tier LLM system for different task complexities
 
@@ -386,6 +386,33 @@ DeerFlow supports LangSmith tracing to help you debug and monitor your workflows
 
 This will enable trace visualization in LangGraph Studio and send your traces to LangSmith for monitoring and analysis.
 
+### Checkpointing
+1. Postgres and MonogDB implementation of LangGraph checkpoint saver.
+2. In-memory store is used to caching the streaming messages before persisting to database, If finish_reason is "stop" or "interrupt", it triggers persistence.
+3. Supports saving and loading checkpoints for workflow execution.
+4. Supports saving chat stream events for replaying conversations.
+
+Note: 
+The latest langgraph-checkpoint-postgres-2.0.23 have checkpointing issue, you can check the open issue:"TypeError: Object of type HumanMessage is not JSON serializable"  [https://github.com/langchain-ai/langgraph/issues/5557].
+
+To use postgres checkpoint you should install langgraph-checkpoint-postgres-2.0.21
+
+The default database and collection will be automatically created if not exists.
+Default database: checkpoing_db
+Default collection: checkpoint_writes_aio (langgraph checkpoint writes)
+Default collection: checkpoints_aio (langgraph checkpoints)
+Default collection: chat_streams (chat stream events for replaying conversations)
+
+You need to set the following environment variables in your `.env` file:
+
+```bash
+# Enable LangGraph checkpoint saver, supports MongoDB, Postgres
+LANGGRAPH_CHECKPOINT_SAVER=true
+# Set the database URL for saving checkpoints
+LANGGRAPH_CHECKPOINT_DB_URL="mongodb://localhost:27017/"
+#LANGGRAPH_CHECKPOINT_DB_URL=postgresql://localhost:5432/postgres
+```
+
 ## Docker
 
 You can also run this project with Docker.
@@ -402,7 +429,8 @@ Final, start up a docker container running the web server:
 
 ```bash
 # Replace deer-flow-api-app with your preferred container name
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# Start the server then bind to localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # stop the server
 docker stop deer-flow-api-app

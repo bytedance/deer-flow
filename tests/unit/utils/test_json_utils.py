@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 import json
+
 from src.utils.json_utils import repair_json_output
 
 
 class TestRepairJsonOutput:
-
     def test_valid_json_object(self):
         """Test with valid JSON object"""
         content = '{"key": "value", "number": 123}'
