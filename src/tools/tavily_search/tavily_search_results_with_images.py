@@ -9,7 +9,9 @@ from langchain.callbacks.manager import (
     AsyncCallbackManagerForToolRun,
     CallbackManagerForToolRun,
 )
-from langchain_tavily.tavily_search import TavilySearch
+
+# from langchain_tavily.tavily_search import TavilySearch
+from langchain_community.tools.tavily_search.tool import TavilySearchResults
 from pydantic import Field
 
 from src.tools.tavily_search.tavily_search_api_wrapper import (
@@ -19,7 +21,7 @@ from src.tools.tavily_search.tavily_search_api_wrapper import (
 logger = logging.getLogger(__name__)
 
 
-class TavilySearchWithImages(TavilySearch):  # type: ignore[override, override]
+class TavilySearchWithImages(TavilySearchResults):  # type: ignore[override, override]
     """Tool that queries the Tavily Search API and gets back json.
 
     Setup:
