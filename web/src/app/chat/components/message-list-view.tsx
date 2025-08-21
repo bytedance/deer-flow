@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Lightbulb,
+  Wrench,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import React, { useCallback, useMemo, useRef, useState } from "react";
@@ -440,7 +441,7 @@ function PlanCard({
   const plan = useMemo<{
     title?: string;
     thought?: string;
-    steps?: { title?: string; description?: string }[];
+    steps?: { title?: string; description?: string; tools?: string[] }[];
   }>(() => {
     return parseJSON(message.content ?? "", {});
   }, [message.content]);
@@ -646,5 +647,20 @@ function PodcastCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function ToolsDisplay({ tools }: { tools: string[] }) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {tools.map((tool, index) => (
+        <span
+          key={index}
+          className="rounded-md bg-muted px-2 py-1 text-xs font-mono text-muted-foreground"
+        >
+          {tool}
+        </span>
+      ))}
+    </div>
   );
 }
