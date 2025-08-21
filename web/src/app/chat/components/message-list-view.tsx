@@ -185,7 +185,7 @@ function MessageListItem({
             )}
           >
             <MessageBubble message={message}>
-              <div className="flex w-full flex-col text-wrap break-words">
+              <div className="flex w-full flex-col break-words">
                 <Markdown
                   className={cn(
                     message.role === "user" &&
@@ -233,11 +233,12 @@ function MessageBubble({
   return (
     <div
       className={cn(
-        `group flex w-fit max-w-[85%] flex-col rounded-2xl px-4 py-3 text-nowrap shadow`,
+        "group flex w-auto max-w-[90vw] flex-col rounded-2xl px-4 py-3 break-words",
         message.role === "user" && "bg-brand rounded-ee-none",
         message.role === "assistant" && "bg-card rounded-es-none",
         className,
       )}
+      style={{ wordBreak: "break-all" }}
     >
       {children}
     </div>
@@ -492,27 +493,46 @@ function PlanCard({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <Markdown className="opacity-80" animated={message.isStreaming}>
-                {plan.thought}
-              </Markdown>
-              {plan.steps && (
-                <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
-                  {plan.steps.map((step, i) => (
-                    <li key={`step-${i}`}>
-                      <h3 className="mb text-lg font-medium">
-                        <Markdown animated={message.isStreaming}>
-                          {step.title}
-                        </Markdown>
-                      </h3>
-                      <div className="text-muted-foreground text-sm">
-                        <Markdown animated={message.isStreaming}>
-                          {step.description}
-                        </Markdown>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                <Markdown className="opacity-80" animated={message.isStreaming}>
+                  {plan.thought}
+                </Markdown>
+                {plan.steps && (
+                  <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
+                    {plan.steps.map((step, i) => (
+                      <li key={`step-${i}`} style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                        <div className="flex items-start gap-2">
+                          <div className="flex-1">
+                            <h3 className="mb flex items-center gap-2 text-lg font-medium">
+                              <Markdown animated={message.isStreaming}>
+                                {step.title}
+                              </Markdown>
+                              {step.tools && step.tools.length > 0 && (
+                                <Tooltip
+                                  title={`Uses ${step.tools.length} MCP tool${step.tools.length > 1 ? "s" : ""}`}
+                                >
+                                  <div className="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-800">
+                                    <Wrench size={12} />
+                                    <span>{step.tools.length}</span>
+                                  </div>
+                                </Tooltip>
+                              )}
+                            </h3>
+                            <div className="text-muted-foreground text-sm" style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                              <Markdown animated={message.isStreaming}>
+                                {step.description}
+                              </Markdown>
+                            </div>
+                            {step.tools && step.tools.length > 0 && (
+                              <ToolsDisplay tools={step.tools} />
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </CardContent>
             <CardFooter className="flex justify-end">
               {!message.isStreaming && interruptMessage?.options?.length && (

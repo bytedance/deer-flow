@@ -185,7 +185,7 @@ const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           <EditorContent
             immediatelyRender={false}
             extensions={extensions}
-            className="border-muted h-full w-full overflow-auto"
+            className="border-muted h-full w-full overflow-auto break-words"
             editorProps={{
               attributes: {
                 class:
