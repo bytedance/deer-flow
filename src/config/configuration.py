@@ -1,7 +1,6 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import logging
 import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
@@ -10,35 +9,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.config.report_style import ReportStyle
 from src.rag.retriever import Resource
-
-logger = logging.getLogger(__name__)
-
-_TRUTHY = {"1", "true", "yes", "y", "on"}
-
-
-def get_bool_env(name: str, default: bool = False) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return str(val).strip().lower() in _TRUTHY
-
-
-def get_str_env(name: str, default: str = "") -> str:
-    val = os.getenv(name)
-    return default if val is None else str(val).strip()
-
-
-def get_int_env(name: str, default: int = 0) -> int:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    try:
-        return int(val.strip())
-    except ValueError:
-        logger.warning(
-            f"Invalid integer value for {name}: {val}. Using default {default}."
-        )
-        return default
+from src.config.loader import get_str_env, get_int_env, get_bool_env
 
 
 def get_recursion_limit(default: int = 25) -> int:
@@ -54,10 +25,10 @@ def get_recursion_limit(default: int = 25) -> int:
     parsed_limit = get_int_env("AGENT_RECURSION_LIMIT", default)
 
     if parsed_limit > 0:
-        logger.info(f"Recursion limit set to: {parsed_limit}")
+        print(f"Recursion limit set to: {parsed_limit}")
         return parsed_limit
     else:
-        logger.warning(
+        print(
             f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
             f"Using default value {default}."
         )
