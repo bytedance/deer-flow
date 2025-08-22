@@ -43,9 +43,7 @@ jobs:
         cache-dependency-path: web/pnpm-lock.yaml
 
     - name: Install pnpm
-      uses: pnpm/action-setup@v4
-      with:
-        version: 10
+      run: npm install -g pnpm
 
     - name: Install frontend dependencies
       run: |
