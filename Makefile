@@ -1,4 +1,4 @@
-.PHONY: help lint format install-dev serve test coverage langgraph-dev
+.PHONY: help lint format install-dev serve test coverage langgraph-dev lint-frontend
 
 help: ## Show this help message
 	@echo "Deer Flow - Available Make Targets:"
@@ -15,6 +15,12 @@ format: ## Format code using ruff
 
 lint: ## Lint and fix code using ruff
 	uv run ruff check --fix --select I --config pyproject.toml .
+
+lint-frontend: ## Lint frontend code and check build
+	cd web && pnpm install --frozen-lockfile
+	cd web && pnpm lint
+	cd web && pnpm typecheck
+	cd web && pnpm build
 
 serve: ## Start development server with reload
 	uv run server.py --reload
