@@ -7,12 +7,12 @@ export interface Message {
   id: string;
   threadId: string;
   agent?:
-    | "coordinator"
-    | "planner"
-    | "researcher"
-    | "coder"
-    | "reporter"
-    | "podcast";
+  | "coordinator"
+  | "planner"
+  | "researcher"
+  | "coder"
+  | "reporter"
+  | "podcast";
   role: MessageRole;
   isStreaming?: boolean;
   content: string;
@@ -42,4 +42,12 @@ export interface ToolCallRuntime {
 export interface Resource {
   uri: string;
   title: string;
+}
+export interface Conversation {
+  id: string;
+  title: string;
+  count: number;
+  date: string;
+  category: string;
+  data_type: string;
 }

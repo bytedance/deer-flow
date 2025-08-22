@@ -104,10 +104,19 @@ class EnhancedTavilySearchAPIWrapper(OriginalTavilySearchAPIWrapper):
             clean_results.append(clean_result)
         images = raw_results["images"]
         for image in images:
-            clean_result = {
-                "type": "image",
-                "image_url": image["url"],
-                "image_description": image["description"],
-            }
+            if isinstance(image, str):
+                clean_result = {
+                    "type": "image",
+                    "image_url": image,
+                    "image_description": "",
+                }
+            elif isinstance(image, dict):
+                clean_result = {
+                    "type": "image",
+                    "image_url": image.get("url"),
+                    "image_description": image.get("description", ""),
+                }
+            else:
+                continue
             clean_results.append(clean_result)
         return clean_results
