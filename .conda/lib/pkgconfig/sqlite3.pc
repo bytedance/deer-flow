@@ -1,0 +1,13 @@
+# Package Information for pkg-config
+
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: SQLite
+Description: SQL database engine
+Version: 3.50.2
+Libs: -L${libdir} -lsqlite3
+Libs.private: -lm -lz 
+Cflags: -I${includedir}

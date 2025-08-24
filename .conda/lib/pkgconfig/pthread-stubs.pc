@@ -1,0 +1,8 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+
+Name: pthread stubs
+Description: Stubs missing from libc for standard pthread functions
+Version: 0.3
+Libs: 

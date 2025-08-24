@@ -1,0 +1,45 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Author: Lasse Collin
+.\"
+.\" Brazilian Portuguese translations for xz package
+.\" Traduções em português brasileiro para o pacote xz.
+.\" Rafael Fontenelle <rafaelff@gnome.org>, 2022-2023.
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH LZMAINFO 1 2013\-06\-30 Tukaani "XZ Utils"
+.SH NOME
+lzmainfo \- mostra informações armazenadas no cabeçalho do arquivo .lzma
+.SH SINOPSE
+\fBlzmainfo\fP [\fB\-\-help\fP] [\fB\-\-version\fP] [\fIarquivo...\fP]
+.SH DESCRIÇÃO
+\fBlzmainfo\fP mostra as informações armazenadas no cabeçalho do arquivo
+\&\fB.lzma\fP. Ele lê os primeiros 13 bytes do \fIarquivo\fP especificado,
+decodifica o cabeçalho e o imprime na saída padrão em formato legível por
+humanos. Se nenhum \fIarquivo\fP for fornecido ou \fIarquivo\fP for \fB\-\fP, a
+entrada padrão será lida.
+.PP
+Normalmente, as informações mais interessantes são o tamanho descompactado e
+o tamanho do dicionário. O tamanho não compactado pode ser mostrado apenas
+se o arquivo estiver na variante de formato \fB.lzma\fP não transmitido. A
+quantidade de memória necessária para descompactar o arquivo é de algumas
+dezenas de kilobytes mais o tamanho do dicionário.
+.PP
+\fBlzmainfo\fP está incluído no XZ Utils principalmente para compatibilidade
+com versões anteriores do LZMA Utils.
+.SH "STATUS DE SAÍDA"
+.TP 
+\fB0\fP
+Está tudo bem.
+.TP 
+\fB1\fP
+Ocorreu um erro.
+.SH BUGS
+\fBlzmainfo\fP usa \fBMB\fP enquanto o sufixo correto seria \fBMiB\fP (2^20
+bytes). Isso é para manter a saída compatível com LZMA Utils.
+.SH "VEJA TAMBÉM"
+\fBxz\fP(1)

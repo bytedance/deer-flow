@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB RandR
+Description: XCB RandR Extension
+Version: 1.17.0
+Requires.private: xcb xcb-render
+Libs: -L${libdir} -lxcb-randr
+Cflags: -I${includedir}

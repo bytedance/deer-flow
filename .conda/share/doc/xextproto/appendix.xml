@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE appendix
+          PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+          "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd">
+<appendix id='system_window_encodings'>
+<title>System Window Encodings</title>
+
+<para>
+The AppGroupCreateAssoc request has the following possible variations:
+</para>
+
+<literallayout>
+<emphasis role='bold'>AppGroupCreateAssoc (X11)</emphasis>
+      1      CARD8            opcode
+      1      6                XC-APPGROUP opcode
+      2      n                length
+      4      WINDOW           window
+      2      0                window_type
+      2      4                system_window_len
+      4      WINDOW           Window
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>AppGroupCreateAssoc (Macintosh)</emphasis>
+      1      CARD8            opcode
+      1      6                XC-APPGROUP opcode
+      2      n                length
+      4      WINDOW           window
+      2      1                window_type
+      2      12               system_window_len
+      4      CARD32           WindowPtr
+      2      INT16            Rect.top
+      2      INT16            Rect.left
+      2      INT16            Rect.bottom
+      2      INT16            Rect.right
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>AppGroupCreateAssoc (Win32)</emphasis>
+      1      CARD8            opcode
+      1      6                XC-APPGROUP opcode
+      2      n                length
+      4      WINDOW           window
+      2      2                window_type
+      2      4                system_window_len
+      4      CARD32           HWND
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>AppGroupCreateAssoc (Win16)</emphasis>
+      1      CARD8            opcode
+      1      6                XC-APPGROUP opcode
+      2      n                length
+      4      WINDOW           window
+      2      3                window_type
+      2      4                system_window_len
+      2      CARD16           HWND offset
+      2      CARD16           HWND segment
+</literallayout>
+
+</appendix>

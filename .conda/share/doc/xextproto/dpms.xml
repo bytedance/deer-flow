@@ -1,0 +1,663 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<book id="dpms">
+
+<bookinfo>
+   <title>X Display Power Management Signaling (DPMS) Extension Protocol Specification</title>
+   <subtitle>X Project Team Standard</subtitle>
+   <authorgroup>
+      <author>
+         <firstname>Rob </firstname><surname>Lembree</surname>
+         <affiliation><orgname>Digital Equipment Corporation</orgname></affiliation>
+         <email>lembree@zk3.dec.com</email>
+      </author>
+   </authorgroup>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <copyright><year>1996</year><holder>Digital Equipment Corporation</holder></copyright>
+
+<legalnotice>
+<para>
+Permission to use, copy, modify, distribute, and sell this
+documentation for any purpose is hereby granted without fee,
+provided that the above copyright notice and this permission
+notice appear in all copies.  Digital Equipment Corporation
+makes no representations about the suitability for any purpose
+of the information in this document.  This documentation is
+provided &ldquo;as is&rdquo; without express or implied warranty.
+</para>
+
+</legalnotice>
+</bookinfo>
+
+<chapter id="Overview">
+<title>Overview</title>
+<para>
+This extension provides X Protocol control over the VESA Display
+Power Management Signaling (DPMS) characteristics of video boards
+under control of the X Window System.<footnote>
+<para>
+<emphasis remap='I'>X Window System</emphasis> is a trademark of The Open Group.
+</para>
+</footnote>
+</para>
+
+
+<para>
+<!-- .LP -->
+Traditionally, the X Window System has provided for both blanking and
+non-blanking screen savers.  Timeouts associated with these built-in
+screen saver mechanisms are limited to idle (dwell) time, and a change
+timeout that specifies the change interval for non-blanking screen savers.
+</para>
+<para>
+<!-- .LP -->
+The United States' Environmental Protection Agency (EPA) Energy Star program
+requires that monitors power down after some idle time by default.
+While it is possible to simply overload the existing screen saver timeouts,
+this solution leaves the non-privileged user little to no control over
+the DPMS characteristics of his or her system.  For example, disabling
+DPMS would require some unintended side effect in the core screen saver,
+such as disabling the changing of a non-blanking screen saver.  Providing
+clients with this control requires an extension to the core X Window System
+Protocol, and this extension seeks to fill this gap.
+</para>
+<para>
+<!-- .LP -->
+The design goal of the DPMS extension is to be a logical extension to
+the traditional screen saver.  The protocol and sample implementation is
+designed to use the same date types and time units as the screen saver.
+The sample implementation works independently from the screen saver so that
+policy as it pertains to the interaction between screen saver and DPMS can
+be deferred to the user or screen saver application. The extension has
+been tested with and shown to work correctly with both the internal blanking
+and non-blanking screen savers, as well as with screen saver extension
+clients.
+</para>
+<para>
+The DPMS extension is designed to be simple, yet export sufficient
+VESA DPMS information to enable full function clients to be written.
+Included is the ability to sense DPMS capability, set and get DPMS timeouts,
+enable and disable individual DPMS modes, enable and disable DPMS (without
+destroying timeout values), and sense current DPMS on/off state and
+power level.
+</para>
+<para>
+There are four power levels specified by the Video Electronics Standards
+Association (VESA) Display Power Management Signaling (DPMS) standard.
+These are:
+</para>
+
+<literallayout class="monospaced">
+<function>DPMS Extension Power Levels</function>
+     0     DPMSModeOn          In use
+     1     DPMSModeStandby     Blanked, low power
+     2     DPMSModeSuspend     Blanked, lower power
+     3     DPMSModeOff         Shut off, awaiting activity
+</literallayout>
+
+<para>
+It is logical to assume that successive DPMS modes be chronologically
+at the same time or later than one another, and the protocol is designed
+to enforce this rule.
+</para>
+
+<para>
+Note however that a conscious decision is made to decouple the timeouts
+associated with screen saver from the DPMS timeouts.  While it might be
+considered logical to require that the first non-zero DPMS timeout be
+greater than or equal to the screen saver timeout, this is intentionally
+omitted, leaving this policy decision to the user or the screen saver
+application.  In the case of a laptop where power may be scarce, the
+importance of power savings should supersede the screen saver.  If the
+laptop user plugs the unit in and power is no longer a scarce commodity,
+it may be decided to make DPMS less aggressive, or disable it completely.
+</para>
+</chapter>
+
+<chapter id="Requests">
+<title>Requests</title>
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSGetVersion'><function>DPMSGetVersion</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>client_major_version</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>client_minor_version</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>server_major_version</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>server_minor_version</emphasis>: CARD16
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+If supplied, the <emphasis remap='I'>client_major_version</emphasis> and
+<emphasis remap='I'>client_minor_version</emphasis> indicate what version
+of the protocol the
+client wants the server to implement.  The server version numbers
+returned indicate the protocol this extension actually supports.  This
+might not equal the version sent by the client.  An implementation can
+(but need not) support more than one version simultaneously.  The
+<emphasis remap='I'>server_major_version</emphasis> and the
+<emphasis remap='I'>server_minor_version</emphasis> are a
+mechanism to support future revisions of the Display Power Management
+Signaling protocol which may be necessary.  In general, the major version
+would increment for incompatible changes, and the minor version would
+increment for small, upward-compatible changes.  Servers that support the
+protocol defined in this document will return a
+<emphasis remap='I'>server_major_version</emphasis>
+of one (1), and a <emphasis remap='I'>server_minor_version</emphasis>
+of two (2).
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSCapable'><function>DPMSCapable</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>capable</emphasis>: BOOL
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is used to determine whether or not the currently running
+server's devices are capable of DPMS operations.  The truth value of this
+request is implementation defined, but is generally based on the capabilities
+of the graphic card and monitor combination.  Also, the return value in the
+case of heterogeneous multi-head servers is implementation defined.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSGetTimeouts'><function>DPMSGetTimeouts</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>standby_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>suspend_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>off_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request returns the current values of the DPMS timeout values.  All
+values are in units of seconds.
+</para>
+
+<para>
+<emphasis remap='I'>standby_timeout</emphasis> is the amount of time
+of inactivity before standby
+mode is invoked. The actual effects of this mode are implementation defined,
+but in the case of DPMS compliant hardware, it is implemented by shutting off
+the horizontal sync signal, and pulsing the vertical sync signal. Standby
+mode provides the quickest monitor recovery time.  Note also that many
+monitors implement this mode identically to suspend mode.  A value of
+zero indicates that this mode is disabled.
+</para>
+
+<para>
+<emphasis remap='I'>suspend_timeout</emphasis> is the amount of time
+of inactivity before the second
+level of power savings is invoked. Suspend mode's physical and electrical
+characteristics are implementation defined, but in DPMS compliant hardware,
+results in the pulsing of the horizontal sync signal, and shutting off of
+the vertical sync signal.  Suspend mode recovery is considered to be slower
+than standby mode, but faster than off mode, however this is monitor
+dependent.  As noted above, many monitors implement this mode identically to
+standby mode.  A value of zero indicates that this mode is disabled.
+</para>
+
+<para>
+<emphasis remap='I'>off_timeout</emphasis> is the amount of time of
+inactivity before the third and
+final level of power savings is invoked. Off mode's physical and electrical
+characteristics are implementation defined, but in DPMS compliant hardware,
+is implemented by shutting off both horizontal and vertical sync signals,
+resulting in the power-down of the monitor.  Recovery time is implementation
+dependent, but frequently is similar to the power-up time of the monitor. A
+value of zero indicates that this mode is disabled.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSSetTimeouts'><function>DPMSSetTimeouts</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>standby_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>suspend_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>off_timeout</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+
+<para>
+All values are in units of seconds.
+<emphasis remap='I'>standby_timeout</emphasis> is the amount of
+time of inactivity before standby mode will be invoked. This is the
+lightest level of power savings, and the monitor is generally immediately
+ready upon detection of user activity.  This is most often implemented by
+shutting off the horizontal sync signal to the monitor.
+A value of zero disables this mode.
+</para>
+
+<para>
+The <emphasis remap='I'>suspend_timeout</emphasis> specifies the amount
+of time of inactivity
+before the screen is placed into suspend mode.  Suspend mode is the
+middle level of power savings, resulting in a slightly longer recovery
+upon detection of activity.  Suspend mode is most often implemented by
+pulsing the horizontal sync signal, and removing the vertical sync
+signal. A value of zero disables this mode.
+</para>
+
+<para>
+The <emphasis remap='I'>off_timeout</emphasis> specifies the amount of
+time of inactivity before
+the monitor is shut off.  Off mode is the deepest level of power management,
+resulting in the greatest power savings and the longest recovery time.
+Off mode is most often implemented by removing both the horizontal and
+vertical signals. A value of zero disables this mode.
+</para>
+<para>
+The values of successive power levels must be greater than or equal
+to the value of the previous (non-zero) level.  A BadValue error is generated
+if an illegal combination is detected.
+</para>
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSEnable'><function>DPMSEnable</function></olink>
+</para>
+<para>
+=&gt;
+</para>
+
+<para>
+This request enables the DPMS characteristics of the server, using the
+server's currently stored timeouts.  If DPMS is already enabled, no change is
+effected.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSDisable'><function>DPMSDisable</function></olink>
+</para>
+<para>
+=&gt;
+</para>
+
+<para>
+This request disables the DPMS characteristics of the server.  It does
+not affect the core or extension screen savers.  If DPMS is already
+disabled, no change is effected.  This request is provided so that DPMS
+may be disabled without damaging the server's stored timeout values.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSForceLevel'><function>DPMSForceLevel</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>power_level</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request forces a specific DPMS level on the server.  If DPMS is
+disabled, a BadMatch error is generated.  If an erroneous power level
+is specified, a BadValue error is returned, and the error value contains
+the bad value.  If the power level specified is already in effect, no
+changes occur.  Power Level must be one of DPMSModeOn, DPMSModeStandby,
+DPMSModeSuspend or DPMSModeOff.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSInfo'><function>DPMSInfo</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>power_level</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>state</emphasis>: BOOL
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request returns information about the current DPMS state of the
+display.  <emphasis remap='I'>state</emphasis> is one of DPMSEnabled
+or DPMSDisabled.
+If <emphasis remap='I'>state</emphasis> is DPMSEnabled,
+<emphasis remap='I'>power_level</emphasis> is returned as one
+of DPMSModeOn, DPMSModeStandby, DPMSModeSuspend or DPMSModeOff, otherwise
+it is undefined.
+</para>
+
+<para>
+<olink targetdoc='dpmslib' targetptr='DPMSSelectInput'><function>DPMSSelectInput</function></olink>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>event_mask</emphasis>: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request specifies whether DPMS extension events should be generated for this client.
+If DPMSInfoNotifyMask is set in <emphasis remap='I'>event-mask</emphasis>, then DPMSInfoNotifyEvent
+events will be generated whenever the current DPMS on/off state or power level changes.
+If no bits are set, then no events will be generated.
+</para>
+
+</chapter>
+
+<chapter id="Events">
+
+<title>Events</title>
+<para>
+The DPMS extension adds one event:
+</para>
+<para>
+<function>DPMSInfoNotifyEvent</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>timestamp</emphasis>: TIMESTAMP
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>power_level</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>state</emphasis>: BOOL
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This event is delivered to clients that have requested
+DPMSInfoNotifyMask events using the <function>DPMSSelectInput</function> request
+whenever the current DPMS on/off state or power level changes.
+<emphasis remap='I'>state</emphasis> is one of DPMSEnabled or DPMSDisabled.
+If <emphasis remap='I'>state</emphasis> is DPMSEnabled,
+<emphasis remap='I'>power_level</emphasis> is one
+of DPMSModeOn, DPMSModeStandby, DPMSModeSuspend or DPMSModeOff, otherwise
+it is undefined.
+</para>
+
+</chapter>
+
+<chapter id="Encoding">
+<title>Encoding</title>
+<para>
+Please refer to the X11 Protocol Encoding document as this document uses
+conventions established there.
+</para>
+
+<para>
+The name of this extension is "DPMS".
+</para>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSGetVersion'><function>DPMSGetVersion</function></olink>
+     1     CARD8         opcode
+     1     0             DPMS opcode
+     2     2             request length
+     2     CARD16        client_major_version
+     2     CARD16        client_minor_version
+=&gt;
+     1     1             Reply
+     1                   unused
+     2     CARD16        sequence number
+     4     0             length
+     2     CARD16        server_major_version
+     2     CARD16        server_minor_version
+     20                  unused
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSCapable'><function>DPMSCapable</function></olink>
+     1     CARD8         opcode
+     1     1             DPMS opcode
+     2     1             request length
+=&gt;
+     1     1             Reply
+     1                   unused
+     2     CARD16        sequence number
+     4     0             length
+     1     BOOL          capable
+     23                  unused
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSGetTimeouts'><function>DPMSGetTimeouts</function></olink>
+     1     CARD8         opcode
+     1     2             DPMS opcode
+     2     1             request length
+=&gt;
+     1     1             Reply
+     1                   unused
+     2     CARD16        sequence number
+     4     0             length
+     2     CARD16        standby_timeout
+     2     CARD16        suspend_timeout
+     2     CARD16        off_timeout
+     18                  unused
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSSetTimeouts'><function>DPMSSetTimeouts</function></olink>
+     1     CARD8         opcode
+     1     3             DPMS opcode
+     2     3             request length
+     2     CARD16        standby_timeout
+     2     CARD16        suspend_timeout
+     2     CARD16        off_timeout
+     2                   unused
+=&gt;
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSEnable'><function>DPMSEnable</function></olink>
+     1     CARD8         opcode
+     1     4             DPMS opcode
+     2     1             request length
+ =&gt;
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSDisable'><function>DPMSDisable</function></olink>
+     1     CARD8         opcode
+     1     5             DPMS opcode
+     2     1             request length
+ =&gt;
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSForceLevel'><function>DPMSForceLevel</function></olink>
+     1     CARD8         opcode
+     1     6             DPMS opcode
+     2     2             request length
+     2                   power_level
+          0     DPMSModeOn
+          1     DPMSModeStandby
+          2     DPMSModeSuspend
+          3     DPMSModeOff
+     2                   unused
+=&gt;
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSInfo'><function>DPMSInfo</function></olink>
+     1     CARD8         opcode
+     1     7             DPMS opcode
+     2     1             request length
+=&gt;
+     1     1             Reply
+     1                   unused
+     2     CARD16        sequence number
+     4     0             length
+     2                   power_level
+           0     DPMSModeOn
+           1     DPMSModeStandby
+           2     DPMSModeSuspend
+           3     DPMSModeOff
+     1     BOOL          state
+     21                  unused
+
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSSelectInput'><function>DPMSSelectInput</function></olink>
+     1     CARD8         opcode
+     1     8             DPMS opcode
+     2     2             request length
+     4                   event mask
+           0     no events
+           1     DPMSInfoNotifyMask
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='dpmslib' targetptr='DPMSInfoNotifyEvent'><function>DPMSInfoNotifyEvent</function></olink>
+     1     GenericEvent    type
+     1     CARD8           DPMS extension offset
+     2     CARD16          sequence number
+     4     0               length
+     2     DPMSInfoNotify  evtype
+     2                     unused
+     4     TIMESTAMP       timestamp
+     2                     power_level
+           0     DPMSModeOn
+           1     DPMSModeStandby
+           2     DPMSModeSuspend
+           3     DPMSModeOff
+     1     BOOL            state
+     13                    unused
+</literallayout>
+</chapter>
+</book>

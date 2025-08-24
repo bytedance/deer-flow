@@ -1,0 +1,1320 @@
+<glossary id='glossary'>
+<title>Glossary</title>
+
+
+<glossentry id="glossary:Access_control_list">
+  <glossterm>Access control list</glossterm>
+  <indexterm zone="glossary:Access_control_list" significance="preferred"><primary>Access control list</primary></indexterm>
+  <glossdef>
+    <para>
+X maintains a list of hosts from which client programs can be run.
+By default,
+only programs on the local host and hosts specified in an initial list read
+by the server can use the display.
+Clients on the local host can change this access control list.
+Some server implementations can also implement other authorization mechanisms
+in addition to or in place of this mechanism.
+The action of this mechanism can be conditional based on the authorization
+protocol name and data received by the server at connection setup.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Active_grab">
+  <glossterm>Active grab</glossterm>
+  <indexterm zone="glossary:Active_grab" significance="preferred"><primary>Active grab</primary></indexterm>
+  <glossdef>
+    <para>
+A grab is active when the pointer or keyboard is actually owned by
+the single grabbing client.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Ancestors">
+  <glossterm>Ancestors</glossterm>
+  <indexterm zone="glossary:Ancestors" significance="preferred"><primary>Ancestors</primary></indexterm>
+  <glossdef>
+    <para>
+If W is an <glossterm linkend="glossary:Inferiors">inferior</glossterm> of A, then A is an ancestor of W.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Atom">
+  <glossterm>Atom</glossterm>
+  <indexterm zone="glossary:Atom" significance="preferred"><primary>Atom</primary></indexterm>
+  <glossdef>
+    <para>
+An atom is a unique ID corresponding to a string name.
+Atoms are used to identify properties, types, and selections.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Background">
+  <glossterm>Background</glossterm>
+  <indexterm zone="glossary:Background" significance="preferred"><primary>Background</primary></indexterm>
+  <glossdef>
+    <para>
+An
+<glossterm linkend="glossary:InputOutput_window"><emphasis role='bold'>InputOutput</emphasis></glossterm>
+window can have a background, which is defined as a pixmap.
+When regions of the window have their contents lost or invalidated,
+the server will automatically tile those regions with the background.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Backing_store">
+  <glossterm>Backing store</glossterm>
+  <indexterm zone="glossary:Backing_store" significance="preferred"><primary>Backing store</primary></indexterm>
+  <glossdef>
+    <para>
+When a server maintains the contents of a window,
+the pixels saved off screen are known as a backing store.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Bit_gravity">
+  <glossterm>Bit gravity</glossterm>
+  <indexterm zone="glossary:Bit_gravity" significance="preferred"><primary>Bit</primary><secondary>gravity</secondary></indexterm>
+  <glossdef>
+    <para>
+When a window is resized,
+the contents of the window are not necessarily discarded.
+It is possible to request that the server relocate the previous contents
+to some region of the window (though no guarantees are made).
+This attraction of window contents for some location of
+a window is known as bit gravity.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Bit_plane">
+  <glossterm>Bit plane</glossterm>
+  <indexterm zone="glossary:Bit_plane" significance="preferred"><primary>Bit</primary><secondary>plane</secondary></indexterm>
+  <glossdef>
+    <para>
+When a pixmap or window is thought of as a stack of bitmaps,
+each bitmap is called a bit plane or plane.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Bitmap">
+  <glossterm>Bitmap</glossterm>
+  <indexterm zone="glossary:Bitmap" significance="preferred"><primary>Bitmap</primary></indexterm>
+  <glossdef>
+    <para>
+A bitmap is a <glossterm linkend="glossary:Pixmap">pixmap</glossterm> of depth one.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Border">
+  <glossterm>Border</glossterm>
+  <indexterm zone="glossary:Border" significance="preferred"><primary>Border</primary></indexterm>
+  <glossdef>
+    <para>
+An
+<glossterm linkend="glossary:InputOutput_window"><emphasis role='bold'>InputOutput</emphasis></glossterm>
+window can have a border of equal thickness on all four sides of the window.
+A pixmap defines the contents of the border,
+and the server automatically maintains the contents of the border.
+Exposure events are never generated for border regions.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Button_grabbing">
+  <glossterm>Button grabbing</glossterm>
+  <indexterm zone="glossary:Button_grabbing" significance="preferred"><primary>Button</primary><secondary>grabbing</secondary></indexterm>
+  <glossdef>
+    <para>
+Buttons on the pointer may be passively grabbed by a client.
+When the button is pressed,
+the pointer is then actively grabbed by the client.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Byte_order">
+  <glossterm>Byte order</glossterm>
+  <indexterm zone="glossary:Byte_order" significance="preferred"><primary>Byte order</primary></indexterm>
+  <glossdef>
+    <para>
+For image (pixmap/bitmap) data,
+the server defines the byte order,
+and clients with different native byte ordering must swap bytes as necessary.
+For all other parts of the protocol,
+the client defines the byte order,
+and the server swaps bytes as necessary.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Children">
+  <glossterm>Children</glossterm>
+  <indexterm zone="glossary:Children" significance="preferred"><primary>Children</primary></indexterm>
+  <indexterm zone="glossary:Children" significance="preferred"><primary>Window</primary><secondary>children</secondary></indexterm>
+  <glossdef>
+    <para>
+The children of a window are its first-level subwindows.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Client">
+  <glossterm>Client</glossterm>
+  <indexterm zone="glossary:Client" significance="preferred"><primary>Client</primary></indexterm>
+  <glossdef>
+    <para>
+An application program connects to the window system server by some
+interprocess communication path, such as a TCP connection or a
+shared memory buffer.
+This program is referred to as a client of the window system server.
+More precisely,
+the client is the communication path itself;
+a program with multiple paths open to the server is viewed as
+multiple clients by the protocol.
+Resource lifetimes are controlled by connection lifetimes,
+not by program lifetimes.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Clipping_region">
+  <glossterm>Clipping region</glossterm>
+  <indexterm zone="glossary:Clipping_region" significance="preferred"><primary>Clipping region</primary></indexterm>
+  <glossdef>
+    <para>
+In a <glossterm linkend="glossary:Graphics_context">graphics context</glossterm>,
+a bitmap or list of rectangles can be specified
+to restrict output to a particular region of the window.
+The image defined by the bitmap or rectangles is called a clipping region.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Colormap">
+  <glossterm>Colormap</glossterm>
+  <indexterm zone="glossary:Colormap" significance="preferred"><primary>Colormap</primary></indexterm>
+  <glossdef>
+    <para>
+A colormap consists of a set of entries defining color values.
+The colormap associated with a window is used to display the contents of
+the window; each pixel value indexes the colormap to produce RGB values
+that drive the guns of a monitor.
+Depending on hardware limitations,
+one or more colormaps may be installed at one time,
+so that windows associated with those maps display with correct colors.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Connection">
+  <glossterm>Connection</glossterm>
+  <indexterm zone="glossary:Connection" significance="preferred"><primary>Connection</primary></indexterm>
+  <glossdef>
+    <para>
+The interprocess communication path between the server and client
+program is known as a connection.
+A client program typically (but not necessarily) has one
+connection to the server over which requests and events are sent.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Containment">
+  <glossterm>Containment</glossterm>
+  <indexterm zone="glossary:Containment" significance="preferred"><primary>Containment</primary></indexterm>
+  <glossdef>
+    <para>
+A window <quote>contains</quote> the pointer if the window is viewable and the
+<glossterm linkend="glossary:Hotspot">hotspot</glossterm> of the cursor is
+within a visible region of the window or a
+visible region of one of its inferiors.
+The border of the window is included as part of the window for containment.
+The pointer is <quote>in</quote> a window if the window contains the pointer
+but no inferior contains the pointer.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Coordinate_system">
+  <glossterm>Coordinate system</glossterm>
+  <indexterm zone="glossary:Coordinate_system" significance="preferred"><primary>Coordinate system</primary></indexterm>
+  <glossdef>
+    <para>
+The coordinate system has the X axis horizontal and the Y axis vertical,
+with the origin [0, 0] at the upper left.
+Coordinates are integral,
+in terms of pixels,
+and coincide with pixel centers.
+Each window and pixmap has its own coordinate system.
+For a window,
+the origin is inside the border at the inside upper left.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Cursor">
+  <glossterm>Cursor</glossterm>
+  <indexterm zone="glossary:Cursor" significance="preferred"><primary>Cursor</primary></indexterm>
+  <glossdef>
+    <para>
+A cursor is the visible shape of the pointer on a screen.
+It consists of a <glossterm linkend="glossary:Hotspot">hotspot</glossterm>,
+a source bitmap, a shape bitmap, and a pair of colors.
+The cursor defined for a window controls the visible appearance
+when the pointer is in that window.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Depth">
+  <glossterm>Depth</glossterm>
+  <indexterm zone="glossary:Depth" significance="preferred"><primary>Depth</primary></indexterm>
+  <glossdef>
+    <para>
+The depth of a window or pixmap is the number of bits per pixel that it has.
+The depth of a graphics context is the depth of the drawables it can be
+used in conjunction with for graphics output.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Device">
+  <glossterm>Device</glossterm>
+  <indexterm zone="glossary:Device" significance="preferred"><primary>Device</primary></indexterm>
+  <glossdef>
+    <para>
+Keyboards, mice, tablets, track-balls, button boxes, and so on are all
+collectively known as input devices.
+The core protocol only deals with two devices,
+<quote>the keyboard</quote> and <quote>the pointer.</quote>
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:DirectColor">
+  <glossterm>DirectColor</glossterm>
+  <indexterm zone="glossary:DirectColor" significance="preferred"><primary>DirectColor</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>DirectColor</emphasis>
+is a class of colormap in which a pixel value is decomposed into three
+separate subfields for indexing.
+The first subfield indexes an array to produce red intensity values.
+The second subfield indexes a second array to produce blue intensity values.
+The third subfield indexes a third array to produce green intensity values.
+The RGB values can be changed dynamically.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Display">
+  <glossterm>Display</glossterm>
+  <indexterm zone="glossary:Display" significance="preferred"><primary>Display</primary></indexterm>
+  <glossdef>
+    <para>
+A server, together with its screens and input devices, is called a display.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Drawable">
+  <glossterm>Drawable</glossterm>
+  <indexterm zone="glossary:Drawable" significance="preferred"><primary>Drawable</primary></indexterm>
+  <glossdef>
+    <para>
+Both windows and pixmaps can be used as sources and destinations in
+graphics operations.
+These windows and pixmaps are collectively known as drawables.
+However, an
+<glossterm linkend="glossary:InputOnly_window"><emphasis role='bold'>InputOnly</emphasis></glossterm>
+window cannot be used as a source or destination in a graphics operation.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Event">
+  <glossterm>Event</glossterm>
+  <indexterm zone="glossary:Event" significance="preferred"><primary>Event</primary></indexterm>
+  <glossdef>
+    <para>
+Clients are informed of information asynchronously by means of events.
+These events can be generated either asynchronously from devices
+or as side effects of client requests.
+Events are grouped into types.
+The server never sends events to a client unless the
+client has specifically asked to be informed of that type of event.
+However, other clients can force events to be sent to other clients.
+Events are typically reported relative to a window.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Event_mask">
+  <glossterm>Event mask</glossterm>
+  <indexterm zone="glossary:Event_mask" significance="preferred"><primary>Event</primary><secondary>mask</secondary></indexterm>
+  <glossdef>
+    <para>
+Events are requested relative to a window.
+The set of event types that a client requests relative to a window
+is described by using an event mask.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Event_synchronization">
+  <glossterm>Event synchronization</glossterm>
+  <indexterm zone="glossary:Event_synchronization" significance="preferred"><primary>Event</primary><secondary>synchronization</secondary></indexterm>
+  <glossdef>
+    <para>
+There are certain race conditions possible when demultiplexing device
+events to clients (in particular deciding where pointer and keyboard
+events should be sent when in the middle of window management
+operations).
+The event synchronization mechanism allows synchronous processing
+of device events.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Event_propagation">
+  <glossterm>Event propagation</glossterm>
+  <indexterm zone="glossary:Event_propagation" significance="preferred"><primary>Event</primary><secondary>propagation</secondary></indexterm>
+  <glossdef>
+    <para>
+Device-related events propagate from the source window to ancestor
+windows until some client has expressed interest in handling that type
+of event or until the event is discarded explicitly.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Event_source">
+  <glossterm>Event source</glossterm>
+  <indexterm zone="glossary:Event_source" significance="preferred"><primary>Event</primary><secondary>source</secondary></indexterm>
+  <glossdef>
+    <para>
+The window the pointer is in is the source of a device-related
+event.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Exposure_event">
+  <glossterm>Exposure event</glossterm>
+  <indexterm zone="glossary:Exposure_event" significance="preferred"><primary>Event</primary><secondary>Exposure</secondary></indexterm>
+  <glossdef>
+    <para>
+Servers do not guarantee to preserve the contents of windows when
+windows are obscured or reconfigured.
+Exposure events are sent to clients to inform them when contents
+of regions of windows have been lost.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Extension">
+  <glossterm>Extension</glossterm>
+  <indexterm zone="glossary:Extension" significance="preferred"><primary>Extension</primary></indexterm>
+  <glossdef>
+    <para>
+Named extensions to the core protocol can be defined to extend the
+system.
+Extension to output requests, resources, and event types are
+all possible and are expected.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Focus_window">
+  <glossterm>Focus window</glossterm>
+  <indexterm zone="glossary:Focus_window" significance="preferred"><primary>Focus window</primary></indexterm>
+  <glossdef>
+    <para>
+The focus window is another term for the <glossterm linkend="glossary:Input_focus">input focus</glossterm>.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Font">
+  <glossterm>Font</glossterm>
+  <indexterm zone="glossary:Font" significance="preferred"><primary>Font</primary></indexterm>
+  <glossdef>
+    <para>
+A font is a matrix of glyphs (typically characters).
+The protocol does no translation or interpretation of character sets.
+The client simply indicates values used to index the glyph array.
+A font contains additional metric information to determine interglyph
+and interline spacing.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:GC">
+  <glossterm>GC, GContext</glossterm>
+  <indexterm zone="glossary:GC" significance="preferred"><primary>GC</primary><seealso>Graphics context</seealso></indexterm>
+  <indexterm zone="glossary:GC" significance="preferred"><primary>GContext</primary><seealso>Graphics context</seealso></indexterm>
+  <glossdef>
+    <para>
+GC and gcontext are abbreviations for <glossterm linkend="glossary:Graphics_context">graphics context</glossterm>.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Glyph">
+  <glossterm>Glyph</glossterm>
+  <indexterm zone="glossary:Glyph" significance="preferred"><primary>Glyph</primary></indexterm>
+  <glossdef>
+    <para>
+A glyph is an image, typically of a character, in a font.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Grab">
+  <glossterm>Grab</glossterm>
+  <indexterm zone="glossary:Grab" significance="preferred"><primary>Grab</primary><seealso>Active grab</seealso><seealso>Passive grab</seealso></indexterm>
+  <glossdef>
+    <para>
+Keyboard keys, the keyboard, pointer buttons, the pointer, and the
+server can be grabbed for exclusive use by a client.
+In general,
+these facilities are not intended to be used by normal applications
+but are intended for various input and window managers to implement
+various styles of user interfaces.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Graphics_context">
+  <glossterm>Graphics context</glossterm>
+  <indexterm zone="glossary:Graphics_context" significance="preferred"><primary>Graphics context</primary></indexterm>
+  <glossdef>
+    <para>
+Various information for graphics output is stored in a graphics context
+such as foreground pixel, background pixel, line width,
+<glossterm linkend="glossary:Clipping_region">clipping region</glossterm>,
+and so on.
+A graphics context can only be used with drawables that have the same root
+and the same depth as the graphics context.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Gravity">
+  <glossterm>Gravity</glossterm>
+  <indexterm zone="glossary:Gravity" significance="preferred"><primary>Gravity</primary></indexterm>
+  <glossdef>
+    <para>
+See <glossterm linkend="glossary:Bit_gravity">bit gravity</glossterm>
+and <glossterm linkend="glossary:Window_gravity">window gravity</glossterm>.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:GrayScale">
+  <glossterm>GrayScale</glossterm>
+  <indexterm zone="glossary:GrayScale" significance="preferred"><primary>GrayScale</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>GrayScale</emphasis>
+can be viewed as a degenerate case of
+<glossterm linkend="glossary:PseudoColor"><emphasis role='bold'>PseudoColor</emphasis></glossterm>,
+in which the red, green, and blue values in any given colormap entry are equal,
+thus producing shades of gray.
+The gray values can be changed dynamically.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Hotspot">
+  <glossterm>Hotspot</glossterm>
+  <indexterm zone="glossary:Hotspot" significance="preferred"><primary>Hotspot</primary></indexterm>
+  <glossdef>
+    <para>
+A cursor has an associated hotspot that defines the point in the
+cursor corresponding to the coordinates reported for the pointer.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Identifier">
+  <glossterm>Identifier</glossterm>
+  <indexterm zone="glossary:Identifier" significance="preferred"><primary>Identifier</primary></indexterm>
+  <glossdef>
+    <para>
+An identifier is a unique value associated with a resource that clients use
+to name that resource.
+The identifier can be used over any connection.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Inferiors">
+  <glossterm>Inferiors</glossterm>
+  <indexterm zone="glossary:Inferiors" significance="preferred"><primary>Inferiors</primary></indexterm>
+  <glossdef>
+    <para>
+The inferiors of a window are all of the subwindows nested below it:
+the children, the children's children, and so on.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Input_focus">
+  <glossterm>Input focus</glossterm>
+  <indexterm zone="glossary:Input_focus" significance="preferred"><primary>Input focus</primary></indexterm>
+  <glossdef>
+    <para>
+The input focus is normally a window defining the scope for
+processing of keyboard input.
+If a generated keyboard event would normally be reported to this window
+or one of its inferiors,
+the event is reported normally.
+Otherwise, the event is reported with respect to
+the focus window.
+The input focus also can be set such that all
+keyboard events are discarded and such that the focus
+window is dynamically taken to be the root window of whatever screen
+the pointer is on at each keyboard event.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Input_manager">
+  <glossterm>Input manager</glossterm>
+  <indexterm zone="glossary:Input_manager" significance="preferred"><primary>Input manager</primary></indexterm>
+  <glossdef>
+    <para>
+Control over keyboard input is typically provided by an input manager client.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:InputOnly_window">
+  <glossterm>InputOnly window</glossterm>
+  <indexterm zone="glossary:InputOnly_window" significance="preferred"><primary>Window</primary><secondary>InputOnly</secondary></indexterm>
+  <glossdef>
+    <para>
+An
+<emphasis role='bold'>InputOnly</emphasis>
+window is a window that cannot be used for graphics requests.
+<emphasis role='bold'>InputOnly</emphasis>
+windows are invisible and can be used to control such things
+as cursors, input event generation, and grabbing.
+<emphasis role='bold'>InputOnly</emphasis>
+windows cannot have
+<emphasis role='bold'>InputOutput</emphasis>
+windows as inferiors.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:InputOutput_window">
+  <glossterm>InputOutput window</glossterm>
+  <indexterm zone="glossary:InputOutput_window" significance="preferred"><primary>Window</primary><secondary>InputOutput</secondary></indexterm>
+  <glossdef>
+    <para>
+An
+<emphasis role='bold'>InputOutput</emphasis>
+window is the normal kind of opaque window, used for both input and output.
+<emphasis role='bold'>InputOutput</emphasis>
+windows can have both
+<emphasis role='bold'>InputOutput</emphasis>
+and
+<emphasis role='bold'>InputOnly</emphasis>
+windows as inferiors.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Key_grabbing">
+  <glossterm>Key grabbing</glossterm>
+  <indexterm zone="glossary:Key_grabbing" significance="preferred"><primary>Key</primary><secondary>grabbing</secondary></indexterm>
+  <glossdef>
+    <para>
+Keys on the keyboard can be passively grabbed by a client.
+When the key is pressed,
+the keyboard is then actively grabbed by the client.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Keyboard_grabbing">
+  <glossterm>Keyboard grabbing</glossterm>
+  <indexterm zone="glossary:Keyboard_grabbing" significance="preferred"><primary>Keyboard</primary><secondary>grabbing</secondary></indexterm>
+  <glossdef>
+    <para>
+A client can actively grab control of the keyboard, and key events
+will be sent to that client rather than the client the events would
+normally have been sent to.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Keysym">
+  <glossterm>Keysym</glossterm>
+  <indexterm zone="glossary:Keysym" significance="preferred"><primary>Keysym</primary></indexterm>
+  <glossdef>
+    <para>
+An encoding of a symbol on a keycap on a keyboard.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Mapped">
+  <glossterm>Mapped</glossterm>
+  <indexterm zone="glossary:Mapped" significance="preferred"><primary>Mapped window</primary></indexterm>
+  <glossdef>
+    <para>
+A window is said to be mapped if a map call has been performed on it.
+Unmapped windows and their inferiors are never viewable or visible.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Modifier_keys">
+  <glossterm>Modifier keys</glossterm>
+  <indexterm zone="glossary:Modifier_keys" significance="preferred"><primary>Modifier keys</primary></indexterm>
+  <indexterm zone="glossary:Modifier_keys"><primary>Key</primary><secondary>modifier</secondary><see>Modifier keys</see></indexterm>
+  <glossdef>
+    <para>
+Shift, Control, Meta, Super, Hyper, Alt, Compose, Apple, CapsLock,
+ShiftLock, and similar keys are called modifier keys.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Monochrome">
+  <glossterm>Monochrome</glossterm>
+  <indexterm zone="glossary:Monochrome" significance="preferred"><primary>Monochrome</primary></indexterm>
+  <glossdef>
+    <para>
+Monochrome is a special case of
+<glossterm linkend="glossary:StaticGray"><emphasis role='bold'>StaticGray</emphasis></glossterm>
+in which there are only two colormap entries.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Obscure">
+  <glossterm>Obscure</glossterm>
+  <indexterm zone="glossary:Obscure" significance="preferred"><primary>Obscure</primary></indexterm>
+  <glossdef>
+    <para>
+A window is obscured if some other window obscures it.
+Window A obscures window B if both are viewable
+<glossterm linkend="glossary:InputOutput_window"><emphasis role='bold'>InputOutput</emphasis></glossterm>
+windows, A is higher in the global stacking order,
+and the rectangle defined by the outside edges of A intersects
+the rectangle defined by the outside edges of B.
+Note the distinction between obscure and occludes.
+Also note that window borders are included in the calculation
+and that a window can be obscured and yet still have visible regions.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Occlude">
+  <glossterm>Occlude</glossterm>
+  <indexterm zone="glossary:Occlude" significance="preferred"><primary>Occlude</primary></indexterm>
+  <glossdef>
+    <para>
+A window is occluded if some other window occludes it.
+Window A occludes window B if both are mapped, A is higher in the global
+stacking order, and the rectangle defined by the outside edges of A
+intersects the rectangle defined by the outside edges of B.
+Note the distinction between occludes and obscures.
+Also note that window borders are included in the calculation.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Padding">
+  <glossterm>Padding</glossterm>
+  <indexterm zone="glossary:Padding" significance="preferred"><primary>Padding</primary></indexterm>
+  <glossdef>
+    <para>
+Some padding bytes are inserted in the data stream to maintain
+alignment of the protocol requests on natural boundaries.
+This increases ease of portability to some machine architectures.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Parent_window">
+  <glossterm>Parent window</glossterm>
+  <indexterm zone="glossary:Parent_window" significance="preferred"><primary>Window</primary><secondary>parent</secondary></indexterm>
+  <glossdef>
+    <para>
+If C is a <glossterm linkend="glossary:Children">child</glossterm> of P,
+then P is the parent of C.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Passive_grab">
+  <glossterm>Passive grab</glossterm>
+  <indexterm zone="glossary:Passive_grab" significance="preferred"><primary>Passive grab</primary></indexterm>
+  <glossdef>
+    <para>
+Grabbing a key or button is a passive grab.
+The grab activates when the key or button is actually pressed.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Pixel_value">
+  <glossterm>Pixel value</glossterm>
+  <indexterm zone="glossary:Pixel_value" significance="preferred"><primary>Pixel value</primary></indexterm>
+  <glossdef>
+    <para>
+A pixel is an N-bit value, where N is the number of bit planes used
+in a particular window or pixmap (that is,
+N is the depth of the window or pixmap).
+For a window,
+a pixel value indexes a colormap to derive an actual color to be displayed.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Pixmap">
+  <glossterm>Pixmap</glossterm>
+  <indexterm zone="glossary:Pixmap" significance="preferred"><primary>Pixmap</primary></indexterm>
+  <glossdef>
+    <para>
+A pixmap is a three-dimensional array of bits.
+A pixmap is normally thought of as a two-dimensional array of pixels,
+where each pixel can be a value from 0 to (2^N)-1
+and where N is the depth (z axis) of the pixmap.
+A pixmap can also be thought of as a stack of N bitmaps.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Plane">
+  <glossterm>Plane</glossterm>
+  <indexterm zone="glossary:Plane" significance="preferred"><primary>Plane</primary></indexterm>
+  <glossdef>
+    <para>
+When a pixmap or window is thought of as a stack of bitmaps,
+each bitmap is called a plane or bit plane.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Plane_mask">
+  <glossterm>Plane mask</glossterm>
+  <indexterm zone="glossary:Plane_mask" significance="preferred"><primary>Plane</primary><secondary>mask</secondary></indexterm>
+  <glossdef>
+    <para>
+Graphics operations can be restricted to only affect a subset of bit
+planes of a destination.
+A plane mask is a bit mask describing which planes are to be modified.
+The plane mask is stored in a graphics context.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Pointer">
+  <glossterm>Pointer</glossterm>
+  <indexterm zone="glossary:Pointer" significance="preferred"><primary>Pointer</primary></indexterm>
+  <glossdef>
+    <para>
+The pointer is the pointing device attached to the cursor
+and tracked on the screens.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Pointer_grabbing">
+  <glossterm>Pointer grabbing</glossterm>
+  <indexterm zone="glossary:Pointer_grabbing" significance="preferred"><primary>Pointer</primary><secondary>grabbing</secondary></indexterm>
+  <glossdef>
+    <para>
+A client can actively grab control of the pointer.
+Then button and motion events will be sent to that client
+rather than the client the events would normally have been sent to.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Pointing_device">
+  <glossterm>Pointing device</glossterm>
+  <indexterm zone="glossary:Pointing_device" significance="preferred"><primary>Pointing device</primary></indexterm>
+  <glossdef>
+    <para>
+A pointing device is typically a mouse, tablet, or some other
+device with effective dimensional motion.
+There is only one visible cursor defined by the core protocol,
+and it tracks whatever pointing device is attached as the pointer.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Property">
+  <glossterm>Property</glossterm>
+  <indexterm zone="glossary:Property" significance="preferred"><primary>Property</primary></indexterm>
+  <glossdef>
+    <para>
+Windows may have associated properties,
+which consist of a name, a type, a data format, and some data.
+The protocol places no interpretation on properties.
+They are intended as a general-purpose naming mechanism for clients.
+For example, clients might use properties to share information such as resize
+hints, program names, and icon formats with a window manager.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Property_list">
+  <glossterm>Property list</glossterm>
+  <indexterm zone="glossary:Property_list" significance="preferred"><primary>Property list</primary></indexterm>
+  <glossdef>
+    <para>
+The property list of a window is the list of properties that have
+been defined for the window.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:PseudoColor">
+  <glossterm>PseudoColor</glossterm>
+  <indexterm zone="glossary:PseudoColor" significance="preferred"><primary>PseudoColor</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>PseudoColor</emphasis>
+is a class of colormap in which a pixel value indexes the colormap to
+produce independent red, green, and blue values;
+that is, the colormap is viewed as an array of triples (RGB values).
+The RGB values can be changed dynamically.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Redirecting_control">
+  <glossterm>Redirecting control</glossterm>
+  <indexterm zone="glossary:Redirecting_control" significance="preferred"><primary>Redirecting control</primary></indexterm>
+  <glossdef>
+    <para>
+Window managers (or client programs) may want to enforce window layout
+policy in various ways.
+When a client attempts to change the size or position of a window,
+the operation may be redirected to a specified client
+rather than the operation actually being performed.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Reply">
+  <glossterm>Reply</glossterm>
+  <indexterm zone="glossary:Reply" significance="preferred"><primary>Reply</primary></indexterm>
+  <glossdef>
+    <para>
+Information requested by a client program is sent back to the client
+with a reply.
+Both events and replies are multiplexed on the same connection.
+Most requests do not generate replies,
+although some requests generate multiple replies.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Request">
+  <glossterm>Request</glossterm>
+  <indexterm zone="glossary:Request" significance="preferred"><primary>Request</primary></indexterm>
+  <glossdef>
+    <para>
+A command to the server is called a request.
+It is a single block of data sent over a connection.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Resource">
+  <glossterm>Resource</glossterm>
+  <indexterm zone="glossary:Resource" significance="preferred"><primary>Resource</primary></indexterm>
+  <glossdef>
+    <para>
+Windows, pixmaps, cursors, fonts, graphics contexts, and colormaps are
+known as resources.
+They all have unique identifiers associated with them for naming purposes.
+The lifetime of a resource usually is bounded by the lifetime of the connection
+over which the resource was created.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:RGB_values">
+  <glossterm>RGB values</glossterm>
+  <indexterm zone="glossary:RGB_values" significance="preferred"><primary>RGB values</primary></indexterm>
+  <glossdef>
+    <para>
+Red, green, and blue (RGB) intensity values are used to define color.
+These values are always represented as 16-bit unsigned numbers,
+with 0 being the minimum intensity and 65535 being the maximum intensity.
+The server scales the values to match the display hardware.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Root">
+  <glossterm>Root</glossterm>
+  <indexterm zone="glossary:Root" significance="preferred"><primary>Root</primary></indexterm>
+  <glossdef>
+    <para>
+The root of a pixmap, colormap, or graphics context is the same as the root of
+whatever drawable was used when the pixmap, colormap, or graphics context was
+created.
+The root of a window is the root window under which the window was created.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Root_window">
+  <glossterm>Root window</glossterm>
+  <indexterm zone="glossary:Root_window" significance="preferred"><primary>Window</primary><secondary>root</secondary></indexterm>
+  <glossdef>
+    <para>
+Each screen has a root window covering it.
+It cannot be reconfigured or unmapped,
+but it otherwise acts as a full-fledged window.
+A root window has no parent.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Save_set">
+  <glossterm>Save set</glossterm>
+  <indexterm zone="glossary:Save_set" significance="preferred"><primary>Save set</primary></indexterm>
+  <glossdef>
+    <para>
+The save set of a client is a list of other clients' windows that,
+if they are inferiors of one of the client's windows at connection close,
+should not be destroyed and that should be remapped if currently unmapped.
+Save sets are typically used by window managers to avoid
+lost windows if the manager terminates abnormally.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Scanline">
+  <glossterm>Scanline</glossterm>
+  <indexterm zone="glossary:Scanline" significance="preferred"><primary>Scanline</primary></indexterm>
+  <glossdef>
+    <para>
+A scanline is a list of pixel or bit values viewed as a horizontal
+row (all values having the same y coordinate) of an image, with the
+values ordered by increasing x coordinate.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Scanline_order">
+  <glossterm>Scanline order</glossterm>
+  <indexterm zone="glossary:Scanline_order" significance="preferred"><primary>Scanline order</primary></indexterm>
+  <glossdef>
+    <para>
+An image represented in scanline order contains scanlines ordered by
+increasing y coordinate.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Screen">
+  <glossterm>Screen</glossterm>
+  <indexterm zone="glossary:Screen" significance="preferred"><primary>Screen</primary></indexterm>
+  <glossdef>
+    <para>
+A server can provide several independent screens,
+which typically have physically independent monitors.
+This would be the expected configuration when there is only a single keyboard
+and pointer shared among the screens.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Selection">
+  <glossterm>Selection</glossterm>
+  <indexterm zone="glossary:Selection" significance="preferred"><primary>Selection</primary></indexterm>
+  <glossdef>
+    <para>
+A selection can be thought of as an indirect property with dynamic
+type; that is, rather than having the property stored in the server,
+it is maintained by some client (the <quote>owner</quote>).
+A selection is global in nature and is thought of as belonging to the user
+(although maintained by clients), rather than as being private to a particular
+window subhierarchy or a particular set of clients.
+When a client asks for the contents of a selection,
+it specifies a selection <quote>target type</quote>.
+This target type can be used to control the transmitted representation of the
+contents.
+For example,
+if the selection is <quote>the last thing the user clicked on</quote>
+and that is currently an image, then the target type might specify
+whether the contents of the image should be sent in XY format or Z format.
+The target type can also be used to control the class of contents transmitted;
+for example, asking for the <quote>looks</quote> (fonts, line
+spacing, indentation, and so on) of a paragraph selection rather than the
+text of the paragraph.
+The target type can also be used for other purposes.
+The protocol does not constrain the semantics.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Server">
+  <glossterm>Server</glossterm>
+  <indexterm zone="glossary:Server" significance="preferred"><primary>Server</primary></indexterm>
+  <glossdef>
+    <para>
+The server provides the basic windowing mechanism.
+It handles connections from clients,
+multiplexes graphics requests onto the screens,
+and demultiplexes input back to the appropriate clients.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Server_grabbing">
+  <glossterm>Server grabbing</glossterm>
+  <indexterm zone="glossary:Server_grabbing" significance="preferred"><primary>Server</primary><secondary>grabbing</secondary></indexterm>
+  <glossdef>
+    <para>
+The server can be grabbed by a single client for exclusive use.
+This prevents processing of any requests from other client connections until
+the grab is completed.
+This is typically only a transient state for
+such things as rubber-banding, pop-up menus, or to execute requests
+indivisibly.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Sibling">
+  <glossterm>Sibling</glossterm>
+  <indexterm zone="glossary:Sibling" significance="preferred"><primary>Sibling</primary></indexterm>
+  <glossdef>
+    <para>
+Children of the same parent window are known as sibling windows.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Stacking_order">
+  <glossterm>Stacking order</glossterm>
+  <indexterm zone="glossary:Stacking_order" significance="preferred"><primary>Stacking order</primary></indexterm>
+  <glossdef>
+    <para>
+Sibling windows may stack on top of each other.
+Windows above other windows both obscure and occlude those lower windows.
+This is similar to paper on a desk.
+The relationship between sibling windows is known as the stacking order.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:StaticColor">
+  <glossterm>StaticColor</glossterm>
+  <indexterm zone="glossary:StaticColor" significance="preferred"><primary>StaticColor</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>StaticColor</emphasis>
+can be viewed as a degenerate case of
+<glossterm linkend="glossary:PseudoColor"><emphasis role='bold'>PseudoColor</emphasis></glossterm>
+in which the RGB values are predefined and read-only.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:StaticGray">
+  <glossterm>StaticGray</glossterm>
+  <indexterm zone="glossary:StaticGray" significance="preferred"><primary>StaticGray</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>StaticGray</emphasis>
+can be viewed as a degenerate case of
+<glossterm linkend="glossary:GrayScale"><emphasis role='bold'>GrayScale</emphasis></glossterm>
+in which the gray values are predefined and read-only.
+The values are typically linear or near-linear increasing ramps.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Stipple">
+  <glossterm>Stipple</glossterm>
+  <indexterm zone="glossary:Stipple" significance="preferred"><primary>Stipple</primary></indexterm>
+  <glossdef>
+    <para>
+A stipple pattern is a bitmap that is used to tile a region that will serve
+as an additional clip mask for a fill operation with the foreground
+color.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:String_Equivalence">
+  <glossterm>String Equivalence</glossterm>
+  <indexterm zone="glossary:String_Equivalence" significance="preferred"><primary>String Equivalence</primary></indexterm>
+  <glossdef>
+    <para>
+Two ISO Latin-1 STRING8 values are considered equal if they are the same
+length and if corresponding bytes are either equal or are equivalent as
+follows:  decimal values 65 to 90 inclusive (characters <quote>A</quote> to <quote>Z</quote>) are
+pairwise equivalent to decimal values 97 to 122 inclusive
+(characters <quote>a</quote> to <quote>z</quote>), decimal values 192 to 214 inclusive
+(characters <quote>A grave</quote> to <quote>O diaeresis</quote>) are pairwise equivalent to decimal
+values 224 to 246 inclusive (characters <quote>a grave</quote> to <quote>o diaeresis</quote>),
+and decimal values 216 to 222 inclusive (characters <quote>O oblique</quote> to <quote>THORN</quote>)
+are pairwise equivalent to decimal values 246 to 254 inclusive
+(characters <quote>o oblique</quote> to <quote>thorn</quote>).
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Tile">
+  <glossterm>Tile</glossterm>
+  <indexterm zone="glossary:Tile" significance="preferred"><primary>Tile</primary></indexterm>
+  <glossdef>
+    <para>
+A pixmap can be replicated in two dimensions to tile a region.
+The pixmap itself is also known as a tile.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Timestamp">
+  <glossterm>Timestamp</glossterm>
+  <indexterm zone="glossary:Timestamp" significance="preferred"><primary>Timestamp</primary></indexterm>
+  <indexterm zone="glossary:Timestamp" significance="preferred"><primary>CurrentTime</primary></indexterm>
+  <glossdef>
+    <para>
+A timestamp is a time value, expressed in milliseconds.
+It typically is the time since the last
+server reset.
+Timestamp values wrap around (after about 49.7 days).
+The server, given its current time is represented by timestamp T,
+always interprets timestamps from clients by treating half of the
+timestamp space as being earlier in time than T and half of the
+timestamp space as being later in time than T.
+One timestamp value (named
+<emphasis role='bold'>CurrentTime</emphasis>)
+is never generated by the server.
+This value is reserved for use in requests to represent the current
+server time.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:TrueColor">
+  <glossterm>TrueColor</glossterm>
+  <indexterm zone="glossary:TrueColor" significance="preferred"><primary>TrueColor</primary></indexterm>
+  <glossdef>
+    <para>
+<emphasis role='bold'>TrueColor</emphasis>
+can be viewed as a degenerate case of
+<glossterm linkend="glossary:DirectColor"><emphasis role='bold'>DirectColor</emphasis></glossterm>
+in which the subfields in the pixel value directly encode
+the corresponding RGB values; that is, the colormap has predefined
+read-only RGB values.
+The values are typically linear or near-linear increasing ramps.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Type">
+  <glossterm>Type</glossterm>
+  <indexterm zone="glossary:Type" significance="preferred"><primary>Type</primary></indexterm>
+  <glossdef>
+    <para>
+A type is an arbitrary atom used to identify the interpretation of
+property data.
+Types are completely uninterpreted by the server
+and are solely for the benefit of clients.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Viewable">
+  <glossterm>Viewable</glossterm>
+  <indexterm zone="glossary:Viewable" significance="preferred"><primary>Viewable</primary></indexterm>
+  <glossdef>
+    <para>
+A window is viewable if it and all of its ancestors are mapped.
+This does not imply that any portion of the window is actually visible.
+Graphics requests can be performed on a window when it is not viewable,
+but output will not be retained unless the server is maintaining
+backing store.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Visible">
+  <glossterm>Visible</glossterm>
+  <indexterm zone="glossary:Visible" significance="preferred"><primary>Visible</primary></indexterm>
+  <glossdef>
+    <para>
+A region of a window is visible if someone looking at the screen can
+actually see it;
+that is, the window is viewable and the region is not occluded by any
+other window.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Window_gravity">
+  <glossterm>Window gravity</glossterm>
+  <indexterm zone="glossary:Window_gravity" significance="preferred"><primary>Window</primary><secondary>gravity</secondary></indexterm>
+  <glossdef>
+    <para>
+When windows are resized,
+subwindows may be repositioned automatically relative to some position
+in the window.
+This attraction of a subwindow to some part of its parent is known
+as window gravity.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:Window_manager">
+  <glossterm>Window manager</glossterm>
+  <indexterm zone="glossary:Window_manager" significance="preferred"><primary>Window</primary><secondary>manager</secondary></indexterm>
+  <glossdef>
+    <para>
+Manipulation of windows on the screen and much of the user interface
+(policy) is typically provided by a window manager client.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:XYFormat">
+  <glossterm>XYFormat</glossterm>
+  <indexterm zone="glossary:XYFormat" significance="preferred"><primary>XYFormat</primary></indexterm>
+  <glossdef>
+    <para>
+The data for a pixmap is said to be in XY format if it is organized as
+a set of bitmaps representing individual bit planes, with the planes
+appearing from most-significant to least-significant in bit order.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+<glossentry id="glossary:ZFormat">
+  <glossterm>ZFormat</glossterm>
+  <indexterm zone="glossary:ZFormat" significance="preferred"><primary>ZFormat</primary></indexterm>
+  <glossdef>
+    <para>
+The data for a pixmap is said to be in Z format if it is organized as
+a set of pixel values in scanline order.
+<!-- .KE -->
+    </para>
+  </glossdef>
+</glossentry>
+</glossary>

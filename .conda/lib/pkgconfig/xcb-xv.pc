@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB Xv
+Description: XCB Xv Extension
+Version: 1.17.0
+Requires.private: xcb xcb-shm
+Libs: -L${libdir} -lxcb-xv
+Cflags: -I${includedir}

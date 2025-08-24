@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: XineramaProto
+Description: Xinerama extension headers
+Version: 1.2.1
+Cflags: -I${includedir}

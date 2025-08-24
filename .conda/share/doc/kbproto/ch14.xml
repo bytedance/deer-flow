@@ -1,0 +1,94 @@
+<chapter id='Replacing_the_Keyboard_On_the_Fly'>
+<title>Replacing the Keyboard "On-the-Fly"</title>
+
+<para>
+XKB supports the <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ event, which reports a change in keyboard geometry or the range of supported
+keycodes. The server can generate an <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ event when it detects a new keyboard, or in response to an <emphasis>
+XkbGetKeyboardByName</emphasis>
+ request (see <link linkend='Using_the_Servers_Database_of_Keyboard_Components'>Using the Server’s
+Database of Keyboard Components</link>) which loads a new keyboard description.
+</para>
+
+
+<para>
+When a client opens a connection to the X server, the server reports the
+minimum and maximum keycodes. If the range of supported keycodes is changed,
+XKB keeps track of the minimum and maximum keycodes that were reported to each
+client and filters out any events that fall outside of that range. Note that
+these events are simply ignored; they are not delivered to some other client.
+</para>
+
+
+<para>
+When the server sends an <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ event to a client to inform it of the new keycode range, XKB resets the stored
+range of legal keycodes to the keycode range reported in the event. Non-XKB
+clients and XKB-aware clients that do not request <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ events never receive events from keys that fall outside of the legal range
+that XKB maintains for that client.
+</para>
+
+
+<para>
+When a client requests <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ events, the server compares the range of keycodes for the current keyboard to
+the range of keycodes that are valid for the client. If they are not the same,
+the server immediately sends that client an <emphasis>
+XkbNewKeyboardNotify</emphasis>
+ event. Even if the "new" keyboard is not new to the server, it is new to this
+particular client.
+</para>
+
+
+<para>
+In addition to filtering out-of-range key events, XKB:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>Adjusts core protocol <emphasis>
+MappingNotify</emphasis>
+ events to refer only to keys that match the stored legal range.
+  </para>
+</listitem>
+<listitem>
+  <para>Reports keyboard mappings for keys that match the stored legal range to
+clients that issue a core protocol <emphasis>
+GetKeyboardMapping</emphasis>
+ request.
+  </para>
+</listitem>
+<listitem>
+  <para>Reports modifier mappings only for keys that match the stored legal
+range to clients that issue a core protocol <emphasis>
+GetModifierMapping</emphasis>
+ request.
+  </para>
+</listitem>
+<listitem>
+  <para>Restricts the core protocol <emphasis>
+ChangeKeyboardMapping</emphasis>
+ and <emphasis>
+SetModifierMapping</emphasis>
+ requests to keys that fall inside the stored legal range.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+In short, XKB does everything possible to hide the fact that the range of legal
+keycodes has changed from clients non-XKB clients, which cannot be expected to
+deal with it. The corresponding XKB events and requests do <emphasis>
+not</emphasis>
+ pay attention to the legal keycode range in the same way because XKB makes it
+possible for clients to track changes to the keycode range for a device and
+respond to them.
+</para>
+</chapter>

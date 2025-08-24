@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB Present
+Description: XCB Present Extension
+Version: 1.17.0
+Requires.private: xcb xcb-randr xcb-xfixes xcb-sync xcb-dri3
+Libs: -L${libdir} -lxcb-present
+Cflags: -I${includedir}

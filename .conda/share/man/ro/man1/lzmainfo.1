@@ -1,0 +1,54 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Author: Lasse Collin
+.\"
+.\" Romanian translation for xz-man.
+.\" Mesajele în limba română pentru manualul pachetului XZ Utils.
+.\" Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2022 - 2024.
+.\" Cronologia traducerii fișierului „xz-man”:
+.\" Traducerea inițială, făcută de R-GC, pentru versiunea xz-man 5.4.0-pre1.
+.\" Actualizare a traducerii pentru versiunea 5.4.0-pre2, făcută de R-GC, dec-2022.
+.\" Actualizare a traducerii pentru versiunea 5.4.3, făcută de R-GC, mai-2023.
+.\" Actualizare a traducerii pentru versiunea 5.4.4-pre1, făcută de R-GC, iul-2023.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre1, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre2, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea Y, făcută de X, Z(luna-anul).
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH LZMAINFO 1 30.06.2013 Tukaani "Utilități XZ"
+.SH NUME
+lzmainfo \- afișează informațiile stocate în antetul fișierului .lzma
+.SH REZUMAT
+\fBlzmainfo\fP [\fB\-\-help\fP] [\fB\-\-version\fP] [\fIfișier...\fP]
+.SH DESCRIERE
+\fBlzmainfo\fP afișează informațiile stocate în antetul fișierului
+\&\fB.lzma\fP. Citește primii 13 octeți din \fIfișierul\fP specificat, decodifică
+antetul și îl afișează la ieșirea standard în format care poate fi citit de
+om. Dacă nu sunt date \fIfișiere\fP sau dacă \fIfișier\fP este \fB\-\fP, se citește
+intrarea standard.
+.PP
+De obicei, cele mai interesante informații sunt dimensiunea necomprimată și
+dimensiunea dicționarului. Dimensiunea necomprimată poate fi afișată numai
+dacă fișierul este în varianta formatului \fB.lzma\fP netransmis în
+flux. Cantitatea de memorie necesară pentru a decomprima fișierul este de
+câteva zeci de kiloocteți plus dimensiunea dicționarului.
+.PP
+\fBlzmainfo\fP este inclus în XZ Utils în primul rând pentru compatibilitatea
+cu LZMA Utils.
+.SH "STARE DE IEȘIRE"
+.TP 
+\fB0\fP
+Totul este bine.
+.TP 
+\fB1\fP
+A apărut o eroare.
+.SH ERORI
+\fBlzmainfo\fP folosește sufixul \fBMB\fP în timp ce sufixul corect ar fi \fBMiB\fP
+(2^20 octeți). Acest lucru este pentru a menține ieșirea compatibilă cu LZMA
+Utils.
+.SH "CONSULTAȚI ȘI"
+\fBxz\fP(1)

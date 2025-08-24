@@ -1,0 +1,66 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" Romanian translation for xz-man.
+.\" Mesajele în limba română pentru manualul pachetului XZ Utils.
+.\" Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2022 - 2024.
+.\" Cronologia traducerii fișierului „xz-man”:
+.\" Traducerea inițială, făcută de R-GC, pentru versiunea xz-man 5.4.0-pre1.
+.\" Actualizare a traducerii pentru versiunea 5.4.0-pre2, făcută de R-GC, dec-2022.
+.\" Actualizare a traducerii pentru versiunea 5.4.3, făcută de R-GC, mai-2023.
+.\" Actualizare a traducerii pentru versiunea 5.4.4-pre1, făcută de R-GC, iul-2023.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre1, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre2, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea Y, făcută de X, Z(luna-anul).
+.\"
+.\" (Note that this file is not based on gzip's zdiff.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZDIFF 1 "13 februarie 2024" Tukaani "Utilități XZ"
+.SH NUME
+xzcmp, xzdiff, lzcmp, lzdiff \- compară fișierele comprimate
+.
+.SH REZUMAT
+\fBxzcmp\fP [\fIopțiune...\fP] \fIfișier1\fP [\fIfișier2\fP]
+.br
+\fBxzdiff\fP \&...
+.br
+\fBlzcmp\fP \&...
+.br
+\fBlzdiff\fP \&...
+.
+.SH DESCRIERE
+\fBxzcmp\fP și \fBxzdiff\fP compară conținutul necomprimat a două fișiere. Datele
+necomprimate și opțiunile sunt transmise la \fBcmp\fP(1) sau \fBdiff\fP(1), cu
+excepția cazului în care se specifică \fB\-\-help\fP sau \fB\-\-version\fP.
+.PP
+Dacă sunt specificate atât \fIfișier1\fP, cât și \fIfișier2\fP, acestea pot fi
+fișiere necomprimate sau fișiere în formate pe care \fBxz\fP(1), \fBgzip\fP(1),
+\fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1) sau \fBlz4\fP(1) le poate
+decomprima. Comenzile de decomprimare necesare sunt determinate de sufixele
+numelor de fișiere \fIfișier1\fP și \fIfișier2\fP. Se presupune că un fișier cu un
+sufix necunoscut este fie necomprimat, fie într\-un format pe care \fBxz\fP(1)
+îl poate decomprima.
+.PP
+În cazul în care se furnizează un singur nume de fișier, \fIfișier1\fP trebuie
+să aibă un sufix al unui format de comprimare acceptat, iar numele pentru
+\fIfișier2\fP se presupune că este \fIfișier1\fP fără sufixul formatului de
+comprimare.
+.PP
+Comenzile \fBlzcmp\fP și \fBlzdiff\fP sunt furnizate pentru compatibilitate
+retroactivă cu LZMA Utils.
+.
+.SH "STARE DE IEȘIRE"
+În cazul în care apare o eroare de decomprimare, starea de ieșire este
+\fB2\fP. În caz contrar, se utilizează starea de ieșire \fBcmp\fP(1) sau
+\fBdiff\fP(1).
+.
+.SH "CONSULTAȚI ȘI"
+\fBcmp\fP(1), \fBdiff\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1),
+\fBzstd\fP(1), \fBlz4\fP(1)

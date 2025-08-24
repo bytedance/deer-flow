@@ -1,0 +1,86 @@
+
+<chapter id='Key_Event_Processing_Overview'>
+<title>Key Event Processing Overview</title>
+
+<para>
+There are three steps to processing each key event in the X server, and at
+least three in the client. This section describes each of these steps briefly;
+the following sections describe each step in more detail.
+</para>
+
+<orderedlist>
+<listitem>
+  <para>First, the server applies global keyboard controls to determine whether
+the key event should be processed immediately, deferred, or ignored. For
+example, the <emphasis>
+SlowKeys</emphasis>
+ control can cause a key event to be deferred until the slow keys delay has
+elapsed while the <emphasis>
+RepeatKeys</emphasis>
+ control can cause multiple X events from a single physical key press if the
+key is held down for an extended period. The global keyboard controls affect
+all of the keys on the keyboard and are described in
+<link linkend='Global_Keyboard_Controls'>Global Keyboard Controls</link>.
+  </para>
+</listitem>
+<listitem>
+  <para>Next, the server applies per-key behavior. Per key-behavior can be used
+to simulate or indicate some special kinds of key behavior. For example,
+keyboard overlays, in which a key generates an alternate keycode under certain
+circumstances, can be implemented using per-key behavior. Every key has a
+single behavior, so the effect of key behavior does not depend on keyboard
+modifier or group state, though it might depend on global keyboard controls.
+Per-key behaviors are described in detail in
+<link linkend='Key_Behavior'>Key Behavior</link>.
+  </para>
+</listitem>
+<listitem>
+  <para>Finally, the server applies key actions. Logically, every keysym on the
+keyboard has some action associated with it. The key action tells the server
+what to do when an event which yields the corresponding keysym is generated.
+Key actions might change or suppress the event, generate some other event, or
+change some aspect of the server. Key actions are described in <link linkend='Key_Actions'>Key Actions</link>.
+  </para>
+</listitem>
+</orderedlist>
+
+<para>
+If the global controls, per-key behavior and key action combine to cause a key
+event, the client which receives the event processes it in several steps.
+</para>
+
+<orderedlist>
+<listitem>
+  <para>First the client extracts the effective keyboard group and a set of
+modifiers from the state field of the event. See <link linkend='Computing_A_State_Field_from_an_XKB_State'>Computing A State Field from an XKB
+State</link> for details.
+  </para>
+</listitem>
+<listitem>
+  <para>Using the modifiers and effective keyboard group, the client selects a
+symbol from the list of keysyms bound to the key. <link linkend='Determining_the_KeySym_Associated_with_a_Key_Event'>Determining the KeySym Associated with a
+Key Event</link> discusses symbol selection.
+  </para>
+</listitem>
+<listitem>
+  <para>If necessary, the client transforms the symbol and resulting string
+using any modifiers that are "left over" from the process of looking up a
+symbol. For example, if the <emphasis>
+Lock</emphasis>
+ modifier is left over, the resulting keysym is capitalized according to the
+capitalization rules specified by the system. See
+<link linkend='Transforming_the_KeySym_Associated_with_a_Key_Event'>
+Transforming the KeySym Associated with a
+Key Event</link> for a more detailed discussion of the transformations defined
+by XKB.
+  </para>
+</listitem>
+<listitem>
+  <para>Finally, the client uses the keysym and remaining modifiers in an
+application-specific way. For example, applications based on the X toolkit
+might apply translations based on the symbol and modifiers reported by the
+first three steps.
+  </para>
+</listitem>
+</orderedlist>
+</chapter>

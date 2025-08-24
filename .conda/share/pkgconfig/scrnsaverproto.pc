@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: ScrnSaverProto
+Description: ScrnSaver extension headers
+Version: 1.2.3
+Cflags: -I${includedir}

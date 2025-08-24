@@ -1,0 +1,220 @@
+<chapter id='Virtual_Modifiers'>
+<title>Virtual Modifiers</title>
+<para>
+The core protocol specifies that
+certain keysyms, when bound to modifiers, affect the rules of keycode to keysym
+interpretation for all keys; for example, when <emphasis>
+Num_Lock</emphasis>
+ is bound to some modifier, that modifier is used to choose shifted or
+unshifted state for the numeric keypad keys. The core protocol does not provide
+a convenient way to determine the mapping of modifier bits, in particular
+<emphasis>
+Mod1</emphasis>
+ through <emphasis>
+Mod5</emphasis>
+, to keysyms such as <emphasis>
+Num_Lock</emphasis>
+ and <emphasis>
+Mode_switch</emphasis>
+. Clients must retrieve and search the modifier map to determine the keycodes
+bound to each modifier, and then retrieve and search the keyboard mapping to
+determine the keysyms bound to the keycodes. They must repeat this process for
+all modifiers whenever any part of the modifier mapping is changed.
+</para>
+
+<para>
+XKB provides a set of sixteen named virtual modifiers, each of which can be
+bound to any set of the eight "real" modifiers (<emphasis>
+Shift</emphasis>
+, <emphasis>
+Lock</emphasis>
+, <emphasis>
+Control</emphasis>
+ and <emphasis>
+Mod1</emphasis>
+-<emphasis>
+Mod5</emphasis>
+ as reported in the keyboard state). This makes it easier for applications and
+keyboard layout designers to specify to the function a modifier key or data
+structure should fulfill without having to worry about which modifier is bound
+to a particular keysym.
+</para>
+
+
+<para>
+The use of a single, server-driven mechanism for reporting changes to all data
+structures makes it easier for clients to stay synchronized. For example, the
+core protocol specifies a special interpretation for the modifier bound to the
+<emphasis>
+Num_Lock</emphasis>
+ key. Whenever any keys or modifiers are rebound, every application has to
+check the keyboard mapping to make sure that the binding for <emphasis>
+Num_Lock</emphasis>
+ has not changed. If <emphasis>
+Num_Lock</emphasis>
+ is remapped when XKB is in use, the keyboard description is automatically
+updated to reflect the new binding, and clients are notified immediately and
+explicitly if there is a change they need to consider.
+</para>
+
+
+<para>
+The separation of function from physical modifier bindings also makes it easier
+to specify more clearly the intent of a binding. X servers do not all assign
+modifiers the same way — for example, <emphasis>
+Num_Lock</emphasis>
+ might be bound to <emphasis>
+Mod2</emphasis>
+ for one vendor and to <emphasis>
+Mod4</emphasis>
+ for another. This makes it cumbersome to automatically remap the keyboard to a
+desired configuration without some kind of prior knowledge about the keyboard
+layout and bindings. With XKB, applications simply use virtual modifiers to
+specify the behavior they want, without regard for the actual physical bindings
+in effect.
+</para>
+
+
+<para>
+XKB puts most aspects of the keyboard under user or program control, so it is
+even more important to clearly and uniformly refer to modifiers by function.
+</para>
+
+<sect1 id='Modifier_Definitions'>
+<title>Modifier Definitions</title>
+<para>
+Use an <emphasis>
+XKB modifier definition</emphasis>
+ to specify the modifiers affected by any XKB control or data structure. An XKB
+modifier definition consists of a set of real modifiers, a set of virtual
+modifiers, and an effective mask. The mask is derived from the real and virtual
+modifiers and cannot be explicitly changed — it contains all of the real
+modifiers specified in the definition <emphasis>
+plus</emphasis>
+ any real modifiers that are bound to the virtual modifiers specified in the
+definition. For example, this modifier definition specifies the numeric lock
+modifier if the <emphasis>
+Num_Lock</emphasis>
+ keysym is not bound to any real modifier:
+</para>
+<literallayout class='monospaced'>
+{ real_mods= None, virtual_mods= NumLock, mask= None }
+</literallayout>
+
+<para>
+If we assign <emphasis>
+Mod2</emphasis>
+ to the <emphasis>
+Num_Lock</emphasis>
+ key, the definition changes to:
+</para>
+
+<literallayout class='monospaced'>
+{ real_mods= None, virtual_mods= NumLock, mask= Mod2 }
+</literallayout>
+
+<para>
+Using this kind of modifier definition makes it easy to specify the desired
+behavior in such a way that XKB can automatically update all of the data
+structures that make up a keymap to reflect user or application specified
+changes in any one aspect of the keymap.
+</para>
+
+
+<para>
+The use of modifier definitions also makes it possible to unambiguously specify
+the reason that a modifier is of interest. On a system for which the <emphasis>
+Alt</emphasis>
+ and <emphasis>
+Meta</emphasis>
+ keysyms are bound to the same modifier, the following definitions behave
+identically:
+</para>
+
+<literallayout class='monospaced'>
+{ real_mods= None, virtual_mods= Alt, mask= Mod1 }
+{ real_mods= None, virtual_mods= Meta, mask= Mod1 }
+</literallayout>
+
+<para>
+If we rebind one of the modifiers, the modifier definitions automatically
+reflect the change:
+</para>
+
+<literallayout class='monospaced'>
+{ real_mods= None, virtual_mods= Alt, mask= Mod1 }
+{ real_mods= None, virtual_mods= Meta, mask= Mod4 }
+</literallayout>
+
+<para>
+Without the level of indirection provided by virtual modifier maps and modifier
+definitions, we would have no way to tell which of the two definitions is
+concerned with <emphasis>
+Alt</emphasis>
+ and which is concerned with <emphasis>
+Meta</emphasis>.
+</para>
+
+
+<sect2 id='Inactive_Modifier_Definitions'>
+<title>Inactive Modifier Definitions</title>
+<para>
+Some XKB structures ignore modifier
+definitions in which the virtual modifiers are unbound. Consider this
+example:
+</para>
+<literallayout class='monospaced'>
+if ( state matches { Shift } ) Do OneThing;
+if ( state matches { Shift+NumLock } ) Do Another;
+</literallayout>
+
+<para>
+If the <emphasis>
+NumLock</emphasis>
+ virtual modifier is not bound to any real modifiers, these effective masks for
+these two cases are identical (i.e. they contain only <emphasis>
+Shift</emphasis>
+). When it is essential to distinguish between <emphasis>
+OneThing</emphasis>
+ and Another, XKB considers only those modifier definitions for which all
+virtual modifiers are bound.
+</para>
+</sect2>
+</sect1>
+
+<sect1 id='Virtual_Modifier_Mapping'>
+<title>Virtual Modifier Mapping</title>
+<para>
+XKB maintains a <emphasis>
+virtual modifier mapping</emphasis>
+, which lists the virtual modifiers associated with each key. The real
+modifiers bound to a virtual modifier always include all of the modifiers bound
+to any of the keys that specify that virtual modifier in their virtual modifier
+mapping.
+</para>
+
+<para>
+For example, if <emphasis>
+Mod3</emphasis>
+ is bound to the <emphasis>
+Num_Lock</emphasis>
+ key by the core protocol modifier mapping, and the <emphasis>
+NumLock</emphasis>
+ virtual modifier is bound to they <emphasis>
+Num_Lock</emphasis>
+ key by the virtual modifier mapping, <emphasis>
+Mod3</emphasis>
+ is added to the set of modifiers associated with the <emphasis>
+NumLock</emphasis>
+ virtual modifier.
+</para>
+
+
+<para>
+The virtual modifier mapping is normally updated automatically whenever actions
+are assigned to keys (see <link linkend='Changing_the_Keyboard_Mapping_Using_the_Core_Protocol'>Changing
+the Keyboard Mapping Using the Core Protocol</link> for details) and few
+applications should need to change the virtual modifier mapping explicitly.
+</para>
+</sect1>
+</chapter>

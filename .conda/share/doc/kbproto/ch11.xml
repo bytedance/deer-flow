@@ -1,0 +1,413 @@
+
+<chapter id='Keyboard_Geometry'>
+<title>Keyboard Geometry</title>
+
+<para>
+The XKB description of a keyboard includes an optional keyboard geometry which
+describes the physical appearance of the keyboard. Keyboard geometry describes
+the shape, location and color of all keyboard keys or other visible keyboard
+components such as indicators. The information contained in a keyboard geometry
+is sufficient to allow a client program to draw an accurate two-dimensional
+image of the keyboard.
+</para>
+
+
+<para>
+The components of the keyboard geometry include the following:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>A <emphasis>
+symbolic name</emphasis>
+ to help users identify the keyboard.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+width</emphasis>
+ and <emphasis>
+height</emphasis>
+ of the keyboard, in <mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-8.svg"/>
+ </imageobject>
+ </mediaobject>
+. For non-rectangular keyboards, the width and height describe the smallest
+bounding-box that encloses the outline of the keyboard.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of up to <emphasis>
+MaxColors</emphasis>
+ (<emphasis>
+32</emphasis>
+) <emphasis>
+color names</emphasis>
+. A color name is a string whose interpretation is not specified by XKB. Other
+geometry components refer to colors using their indices in this list.
+  </para>
+</listitem>
+<listitem>
+  <para>The<emphasis>
+ base color</emphasis>
+ of the keyboard is the predominant color on the keyboard and is used as the
+default color for any components whose color is not explicitly specified.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+label color</emphasis>
+ is the color used to draw the labels on most of the keyboard keys.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+label font</emphasis>
+ is a string which describes the font used to draw labels on most keys; XKB
+does not specify a format or name space for font names.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of <emphasis>
+geometry properties</emphasis>
+. A geometry property associates an arbitrary string with an equally arbitrary
+name. Geometry properties can be used to provide hints to programs that display
+images of keyboards, but they are not interpreted by XKB. No other geometry
+structures refer to geometry properties.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of <emphasis>
+key aliases</emphasis>
+, as described in <link linkend='Symbolic_Names'>Symbolic
+Names</link>.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of <emphasis>
+shapes</emphasis>
+; other keyboard components refer to shapes by their index in this list. A
+shape consists of a name and one or more closed-polygons called <emphasis>
+outlines</emphasis>
+. Shapes and outlines are described in detail in <link linkend='Shapes_and_Outlines'>Shapes and Outlines</link>.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+Unless otherwise specified, geometry measurements are in <mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-9.svg"/>
+ </imageobject>
+ </mediaobject>
+
+ units. The origin (0,0) is in the top left corner of the keyboard image. Some
+geometry components can be drawn rotated; all such objects rotate about their
+origin in <mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-10.svg"/>
+ </imageobject>
+ </mediaobject>
+
+ increments.
+</para>
+
+
+<para>
+All geometry components include a <emphasis>
+priority</emphasis>
+, which indicates the order in which overlapping objects should be drawn.
+Objects are drawn in order from highest priority (<emphasis>
+0</emphasis>
+) to lowest (<emphasis>
+255</emphasis>
+).
+</para>
+
+
+<para>
+The description of the actual appearance of the keyboard is subdivided into
+named <emphasis>
+sections</emphasis>
+ of related keys and <emphasis>
+doodads</emphasis>
+. A a <emphasis>
+doodad</emphasis>
+ describes some visible aspect of the keyboard that is not a key. A section is
+a collection of keys and doodads that are physically close together and
+logically related.
+</para>
+
+<sect1 id='Shapes_and_Outlines'>
+<title>Shapes and Outlines</title>
+
+<para>
+An outline is a list of one or more points which describes a single
+closed-polygon, as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>A list with a single point describes a rectangle with one corner at the
+origin of the shape (<emphasis>
+0</emphasis>
+,<emphasis>
+0</emphasis>
+) and the opposite corner at the specified point.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of two points describes a rectangle with one corner at the
+position specified by the first point and the opposite corner at the position
+specified by the second point.
+  </para>
+</listitem>
+<listitem>
+  <para>A list of three or more points describes an arbitrary polygon. If
+necessary, the polygon is automatically closed by connecting the last point in
+the list with the first.
+  </para>
+</listitem>
+<listitem>
+  <para>A non-zero value for the <emphasis>
+cornerRadius</emphasis>
+ field specifies that the corners of the polygon should be drawn as circles
+with the specified radius.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+All points in an outline are specified relative to the origin of the enclosing
+shape. Points in an outline may have negative values for the X and Y coordinate.
+</para>
+
+
+<para>
+One outline (usually the first) is the primary outline; a keyboard display
+application can generate a simpler but still accurate keyboard image by
+displaying only the primary outlines for each shape. Non-rectangular keys must
+include a rectangular <emphasis>
+approximation</emphasis>
+ as one of the outlines associated with the shape; the approximation is not
+normally displayed but can be used by very simple keyboard display applications
+to generate a recognizable but degraded image of the keyboard.
+</para>
+
+
+</sect1>
+<sect1 id='Sections'>
+<title>Sections</title>
+
+<para>
+Each section has its own coordinate system — if a section is rotated, the
+coordinates of any components within the section are interpreted relative to
+the edges that were on the top and left before rotation. The components that
+make up a section include:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>A list of <emphasis>
+rows</emphasis>
+. A row is a list of horizontally or vertically adjacent keys. Horizontal rows
+parallel the (pre-rotation) top of the section and vertical rows parallel the
+(pre-rotation) left of the section. All keys in a horizontal row share a common
+top coordinate; all keys in a vertical row share a left coordinate.
+  </para>
+<para>
+A key description consists of a key <emphasis>
+name</emphasis>
+, a <emphasis>
+shape</emphasis>
+, a key <emphasis>
+color</emphasis>
+, and a <emphasis>
+gap</emphasis>
+. The key <emphasis>
+name</emphasis>
+ should correspond to one of the keys named in the keyboard names description,
+the <emphasis>
+shape</emphasis>
+ specifies the appearance of the key, and the key <emphasis>
+color</emphasis>
+ specifies the color of the key (not the label on the key). Keys are normally
+drawn immediately adjacent to one another from left-to-right (or top-to-bottom)
+within a row. The <emphasis>
+gap</emphasis>
+ field specifies the distance between a key and its predecessor.
+  </para>
+</listitem>
+<listitem>
+  <para>An optional list of doodads; any type of doodad can be enclosed within
+a section. Position and angle of rotation are relative to the origin and angle
+of rotation of the sections that contain them. Priority is relative to the
+other components of the section, not to the keyboard as a whole.
+  </para>
+</listitem>
+<listitem>
+  <para>An optional list of <emphasis>
+overlay keys</emphasis>
+. Each overlay key definition indicates a key that can yield multiple scan
+codes and consists of a field named <emphasis>
+under</emphasis>
+, which specifies the primary name of the key and a field named <emphasis>
+over</emphasis>
+, which specifies the name for the key when the overlay keycode is selected.
+The key specified in <emphasis>
+under</emphasis>
+ must be a member of the section that contains the overlay key definition,
+while the key specified in over must not.
+  </para>
+</listitem>
+</itemizedlist>
+
+</sect1>
+<sect1 id='Doodads'>
+<title>Doodads</title>
+
+<para>
+Doodads can be global to the keyboard or part of a section. Doodads have
+symbolic names of arbitrary length. The only doodad name whose interpretation
+is specified by XKB is "Edges", which describes the outline of the entire
+keyboard, if present.
+</para>
+
+
+<para>
+All doodads report their origin in fields named <emphasis>
+left</emphasis>
+ and <emphasis>
+top</emphasis>
+. XKB supports five kinds of doodads:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>An <emphasis>
+indicator doodad</emphasis>
+ describes one of the physical keyboard indicators. Indicator doodads specify
+the shape of the indicator, the indicator color when it is lit (<emphasis>
+on_color</emphasis>
+) and the indicator color when it is dark (<emphasis>
+off_color</emphasis>
+).
+  </para>
+</listitem>
+<listitem>
+  <para>An <emphasis>
+outline doodad</emphasis>
+ describes some aspect of the keyboard to be drawn as one or more hollow,
+closed polygons. Outline doodads specify the shape, color, and angle of
+rotation about the doodad origin at which they should be drawn.
+  </para>
+</listitem>
+<listitem>
+  <para>A <emphasis>
+solid doodad</emphasis>
+ describes some aspect of the keyboard to be drawn as one or more filled
+polygons. Solid doodads specify the shape, color and angle of rotation about
+the doodad origin at which they should be drawn.
+  </para>
+</listitem>
+<listitem>
+  <para>A <emphasis>
+text doodad</emphasis>
+ describes a text label somewhere on the keyboard. Text doodads specify the
+label string, the font and color to use when drawing the label, and the angle
+of rotation of the doodad about its origin.
+  </para>
+</listitem>
+<listitem>
+  <para>A <emphasis>
+logo doodad</emphasis>
+ is a catch-all, which describes some other visible element of the keyboard. A
+logo doodad is essentially an outline doodad with an additional symbolic name
+that describes the element to be drawn.
+  </para>
+  <para>
+If a keyboard display program recognizes the symbolic name, it can draw
+something appropriate within the bounding region of the shape specified in the
+doodad. If the symbolic name does not describe a recognizable image, it should
+draw an outline using the specified shape, outline, and angle of rotation.
+  </para>
+  <para>
+The XKB extension does not specify the interpretation of logo names.
+  </para>
+</listitem>
+</itemizedlist>
+
+</sect1>
+<sect1 id='Keyboard_Geometry_Example'>
+<title>Keyboard Geometry Example</title>
+
+<para>
+Consider the following example keyboard:
+</para>
+
+<mediaobject>
+  <imageobject>
+    <imagedata format="SVG" fileref="XKBproto-11.svg"/>
+  </imageobject>
+</mediaobject>
+
+
+<para>
+This keyboard has six sections: The left and right function sections (at the
+very top) each have one horizontal row with eight keys. The left and right
+alphanumeric sections (the large sections in the middle) each have six vertical
+rows, with four or five keys in each row. The left and right editing sections
+each have three vertical rows with one to three keys per row; the left editing
+section is rotated 20° clockwise about its origin while the right editing
+section is rotated 20° counterclockwise.
+</para>
+
+
+<para>
+This keyboard has four global doodads: Three small, round indicators and a
+rectangular logo. The program which generated this image did not recognize the
+logo, so it displays an outline with an appropriate shape in its place.
+</para>
+
+
+<para>
+This keyboard has seven shapes: All of the keys in the two function sections
+use the "FKEY" shape. Most of the keys in the alphanumeric sections, as well as
+four of the keys in each of the editing sections use the "NORM" shape. The keys
+in the first column of the left alphanumeric section and the last column of the
+right alphanumeric section all use the "WIDE" shape. Two keys in each of the
+editing sections use the "TALL" shape. The "LED" shape describes the three
+small, round indicators between the function and alphabetic sections. The
+"LOGO" shape describes the keyboard logo, and the "EDGE" shape describes the
+outline of the keyboard as a whole.
+</para>
+
+
+<para>
+The keyboard itself is white, as are all of the keys except for the eight keys
+that make up the home row, which use the "grey20" color. It isn’t really
+visible in this picture, but the three indicators have an "on" color of "green"
+and are "green30" when they are turned off. The keys in the alphanumeric and
+editing sections all have a (vertical) gap of 0.5mm; the keys in the two
+function sections have a (horizontal) gap of 3mm.
+</para>
+
+
+<para>
+Many of the keys in the right alphanumeric section, and the rightmost key in
+the right editing section are drawn with two names in this image. Those are
+overlay keys; the bottom key name is the normal name while the overlay name is
+printed at the top. For example, the right editing section has a single overlay
+key entry, which specifies an <emphasis>
+under</emphasis>
+ name of <emphasis>
+&lt;SPCE&gt;</emphasis>
+ and an <emphasis>
+over</emphasis>
+ name of <emphasis>
+&lt;KP0&gt;</emphasis>
+, which indicates that the key in question is usually the shift key, but can
+behave like the <emphasis>
+0</emphasis>
+ key on the numeric keypad when an overlay is active.
+</para>
+</sect1>
+</chapter>

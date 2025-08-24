@@ -1,0 +1,865 @@
+<chapter id='Global_Keyboard_Controls'>
+<title>Global Keyboard Controls</title>
+
+<para>
+The X Keyboard Extension supports a number of <emphasis>
+global key controls</emphasis>
+, which affect the way that XKB handles the keyboard as a whole. Many of these
+controls make the keyboard more accessible to the physically impaired and are
+based on the AccessDOS package<footnote><para>
+AccessDOS provides access to the DOS operating system for people with physical
+impairments and was developed by the Trace R&amp;D Center at the University of
+Wisconsin. For more information on AccessDOS, contact the Trace R&amp;D Center,
+Waisman Center and Department of Industrial Engineering, University of
+Wisconsin-Madison WI 53705-2280. Phone: 608-262-6966. e-mail:
+info@trace.wisc.edu.</para></footnote>.
+</para>
+
+<sect1 id='The_RepeatKeys_Control'>
+<title>The RepeatKeys Control</title>
+
+<para>
+The core protocol only allows control over whether or not the entire keyboard
+or individual keys should autorepeat when held down. The <emphasis>
+RepeatKeys</emphasis>
+ control extends this capability by adding control over the delay until a key
+begins to repeat and the rate at which it repeats. <emphasis>
+RepeatKeys</emphasis>
+ is also coupled with the core autorepeat control; changes to one are always
+reflected in the other.
+</para>
+
+
+<para>
+The <emphasis>
+RepeatKeys</emphasis>
+ control has two parameters. The <emphasis>
+autorepeat delay</emphasis>
+ specifies the delay between the initial press of an autorepeating key and the
+first generated repeat event in milliseconds. The <emphasis>
+autorepeat interval</emphasis>
+ specifies the delay between all subsequent generated repeat events in
+milliseconds.
+</para>
+
+
+<sect2 id='The_PerKeyRepeat_Control'>
+<title>The PerKeyRepeat Control</title>
+
+<para>
+When <emphasis>
+RepeatKeys</emphasis>
+ are active, the <emphasis>
+PerKeyRepeat</emphasis>
+ control specifies whether or not individual keys should autorepeat when held
+down. XKB provides the <emphasis>
+PerKeyRepeat</emphasis>
+ for convenience only, and it always parallels the <emphasis>
+auto-repeats</emphasis>
+ field of the core protocol <emphasis>
+GetKeyboardControl</emphasis>
+ request — changes to one are always reflected in the other.
+</para>
+
+
+</sect2>
+<sect2 id='Detectable_Autorepeat'>
+<title>Detectable Autorepeat</title>
+
+<para>
+The X server usually generates both press and release events whenever an
+autorepeating key is held down. If an XKB-aware client enables the <emphasis>
+DetectableAutorepeat</emphasis>
+ per-client option for a keyboard, the server sends that client a key release
+event only when the key is <emphasis>
+physically</emphasis>
+ released. For example, holding down a key to generate three characters without
+detectable autorepeat yields:
+</para>
+
+<literallayout class='monospaced'>
+Press <emphasis>-></emphasis> Release <emphasis>-></emphasis> Press <emphasis>-></emphasis> Release <emphasis>-></emphasis> Press <emphasis>-></emphasis> Release
+</literallayout>
+
+<para>
+If detectable autorepeat is enabled, the client instead receives:
+</para>
+
+<literallayout class='monospaced'>
+Press<emphasis>-></emphasis> Press <emphasis>-></emphasis> Press <emphasis>-></emphasis> Release
+</literallayout>
+
+<para>
+Note that only clients that request detectable autorepeat are affected; other
+clients continue to receive both press and release events for autorepeating
+keys. Also note that support for detectable autorepeat is optional; servers are
+not required to support detectable autorepeat, but they must correctly report
+whether or not it is supported.
+</para>
+
+
+<para>
+<link linkend='Querying_and_Changing_Per_Client_Flags'>Querying and Changing Per-Client
+Flags</link> describes the <emphasis>
+XkbPerClientFlags</emphasis>
+ request, which reports or changes values for all of the per-client flags, and
+which lists the per-client flags that are supported.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='The_SlowKeys_Control'>
+<title>The SlowKeys Control</title>
+
+<para>
+Some users often bump keys accidentally while moving their hand or typing stick
+toward the key they want. Usually, the keys that are bumped accidentally are
+hit only for a very short period of time. The <emphasis>
+SlowKeys</emphasis>
+ control helps filter these accidental bumps by telling the server to wait a
+specified period, called the <emphasis>
+SlowKeys acceptance delay</emphasis>
+, before delivering key events. If the key is released before this period
+elapses, no key events are generated. The user can then bump any number of keys
+on their way to the one they want without generating unwanted characters. Once
+they have reached the key they want, they can then hold it long enough for
+<emphasis>
+SlowKeys</emphasis>
+ to accept it.
+</para>
+
+
+<para>
+The <emphasis>
+SlowKeys</emphasis>
+ control has one parameter; the <emphasis>
+slow keys delay</emphasis>
+ specifies the length of time, in milliseconds, that a key must be held down
+before it is accepted.
+</para>
+
+
+<para>
+When <emphasis>
+SlowKeys</emphasis>
+ are active, the X Keyboard Extension reports the initial press, acceptance,
+rejection or release of any key to interested clients using <emphasis>
+AccessXNotify</emphasis>
+ events. The <emphasis>
+AccessXNotify</emphasis>
+ event is described in more detail in <link linkend='Events'>Events</link>.
+</para>
+
+</sect1>
+<sect1 id='The_BounceKeys_Control'>
+<title>The BounceKeys Control</title>
+
+<para>
+Some people with physical impairments accidentally "bounce" on a key when they
+press it. That is, they press it once, then accidentally press it again
+immediately. The <emphasis>
+BounceKeys</emphasis>
+ control temporarily disables a key after it has been pressed, effectively
+"debouncing" the keyboard.
+</para>
+
+
+<para>
+The <emphasis>
+BounceKeys</emphasis>
+ has a single parameter. The <emphasis>
+BounceKeys delay</emphasis>
+ specifies the period of time, in milliseconds, that the key is disabled after
+it is pressed.
+</para>
+
+
+<para>
+When <emphasis>
+BounceKeys</emphasis>
+ are active, the server reports the acceptance or rejection of any key to
+interested clients by sending an <emphasis>
+AccessXNotify</emphasis>
+ event. The <emphasis>
+AccessXNotify</emphasis>
+ event is described in more detail in <link linkend='Events'>Events</link>.
+</para>
+
+</sect1>
+<sect1 id='The_StickyKeys_Control'>
+<title>The StickyKeys Control</title>
+
+<para>
+Some people find it difficult or impossible to press two keys at once. The
+<emphasis>
+StickyKeys</emphasis>
+ control makes it easier for them to type by changing the behavior of the
+modifier keys. When <emphasis>
+StickyKeys</emphasis>
+ are enabled, a modifier is latched when the user presses it just once, so the
+user can first press a modifier, release it, then press another key. For
+example, to get an exclamation point (!) on a PC-style keyboard, the user can
+press the <emphasis>
+Shift</emphasis>
+ key, release it, then press the <emphasis>
+1</emphasis>
+ key.
+</para>
+
+
+<para>
+By default, <emphasis>
+StickyKeys</emphasis>
+ also allows users to lock modifier keys without requiring special locking
+keys. The user can press a modifier twice in a row to lock it, and then unlock
+it by pressing it one more time.
+</para>
+
+
+<para>
+Modifiers are automatically unlatched when the user presses a non-modifier key.
+For instance, to enter the sequence <emphasis>
+Shift</emphasis>
++<emphasis>
+Ctrl</emphasis>
++<emphasis>
+Z</emphasis>
+ the user could press and release the <emphasis>
+Shift</emphasis>
+ key to latch the <emphasis>
+Shift</emphasis>
+ modifier, then press and release the <emphasis>
+Ctrl</emphasis>
+ key to latch the <emphasis>
+Control</emphasis>
+ modifier — the <emphasis>
+Ctrl</emphasis>
+ key is a modifier key, so pressing it does not unlatch the <emphasis>
+Shift</emphasis>
+ modifier, but leaves both the <emphasis>
+Shift</emphasis>
+ and <emphasis>
+Control</emphasis>
+ modifiers latched, instead. When the user presses the <emphasis>
+Z</emphasis>
+ key, it will be as though the user pressed <emphasis>
+Shift</emphasis>
++<emphasis>
+Ctrl</emphasis>
++<emphasis>
+Z</emphasis>
+ simultaneously. The <emphasis>
+Z</emphasis>
+ key is not a modifier key, so the <emphasis>
+Shift</emphasis>
+ and <emphasis>
+Control</emphasis>
+ modifiers are unlatched after the event is generated.
+</para>
+
+
+<para>
+A locked a modifier remains in effect until the user unlocks it. For example,
+to enter the sequence ("XKB") on a PC-style keyboard with a typical US/ASCII
+layout, the user could press and release the <emphasis>
+Shift</emphasis>
+ key twice to lock the <emphasis>
+Shift</emphasis>
+ modifier. Then, when the user presses the <emphasis>
+9</emphasis>
+, <emphasis>
+‘</emphasis>
+, <emphasis>
+x</emphasis>
+, <emphasis>
+k</emphasis>
+, <emphasis>
+b</emphasis>
+, <emphasis>
+‘</emphasis>
+, and <emphasis>
+0</emphasis>
+ keys in sequence, it will generate ("XKB"). To unlock the <emphasis>
+Shift</emphasis>
+ modifier, the user can press and release the <emphasis>
+Shift</emphasis>
+ key.
+</para>
+
+
+<para>
+Two option flags modify the behavior of the <emphasis>
+StickyKeys</emphasis>
+ control:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If the <emphasis>
+XkbAX_TwoKeys</emphasis>
+ flag is set, XKB automatically turns <emphasis>
+StickyKeys</emphasis>
+ off if the user presses two or more keys at once. This serves to automatically
+disable StickyKeys when a user who does not require sticky keys is using the
+keyboard.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+XkbAX_LatchToLock</emphasis>
+ controls the locking behavior of <emphasis>
+StickyKeys</emphasis>
+; the <emphasis>
+StickyKeys</emphasis>
+ control only locks modifiers as described above if the <emphasis>
+XkbAX_LatchToLock</emphasis>
+ flag is set.
+  </para>
+</listitem>
+</itemizedlist>
+
+</sect1>
+<sect1 id='The_MouseKeys_Control'>
+<title>The MouseKeys Control</title>
+
+<para>
+The <emphasis>
+MouseKeys</emphasis>
+ control lets a user control all the mouse functions from the keyboard. When
+<emphasis>
+MouseKeys</emphasis>
+ are enabled, all keys with <emphasis>
+MouseKeys</emphasis>
+ actions bound to them generate core pointer events instead of normal key press
+and release events.
+</para>
+
+
+<para>
+The <emphasis>
+MouseKeys</emphasis>
+ control has a single parameter, the <emphasis>
+mouse keys default button</emphasis>
+, which specifies the core pointer button to be used by mouse keys actions that
+do not explicitly specify a button.
+</para>
+
+
+</sect1>
+<sect1 id='The_MouseKeysAccel_Control'>
+<title>The MouseKeysAccel Control</title>
+
+<para>
+If the <emphasis>
+MouseKeysAccel</emphasis>
+ control is enabled, the effect of a pointer motion action changes as a key is
+held down. The <emphasis>
+mouse keys delay</emphasis>
+ specifies the amount of time between the initial key press and the first
+repeated motion event. The <emphasis>
+mouse keys interval</emphasis>
+ specifies the amount of time between repeated mouse keys events. The <emphasis>
+steps to maximum acceleration</emphasis>
+ field specifies the total number of events before the key is travelling at
+maximum speed. The <emphasis>
+maximum acceleration</emphasis>
+ field specifies the maximum acceleration. The <emphasis>
+curve</emphasis>
+ parameter controls the ramp used to reach maximum acceleration.
+</para>
+
+
+<para>
+When <emphasis>
+MouseKeys</emphasis>
+ are active and a <emphasis>
+SA_MovePtr</emphasis>
+ key action (see <link linkend='Key_Actions'>Key
+Actions</link>) is activated, a pointer motion event is generated immediately.
+If <emphasis>
+MouseKeysAccel</emphasis>
+ is enabled and if acceleration is enabled for the key in question, a second
+event is generated after <emphasis>
+mouse keys delay </emphasis>
+milliseconds, and additional events are generated every <emphasis>
+mouse keys interval</emphasis>
+ milliseconds for as long as the key is held down.
+</para>
+
+
+<sect2 id='Relative_Pointer_Motion'>
+<title>Relative Pointer Motion</title>
+
+<para>
+If the <emphasis>
+SA_MovePtr</emphasis>
+ action specifies relative motion, events are generated as follows: The initial
+event always moves the cursor the distance specified in the action; after
+<emphasis>
+steps to maximum acceleration</emphasis>
+ events have been generated, all subsequent events move the pointer the
+distance specified in the action times the <emphasis>
+maximum acceleration.</emphasis>
+ Events after the first but before maximum acceleration has been achieved are
+accelerated according to the formula:
+</para>
+
+<mediaobject>
+ <imageobject>
+   <imagedata format="SVG" fileref="XKBproto-1.svg"/>
+ </imageobject>
+</mediaobject>
+
+
+<para>
+Where <emphasis>
+action_delta</emphasis>
+ is the offset specified by the mouse keys action, <emphasis>
+max_accel </emphasis>
+and <emphasis>
+steps_to_max</emphasis>
+ are parameters to the <emphasis>
+MouseKeysAccel</emphasis>
+ ctrl, and the curveFactor is computed using the <emphasis>
+MouseKeysAccel</emphasis>
+ <emphasis>
+curve</emphasis>
+ parameter as follows:
+</para>
+
+<mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-2.svg"/>
+ </imageobject>
+ </mediaobject>
+
+
+<para>
+With the result that a <emphasis>
+curve</emphasis>
+ of <emphasis>
+0</emphasis>
+ causes the distance moved to increase linearly from <emphasis>
+action_delta</emphasis>
+ to <mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-3.svg"/>
+ </imageobject>
+ </mediaobject>
+
+, and the minimum legal <emphasis>
+curve</emphasis>
+ of -<emphasis>
+1000</emphasis>
+ causes all events after the first move at <emphasis>
+max_accel</emphasis>
+. A negative <emphasis>
+curve</emphasis>
+ causes an initial sharp increase in acceleration which tapers off, while a
+positive curve yields a slower initial increase in acceleration followed by a
+sharp increase as the number of pointer events generated by the action
+approaches <emphasis>
+steps_to_max</emphasis>
+.
+</para>
+
+
+</sect2>
+<sect2 id='Absolute_Pointer_Motion'>
+<title>Absolute Pointer Motion</title>
+
+<para>
+If an <emphasis>
+SA_MovePtr</emphasis>
+ action specifies an absolute position for one of the coordinates but still
+allows acceleration, all repeated events contain any absolute coordinates
+specified in the action.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='The_AccessXKeys_Control'>
+<title>The AccessXKeys Control</title>
+
+<para>
+If <emphasis>
+AccessXKeys</emphasis>
+ is enabled many controls can also be turned on or off from the keyboard by
+entering the following standard key sequences:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>Holding down a shift key by itself for eight seconds toggles the
+<emphasis>
+SlowKeys</emphasis>
+ control.
+  </para>
+</listitem>
+<listitem>
+  <para>Pressing and releasing a shift key five times in a row without any
+intervening key events and with less than 30 seconds delay between consecutive
+presses toggles the state of the <emphasis>
+StickyKeys</emphasis>
+ control.
+  </para>
+</listitem>
+<listitem>
+  <para>Simultaneously operating two or more modifier keys deactivates the
+<emphasis>
+StickyKeys</emphasis>
+ control.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+Some of these key sequences optionally generate audible feedback of the change
+in state, as described in <link linkend='The_AccessXFeedback_Control'>The
+AccessXFeedback Control</link>, or cause <emphasis>
+XkbAccessXNotify</emphasis>
+ events as described in <link linkend='Events'>Events</link>.
+</para>
+
+
+</sect1>
+<sect1 id='The_AccessXTimeout_Control'>
+<title>The AccessXTimeout Control</title>
+
+<para>
+In environments where computers are shared, features such as <emphasis>
+SlowKeys</emphasis>
+ present a problem: if <emphasis>
+SlowKeys</emphasis>
+ is on, the keyboard can appear to be unresponsive because keys have no effect
+unless they are held for a certain period of time. To help address this
+problem, XKB provides an <emphasis>
+AccessXTimeout</emphasis>
+ control to automatically change the value of any global controls or AccessX
+options if the keyboard is idle for a specified period of time.
+</para>
+
+
+<para>
+The AccessXTimeout control has a number of parameters which affect the duration
+of the timeout and the features changed when the timeout expires.
+</para>
+
+
+<para>
+The <emphasis>
+AccessX Timeout</emphasis>
+ field specifies the number of seconds the keyboard must be idle before the
+global controls and AccessX options are modified. The <emphasis>
+AccessX Options Mask</emphasis>
+ field specifies which values in the <emphasis>
+AccessX Options</emphasis>
+ field are to be changed, and the <emphasis>
+AccessX Options Values</emphasis>
+ field specifies the new values for those options. The <emphasis>
+AccessX Controls Mask</emphasis>
+ field specifies which controls are to be changed in the global set of
+<emphasis>
+enabled controls</emphasis>
+, and the <emphasis>
+AccessX Controls Values</emphasis>
+ field specifies the new values for those controls.
+</para>
+
+
+</sect1>
+<sect1 id='The_AccessXFeedback_Control'>
+<title>The AccessXFeedback Control</title>
+
+<para>
+If <emphasis>
+AccessXFeedback</emphasis>
+ is enabled, special beep-codes indicate changes in keyboard controls (or some
+key events when <emphasis>
+SlowKeys</emphasis>
+ or <emphasis>
+StickyKeys</emphasis>
+ are active). Many beep codes sound as multiple tones, but XKB reports a single
+<emphasis>
+XkbBellNotify</emphasis>
+ event for the entire sequence of tones.
+</para>
+
+
+<para>
+All feedback tones are governed by the <emphasis>
+AudibleBell</emphasis>
+ control. Individual feedback tones can be explicitly enabled or disabled using
+the <emphasis>
+accessX options mask</emphasis>
+ or set to deactivate after an idle period using the <emphasis>
+accessX timeout options mask</emphasis>
+. XKB defines the following feedback tones:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.5*'/>
+<colspec colname='c3' colwidth='1.5*'/>
+<colspec colname='c4' colwidth='1.5*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Feedback Name</entry>
+    <entry>Bell Name</entry>
+    <entry>Default Sound</entry>
+    <entry>Indicates</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>FeatureFB</entry>
+    <entry>AX_FeatureOn</entry>
+    <entry>rising tone</entry>
+    <entry>Keyboard control enabled</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_FeatureOff</entry>
+    <entry>falling tone</entry>
+    <entry>Keyboard control disabled</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_FeatureChange</entry>
+    <entry>two tones</entry>
+    <entry>Several controls changed state</entry>
+  </row>
+  <row>
+    <entry>IndicatorFB</entry>
+    <entry>AX_IndicatorOn</entry>
+    <entry>high tone</entry>
+    <entry>Indicator Lit</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_IndicatorOff</entry>
+    <entry>low tone</entry>
+    <entry>Indicator Extinguished</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_IndicatorChange</entry>
+    <entry>two high tones</entry>
+    <entry>Several indicators changed state</entry>
+  </row>
+  <row>
+    <entry>SlowWarnFB</entry>
+    <entry>AX_SlowKeysWarning</entry>
+    <entry>three high tones</entry>
+    <entry>Shift key held for four seconds</entry>
+  </row>
+  <row>
+    <entry>SKPressFB</entry>
+    <entry>AX_SlowKeyPress</entry>
+    <entry>single tone</entry>
+    <entry>Key press while <emphasis>
+SlowKeys</emphasis>
+ are on</entry>
+  </row>
+  <row>
+    <entry>SKReleaseFB</entry>
+    <entry>AX_SlowKeyRelease</entry>
+    <entry>single tone</entry>
+    <entry>Key release while <emphasis>
+SlowKeys</emphasis>
+ are on</entry>
+  </row>
+  <row>
+    <entry>SKAcceptFB</entry>
+    <entry>AX_SlowKeyAccept</entry>
+    <entry>single tone</entry>
+    <entry>Key event accepted by <emphasis>
+SlowKeys</emphasis>
+</entry>
+  </row>
+  <row>
+    <entry>SKRejectFB</entry>
+    <entry>AX_SlowKeyReject</entry>
+    <entry>low tone</entry>
+    <entry>Key event rejected by <emphasis>
+SlowKeys</emphasis>
+</entry>
+  </row>
+  <row>
+    <entry>StickyKeysFB</entry>
+    <entry>AX_StickyLatch</entry>
+    <entry>low tone then high tone</entry>
+    <entry>Modifier latched by <emphasis>
+StickyKeys</emphasis>
+</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_StickyLock</entry>
+    <entry>high tone</entry>
+    <entry>Modifier locked by <emphasis>
+StickyKeys</emphasis>
+</entry>
+  </row>
+  <row>
+    <entry>&#x0020;</entry>
+    <entry>AX_StickyUnlock</entry>
+    <entry>low tone</entry>
+    <entry>Modifier unlocked by <emphasis>
+StickyKeys</emphasis>
+</entry>
+  </row>
+  <row>
+    <entry>BKRejectFB</entry>
+    <entry>AX_BounceKeysReject</entry>
+    <entry>low tone</entry>
+    <entry>Key event rejected by <emphasis>
+BounceKeys</emphasis>
+</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Implementations that cannot generate continuous tones may generate multiple
+beeps instead of falling and rising tones; for example, they can generate a
+high-pitched beep followed by a low-pitched beep instead of a continuous
+falling tone.
+</para>
+
+
+<para>
+If the physical keyboard bell is not very capable, attempts to simulate a
+continuous tone with multiple bells can sound horrible. Set the <emphasis>
+DumbBellFB</emphasis>
+ AccessX option to inform the server that the keyboard bell is not very capable
+and that XKB should use only simple bell combinations. Keyboard capabilities
+vary wildly, so the sounds generated for the individual bells when the
+<emphasis>
+DumbBellFB</emphasis>
+ option is set are implementation specific.
+</para>
+
+
+</sect1>
+<sect1 id='The_Overlay1_and_Overlay2_Controls'>
+<title>The Overlay1 and Overlay2 Controls</title>
+
+<para>
+A keyboard overlay allows some subset of the keyboard to report alternate
+keycodes when the overlay is enabled. For example a keyboard overlay can be
+used to simulate a numeric or editing keypad on keyboard that does not actually
+have one by generating alternate of keycodes for some keys when the overlay is
+enabled. This technique is very common on portable computers and embedded
+systems with small keyboards.
+</para>
+
+
+<para>
+XKB includes direct support for two keyboard overlays, using the <emphasis>
+Overlay1</emphasis>
+ and <emphasis>
+Overlay2</emphasis>
+ controls. When <emphasis>
+Overlay1</emphasis>
+ is enabled, all of the keys that are members of the first keyboard overlay
+generate an alternate keycode. When <emphasis>
+Overlay2</emphasis>
+ is enabled, all of the keys that are members of the second keyboard overlay
+generate an alternate keycode.
+</para>
+
+
+<para>
+To specify the overlay to which a key belongs and the alternate keycode it
+should generate when that overlay is enabled, assign it either the <emphasis>
+KB_Overlay1</emphasis>
+ or <emphasis>
+KB_Overlay2</emphasis>
+ key behaviors, as described in <link linkend='Key_Behavior'>
+Key Behavior</link>.
+</para>
+
+
+</sect1>
+<sect1 id='Boolean_Controls_and_The_EnabledControls_Control'>
+<title>"Boolean" Controls and The EnabledControls Control</title>
+
+<para>
+All of the controls described above, along with the <emphasis>
+AudibleBell</emphasis>
+ control (described in <link linkend='Disabling_Server_Generated_Bells'>Disabling
+Server Generated Bells</link>) and the <emphasis>
+IgnoreGroupLock</emphasis>
+ control (described in <link linkend='Server_Internal_Modifiers_and_Ignore_Locks_Behavior'>Server
+Internal Modifiers and Ignore Locks Behavior</link>) comprise the <emphasis>
+boolean controls</emphasis>
+. In addition to any parameters listed in the descriptions of the individual
+controls, the boolean controls can be individually enabled or disabled by
+changing the value of the <emphasis>
+EnabledControls</emphasis>
+ control.
+</para>
+
+
+<para>
+The following <emphasis>
+non-boolean</emphasis>
+ controls are always active and cannot be changed using the <emphasis>
+EnabledControls</emphasis>
+ control or specified in any context that accepts only boolean controls:
+<emphasis>
+GroupsWrap</emphasis>
+ (<link linkend='Computing_Effective_Modifier_and_Group'>Computing Effective Modifier and
+Group</link>), <emphasis>
+EnabledControls</emphasis>
+, <emphasis>
+InternalMods</emphasis>
+ (<link linkend='Server_Internal_Modifiers_and_Ignore_Locks_Behavior'>Server Internal Modifiers and
+Ignore Locks Behavior</link>), and <emphasis>
+IgnoreLockMods</emphasis>
+ (<link linkend='Server_Internal_Modifiers_and_Ignore_Locks_Behavior'>Server Internal Modifiers and
+Ignore Locks Behavior</link>) and <emphasis>
+PerKeyRepeat</emphasis>
+ (<link linkend='The_RepeatKeys_Control'>The RepeatKeys Control</link>)
+</para>
+
+
+</sect1>
+<sect1 id='Automatic_Reset_of_Boolean_Controls'>
+<title>Automatic Reset of Boolean Controls</title>
+
+<para>
+The <emphasis>
+auto-reset controls</emphasis>
+ are a per-client value which consist of two masks that can contain any of the
+boolean controls (see <link linkend='Boolean_Controls_and_The_EnabledControls_Control'>"Boolean"
+Controls and The EnabledControls Control</link>). Whenever the client exits
+for any reason, any boolean controls specified in the <emphasis>
+auto-reset mask</emphasis>
+ are set to the corresponding value from the <emphasis>
+auto-reset values</emphasis>
+ mask. This makes it possible for clients to "clean up after themselves"
+automatically, even if abnormally terminated.
+</para>
+
+
+<para>
+For example, a client that replace the keyboard bell with some other audible
+cue might want to turn off the <emphasis>
+AudibleBell</emphasis>
+ control (<link linkend='Disabling_Server_Generated_Bells'>Disabling Server
+Generated Bells</link>) to prevent the server from also generating a sound and
+thus avoid cacophony. If the client were to exit without resetting the
+<emphasis>
+AudibleBell </emphasis>
+control, the user would be left without any feedback at all. Setting <emphasis>
+AudibleBell</emphasis>
+ in both the auto-reset mask and auto-reset values guarantees that the audible
+bell will be turned back on when the client exits.
+</para>
+</sect1>
+</chapter>

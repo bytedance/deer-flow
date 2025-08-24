@@ -1,0 +1,723 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<book id="xtest">
+
+<bookinfo>
+   <title>XTEST Extension Protocol</title>
+   <subtitle>X Consortium Standard</subtitle>
+   <authorgroup>
+      <author>
+         <firstname>Kieron</firstname><surname>Drake</surname>
+         <affiliation><orgname>UniSoft Ltd.</orgname></affiliation>
+      </author>
+   </authorgroup>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 2.2</releaseinfo>
+   <copyright><year>1992</year><holder>UniSoft Group Ltd.</holder></copyright>
+   <copyright><year>1992</year><year>1994</year><holder>X Consortium</holder></copyright>
+
+<legalnotice>
+<para>
+Permission to use, copy, modify, and distribute this documentation for any
+purpose and without fee is hereby granted, provided that the above copyright
+notice and this permission notice appear in all copies.  UniSoft makes no
+representations about the suitability for any purpose of the information in
+this document.  This documentation is provided "as is" without express or
+implied warranty.
+</para>
+
+<para>
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+</para>
+
+<para>
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+</para>
+
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+</para>
+
+<para>
+Except as contained in this notice, the name of the X Consortium shall not be
+used in advertising or otherwise to promote the sale, use or other dealings
+in this Software without prior written authorization from the X Consortium.
+</para>
+</legalnotice>
+</bookinfo>
+
+
+<chapter id="Overview">
+<title>Overview</title>
+<para>
+This extension is a minimal set of client and server extensions
+required to completely test the X11 server with no user intervention.
+</para>
+
+<para>
+This extension is not intended to support general journaling and
+playback of user actions.  This is a difficult area [XTrap, 89] as it attempts
+to synchronize synthetic user interactions with their effects; it is at the
+higher level of dialogue recording/playback rather than at the strictly lexical
+level.  We are interested only in the latter, simpler, case.  A more detailed
+discussion and justification of the extension functionality is given in
+[Drake, 91].
+</para>
+
+<para>
+We are aiming only to provide a minimum set of facilities that
+solve immediate testing and validation problems.  The testing extension
+itself needs testing, where possible, and so should be as simple as possible.
+</para>
+
+<para>
+We have also tried to:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+Confine the extension to an appropriate high level within the server
+to minimize portability problems.  In practice this means that the extension
+should be at the DIX level or use the DIX/DDX interface, or both.  This
+has effects, in particular, on the level at which "input synthesis"
+can occur.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Minimize the changes required in the rest of the server.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Minimize performance penalties on normal server operation.
+    </para>
+  </listitem>
+</itemizedlist>
+</chapter>
+
+<chapter id="Description">
+<title>Description</title>
+<para>
+The functions provided by this extension fall into two groups:
+</para>
+
+<variablelist>
+  <varlistentry>
+    <term>Client Operations</term>
+    <listitem>
+      <para>
+These routines manipulate otherwise hidden client-side behavior.  The
+actual implementation will depend on the details of the actual language
+binding and what degree of request buffering, GContext caching, and so on, is
+provided.
+In the C binding, defined in "XTEST Extension Library", routines are
+provided to access the internals of two opaque data structures
+-- <function>GC</function>s
+and
+<function>Visual</function>s --
+and to discard any requests pending within the
+output buffer of a connection.  The exact details can be expected to differ for
+other language bindings.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>Server Requests</term>
+    <listitem>
+      <para>
+The first of these requests is similar to that provided in most
+extensions: it allows a client to specify a major and minor version
+number to the server and for the server to respond with major and minor
+versions of its own.  The remaining two requests allow the following:
+<!-- .RS -->
+      </para>
+      <itemizedlist>
+        <listitem>
+          <para>
+Access to an otherwise "write-only" server resource: the cursor
+associated with a given window
+          </para>
+        </listitem>
+        <listitem>
+          <para>
+Perhaps most importantly, limited synthesis of input device events,
+almost as if a cooperative user had moved the pointing device
+or pressed a key or button.
+          </para>
+        </listitem>
+      </itemizedlist>
+    </listitem>
+  </varlistentry>
+</variablelist>
+
+</chapter>
+
+<chapter id="Types">
+<title>Types</title>
+<para>
+The following types are used in the request and event definitions in
+subsequent sections:
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="3.0*"/>
+  <tbody>
+    <row>
+      <entry namest="c1" nameend="c2">
+FAKE_EVENT_TYPE
+{ <function>KeyPress</function>,
+<function>KeyRelease</function>,
+<function>MotionNotify</function>,
+<function>ButtonPress</function>,
+<function>ButtonRelease</function> }
+      </entry>
+    </row>
+    <row>
+      <entry></entry>
+    </row>
+    <row>
+      <entry>FAKE_EVENT</entry>
+      <entry>[type: FAKE_EVENT_TYPE,</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>detail: BYTE,</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>time: TIME,</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>root: WINDOW,</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>rootX, rootY: INT16]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+CURSOR { <function>CurrentCursor</function>, <function> None</function> }
+or a cursor as defined by the X11 Protocol.
+</para>
+
+</chapter>
+
+<chapter id="Client_Operations">
+<title>Client Operations</title>
+
+<para>
+These are abstract definitions of functionality.  They refer to client-side
+objects such as "GC" and "VISUAL" that are quoted to
+denote their abstract nature.  Concrete versions of these functions are
+defined only for particular language bindings.  In some circumstances
+a particular language binding may not implement the relevant abstract
+type or may provide it as a transparent, rather than opaque, type, with
+the result that the corresponding function does not make sense or is
+not required, respectively.
+</para>
+
+<para>
+<olink targetdoc='xtestlib' targetptr='XTestSetGContextOfGC'><function>XTestSetGContextOfGC</function></olink>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>gc</emphasis>: "GC"
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>gid</emphasis>: GCONTEXT
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Sets the GCONTEXT within the "GC" gc to have
+the value specified by gid.
+</para>
+
+<para>
+<olink targetdoc='xtestlib' targetptr='XTestSetVisualIDOfVisual'><function>XTestSetVisualIDOfVisual</function></olink>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>visual</emphasis>: "VISUAL"
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>visualid</emphasis>: VISUALID
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Sets the VISUALID within the "VISUAL" visual to have
+the value specified by visualid.
+</para>
+
+<para>
+<olink targetdoc='xtestlib' targetptr='XTestDiscard'><function>XTestDiscard</function></olink>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>dpy</emphasis>: "CONNECTION"
+      </entry>
+    </row>
+    <row>
+      <entry>
+=&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+status: BOOL
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Discards any requests that are present in the request buffer associated with
+the "CONNECTION" dpy.
+The status returned is
+<function>True</function>
+if there were one or more requests
+in the buffer and
+<function>False</function>
+otherwise.
+</para>
+</chapter>
+
+<chapter id="Server_Requests">
+<title>Server Requests</title>
+<para>
+<function>XTestGetVersion</function>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>clientMajorVersion</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>clientMinorVersion</emphasis>: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+   =&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+serverMajorVersion: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+serverMinorVersion: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors: <function>Length</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+
+<para>
+This request can be used to ensure that the server version of the XTEST
+extension is usable by the client.  This document defines major version two
+(2), minor version one (1).
+</para>
+
+<para>
+<function>XTestCompareCursor</function>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>window</emphasis>: WINDOW
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>cursor-id</emphasis>: CURSOR or
+<function>CurrentCursor</function>
+or
+<function>None</function>
+      </entry>
+    </row>
+    <row>
+      <entry>
+=&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+same: BOOL
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Window</function>,
+<function>Length</function>,
+<function>Cursor</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request looks up the cursor associated with the window and
+compares it with either the null cursor if cursor-id is
+<function>None ,</function>
+or the current cursor (that is, the one being displayed),
+or the cursor whose ID is cursor-id, and returns
+the result of the comparison in same.
+</para>
+
+<para>
+<function>XTestFakeInput</function>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>events</emphasis>: LISTofFAKE_EVENT
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Window</function>,
+<function>Length</function>,
+<function>Alloc</function>,
+<function>Value</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request simulates the limited set of core protocol
+events within the set FAKE_EVENT_TYPE.  Only the following event fields,
+defined in FAKE_EVENT, are interpreted:
+</para>
+
+<variablelist>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>type</emphasis>
+    </term>
+    <listitem>
+      <para>
+This must be one of
+<function>KeyPress</function>,
+<function>KeyRelease</function>,
+<function>MotionNotify</function>,
+<function>ButtonPress</function>,
+or
+<function>ButtonRelease</function>,
+or else a
+<function>Value</function>
+error occurs.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>detail</emphasis>
+    </term>
+    <listitem>
+      <para>
+For key events, this field is interpreted as the physical keycode.
+If the keycode is less than min-keycode or greater than max-keycode,
+as returned in the connection setup, then a
+<function>Value</function>
+error occurs.
+For button events, this field is interpreted as the physical (or core) button,
+meaning it will be mapped to the corresponding logical button according to
+the most recent
+<function>SetPointerMapping</function>
+request.
+If the button number is less than one or greater than the number of physical
+buttons, then a
+<function>Value</function>
+error occurs.
+For motion events, if this field is
+<function>True ,</function>
+then rootX and rootY
+are relative distances from the current pointer location; if this field is
+<function>False,</function>
+then they are absolute positions.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>time</emphasis>
+    </term>
+    <listitem>
+      <para>
+This is either
+<function>CurrentTime</function>
+(meaning no delay)
+or the delay in milliseconds that the server should wait before
+simulating this event.  No other requests from this client will be
+processed until this delay, if any, has expired and subsequent processing
+of the simulated event has been completed.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>root</emphasis>
+    </term>
+    <listitem>
+      <para>
+In the case of motion events this field is the ID of the root window on
+which the new motion is to take place.  If
+<function>None</function>
+is specified, the root window of the screen the pointer is currently on
+is used instead.
+If this field is not a valid window, then a
+<function>Window</function>
+error occurs.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>rootX</emphasis> &amp;
+      <emphasis remap='I'>rootY</emphasis>
+    </term>
+    <listitem>
+      <para>
+In the case of motion events these fields indicate relative distance or
+absolute pointer coordinates, according to the setting of detail.
+If the specified coordinates are off-screen, the closest on-screen
+coordinates will be substituted.
+    </para>
+  </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+When the simulated event(s) are processed, they cause event propagation,
+passive grab activation, and so on, just as if the corresponding input device
+action had occurred.  However, motion events might not be recorded in the
+motion history buffer.
+</para>
+
+<para>
+For the currently supported event types, the event list must have length one,
+otherwise a
+<function>BadLength</function>
+error occurs.
+</para>
+
+<para>
+<olink targetdoc='xtestlib' targetptr='XTestGrabControl'><function>XTestGrabControl</function></olink>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>impervious</emphasis>: BOOL
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+If impervious is
+<function>True</function>,
+then the executing client becomes impervious to server grabs;
+that is, it can continue executing requests even if another client
+grabs the server.
+If impervious is
+<function>False</function>,
+then the executing client returns to the normal state of being
+susceptible to server grabs.
+</para>
+</chapter>
+
+<chapter id="Encoding">
+<title>Encoding</title>
+<para>
+Please refer to the X11 Protocol Encoding document as this document uses
+conventions established there.
+</para>
+
+<para>
+The name of this extension is "XTEST".
+</para>
+
+<sect1 id="New_Types">
+<title>New Types</title>
+<literallayout class="monospaced">
+FAKE_EVENT_TYPE
+     2     KeyPress
+     3     KeyRelease
+     4     ButtonPress
+     5     ButtonRelease
+     6     MotionNotify
+</literallayout>
+
+<para>
+NOTE that the above values are defined to be the same as those for
+the corresponding core protocol event types.
+</para>
+</sect1>
+
+<sect1 id="Requests">
+<title>Requests</title>
+
+<literallayout class="monospaced">
+<function>XTestGetVersion</function>
+     1     CARD8               opcode
+     1     0                   xtest opcode
+     2     2                   request length
+     1     CARD8               client major version
+     1                         unused
+     2     CARD16              client minor version
+=&gt;
+     1     1                   Reply
+     1     CARD8               server major version
+     2     CARD16              sequence number
+     4     0                   reply length
+     2     CARD16              server minor version
+     22                        unused
+</literallayout>
+
+<literallayout class="monospaced">
+<function>XTestCompareCursor</function>
+     1     CARD8               opcode
+     1     1                   xtest opcode
+     2     3                   request length
+     4     WINDOW              window
+     4     CURSOR              cursor-id
+           0     None
+           1     CurrentCursor
+=&gt;
+     1     1                   Reply
+     1     BOOL                cursors are the same
+     2     CARD16              sequence number
+     4     0                   reply length
+     24                        unused
+</literallayout>
+
+<literallayout class="monospaced">
+<function>XTestFakeInput</function>
+     1     CARD8               opcode
+     1     2                   xtest opcode
+     2     1+(1*8)             request length
+     1     FAKE_EVENT_TYPE     fake device event type
+     1     BYTE                detail: button or keycode
+     2                         unused
+     4     TIME                delay (milliseconds)
+           0     CurrentTime
+     4     WINDOW              root window for MotionNotify
+           0     None
+     8                         unused
+     2     INT16               x position for MotionNotify
+     2     INT16               y position for MotionNotify
+     8                         unused
+</literallayout>
+
+<literallayout class="monospaced">
+<olink targetdoc='xtestlib' targetptr='XTestGrabControl'><function>XTestGrabControl</function></olink>
+     1     CARD8               opcode
+     1     3                   xtest opcode
+     2     2                   request length
+     1     BOOL                impervious
+     3                         unused
+</literallayout>
+</sect1>
+</chapter>
+
+<chapter id="References">
+<title>References</title>
+<para>
+Annicchiarico, D., et al.,
+<emphasis remap='I'>XTrap: The XTrap Architecture</emphasis>.
+Digital Equipment Corporation, July 1991.
+</para>
+
+<para>
+Drake, K. J.,
+<emphasis remap='I'>Some Proposals for a
+Minimum X11 Testing Extension</emphasis>.
+UniSoft Ltd., June 1991.
+</para>
+</chapter>
+
+</book>

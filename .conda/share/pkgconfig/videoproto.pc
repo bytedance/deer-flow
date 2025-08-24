@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+
+Name: VideoProto
+Description: Video extension headers
+Version: 2.3.3
+Cflags: -I${includedir}

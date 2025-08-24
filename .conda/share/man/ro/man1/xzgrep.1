@@ -1,0 +1,103 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" Romanian translation for xz-man.
+.\" Mesajele în limba română pentru manualul pachetului XZ Utils.
+.\" Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2022 - 2024.
+.\" Cronologia traducerii fișierului „xz-man”:
+.\" Traducerea inițială, făcută de R-GC, pentru versiunea xz-man 5.4.0-pre1.
+.\" Actualizare a traducerii pentru versiunea 5.4.0-pre2, făcută de R-GC, dec-2022.
+.\" Actualizare a traducerii pentru versiunea 5.4.3, făcută de R-GC, mai-2023.
+.\" Actualizare a traducerii pentru versiunea 5.4.4-pre1, făcută de R-GC, iul-2023.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre1, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre2, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea Y, făcută de X, Z(luna-anul).
+.\"
+.\" (Note that this file is not based on gzip's zgrep.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZGREP 1 "13 februarie 2024" Tukaani "Utilități XZ"
+.SH NUME
+xzgrep \- caută modele în fișiere posibil comprimate
+.
+.SH REZUMAT
+\fBxzgrep\fP [\fIopțiune...\fP] \fIlistă\-modele\fP [\fIfișier...\fP]
+.br
+\fBxzegrep\fP \&...
+.br
+\fBxzfgrep\fP \&...
+.br
+\fBlzgrep\fP \&...
+.br
+\fBlzegrep\fP \&...
+.br
+\fBlzfgrep\fP \&...
+.
+.SH DESCRIERE
+\fBxzgrep\fP invocă \fBgrep\fP(1) asupra conținutului necomprimat al
+fișierelor. Formatele \fIfișierelor\fP sunt determinate de sufixele numelor de
+fișiere. Orice \fIfișier\fP cu un sufix acceptat de \fBxz\fP(1), \fBgzip\fP(1),
+\fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1) sau \fBlz4\fP(1) va fi decomprimat; toate
+celelalte fișiere sunt presupuse a fi necomprimate.
+.PP
+Dacă nu se specifică niciun \fIfișier\fP sau dacă \fIfișier\fP este \fB\-\fP, se
+citește intrarea standard. Atunci când se citește de la intrarea standard,
+sunt decomprimate numai fișierele acceptate de \fBxz\fP(1).  Se presupune că
+celelalte fișiere sunt deja în format necomprimat.
+.PP
+Sunt acceptate majoritatea \fIopțiunilor\fP din \fBgrep\fP(1). Cu toate acestea,
+următoarele opțiuni nu sunt acceptate:
+.IP "" 4
+\fB\-r\fP, \fB\-\-recursive\fP
+.IP "" 4
+\fB\-R\fP, \fB\-\-dereference\-recursive\fP
+.IP "" 4
+\fB\-d\fP, \fB\-\-directories=\fP\fIacțiune\fP
+.IP "" 4
+\fB\-Z\fP, \fB\-\-null\fP
+.IP "" 4
+\fB\-z\fP, \fB\-\-null\-data\fP
+.IP "" 4
+\fB\-\-include=\fP\fIglobal\fP
+.IP "" 4
+\fB\-\-exclude=\fP\fIglobal\fP
+.IP "" 4
+\fB\-\-exclude\-from=\fP\fIfișier\fP
+.IP "" 4
+\fB\-\-exclude\-dir=\fP\fIglobal\fP
+.PP
+\fBxzegrep\fP este un alias pentru \fBxzgrep \-E\fP. \fBxzfgrep\fP este un alias
+pentru \fBxzgrep \-F\fP.
+.PP
+Comenzile \fBlzgrep\fP, \fBlzegrep\fP și \fBlzfgrep\fP sunt furnizate pentru
+compatibilitate retroactivă cu LZMA Utils.
+.
+.SH "STARE DE IEȘIRE"
+.TP 
+0
+A fost găsită cel puțin o potrivire din cel puțin unul dintre fișierele de
+la intrare. Nu au apărut erori.
+.TP 
+1
+Nu au fost găsite potriviri din niciunul dintre fișierele de la intrare. Nu
+au apărut erori.
+.TP 
+>1
+A apărut una sau mai multe erori. Nu se cunoaște dacă au fost găsite
+potriviri.
+.
+.SH "VARIABILE DE MEDIU"
+.TP 
+\fBGREP\fP
+Dacă variabila de mediu \fBGREP\fP este stabilită la o valoare nevidă, aceasta
+este utilizată în locul lui \fBgrep\fP, \fBgrep \-E\fP sau \fBgrep \-F\fP.
+.
+.SH "CONSULTAȚI ȘI"
+\fBgrep\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1),
+\fBlz4\fP(1), \fBzgrep\fP(1)

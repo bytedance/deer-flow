@@ -1,0 +1,204 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# rolodex --
+# This script was written as an entry in Tom LaStrange's rolodex
+# benchmark.  It creates something that has some of the look and
+# feel of a rolodex program, although it's lifeless and doesn't
+# actually do the rolodex application.
+
+package require Tk
+
+foreach i [winfo children .] {
+    catch {destroy $i}
+}
+
+set version 1.2
+
+#------------------------------------------
+# Phase 0: create the front end.
+#------------------------------------------
+
+frame .frame -relief flat
+pack .frame -side top -fill y -anchor center
+
+set names {{} Name: Address: {} {} {Home Phone:} {Work Phone:} Fax:}
+foreach i {1 2 3 4 5 6 7} {
+    label .frame.label$i -text [lindex $names $i] -anchor e
+    entry .frame.entry$i -width 35
+    grid .frame.label$i .frame.entry$i -sticky ew -pady 2 -padx 1
+}
+
+frame .buttons
+pack .buttons -side bottom -pady 2 -anchor center
+button .buttons.clear -text Clear
+button .buttons.add -text Add
+button .buttons.search -text Search
+button .buttons.delete -text "Delete ..."
+pack .buttons.clear .buttons.add .buttons.search .buttons.delete \
+	-side left -padx 2
+
+#------------------------------------------
+# Phase 1: Add menus, dialog boxes
+#------------------------------------------
+
+# DKF - note that this is an old-style menu bar; I just have not yet
+# got around to converting the context help code to work with the new
+# menu system and its <<MenuSelect>> virtual event.
+
+frame .menu -relief raised -borderwidth 1
+pack .menu -before .frame -side top -fill x
+
+menubutton .menu.file -text "File" -menu .menu.file.m -underline 0
+menu .menu.file.m
+.menu.file.m add command -label "Load ..." -command fileAction -underline 0
+.menu.file.m add command -label "Exit" -command {destroy .} -underline 0
+pack .menu.file -side left
+
+menubutton .menu.help -text "Help" -menu .menu.help.m -underline 0
+menu .menu.help.m
+pack .menu.help -side right
+
+proc deleteAction {} {
+    if {[tk_dialog .delete {Confirm Action} {Are you sure?} {} 0  Cancel]
+	    == 0} {
+	clearAction
+    }
+}
+.buttons.delete config -command deleteAction
+
+proc fileAction {} {
+    tk_dialog .fileSelection {File Selection} {This is a dummy file selection dialog box, which is used because there isn't a good file selection dialog built into Tk yet.} {} 0 OK
+    puts stderr {dummy file name}
+}
+
+#------------------------------------------
+# Phase 3: Print contents of card
+#------------------------------------------
+
+proc addAction {} {
+    global names
+    foreach i {1 2 3 4 5 6 7} {
+	puts stderr [format "%-12s %s" [lindex $names $i] [.frame.entry$i get]]
+    }
+}
+.buttons.add config -command addAction
+
+#------------------------------------------
+# Phase 4: Miscellaneous other actions
+#------------------------------------------
+
+proc clearAction {} {
+    foreach i {1 2 3 4 5 6 7} {
+	.frame.entry$i delete 0 end
+    }
+}
+.buttons.clear config -command clearAction
+
+proc fillCard {} {
+    clearAction
+    .frame.entry1 insert 0 "John Ousterhout"
+    .frame.entry2 insert 0 "CS Division, Department of EECS"
+    .frame.entry3 insert 0 "University of California"
+    .frame.entry4 insert 0 "Berkeley, CA 94720"
+    .frame.entry5 insert 0 "private"
+    .frame.entry6 insert 0 "510-642-0865"
+    .frame.entry7 insert 0 "510-642-5775"
+}
+.buttons.search config -command "addAction; fillCard"
+
+#----------------------------------------------------
+# Phase 5: Accelerators, mnemonics, command-line info
+#----------------------------------------------------
+
+.buttons.clear config -text "Clear    Ctrl+C"
+bind . <Control-c> clearAction
+.buttons.add config -text "Add    Ctrl+A"
+bind . <Control-a> addAction
+.buttons.search config -text "Search    Ctrl+S"
+bind . <Control-s> "addAction; fillCard"
+.buttons.delete config -text "Delete...    Ctrl+D"
+bind . <Control-d> deleteAction
+
+.menu.file.m entryconfig 1 -accel Ctrl+F
+bind . <Control-f> fileAction
+.menu.file.m entryconfig 2 -accel Ctrl+Q
+bind . <Control-q> {destroy .}
+
+focus .frame.entry1
+
+#----------------------------------------------------
+# Phase 6: help
+#----------------------------------------------------
+
+proc Help {topic {x 0} {y 0}} {
+    global helpTopics helpCmds
+    if {$topic == ""} return
+    while {[info exists helpCmds($topic)]} {
+	set topic [eval $helpCmds($topic)]
+    }
+    if [info exists helpTopics($topic)] {
+	set msg $helpTopics($topic)
+    } else {
+	set msg "Sorry, but no help is available for this topic"
+    }
+    tk_dialog .help {Rolodex Help} "Information on $topic:\n\n$msg" \
+	    {} 0 OK
+}
+
+proc getMenuTopic {w x y} {
+    return $w.[$w index @[expr {$y-[winfo rooty $w]}]]
+}
+
+event add <<Help>> <F1> <Help>
+bind .    <<Help>> {Help [winfo containing %X %Y] %X %Y}
+bind Menu <<Help>> {Help [winfo containing %X %Y] %X %Y}
+
+# Help text and commands follow:
+
+set helpTopics(.menu.file) {This is the "file" menu.  It can be used to invoke some overall operations on the rolodex applications, such as loading a file or exiting.}
+
+set helpCmds(.menu.file.m) {getMenuTopic $topic $x $y}
+set helpTopics(.menu.file.m.1) {The "Load" entry in the "File" menu posts a dialog box that you can use to select a rolodex file}
+set helpTopics(.menu.file.m.2) {The "Exit" entry in the "File" menu causes the rolodex application to terminate}
+set helpCmds(.menu.file.m.none) {set topic ".menu.file"}
+
+set helpTopics(.frame.entry1) {In this field of the rolodex entry you should type the person's name}
+set helpTopics(.frame.entry2) {In this field of the rolodex entry you should type the first line of the person's address}
+set helpTopics(.frame.entry3) {In this field of the rolodex entry you should type the second line of the person's address}
+set helpTopics(.frame.entry4) {In this field of the rolodex entry you should type the third line of the person's address}
+set helpTopics(.frame.entry5) {In this field of the rolodex entry you should type the person's home phone number, or "private" if the person doesn't want his or her number publicized}
+set helpTopics(.frame.entry6) {In this field of the rolodex entry you should type the person's work phone number}
+set helpTopics(.frame.entry7) {In this field of the rolodex entry you should type the phone number for the person's FAX machine}
+
+set helpCmds(.frame.label1) {set topic .frame.entry1}
+set helpCmds(.frame.label2) {set topic .frame.entry2}
+set helpCmds(.frame.label3) {set topic .frame.entry3}
+set helpCmds(.frame.label4) {set topic .frame.entry4}
+set helpCmds(.frame.label5) {set topic .frame.entry5}
+set helpCmds(.frame.label6) {set topic .frame.entry6}
+set helpCmds(.frame.label7) {set topic .frame.entry7}
+
+set helpTopics(context) {Unfortunately, this application doesn't support context-sensitive help in the usual way, because when this demo was written Tk didn't have a grab mechanism and this is needed for context-sensitive help.  Instead, you can achieve much the same effect by simply moving the mouse over the window you're curious about and pressing the Help or F1 keys.  You can do this anytime.}
+set helpTopics(help) {This application provides only very crude help.  Besides the entries in this menu, you can get help on individual windows by moving the mouse cursor over the window and pressing the Help or F1 keys.}
+set helpTopics(window) {This window is a dummy rolodex application created as part of Tom LaStrange's toolkit benchmark.  It doesn't really do anything useful except to demonstrate a few features of the Tk toolkit.}
+set helpTopics(keys) "The following accelerator keys are defined for this application (in addition to those already available for the entry windows):\n\nCtrl+A:\t\tAdd\nCtrl+C:\t\tClear\nCtrl+D:\t\tDelete\nCtrl+F:\t\tEnter file name\nCtrl+Q:\t\tExit application (quit)\nCtrl+S:\t\tSearch (dummy operation)"
+set helpTopics(version) "This is version $version."
+
+# Entries in "Help" menu
+
+.menu.help.m add command -label "On Context..." -command {Help context} \
+	-underline 3
+.menu.help.m add command -label "On Help..." -command {Help help} \
+	-underline 3
+.menu.help.m add command -label "On Window..." -command {Help window} \
+	-underline 3
+.menu.help.m add command -label "On Keys..." -command {Help keys} \
+	-underline 3
+.menu.help.m add command -label "On Version..." -command {Help version}  \
+	-underline 3
+
+# Local Variables:
+# mode: tcl
+# End:

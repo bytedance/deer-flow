@@ -1,0 +1,47 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Author: Lasse Collin
+.\"
+.\" french translation of XZ Utils man
+.\" Copyright (C) 2021 Debian French l10n team <debian-l10n-french@lists.debian.org>
+.\"  Translator
+.\" bubu <bubub@no-log.org>, 2021.
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH LZMAINFO 1 30\-06\-2013 Tukaani "Utilitaires XZ"
+.SH NOM
+lzmainfo \- Afficher l'information stockée dans l'en\-tête du fichier .lzma
+.SH SYNOPSIS
+\fBlzmainfo\fP [\fB\-\-help\fP] [\fB\-\-version\fP] [\fIfichier...\fP]
+.SH DESCRIPTION
+\fBlzmainfo\fP affiche l'information stockée dans l'en\-tête du fichier
+\&\fB.lzma\fP. Il lit les 13 premiers octets du \fIfichier\fP indiqué, décode
+l'en\-tête, et l'écrit sur la sortie standard dans un format lisible par un
+humain. Si aucun \fIfichier\fP n'est spécifié ou si \fIfichier\fP est \fB\-\fP,
+l'entrée standard est lue.
+.PP
+Habituellement l'information la plus interressante est la taille non
+compressée et la taille du dictionnaire. La taille ne peut être affichée que
+si le fichier est dans la variante du format \fB.lzma\fP qui n'est pas en
+flux. La quantité de mémoire requise pour décompresser le fichier est de
+quelques douzaines de kilooctets en plus de la taille du dictionnaire.
+.PP
+\fBlzmainfo\fP est inclus dans les utilitaires XZ essentiellement pour des
+besoins de rétrocompatibilité avec les utilitaires LZMA.
+.SH "STATUT DE SORTIE"
+.TP 
+\fB0\fP
+Tout est bon.
+.TP 
+\fB1\fP
+Une erreur est survenue.
+.SH BOGUES
+\fBlzmainfo\fP utilise \fBMB\fP alors que le suffixe correct devrait être
+\fBMiB\fP(2^20 octets). Cela pour garder la sortie compatible avec les
+utilitaires LZMA.
+.SH "VOIR AUSSI"
+\fBxz\fP(1)

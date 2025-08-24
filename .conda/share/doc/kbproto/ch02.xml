@@ -1,0 +1,441 @@
+<chapter id='Keyboard_State'>
+<title>Keyboard State</title>
+<para>
+The core protocol description of
+keyboard state consists of eight <emphasis>
+modifiers</emphasis>
+(<emphasis>
+Shift</emphasis>
+, <emphasis>
+Lock</emphasis>
+, <emphasis>
+Control</emphasis>
+, and <emphasis>
+Mod1</emphasis>
+-<emphasis>
+Mod5</emphasis>
+). A modifier reports the state of one or modifier keys, which are similar to
+qualifier keys as defined by the ISO9995 standard:
+</para>
+
+<variablelist>
+  <varlistentry>
+    <term>Qualifier key</term>
+    <listitem>
+      <para>
+A key whose operation
+has no immediate effect, but which, for as long as it is held down, modifies
+the effect of other keys. A qualifier key may be, for example, a shift key or a
+control key.
+      </para>
+    </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+Whenever a modifier key is physically or logically depressed, the modifier it
+controls is set in the keyboard state. The protocol implies that certain
+modifier keys lock (i.e. affect modifier state after they have been physically
+released) but does not explicitly discuss locking keys or their behavior. The
+current modifier state is reported to clients in a number of core protocol
+events and can be determined using the <emphasis>
+QueryPointer</emphasis>
+ request.
+</para>
+
+<para>
+The XKB extension retains the eight "real" modifiers defined by the core
+protocol but extends the core protocol notion of <emphasis>
+keyboard state</emphasis>
+ to include up to four <emphasis>
+keysym groups</emphasis>
+, as defined by the ISO9995 standard:
+</para>
+
+
+<variablelist>
+  <varlistentry>
+    <term>Group:</term>
+    <listitem>
+      <para>
+A logical state of a keyboard providing
+access to a collection of characters. A group usually contains a set of
+characters which logically belong together and which may be arranged on several
+shift levels within that group.
+      </para>
+    </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+For example, keyboard group can be used to select between multiple alphabets on
+a single keyboard, or to access less-commonly used symbols within a character
+set.
+</para>
+
+<sect1 id='Locking_and_Latching_Modifiers_and_Groups'>
+<title>Locking and Latching Modifiers and Groups</title>
+<para>
+With the core protocol, there is no way to
+tell whether a modifier is set due to a lock or because the user is actually
+holding down a key; this can make for a clumsy user-interface as locked
+modifiers or group state interfere with accelerators and translations.
+</para>
+<para>
+XKB adds explicit support for locking
+and latching modifiers and groups. Locked modifiers or groups apply to all
+future key events until they are explicitly changed. Latched modifiers or
+groups apply only to the next key event that does not change keyboard state.
+</para>
+
+</sect1>
+<sect1 id='Fundamental_Components_of_XKB_Keyboard_State'>
+<title>Fundamental Components of XKB Keyboard State</title>
+<para>
+The fundamental components of XKB keyboard state include:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The locked modifiers and group</para>
+</listitem>
+<listitem>
+  <para>The latched modifiers and group</para>
+</listitem>
+<listitem>
+  <para>The base modifiers and group (for which keys are physically or
+logically down)
+  </para>
+</listitem>
+<listitem>
+  <para>The effective modifiers and group (the cumulative effect of the base,
+locked and latched modifier and group states).
+  </para>
+</listitem>
+<listitem>
+  <para>State of the core pointer buttons.</para>
+</listitem>
+</itemizedlist>
+
+<para>
+The latched and locked state of modifiers and groups can be changed in response
+to keyboard activity or under application control using the <emphasis>
+XkbLatchLockState</emphasis>
+ request. The base modifier, base group
+and pointer button states always reflect the logical state of the keyboard and
+pointer and change <emphasis>
+only</emphasis>
+ in response to keyboard or pointer activity.
+</para>
+
+<sect2 id='Computing_Effective_Modifier_and_Group'>
+<title>Computing Effective Modifier and Group</title>
+<para>
+The effective modifiers and group
+report the cumulative effects of the base, latched and locked modifiers and
+group respectively, and cannot be directly changed. Note that the effective
+modifiers and effective group are computed differently.
+</para>
+
+<para>
+The effective modifiers are simply the bitwise union of the base, latched and
+locked modifiers.
+</para>
+
+
+<para>
+The effective group is the arithmetic sum of the base, latched and locked
+groups. The locked and effective keyboard group must fall in the range
+<emphasis>
+Group1</emphasis>
+-<emphasis>
+Group4</emphasis>
+, so they are adjusted into range as specified by the global <emphasis>
+GroupsWrap </emphasis>
+control as follows:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+If the <emphasis>
+RedirectIntoRange</emphasis>
+ flag is set, the four least significant
+bits of the groups wrap control specify the index of a group to which all
+illegal groups correspond. If the specified group is also out of range, all
+illegal groups map to <emphasis>
+Group1</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the <emphasis>
+ClampIntoRange</emphasis>
+ flag is set, out-of-range groups
+correspond to the nearest legal group. Effective groups larger than the highest
+supported group are mapped to the highest supported group; effective groups
+less than <emphasis>
+Group1</emphasis>
+ are mapped to <emphasis>
+Group1</emphasis>
+. For example, a key with two groups of symbols uses <emphasis>
+Group2</emphasis>
+ type and symbols if the global effective group is either <emphasis>
+Group3</emphasis>
+ or <emphasis>
+Group4</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If neither flag is set, group is
+wrapped into range using integer modulus. For example, a key with two groups of
+symbols for which groups wrap uses <emphasis>
+Group1</emphasis>
+ symbols if the global effective group is <emphasis>
+Group3</emphasis>
+ or <emphasis>
+Group2</emphasis>
+ symbols if the global effective group is <emphasis>
+Group4</emphasis>.
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+The base and latched keyboard groups are unrestricted eight-bit integer values
+and are not affected by the <emphasis>
+GroupsWrap</emphasis>
+ control.
+</para>
+
+</sect2>
+
+<sect2 id='Computing_A_State_Field_from_an_XKB_State'>
+<title>Computing A State Field from an XKB State</title>
+<para>
+Many events report the keyboard state
+in a single <emphasis>
+state</emphasis>
+ field. Using XKB, a state field combines modifiers, group and the pointer
+button state into a single sixteen bit value as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>Bits 0 through 7 (the least significant eight bits) of the effective
+state comprise a mask of type KEYMASK which reports the state modifiers.
+  </para>
+</listitem>
+<listitem>
+  <para>Bits 8 through 12 comprise a mask of type BUTMASK which reports pointer
+button state.
+  </para>
+</listitem>
+<listitem>
+  <para>Bits 13 and 14 are interpreted as a two-bit unsigned numeric value and
+report the state keyboard group.
+  </para>
+</listitem>
+<listitem>
+  <para>Bit 15 (the most significant bit) is reserved and must be zero.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+It is possible to assemble a state field from any of the components of the XKB
+keyboard state. For example, the effective keyboard state would be assembled as
+described above using the effective keyboard group, the effective keyboard
+modifiers and the pointer button state.
+</para>
+
+</sect2>
+</sect1>
+
+<sect1 id='Derived_Components_of_XKB_Keyboard_State'>
+<title>Derived Components of XKB Keyboard State</title>
+<para>
+In addition to the fundamental state
+components, XKB keeps track of and reports a number of state components which
+are derived from the fundamental components but stored and reported separately
+to make it easier to track changes in the keyboard state. These derived
+components are updated automatically whenever any of the fundamental components
+change but cannot be changed directly.
+</para>
+
+<para>
+The first pair of derived state components control the way that passive grabs
+are activated and the way that modifiers are reported in core protocol events
+that report state. The server uses the <emphasis>
+ServerInternalModifiers</emphasis>
+, <emphasis>
+IgnoreLocksModifiers</emphasis>
+ and <emphasis>
+IgnoreGroupLock</emphasis>
+ controls, described in <link linkend='Server_Internal_Modifiers_and_Ignore_Locks_Behavior'>Server
+Internal Modifiers and Ignore Locks Behavior</link>, to derive these two
+states as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The lookup state is the state used to determine the symbols associated
+with a key event and consists of the effective state minus any server internal
+modifiers.
+  </para>
+</listitem>
+<listitem>
+  <para>The grab state is the state used to decide whether a particular event
+triggers a passive grab and consists of the lookup state minus any members of
+the ignore locks modifiers that are not either latched or logically depressed.
+If the ignore group locks control is set, the grab state does not include the
+effects of any locked groups.
+  </para>
+</listitem>
+</itemizedlist>
+
+<sect2 id='Server_Internal_Modifiers_and_Ignore_Locks_Behavior'>
+<title>Server Internal Modifiers and Ignore Locks Behavior</title>
+<para>
+The core protocol does not provide any
+way to exclude certain modifiers from client events, so there is no way to set
+up a modifier which affects only the server.
+</para>
+
+<para>
+The modifiers specified in the mask of the <emphasis>
+InternalMods</emphasis>
+ control are not reported in any core
+protocol events, are not used to determine grabs and are not used to calculate
+compatibility state for XKB-unaware clients. Server internal modifiers affect
+only the action applied when a key is pressed.
+</para>
+
+
+<para>
+The core protocol does not provide any way to exclude certain modifiers from
+grab calculations, so locking modifiers often have unanticipated and
+unfortunate side-effects. XKB provides another mask which can help avoid some
+of these problems.
+</para>
+
+
+<para>
+The locked state of the modifiers specified in mask of the <emphasis>
+IgnoreLockMods</emphasis>
+ control is not reported in most core
+protocol events and is not used to activate grabs. The only core events which
+include the locked state of the modifiers in the ignore locks mask are key
+press and release events that do not activate a passive grab and which do not
+occur while a grab is active. If the <emphasis>
+IgnoreGroupLock</emphasis>
+ control is set, the locked state of the
+keyboard group is not considered when activating passive grabs.
+</para>
+
+
+<para>
+Without XKB, the passive grab set by a translation (e.g. <emphasis>
+Alt&lt;KeyPress&gt;space</emphasis>
+) does not trigger if any modifiers other than those specified by the
+translation are set, with the result that many user interface components do not
+react when either Num Lock or when the secondary keyboard group are active. The
+ignore locks mask and the ignore group locks control make it possible to avoid
+this behavior without exhaustively grabbing every possible modifier combination.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='Compatibility_Components_of_Keyboard_State'>
+<title>Compatibility Components of Keyboard State</title>
+<para>
+The core protocol interpretation of
+keyboard modifiers does not include direct support for multiple groups, so XKB
+reports the effective keyboard group to XKB-aware clients using some of the
+reserved bits in the state field of some core protocol events, as described in
+<link linkend='Computing_A_State_Field_from_an_XKB_State'>Computing A State Field from an
+XKB State</link>.
+</para>
+
+<para>
+This modified state field would not be interpreted correctly by XKB-unaware
+clients, so XKB provides a <emphasis>
+group compatibility mapping</emphasis>
+(see <link linkend='Group_Compatibility_Map'>Group Compatibility Map</link>) which
+remaps the keyboard group into a core modifier mask that has similar effects,
+when possible. XKB maintains three compatibility state components that are used
+to make non-XKB clients work as well as possible:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+The <emphasis>
+compatibility state</emphasis>
+ corresponds to the effective modifier
+and effective group state.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+The <emphasis>
+compatibility lookup state</emphasis>
+ is the core-protocol equivalent of the
+lookup state.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+The <emphasis>
+compatibility grab state</emphasis>
+ is the nearest core-protocol equivalent
+of the grab state.
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+Compatibility states are essentially the corresponding XKB state, but with
+keyboard group possibly encoded as one or more modifiers; <link linkend='Group_Compatibility_Map'>Group Compatibility Map</link> describes
+the group compatibility map, which specifies the modifier(s) that correspond to
+each keyboard group.
+</para>
+
+
+<para>
+The compatibility state reported to XKB-unaware
+ clients for any given core protocol event
+is computed from the modifier state that XKB-capable clients would see for that
+same event. For example, if the ignore group locks control is set and group 2
+is locked, the modifier bound to <emphasis>
+Mode_switch</emphasis>
+ is not reported in any event except (Device)KeyPress and (Device)KeyRelease
+events that do not trigger a passive grab.
+</para>
+
+<note>
+<para>
+Referring to clients as "XKB-capable
+ is somewhat misleading in this context.
+The sample implementation of XKB invisibly extends the X library to use the
+keyboard extension if it is present. This means that most clients can take
+advantage of all of XKB without modification, but it also means that the XKB
+state can be reported to clients that have not explicitly requested the
+keyboard extension. Clients that <emphasis>
+directly</emphasis>
+ interpret the state field of core protocol events or that interpret the keymap
+directly may be affected by some of the XKB differences; clients that use
+library or toolkit routines to interpret keyboard events automatically use all
+of the XKB features.
+</para>
+</note>
+
+<para>
+XKB-aware clients can query the keyboard state at any time or request immediate
+notification of a change to any of the fundamental or derived components of the
+keyboard state.
+</para>
+</sect1>
+</chapter>

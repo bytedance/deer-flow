@@ -1,0 +1,13 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+enginesdir=${libdir}/engines-3
+modulesdir=${libdir}/ossl-modules
+
+Name: OpenSSL-libcrypto
+Description: OpenSSL cryptography library
+Version: 3.0.17
+Libs: -L${libdir} -lcrypto
+Libs.private: -ldl -pthread 
+Cflags: -I${includedir}

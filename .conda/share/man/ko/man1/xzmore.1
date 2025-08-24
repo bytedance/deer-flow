@@ -1,0 +1,42 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Andrew Dudman
+.\"          Lasse Collin
+.\"
+.\" Korean translation for the xz-man
+.\" Seong-ho Cho <darkcircle.0426@gmail.com>, 2023, 2024.
+.\"
+.\" (Note that this file is based on xzless.1 instead of gzip's zmore.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZMORE 1 2024\-02\-12 Tukaani "XZ 유틸리티"
+.SH 이름
+xzmore, lzmore \- xz 압축 (텍스트) 파일 또는 lzma 압축 (텍스트) 파일을 봅니다
+.
+.SH 요약
+\fBxzmore\fP [\fI<파일>\fP...]
+.br
+\fBlzmore\fP [\fI<파일>\fP...]
+.
+.SH 설명
+\fBxzmore\fP 명령은 압축 파일에 들어있는 텍스트를 \fBmore\fP(1) 명령으로 터미널에 나타냅니다.  \fBxz\fP(1) 방식으로
+압축을 해제하는 파일만 지원합니다.  다른 파일은 이미 압축을 해제한 파일로 간주합니다.  \fI<파일>\fP을 지정하지
+않으면, \fBxzmore\fP 프로그램에서는 표준 입력을 읽어들입니다.  키보드 명령 정보는 \fBmore\fP(1)  설명서를 참고하십시오.
+.PP
+참고로 \fBmore\fP(1) 명령 구현체에 따라 반대 방향(윗방향)으로의 스크롤은 못할 수도 있습니다.  \fBxzmore\fP 명령이
+\fBmore\fP(1) 명령에 압축 해제한 데이터를 파이프로 전달하기 때문입니다.  \fBxzless\fP(1)는   좀 더 나은 기능을 가진
+\fBless\fP(1) 명령을 활용합니다.
+.PP
+\fBlzmore\fP 명령은 LZMA 유틸리티 하위 호환용으로 제공합니다.
+.
+.SH 환경
+.TP 
+\fBPAGER\fP
+\fBPAGER\fP 환경변수 값을 설정했다면 \fBmore\fP(1) 대신 해당 환경변수 값을 사용합니다.
+.
+.SH "추가 참조"
+\fBmore\fP(1), \fBxz\fP(1), \fBxzless\fP(1), \fBzmore\fP(1)

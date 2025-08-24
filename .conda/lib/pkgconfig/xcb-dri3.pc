@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB DRI3
+Description: XCB DRI3 Extension
+Version: 1.17.0
+Requires.private: xcb
+Libs: -L${libdir} -lxcb-dri3
+Cflags: -I${includedir}

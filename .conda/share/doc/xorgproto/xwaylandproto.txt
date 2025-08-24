@@ -1,0 +1,96 @@
+                        The XWAYLAND Extension
+			    Version 1.0
+			     2022-07-29
+
+1. Introduction
+
+The XWAYLAND extension allows clients to reliably identify whether an X server
+is Xwayland. It does not provide any functionality beyond the absolute minimum
+to identify as extension.
+
+Only Xwayland initializes this extension. Thus, if the extension is present,
+the X server is Xwayland. Clients should not need the protocol detailed in this
+document, a QueryExtension or ListExtensions request is sufficient to check
+whether the extension is present.
+
+The protocol detailed in this document is merely to future-proof this extension
+in case actual functionality is added in the future.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+2. Version History
+
+- 1.0, July 2022: QueryVersion request only
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+3. Events and Errors
+
+XWAYLAND defines no events or errrors
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+4. Extension initialization
+
+The name of this extension is "XWAYLAND"
+
+┌───
+   XwlQueryVersion
+	client-major-version:	CARD16
+	client-minor-version:	CARD16
+      ▶
+	major-version:		CARD16
+	minor-version:		CARD16
+└───
+
+	The client sends the highest supported version to the server
+	and the server replies with the highest version it supports,
+	but no higher than the requested version. Major versions changes
+	can introduce incompatibilities in existing functionality, minor
+	version changes introduce only backward compatible changes.
+	It is the clients responsibility to ensure that the server
+	supports a version which is compatible with its expectations.
+
+	Backwards compatible changes include addition of new
+	requests.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+Appendix A. Protocol Encoding
+
+Syntactic Conventions
+
+This document uses the same syntactic conventions as the core X
+protocol encoding document.
+
+A.1 Common Types
+
+None.
+
+A.2 Protocol Requests
+
+┌───
+    XwlQueryVersion
+	1	CARD8			major opcode
+	1	0			XWAYLAND opcode
+	2	2			length
+	2	CARD16			major version
+	2	CARD16			minor version
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	2	CARD16			major version
+	2	CARD16			minor version
+	20				unused
+└───
+
+A.3 Protocol Events
+
+The XWAYLAND extension defines no events.
+
+A.4 Protocol Errors
+
+The XWAYLAND extension defines no errors.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄

@@ -1,0 +1,338 @@
+'\" -*- coding: us-ascii -*-
+.if \n(.g .ds T< \\FC
+.if \n(.g .ds T> \\F[\n[.fam]]
+.de URL
+\\$2 \(la\\$1\(ra\\$3
+..
+.if \n(.g .mso www.tmac
+.TH XMLWF 1 "March 27, 2025" "" ""
+.SH NAME
+xmlwf \- Determines if an XML document is well-formed
+.SH SYNOPSIS
+'nh
+.fi
+.ad l
+\fBxmlwf\fR \kx
+.if (\nx>(\n(.l/2)) .nr x (\n(.l/5)
+'in \n(.iu+\nxu
+[\fIOPTIONS\fR] [\fIFILE\fR ...]
+'in \n(.iu-\nxu
+.ad b
+'hy
+'nh
+.fi
+.ad l
+\fBxmlwf\fR \kx
+.if (\nx>(\n(.l/2)) .nr x (\n(.l/5)
+'in \n(.iu+\nxu
+\fB-h\fR | \fB--help\fR 
+'in \n(.iu-\nxu
+.ad b
+'hy
+'nh
+.fi
+.ad l
+\fBxmlwf\fR \kx
+.if (\nx>(\n(.l/2)) .nr x (\n(.l/5)
+'in \n(.iu+\nxu
+\fB-v\fR | \fB--version\fR 
+'in \n(.iu-\nxu
+.ad b
+'hy
+.SH DESCRIPTION
+\fBxmlwf\fR uses the Expat library to
+determine if an XML document is well-formed. It is
+non-validating.
+.PP
+If you do not specify any files on the command-line, and you
+have a recent version of \fBxmlwf\fR, the
+input file will be read from standard input.
+.SH "WELL-FORMED DOCUMENTS"
+A well-formed document must adhere to the
+following rules:
+.TP 0.2i
+\(bu
+The file begins with an XML declaration. For instance,
+\*(T<<?xml version="1.0" standalone="yes"?>\*(T>.
+\fINOTE\fR:
+\fBxmlwf\fR does not currently
+check for a valid XML declaration.
+.TP 0.2i
+\(bu
+Every start tag is either empty (<tag/>)
+or has a corresponding end tag.
+.TP 0.2i
+\(bu
+There is exactly one root element. This element must contain
+all other elements in the document. Only comments, white
+space, and processing instructions may come after the close
+of the root element.
+.TP 0.2i
+\(bu
+All elements nest properly.
+.TP 0.2i
+\(bu
+All attribute values are enclosed in quotes (either single
+or double).
+.PP
+If the document has a DTD, and it strictly complies with that
+DTD, then the document is also considered \fIvalid\fR.
+\fBxmlwf\fR is a non-validating parser --
+it does not check the DTD. However, it does support
+external entities (see the \*(T<\fB\-x\fR\*(T> option).
+.SH OPTIONS
+When an option includes an argument, you may specify the argument either
+separately ("\*(T<\fB\-d\fR\*(T> \fIoutput\fR") or concatenated with the
+option ("\*(T<\fB\-d\fR\*(T>\fIoutput\fR"). \fBxmlwf\fR
+supports both.
+.TP 
+\*(T<\fB\-a\fR\*(T> \fIfactor\fR
+Sets the maximum tolerated amplification factor
+for protection against billion laughs attacks (default: 100.0).
+The amplification factor is calculated as ..
+
+.nf
+
+            amplification := (direct + indirect) / direct
+          
+.fi
+
+\&.. while parsing, whereas
+<direct> is the number of bytes read
+from the primary document in parsing and
+<indirect> is the number of bytes
+added by expanding entities and reading of external DTD files,
+combined.
+
+\fINOTE\fR:
+If you ever need to increase this value for non-attack payload,
+please file a bug report.
+.TP 
+\*(T<\fB\-b\fR\*(T> \fIbytes\fR
+Sets the number of output bytes (including amplification)
+needed to activate protection against billion laughs attacks
+(default: 8 MiB).
+This can be thought of as an "activation threshold".
+
+\fINOTE\fR:
+If you ever need to increase this value for non-attack payload,
+please file a bug report.
+.TP 
+\*(T<\fB\-c\fR\*(T>
+If the input file is well-formed and \fBxmlwf\fR
+doesn't encounter any errors, the input file is simply copied to
+the output directory unchanged.
+This implies no namespaces (turns off \*(T<\fB\-n\fR\*(T>) and
+requires \*(T<\fB\-d\fR\*(T> to specify an output directory.
+.TP 
+\*(T<\fB\-d\fR\*(T> \fIoutput-dir\fR
+Specifies a directory to contain transformed
+representations of the input files.
+By default, \*(T<\fB\-d\fR\*(T> outputs a canonical representation
+(described below).
+You can select different output formats using \*(T<\fB\-c\fR\*(T>,
+\*(T<\fB\-m\fR\*(T> and \*(T<\fB\-N\fR\*(T>.
+
+The output filenames will
+be exactly the same as the input filenames or "STDIN" if the input is
+coming from standard input. Therefore, you must be careful that the
+output file does not go into the same directory as the input
+file. Otherwise, \fBxmlwf\fR will delete the
+input file before it generates the output file (just like running
+\*(T<cat < file > file\*(T> in most shells).
+
+Two structurally equivalent XML documents have a byte-for-byte
+identical canonical XML representation.
+Note that ignorable white space is considered significant and
+is treated equivalently to data.
+More on canonical XML can be found at
+http://www.jclark.com/xml/canonxml.html .
+.TP 
+\*(T<\fB\-e\fR\*(T> \fIencoding\fR
+Specifies the character encoding for the document, overriding
+any document encoding declaration. \fBxmlwf\fR
+supports four built-in encodings:
+\*(T<US\-ASCII\*(T>,
+\*(T<UTF\-8\*(T>,
+\*(T<UTF\-16\*(T>, and
+\*(T<ISO\-8859\-1\*(T>.
+Also see the \*(T<\fB\-w\fR\*(T> option.
+.TP 
+\*(T<\fB\-g\fR\*(T> \fIbytes\fR
+Sets the buffer size to request per call pair to
+\*(T<\fBXML_GetBuffer\fR\*(T> and \*(T<\fBread\fR\*(T>
+(default: 8 KiB).
+.TP 
+\*(T<\fB\-h\fR\*(T>, \*(T<\fB\-\-help\fR\*(T>
+Prints short usage information on command \fBxmlwf\fR,
+and then exits.
+Similar to this man page but more concise.
+.TP 
+\*(T<\fB\-k\fR\*(T>
+When processing multiple files, \fBxmlwf\fR
+by default halts after the the first file with an error.
+This tells \fBxmlwf\fR to report the error
+but to keep processing.
+This can be useful, for example, when testing a filter that converts
+many files to XML and you want to quickly find out which conversions
+failed.
+.TP 
+\*(T<\fB\-m\fR\*(T>
+Outputs some strange sort of XML file that completely
+describes the input file, including character positions.
+Requires \*(T<\fB\-d\fR\*(T> to specify an output file.
+.TP 
+\*(T<\fB\-n\fR\*(T>
+Turns on namespace processing. (describe namespaces)
+\*(T<\fB\-c\fR\*(T> disables namespaces.
+.TP 
+\*(T<\fB\-N\fR\*(T>
+Adds a doctype and notation declarations to canonical XML output.
+This matches the example output used by the formal XML test cases.
+Requires \*(T<\fB\-d\fR\*(T> to specify an output file.
+.TP 
+\*(T<\fB\-p\fR\*(T>
+Tells \fBxmlwf\fR to process external DTDs and parameter
+entities.
+
+Normally \fBxmlwf\fR never parses parameter
+entities. \*(T<\fB\-p\fR\*(T> tells it to always parse them.
+\*(T<\fB\-p\fR\*(T> implies \*(T<\fB\-x\fR\*(T>.
+.TP 
+\*(T<\fB\-q\fR\*(T>
+Disable reparse deferral, and allow quadratic parse runtime
+on large tokens (default: reparse deferral enabled).
+.TP 
+\*(T<\fB\-r\fR\*(T>
+Normally \fBxmlwf\fR memory-maps the XML file
+before parsing; this can result in faster parsing on many
+platforms.
+\*(T<\fB\-r\fR\*(T> turns off memory-mapping and uses normal file
+IO calls instead.
+Of course, memory-mapping is automatically turned off
+when reading from standard input.
+
+Use of memory-mapping can cause some platforms to report
+substantially higher memory usage for
+\fBxmlwf\fR, but this appears to be a matter of
+the operating system reporting memory in a strange way; there is
+not a leak in \fBxmlwf\fR.
+.TP 
+\*(T<\fB\-s\fR\*(T>
+Prints an error if the document is not standalone. 
+A document is standalone if it has no external subset and no
+references to parameter entities.
+.TP 
+\*(T<\fB\-t\fR\*(T>
+Turns on timings. This tells Expat to parse the entire file,
+but not perform any processing.
+This gives a fairly accurate idea of the raw speed of Expat itself
+without client overhead.
+\*(T<\fB\-t\fR\*(T> turns off most of the output options
+(\*(T<\fB\-d\fR\*(T>, \*(T<\fB\-m\fR\*(T>, \*(T<\fB\-c\fR\*(T>, ...).
+.TP 
+\*(T<\fB\-v\fR\*(T>, \*(T<\fB\-\-version\fR\*(T>
+Prints the version of the Expat library being used, including some
+information on the compile-time configuration of the library, and
+then exits.
+.TP 
+\*(T<\fB\-w\fR\*(T>
+Enables support for Windows code pages.
+Normally, \fBxmlwf\fR will throw an error if it
+runs across an encoding that it is not equipped to handle itself. With
+\*(T<\fB\-w\fR\*(T>, \fBxmlwf\fR will try to use a Windows code
+page. See also \*(T<\fB\-e\fR\*(T>.
+.TP 
+\*(T<\fB\-x\fR\*(T>
+Turns on parsing external entities.
+
+Non-validating parsers are not required to resolve external
+entities, or even expand entities at all.
+Expat always expands internal entities (?),
+but external entity parsing must be enabled explicitly.
+
+External entities are simply entities that obtain their
+data from outside the XML file currently being parsed.
+
+This is an example of an internal entity:
+
+.nf
+
+<!ENTITY vers '1.0.2'>
+.fi
+
+And here are some examples of external entities:
+
+.nf
+
+<!ENTITY header SYSTEM "header\-&vers;.xml">  (parsed)
+<!ENTITY logo SYSTEM "logo.png" PNG>         (unparsed)
+.fi
+.TP 
+\*(T<\fB\-\-\fR\*(T>
+(Two hyphens.)
+Terminates the list of options. This is only needed if a filename
+starts with a hyphen. For example:
+
+.nf
+
+xmlwf \-\- \-myfile.xml
+.fi
+
+will run \fBxmlwf\fR on the file
+\*(T<\fI\-myfile.xml\fR\*(T>.
+.PP
+Older versions of \fBxmlwf\fR do not support
+reading from standard input.
+.SH OUTPUT
+\fBxmlwf\fR outputs nothing for files which are problem-free.
+If any input file is not well-formed, or if the output for any
+input file cannot be opened, \fBxmlwf\fR prints a single
+line describing the problem to standard output.
+.PP
+If the \*(T<\fB\-k\fR\*(T> option is not provided, \fBxmlwf\fR
+halts upon encountering a well-formedness or output-file error. 
+If \*(T<\fB\-k\fR\*(T> is provided, \fBxmlwf\fR continues
+processing the remaining input files, describing problems found with any of them.
+.SH "EXIT STATUS"
+For options \*(T<\fB\-v\fR\*(T>|\*(T<\fB\-\-version\fR\*(T> or \*(T<\fB\-h\fR\*(T>|\*(T<\fB\-\-help\fR\*(T>, \fBxmlwf\fR always exits with status code 0. For other cases, the following exit status codes are returned:
+.TP 
+\*(T<\fB0\fR\*(T>
+The input files are well-formed and the output (if requested) was written successfully.
+.TP 
+\*(T<\fB1\fR\*(T>
+An internal error occurred.
+.TP 
+\*(T<\fB2\fR\*(T>
+One or more input files were not well-formed or could not be parsed.
+.TP 
+\*(T<\fB3\fR\*(T>
+If using the \*(T<\fB\-d\fR\*(T> option, an error occurred opening an output file.
+.TP 
+\*(T<\fB4\fR\*(T>
+There was a command-line argument error in how \fBxmlwf\fR was invoked.
+.SH BUGS
+The errors should go to standard error, not standard output.
+.PP
+There should be a way to get \*(T<\fB\-d\fR\*(T> to send its
+output to standard output rather than forcing the user to send
+it to a file.
+.PP
+I have no idea why anyone would want to use the
+\*(T<\fB\-d\fR\*(T>, \*(T<\fB\-c\fR\*(T>, and
+\*(T<\fB\-m\fR\*(T> options. If someone could explain it to
+me, I'd like to add this information to this manpage.
+.SH "SEE ALSO"
+.nf
+
+The Expat home page:                            https://libexpat.github.io/
+The W3 XML 1.0 specification (fourth edition):  https://www.w3.org/TR/2006/REC\-xml\-20060816/
+Billion laughs attack:                          https://en.wikipedia.org/wiki/Billion_laughs_attack
+.fi
+.SH AUTHOR
+This manual page was originally written by Scott Bronson <\*(T<bronson@rinspin.com\*(T>>
+in December 2001 for
+the Debian GNU/Linux system (but may be used by others). Permission is
+granted to copy, distribute and/or modify this document under
+the terms of the GNU Free Documentation
+License, Version 1.1.

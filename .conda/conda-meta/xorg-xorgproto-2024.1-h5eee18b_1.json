@@ -1,0 +1,1929 @@
+{
+  "build": "h5eee18b_1",
+  "build_number": 1,
+  "channel": "https://repo.anaconda.com/pkgs/main/linux-64",
+  "constrains": [
+    "xorg-xextproto <0.0.0a",
+    "xorg-xproto <0.0.0a",
+    "xorg-recordproto <0.0.0a",
+    "xorg-randrproto <0.0.0a",
+    "xorg-xf86dgaproto <0.0.0a",
+    "xorg-xf86vidmodeproto <0.0.0a",
+    "xorg-xcmiscproto <0.0.0a",
+    "xorg-applewmproto <0.0.0a",
+    "xorg-damageproto <0.0.0a",
+    "xorg-xf86driproto <0.0.0a",
+    "xorg-renderproto <0.0.0a",
+    "xorg-kbproto <0.0.0a",
+    "xorg-glproto <0.0.0a",
+    "xorg-inputproto <0.0.0a",
+    "xorg-scrnsaverproto <0.0.0a",
+    "xorg-compositeproto <0.0.0a",
+    "xorg-videoproto <0.0.0a",
+    "xorg-xwaylandproto <0.0.0a",
+    "xorg-dri3proto <0.0.0a",
+    "xorg-fixesproto <0.0.0a",
+    "xorg-dri2proto <0.0.0a",
+    "xorg-resourceproto <0.0.0a",
+    "xorg-dpmsproto <0.0.0a",
+    "xorg-xineramaproto <0.0.0a",
+    "xorg-fontsproto <0.0.0a",
+    "xorg-dmxproto <0.0.0a",
+    "xorg-xf86bigfontproto <0.0.0a",
+    "xorg-presentproto <0.0.0a",
+    "xorg-bigreqsproto <0.0.0a"
+  ],
+  "depends": [
+    "libgcc-ng >=11.2.0"
+  ],
+  "extracted_package_dir": "/home/kie/miniconda3/pkgs/xorg-xorgproto-2024.1-h5eee18b_1",
+  "files": [
+    "include/GL/glxint.h",
+    "include/GL/glxmd.h",
+    "include/GL/glxproto.h",
+    "include/GL/glxtokens.h",
+    "include/GL/internal/glcore.h",
+    "include/X11/DECkeysym.h",
+    "include/X11/HPkeysym.h",
+    "include/X11/Sunkeysym.h",
+    "include/X11/X.h",
+    "include/X11/XF86keysym.h",
+    "include/X11/XWDFile.h",
+    "include/X11/Xalloca.h",
+    "include/X11/Xarch.h",
+    "include/X11/Xatom.h",
+    "include/X11/Xdefs.h",
+    "include/X11/Xfuncproto.h",
+    "include/X11/Xfuncs.h",
+    "include/X11/Xmd.h",
+    "include/X11/Xos.h",
+    "include/X11/Xos_r.h",
+    "include/X11/Xosdefs.h",
+    "include/X11/Xpoll.h",
+    "include/X11/Xproto.h",
+    "include/X11/Xprotostr.h",
+    "include/X11/Xthreads.h",
+    "include/X11/Xw32defs.h",
+    "include/X11/Xwindows.h",
+    "include/X11/Xwinsock.h",
+    "include/X11/ap_keysym.h",
+    "include/X11/dri/xf86dri.h",
+    "include/X11/dri/xf86driproto.h",
+    "include/X11/dri/xf86dristr.h",
+    "include/X11/extensions/EVI.h",
+    "include/X11/extensions/EVIproto.h",
+    "include/X11/extensions/XI.h",
+    "include/X11/extensions/XI2.h",
+    "include/X11/extensions/XI2proto.h",
+    "include/X11/extensions/XIproto.h",
+    "include/X11/extensions/XKB.h",
+    "include/X11/extensions/XKBproto.h",
+    "include/X11/extensions/XKBsrv.h",
+    "include/X11/extensions/XKBstr.h",
+    "include/X11/extensions/XResproto.h",
+    "include/X11/extensions/Xv.h",
+    "include/X11/extensions/XvMC.h",
+    "include/X11/extensions/XvMCproto.h",
+    "include/X11/extensions/Xvproto.h",
+    "include/X11/extensions/ag.h",
+    "include/X11/extensions/agproto.h",
+    "include/X11/extensions/applewmconst.h",
+    "include/X11/extensions/applewmproto.h",
+    "include/X11/extensions/bigreqsproto.h",
+    "include/X11/extensions/bigreqstr.h",
+    "include/X11/extensions/composite.h",
+    "include/X11/extensions/compositeproto.h",
+    "include/X11/extensions/cup.h",
+    "include/X11/extensions/cupproto.h",
+    "include/X11/extensions/damageproto.h",
+    "include/X11/extensions/damagewire.h",
+    "include/X11/extensions/dbe.h",
+    "include/X11/extensions/dbeproto.h",
+    "include/X11/extensions/dmx.h",
+    "include/X11/extensions/dmxproto.h",
+    "include/X11/extensions/dpmsconst.h",
+    "include/X11/extensions/dpmsproto.h",
+    "include/X11/extensions/dri2proto.h",
+    "include/X11/extensions/dri2tokens.h",
+    "include/X11/extensions/dri3proto.h",
+    "include/X11/extensions/ge.h",
+    "include/X11/extensions/geproto.h",
+    "include/X11/extensions/lbx.h",
+    "include/X11/extensions/lbxproto.h",
+    "include/X11/extensions/mitmiscconst.h",
+    "include/X11/extensions/mitmiscproto.h",
+    "include/X11/extensions/multibufconst.h",
+    "include/X11/extensions/multibufproto.h",
+    "include/X11/extensions/panoramiXproto.h",
+    "include/X11/extensions/presentproto.h",
+    "include/X11/extensions/presenttokens.h",
+    "include/X11/extensions/randr.h",
+    "include/X11/extensions/randrproto.h",
+    "include/X11/extensions/recordconst.h",
+    "include/X11/extensions/recordproto.h",
+    "include/X11/extensions/recordstr.h",
+    "include/X11/extensions/render.h",
+    "include/X11/extensions/renderproto.h",
+    "include/X11/extensions/saver.h",
+    "include/X11/extensions/saverproto.h",
+    "include/X11/extensions/secur.h",
+    "include/X11/extensions/securproto.h",
+    "include/X11/extensions/shapeconst.h",
+    "include/X11/extensions/shapeproto.h",
+    "include/X11/extensions/shapestr.h",
+    "include/X11/extensions/shm.h",
+    "include/X11/extensions/shmproto.h",
+    "include/X11/extensions/shmstr.h",
+    "include/X11/extensions/syncconst.h",
+    "include/X11/extensions/syncproto.h",
+    "include/X11/extensions/syncstr.h",
+    "include/X11/extensions/xcmiscproto.h",
+    "include/X11/extensions/xcmiscstr.h",
+    "include/X11/extensions/xf86bigfont.h",
+    "include/X11/extensions/xf86bigfproto.h",
+    "include/X11/extensions/xf86bigfstr.h",
+    "include/X11/extensions/xf86dga.h",
+    "include/X11/extensions/xf86dga1const.h",
+    "include/X11/extensions/xf86dga1proto.h",
+    "include/X11/extensions/xf86dga1str.h",
+    "include/X11/extensions/xf86dgaconst.h",
+    "include/X11/extensions/xf86dgaproto.h",
+    "include/X11/extensions/xf86dgastr.h",
+    "include/X11/extensions/xf86vm.h",
+    "include/X11/extensions/xf86vmproto.h",
+    "include/X11/extensions/xf86vmstr.h",
+    "include/X11/extensions/xfixesproto.h",
+    "include/X11/extensions/xfixeswire.h",
+    "include/X11/extensions/xtestconst.h",
+    "include/X11/extensions/xtestext1const.h",
+    "include/X11/extensions/xtestext1proto.h",
+    "include/X11/extensions/xtestproto.h",
+    "include/X11/extensions/xwaylandproto.h",
+    "include/X11/fonts/FS.h",
+    "include/X11/fonts/FSproto.h",
+    "include/X11/fonts/font.h",
+    "include/X11/fonts/fontproto.h",
+    "include/X11/fonts/fontstruct.h",
+    "include/X11/fonts/fsmasks.h",
+    "include/X11/keysym.h",
+    "include/X11/keysymdef.h",
+    "share/doc/bigreqsproto/bigreq.xml",
+    "share/doc/fontsproto/fsproto.xml",
+    "share/doc/kbproto/XKBproto-1.svg",
+    "share/doc/kbproto/XKBproto-10.svg",
+    "share/doc/kbproto/XKBproto-11.svg",
+    "share/doc/kbproto/XKBproto-2.svg",
+    "share/doc/kbproto/XKBproto-3.svg",
+    "share/doc/kbproto/XKBproto-4.svg",
+    "share/doc/kbproto/XKBproto-5.svg",
+    "share/doc/kbproto/XKBproto-6.svg",
+    "share/doc/kbproto/XKBproto-7.svg",
+    "share/doc/kbproto/XKBproto-8.svg",
+    "share/doc/kbproto/XKBproto-9.svg",
+    "share/doc/kbproto/acknowledgements.xml",
+    "share/doc/kbproto/appA.xml",
+    "share/doc/kbproto/appB.xml",
+    "share/doc/kbproto/appC.xml",
+    "share/doc/kbproto/appD.xml",
+    "share/doc/kbproto/ch01.xml",
+    "share/doc/kbproto/ch02.xml",
+    "share/doc/kbproto/ch03.xml",
+    "share/doc/kbproto/ch04.xml",
+    "share/doc/kbproto/ch05.xml",
+    "share/doc/kbproto/ch06.xml",
+    "share/doc/kbproto/ch07.xml",
+    "share/doc/kbproto/ch08.xml",
+    "share/doc/kbproto/ch09.xml",
+    "share/doc/kbproto/ch10.xml",
+    "share/doc/kbproto/ch11.xml",
+    "share/doc/kbproto/ch12.xml",
+    "share/doc/kbproto/ch13.xml",
+    "share/doc/kbproto/ch14.xml",
+    "share/doc/kbproto/ch15.xml",
+    "share/doc/kbproto/ch16.xml",
+    "share/doc/kbproto/xkbproto.xml",
+    "share/doc/recordproto/record.xml",
+    "share/doc/scrnsaverproto/saver.xml",
+    "share/doc/xcmiscproto/xc-misc.xml",
+    "share/doc/xextproto/appendix.xml",
+    "share/doc/xextproto/appgrp.xml",
+    "share/doc/xextproto/dbe.xml",
+    "share/doc/xextproto/dpms.xml",
+    "share/doc/xextproto/evi.xml",
+    "share/doc/xextproto/geproto.xml",
+    "share/doc/xextproto/lbx.xml",
+    "share/doc/xextproto/multibuf.xml",
+    "share/doc/xextproto/security.xml",
+    "share/doc/xextproto/shape.xml",
+    "share/doc/xextproto/shm.xml",
+    "share/doc/xextproto/sync.xml",
+    "share/doc/xextproto/tog-cup.xml",
+    "share/doc/xextproto/xtest.xml",
+    "share/doc/xorgproto/compositeproto.txt",
+    "share/doc/xorgproto/damageproto.txt",
+    "share/doc/xorgproto/dri2proto.txt",
+    "share/doc/xorgproto/dri3proto.txt",
+    "share/doc/xorgproto/fixesproto.txt",
+    "share/doc/xorgproto/presentproto.txt",
+    "share/doc/xorgproto/randrproto.txt",
+    "share/doc/xorgproto/renderproto.txt",
+    "share/doc/xorgproto/resproto.txt",
+    "share/doc/xorgproto/xv-protocol-v2.txt",
+    "share/doc/xorgproto/xwaylandproto.txt",
+    "share/doc/xproto/encoding.xml",
+    "share/doc/xproto/glossary.xml",
+    "share/doc/xproto/keysyms.xml",
+    "share/doc/xproto/sect1-9.xml",
+    "share/doc/xproto/x11protocol.xml",
+    "share/pkgconfig/applewmproto.pc",
+    "share/pkgconfig/bigreqsproto.pc",
+    "share/pkgconfig/compositeproto.pc",
+    "share/pkgconfig/damageproto.pc",
+    "share/pkgconfig/dmxproto.pc",
+    "share/pkgconfig/dpmsproto.pc",
+    "share/pkgconfig/dri2proto.pc",
+    "share/pkgconfig/dri3proto.pc",
+    "share/pkgconfig/fixesproto.pc",
+    "share/pkgconfig/fontsproto.pc",
+    "share/pkgconfig/glproto.pc",
+    "share/pkgconfig/inputproto.pc",
+    "share/pkgconfig/kbproto.pc",
+    "share/pkgconfig/presentproto.pc",
+    "share/pkgconfig/randrproto.pc",
+    "share/pkgconfig/recordproto.pc",
+    "share/pkgconfig/renderproto.pc",
+    "share/pkgconfig/resourceproto.pc",
+    "share/pkgconfig/scrnsaverproto.pc",
+    "share/pkgconfig/videoproto.pc",
+    "share/pkgconfig/xcmiscproto.pc",
+    "share/pkgconfig/xextproto.pc",
+    "share/pkgconfig/xf86bigfontproto.pc",
+    "share/pkgconfig/xf86dgaproto.pc",
+    "share/pkgconfig/xf86driproto.pc",
+    "share/pkgconfig/xf86vidmodeproto.pc",
+    "share/pkgconfig/xineramaproto.pc",
+    "share/pkgconfig/xproto.pc",
+    "share/pkgconfig/xwaylandproto.pc"
+  ],
+  "fn": "xorg-xorgproto-2024.1-h5eee18b_1.conda",
+  "license": "MIT",
+  "link": {
+    "source": "/home/kie/miniconda3/pkgs/xorg-xorgproto-2024.1-h5eee18b_1",
+    "type": 1
+  },
+  "md5": "412a0d97a7a51d23326e57226189da92",
+  "name": "xorg-xorgproto",
+  "package_tarball_full_path": "/home/kie/miniconda3/pkgs/xorg-xorgproto-2024.1-h5eee18b_1.conda",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "include/GL/glxint.h",
+        "path_type": "hardlink",
+        "sha256": "3dcd6b79b13cc985e513e28e3369bc9e068dc4c6367d4b090a1193f35b5f0baa",
+        "sha256_in_prefix": "3dcd6b79b13cc985e513e28e3369bc9e068dc4c6367d4b090a1193f35b5f0baa",
+        "size_in_bytes": 4696
+      },
+      {
+        "_path": "include/GL/glxmd.h",
+        "path_type": "hardlink",
+        "sha256": "2bb5fe1a31ad2389b33129831c616c3a496b9f85ec3a5afedd6e740aa8d19097",
+        "sha256_in_prefix": "2bb5fe1a31ad2389b33129831c616c3a496b9f85ec3a5afedd6e740aa8d19097",
+        "size_in_bytes": 2085
+      },
+      {
+        "_path": "include/GL/glxproto.h",
+        "path_type": "hardlink",
+        "sha256": "89ffdb6a325e33cee77686e44d2c6a13e419af8cf1c417690e907b5dd0a094a4",
+        "sha256_in_prefix": "89ffdb6a325e33cee77686e44d2c6a13e419af8cf1c417690e907b5dd0a094a4",
+        "size_in_bytes": 78531
+      },
+      {
+        "_path": "include/GL/glxtokens.h",
+        "path_type": "hardlink",
+        "sha256": "8c86b8b9d24ea06d7563012c8099971aa9d4e3db37930abede5dddb294c0d8a9",
+        "sha256_in_prefix": "8c86b8b9d24ea06d7563012c8099971aa9d4e3db37930abede5dddb294c0d8a9",
+        "size_in_bytes": 11429
+      },
+      {
+        "_path": "include/GL/internal/glcore.h",
+        "path_type": "hardlink",
+        "sha256": "3b715ad3957914f560a23fa31cfc835676ba65fb4ea62b36f7030cda7a41dbfa",
+        "sha256_in_prefix": "3b715ad3957914f560a23fa31cfc835676ba65fb4ea62b36f7030cda7a41dbfa",
+        "size_in_bytes": 6315
+      },
+      {
+        "_path": "include/X11/DECkeysym.h",
+        "path_type": "hardlink",
+        "sha256": "9610df489e4dc4082ab74b0b5007309fb1ed7286e47634f039272bbf4a99b720",
+        "sha256_in_prefix": "9610df489e4dc4082ab74b0b5007309fb1ed7286e47634f039272bbf4a99b720",
+        "size_in_bytes": 2867
+      },
+      {
+        "_path": "include/X11/HPkeysym.h",
+        "path_type": "hardlink",
+        "sha256": "cd157ef21f5bd6833f4b82937de93504fecc1e368ded3e4a908244817b785ea5",
+        "sha256_in_prefix": "cd157ef21f5bd6833f4b82937de93504fecc1e368ded3e4a908244817b785ea5",
+        "size_in_bytes": 7936
+      },
+      {
+        "_path": "include/X11/Sunkeysym.h",
+        "path_type": "hardlink",
+        "sha256": "eb20cdc24a3fb9d8f43d18e50615ed44fc37006d704a42a4da1d2a7c2cfeb035",
+        "sha256_in_prefix": "eb20cdc24a3fb9d8f43d18e50615ed44fc37006d704a42a4da1d2a7c2cfeb035",
+        "size_in_bytes": 4413
+      },
+      {
+        "_path": "include/X11/X.h",
+        "path_type": "hardlink",
+        "sha256": "3f3ce079a71d26784ea298a75a29fb8add6f0f409cf36850bea7d428fdb1a9fb",
+        "sha256_in_prefix": "3f3ce079a71d26784ea298a75a29fb8add6f0f409cf36850bea7d428fdb1a9fb",
+        "size_in_bytes": 20137
+      },
+      {
+        "_path": "include/X11/XF86keysym.h",
+        "path_type": "hardlink",
+        "sha256": "d0bbb8c30541e1b85c05af25551d40e82ea9f6166ca367f5330bf9ce760fe97e",
+        "sha256_in_prefix": "d0bbb8c30541e1b85c05af25551d40e82ea9f6166ca367f5330bf9ce760fe97e",
+        "size_in_bytes": 35330
+      },
+      {
+        "_path": "include/X11/XWDFile.h",
+        "path_type": "hardlink",
+        "sha256": "8383b2a444394f6748d0c3c770880acedb015357222040bbcb28791b6b309a7f",
+        "sha256_in_prefix": "8383b2a444394f6748d0c3c770880acedb015357222040bbcb28791b6b309a7f",
+        "size_in_bytes": 3872
+      },
+      {
+        "_path": "include/X11/Xalloca.h",
+        "path_type": "hardlink",
+        "sha256": "7fc35f8e17d6e342bd0cf07284e08c0216c66ee45affc8aa935570e142bfdc54",
+        "sha256_in_prefix": "7fc35f8e17d6e342bd0cf07284e08c0216c66ee45affc8aa935570e142bfdc54",
+        "size_in_bytes": 4587
+      },
+      {
+        "_path": "include/X11/Xarch.h",
+        "path_type": "hardlink",
+        "sha256": "e5d6c520a7f79d69e183f96a1450d6f21063c7298662265b93a404dac3981145",
+        "sha256_in_prefix": "e5d6c520a7f79d69e183f96a1450d6f21063c7298662265b93a404dac3981145",
+        "size_in_bytes": 2951
+      },
+      {
+        "_path": "include/X11/Xatom.h",
+        "path_type": "hardlink",
+        "sha256": "4da0ace354f86d5ad38fd24b4bcdb2e28e17432e0637c3eb25ecddb444f89486",
+        "sha256_in_prefix": "4da0ace354f86d5ad38fd24b4bcdb2e28e17432e0637c3eb25ecddb444f89486",
+        "size_in_bytes": 2518
+      },
+      {
+        "_path": "include/X11/Xdefs.h",
+        "path_type": "hardlink",
+        "sha256": "33aeef747e6b1fac465abca1f2c4d233cef2adbad7271f755ba92fe564bf2207",
+        "sha256_in_prefix": "33aeef747e6b1fac465abca1f2c4d233cef2adbad7271f755ba92fe564bf2207",
+        "size_in_bytes": 2401
+      },
+      {
+        "_path": "include/X11/Xfuncproto.h",
+        "path_type": "hardlink",
+        "sha256": "e3459a7b7ea05634666daabd0fb37351c3cb0090df5aa8fea3d4b92281c42c60",
+        "sha256_in_prefix": "e3459a7b7ea05634666daabd0fb37351c3cb0090df5aa8fea3d4b92281c42c60",
+        "size_in_bytes": 7420
+      },
+      {
+        "_path": "include/X11/Xfuncs.h",
+        "path_type": "hardlink",
+        "sha256": "f2d087fb703bcd883bca0f53b2c6896004d9a78cf35e43f4305b7c1f53cc27c7",
+        "sha256_in_prefix": "f2d087fb703bcd883bca0f53b2c6896004d9a78cf35e43f4305b7c1f53cc27c7",
+        "size_in_bytes": 2256
+      },
+      {
+        "_path": "include/X11/Xmd.h",
+        "path_type": "hardlink",
+        "sha256": "f9a844b749286102b9f5acb8d0ff62fad3a697f9b5d39f1a525ea087865a13be",
+        "sha256_in_prefix": "f9a844b749286102b9f5acb8d0ff62fad3a697f9b5d39f1a525ea087865a13be",
+        "size_in_bytes": 5236
+      },
+      {
+        "_path": "include/X11/Xos.h",
+        "path_type": "hardlink",
+        "sha256": "c7ecf4e4648478b00d031bc5aca9cc595dd9b5b85653cee1a763536a23e8da3b",
+        "sha256_in_prefix": "c7ecf4e4648478b00d031bc5aca9cc595dd9b5b85653cee1a763536a23e8da3b",
+        "size_in_bytes": 4386
+      },
+      {
+        "_path": "include/X11/Xos_r.h",
+        "path_type": "hardlink",
+        "sha256": "43bbccf037dfad389ef742c382725c05235ccae31c3142591b78fe4622de966b",
+        "sha256_in_prefix": "43bbccf037dfad389ef742c382725c05235ccae31c3142591b78fe4622de966b",
+        "size_in_bytes": 33693
+      },
+      {
+        "_path": "include/X11/Xosdefs.h",
+        "path_type": "hardlink",
+        "sha256": "cab0a2d64c7d75dcc07718bbd07a6046be254cd9150fb810c1134ab551532b5b",
+        "sha256_in_prefix": "cab0a2d64c7d75dcc07718bbd07a6046be254cd9150fb810c1134ab551532b5b",
+        "size_in_bytes": 3115
+      },
+      {
+        "_path": "include/X11/Xpoll.h",
+        "path_type": "hardlink",
+        "sha256": "b35fd8105ca5fb36a9c7717818e6846c058904831e351ceef872bd0f145febf7",
+        "sha256_in_prefix": "b35fd8105ca5fb36a9c7717818e6846c058904831e351ceef872bd0f145febf7",
+        "size_in_bytes": 7743
+      },
+      {
+        "_path": "include/X11/Xproto.h",
+        "path_type": "hardlink",
+        "sha256": "ae2c275f8b7bf4705ef993b50a34ce7418fbbc4789bcb841237116b7c0271c82",
+        "sha256_in_prefix": "ae2c275f8b7bf4705ef993b50a34ce7418fbbc4789bcb841237116b7c0271c82",
+        "size_in_bytes": 52399
+      },
+      {
+        "_path": "include/X11/Xprotostr.h",
+        "path_type": "hardlink",
+        "sha256": "f3ea6f07d8f7e740da7dadab37d0ef8f6101658e52efab871460a1abc883c292",
+        "sha256_in_prefix": "f3ea6f07d8f7e740da7dadab37d0ef8f6101658e52efab871460a1abc883c292",
+        "size_in_bytes": 2743
+      },
+      {
+        "_path": "include/X11/Xthreads.h",
+        "path_type": "hardlink",
+        "sha256": "1d1f3d598e0066d2e7efe133a8568d34fd670730bc9f1eb8dd9f5094ded4b6a9",
+        "sha256_in_prefix": "1d1f3d598e0066d2e7efe133a8568d34fd670730bc9f1eb8dd9f5094ded4b6a9",
+        "size_in_bytes": 12395
+      },
+      {
+        "_path": "include/X11/Xw32defs.h",
+        "path_type": "hardlink",
+        "sha256": "aea48b3eb9f3195863f5286b4c7b790f57651b87bdaac58e159a16cce000a3fc",
+        "sha256_in_prefix": "aea48b3eb9f3195863f5286b4c7b790f57651b87bdaac58e159a16cce000a3fc",
+        "size_in_bytes": 1909
+      },
+      {
+        "_path": "include/X11/Xwindows.h",
+        "path_type": "hardlink",
+        "sha256": "f325abc2e6e77e3a747bc89c45d5dbb4b8ba6c473793a6aa0bd28dddc64d327b",
+        "sha256_in_prefix": "f325abc2e6e77e3a747bc89c45d5dbb4b8ba6c473793a6aa0bd28dddc64d327b",
+        "size_in_bytes": 3371
+      },
+      {
+        "_path": "include/X11/Xwinsock.h",
+        "path_type": "hardlink",
+        "sha256": "8b782cf21f6b1cc1f0b190a73061144c75a1ce5519ffa46302e291d87a83f212",
+        "sha256_in_prefix": "8b782cf21f6b1cc1f0b190a73061144c75a1ce5519ffa46302e291d87a83f212",
+        "size_in_bytes": 2349
+      },
+      {
+        "_path": "include/X11/ap_keysym.h",
+        "path_type": "hardlink",
+        "sha256": "0959cf896b2aadb430b83a6a28668f6253ccb1533cbb2a594bb08d52a86d2d85",
+        "sha256_in_prefix": "0959cf896b2aadb430b83a6a28668f6253ccb1533cbb2a594bb08d52a86d2d85",
+        "size_in_bytes": 2294
+      },
+      {
+        "_path": "include/X11/dri/xf86dri.h",
+        "path_type": "hardlink",
+        "sha256": "d2e8a5ad7a99f6fcb2afa21b367532ed1bfb6afd765ae443d14c7be63b090141",
+        "sha256_in_prefix": "d2e8a5ad7a99f6fcb2afa21b367532ed1bfb6afd765ae443d14c7be63b090141",
+        "size_in_bytes": 2445
+      },
+      {
+        "_path": "include/X11/dri/xf86driproto.h",
+        "path_type": "hardlink",
+        "sha256": "847e039fd2b38731fd78b7a7afc96286209ce2b137b756f526a25412e4d58ecf",
+        "sha256_in_prefix": "847e039fd2b38731fd78b7a7afc96286209ce2b137b756f526a25412e4d58ecf",
+        "size_in_bytes": 9669
+      },
+      {
+        "_path": "include/X11/dri/xf86dristr.h",
+        "path_type": "hardlink",
+        "sha256": "57580e9cbcd6ff7d73a086bc53efb861b7e196cb3d636a9f6e4939ae566c2417",
+        "sha256_in_prefix": "57580e9cbcd6ff7d73a086bc53efb861b7e196cb3d636a9f6e4939ae566c2417",
+        "size_in_bytes": 174
+      },
+      {
+        "_path": "include/X11/extensions/EVI.h",
+        "path_type": "hardlink",
+        "sha256": "44df84d26993330980047b643ced1ff0fa22ebe7f165b98d33eb0d7e831119a6",
+        "sha256_in_prefix": "44df84d26993330980047b643ced1ff0fa22ebe7f165b98d33eb0d7e831119a6",
+        "size_in_bytes": 1563
+      },
+      {
+        "_path": "include/X11/extensions/EVIproto.h",
+        "path_type": "hardlink",
+        "sha256": "c4840aea1b12c0a0cc0c9bd393c80f5096e69132fe827f0210a0b77c966ce013",
+        "sha256_in_prefix": "c4840aea1b12c0a0cc0c9bd393c80f5096e69132fe827f0210a0b77c966ce013",
+        "size_in_bytes": 3006
+      },
+      {
+        "_path": "include/X11/extensions/XI.h",
+        "path_type": "hardlink",
+        "sha256": "c456e8e0f6a03f7f5bf505d7626791f97856db7edc42fa806876b63356e0e272",
+        "sha256_in_prefix": "c456e8e0f6a03f7f5bf505d7626791f97856db7edc42fa806876b63356e0e272",
+        "size_in_bytes": 9823
+      },
+      {
+        "_path": "include/X11/extensions/XI2.h",
+        "path_type": "hardlink",
+        "sha256": "a9533c6407ebadb3871911abde60a33c8e04fd4fa6ee0d94cb46dba9d897cd46",
+        "sha256_in_prefix": "a9533c6407ebadb3871911abde60a33c8e04fd4fa6ee0d94cb46dba9d897cd46",
+        "size_in_bytes": 11151
+      },
+      {
+        "_path": "include/X11/extensions/XI2proto.h",
+        "path_type": "hardlink",
+        "sha256": "b419ceee6265f5e1b31ae4f09ad611c27dfc350be7daee0b16d9eb3fc69b62a5",
+        "sha256_in_prefix": "b419ceee6265f5e1b31ae4f09ad611c27dfc350be7daee0b16d9eb3fc69b62a5",
+        "size_in_bytes": 40459
+      },
+      {
+        "_path": "include/X11/extensions/XIproto.h",
+        "path_type": "hardlink",
+        "sha256": "32852fe9a4dfe74f84fd5573bd3342180dd74a4464e2d99950f4977e7d57eb90",
+        "sha256_in_prefix": "32852fe9a4dfe74f84fd5573bd3342180dd74a4464e2d99950f4977e7d57eb90",
+        "size_in_bytes": 41010
+      },
+      {
+        "_path": "include/X11/extensions/XKB.h",
+        "path_type": "hardlink",
+        "sha256": "fe1ad789175ca423f5ba8a9797853b076d9fe887c93912ec59dd371ea8ab78bd",
+        "sha256_in_prefix": "fe1ad789175ca423f5ba8a9797853b076d9fe887c93912ec59dd371ea8ab78bd",
+        "size_in_bytes": 28212
+      },
+      {
+        "_path": "include/X11/extensions/XKBproto.h",
+        "path_type": "hardlink",
+        "sha256": "8e63ddc0011cff9f473a51c3423febf4788a9563f3f384c826db1186723e5e74",
+        "sha256_in_prefix": "8e63ddc0011cff9f473a51c3423febf4788a9563f3f384c826db1186723e5e74",
+        "size_in_bytes": 29172
+      },
+      {
+        "_path": "include/X11/extensions/XKBsrv.h",
+        "path_type": "hardlink",
+        "sha256": "3647e1913b8a5611db225b0d2999e293b7b3bc9029c13ab53e5c5ad150e2d19f",
+        "sha256_in_prefix": "3647e1913b8a5611db225b0d2999e293b7b3bc9029c13ab53e5c5ad150e2d19f",
+        "size_in_bytes": 28018
+      },
+      {
+        "_path": "include/X11/extensions/XKBstr.h",
+        "path_type": "hardlink",
+        "sha256": "37e7f96d1c6baa97fe7a3fde4c0de4685b886ad2b83aec252218cc757c3da46c",
+        "sha256_in_prefix": "37e7f96d1c6baa97fe7a3fde4c0de4685b886ad2b83aec252218cc757c3da46c",
+        "size_in_bytes": 19697
+      },
+      {
+        "_path": "include/X11/extensions/XResproto.h",
+        "path_type": "hardlink",
+        "sha256": "7ebe2398f4eed157e0de1dcce51ebddad81c50b06137b18b5389fb594bee7ab3",
+        "sha256_in_prefix": "7ebe2398f4eed157e0de1dcce51ebddad81c50b06137b18b5389fb594bee7ab3",
+        "size_in_bytes": 5168
+      },
+      {
+        "_path": "include/X11/extensions/Xv.h",
+        "path_type": "hardlink",
+        "sha256": "c7918121196caf28257d441bfd53a8d7a63cf6002f840f991a195d98de72b13c",
+        "sha256_in_prefix": "c7918121196caf28257d441bfd53a8d7a63cf6002f840f991a195d98de72b13c",
+        "size_in_bytes": 3027
+      },
+      {
+        "_path": "include/X11/extensions/XvMC.h",
+        "path_type": "hardlink",
+        "sha256": "aa0c708ce394aedb18f72f6382ff7bd08734e25eace1a52f778cec5cf6aa5420",
+        "sha256_in_prefix": "aa0c708ce394aedb18f72f6382ff7bd08734e25eace1a52f778cec5cf6aa5420",
+        "size_in_bytes": 3620
+      },
+      {
+        "_path": "include/X11/extensions/XvMCproto.h",
+        "path_type": "hardlink",
+        "sha256": "15cb788db04696fe14f7c51b030df695d7f6ae72f907477a2b6c38ea3fb85656",
+        "sha256_in_prefix": "15cb788db04696fe14f7c51b030df695d7f6ae72f907477a2b6c38ea3fb85656",
+        "size_in_bytes": 4473
+      },
+      {
+        "_path": "include/X11/extensions/Xvproto.h",
+        "path_type": "hardlink",
+        "sha256": "d05fe6fbf2545804911be29b2dbac60065d2c23e7156d962a17c9c58787a478c",
+        "sha256_in_prefix": "d05fe6fbf2545804911be29b2dbac60065d2c23e7156d962a17c9c58787a478c",
+        "size_in_bytes": 12109
+      },
+      {
+        "_path": "include/X11/extensions/ag.h",
+        "path_type": "hardlink",
+        "sha256": "2026eaa8774cce32108f7c785eaa4503c7fddc65451b91de21b299079f077e34",
+        "sha256_in_prefix": "2026eaa8774cce32108f7c785eaa4503c7fddc65451b91de21b299079f077e34",
+        "size_in_bytes": 1705
+      },
+      {
+        "_path": "include/X11/extensions/agproto.h",
+        "path_type": "hardlink",
+        "sha256": "ee57f6bbb34865f14733196f4f45de87943564e947925c47af3dbd9b141664f9",
+        "sha256_in_prefix": "ee57f6bbb34865f14733196f4f45de87943564e947925c47af3dbd9b141664f9",
+        "size_in_bytes": 5005
+      },
+      {
+        "_path": "include/X11/extensions/applewmconst.h",
+        "path_type": "hardlink",
+        "sha256": "c0f42e2e231bc5e6a2a97dc277e4cc3e3ee2925669050a47005e189bd4fa5754",
+        "sha256_in_prefix": "c0f42e2e231bc5e6a2a97dc277e4cc3e3ee2925669050a47005e189bd4fa5754",
+        "size_in_bytes": 2900
+      },
+      {
+        "_path": "include/X11/extensions/applewmproto.h",
+        "path_type": "hardlink",
+        "sha256": "c47efc1e4ae60c30dd144fb2dd51b4a18231ea71bf90edd36455851483a77436",
+        "sha256_in_prefix": "c47efc1e4ae60c30dd144fb2dd51b4a18231ea71bf90edd36455851483a77436",
+        "size_in_bytes": 8098
+      },
+      {
+        "_path": "include/X11/extensions/bigreqsproto.h",
+        "path_type": "hardlink",
+        "sha256": "161ccbc4c6edb751b4f0c59155e194e719d29a3543e157159c065a9988feccd0",
+        "sha256_in_prefix": "161ccbc4c6edb751b4f0c59155e194e719d29a3543e157159c065a9988feccd0",
+        "size_in_bytes": 1909
+      },
+      {
+        "_path": "include/X11/extensions/bigreqstr.h",
+        "path_type": "hardlink",
+        "sha256": "a01646c7ce3d2ca4f93a1393cb730c755399966bf74585c7b889b4b67c7be7b5",
+        "sha256_in_prefix": "a01646c7ce3d2ca4f93a1393cb730c755399966bf74585c7b889b4b67c7be7b5",
+        "size_in_bytes": 187
+      },
+      {
+        "_path": "include/X11/extensions/composite.h",
+        "path_type": "hardlink",
+        "sha256": "4ae957edf4cbc648f6c3d79985b5990f1f8b59baea8c0925ce87e824b994efb6",
+        "sha256_in_prefix": "4ae957edf4cbc648f6c3d79985b5990f1f8b59baea8c0925ce87e824b994efb6",
+        "size_in_bytes": 3109
+      },
+      {
+        "_path": "include/X11/extensions/compositeproto.h",
+        "path_type": "hardlink",
+        "sha256": "50d751cd8d8dcf78ed6f8ee795f1701e29d57a4e8db734617d9c0704e4e9a973",
+        "sha256_in_prefix": "50d751cd8d8dcf78ed6f8ee795f1701e29d57a4e8db734617d9c0704e4e9a973",
+        "size_in_bytes": 5441
+      },
+      {
+        "_path": "include/X11/extensions/cup.h",
+        "path_type": "hardlink",
+        "sha256": "222ea6974547ca941a73ef80f33b87eea6e8f8f2326889ad86774009c50a887d",
+        "sha256_in_prefix": "222ea6974547ca941a73ef80f33b87eea6e8f8f2326889ad86774009c50a887d",
+        "size_in_bytes": 1353
+      },
+      {
+        "_path": "include/X11/extensions/cupproto.h",
+        "path_type": "hardlink",
+        "sha256": "39a8b0c8012991e73e7296b0144dd2b438696bb333714a555990c67494188c1e",
+        "sha256_in_prefix": "39a8b0c8012991e73e7296b0144dd2b438696bb333714a555990c67494188c1e",
+        "size_in_bytes": 3065
+      },
+      {
+        "_path": "include/X11/extensions/damageproto.h",
+        "path_type": "hardlink",
+        "sha256": "851fbfa9105d39a4cc28f3b357f7a8112ab3e245fc702a69d80f5ad62610bc3c",
+        "sha256_in_prefix": "851fbfa9105d39a4cc28f3b357f7a8112ab3e245fc702a69d80f5ad62610bc3c",
+        "size_in_bytes": 3615
+      },
+      {
+        "_path": "include/X11/extensions/damagewire.h",
+        "path_type": "hardlink",
+        "sha256": "d25fc9e418c6a90dbf9c6d70df42e027fbabc2ee34412ce93fb68cedeede18b9",
+        "sha256_in_prefix": "d25fc9e418c6a90dbf9c6d70df42e027fbabc2ee34412ce93fb68cedeede18b9",
+        "size_in_bytes": 1893
+      },
+      {
+        "_path": "include/X11/extensions/dbe.h",
+        "path_type": "hardlink",
+        "sha256": "fccc5aad978437552fefdc8f17cf4634dc6795b202bbc511ae30385f4d975a60",
+        "sha256_in_prefix": "fccc5aad978437552fefdc8f17cf4634dc6795b202bbc511ae30385f4d975a60",
+        "size_in_bytes": 2159
+      },
+      {
+        "_path": "include/X11/extensions/dbeproto.h",
+        "path_type": "hardlink",
+        "sha256": "eea867f4ed3b7c1fb8b092989c835125333f68b628ddfbbfa120cef60a99e502",
+        "sha256_in_prefix": "eea867f4ed3b7c1fb8b092989c835125333f68b628ddfbbfa120cef60a99e502",
+        "size_in_bytes": 7343
+      },
+      {
+        "_path": "include/X11/extensions/dmx.h",
+        "path_type": "hardlink",
+        "sha256": "0c7a2b2fad12ce2a2e4cbc5abbb3352bb818c474c9ae2293f3111d277d26a2c5",
+        "sha256_in_prefix": "0c7a2b2fad12ce2a2e4cbc5abbb3352bb818c474c9ae2293f3111d277d26a2c5",
+        "size_in_bytes": 2373
+      },
+      {
+        "_path": "include/X11/extensions/dmxproto.h",
+        "path_type": "hardlink",
+        "sha256": "d0d98a46a4c6ac933cfaf399187553f220cd85c2ccf90f915efdd31437cfb5ac",
+        "sha256_in_prefix": "d0d98a46a4c6ac933cfaf399187553f220cd85c2ccf90f915efdd31437cfb5ac",
+        "size_in_bytes": 13343
+      },
+      {
+        "_path": "include/X11/extensions/dpmsconst.h",
+        "path_type": "hardlink",
+        "sha256": "90e503d50d8bf9a7b4ab4f59557f1aa533c38670f4ea6a6b8f7795b350fc53be",
+        "sha256_in_prefix": "90e503d50d8bf9a7b4ab4f59557f1aa533c38670f4ea6a6b8f7795b350fc53be",
+        "size_in_bytes": 1778
+      },
+      {
+        "_path": "include/X11/extensions/dpmsproto.h",
+        "path_type": "hardlink",
+        "sha256": "e1739aec5af2d719319cfcec31fcfc83bcd5fe6eae344c225a2237ff63fb1d76",
+        "sha256_in_prefix": "e1739aec5af2d719319cfcec31fcfc83bcd5fe6eae344c225a2237ff63fb1d76",
+        "size_in_bytes": 5288
+      },
+      {
+        "_path": "include/X11/extensions/dri2proto.h",
+        "path_type": "hardlink",
+        "sha256": "6ea4a4ec24777e9d56b7033aac475a850619704a18493104eb894c1c4e340322",
+        "sha256_in_prefix": "6ea4a4ec24777e9d56b7033aac475a850619704a18493104eb894c1c4e340322",
+        "size_in_bytes": 8318
+      },
+      {
+        "_path": "include/X11/extensions/dri2tokens.h",
+        "path_type": "hardlink",
+        "sha256": "8d0522d35d28259bdb099fba9e5351e94f46fee1f0a5fda640aab5037012a37e",
+        "sha256_in_prefix": "8d0522d35d28259bdb099fba9e5351e94f46fee1f0a5fda640aab5037012a37e",
+        "size_in_bytes": 2468
+      },
+      {
+        "_path": "include/X11/extensions/dri3proto.h",
+        "path_type": "hardlink",
+        "sha256": "9c30e8b62204677c4eb1c2babeb776fede9a6b35966f5750ef9d6f55f92ce66b",
+        "sha256_in_prefix": "9c30e8b62204677c4eb1c2babeb776fede9a6b35966f5750ef9d6f55f92ce66b",
+        "size_in_bytes": 6913
+      },
+      {
+        "_path": "include/X11/extensions/ge.h",
+        "path_type": "hardlink",
+        "sha256": "eebf3ac0a163aa23e2f9e75864639eae276d8d71516840b5b3458cf3414ccfed",
+        "sha256_in_prefix": "eebf3ac0a163aa23e2f9e75864639eae276d8d71516840b5b3458cf3414ccfed",
+        "size_in_bytes": 1782
+      },
+      {
+        "_path": "include/X11/extensions/geproto.h",
+        "path_type": "hardlink",
+        "sha256": "b831b2d821249670d8ed60a05f9f0dd85caa2c2ef101dbb6989bca5ea7ad02f1",
+        "sha256_in_prefix": "b831b2d821249670d8ed60a05f9f0dd85caa2c2ef101dbb6989bca5ea7ad02f1",
+        "size_in_bytes": 2351
+      },
+      {
+        "_path": "include/X11/extensions/lbx.h",
+        "path_type": "hardlink",
+        "sha256": "92a918d6978fcc31a277c35d977a7fe8160897c592962df84a4023f523e9c06f",
+        "sha256_in_prefix": "92a918d6978fcc31a277c35d977a7fe8160897c592962df84a4023f523e9c06f",
+        "size_in_bytes": 2236
+      },
+      {
+        "_path": "include/X11/extensions/lbxproto.h",
+        "path_type": "hardlink",
+        "sha256": "5cb30949b8c2488d13b0fcc80b9e6f276475e54d7c53d92a410a94b24fa781f6",
+        "sha256_in_prefix": "5cb30949b8c2488d13b0fcc80b9e6f276475e54d7c53d92a410a94b24fa781f6",
+        "size_in_bytes": 24782
+      },
+      {
+        "_path": "include/X11/extensions/mitmiscconst.h",
+        "path_type": "hardlink",
+        "sha256": "51a1ce94842dbd1d1804787d2b08497c66b0ab0823d8ccad18eab82b0b5031eb",
+        "sha256_in_prefix": "51a1ce94842dbd1d1804787d2b08497c66b0ab0823d8ccad18eab82b0b5031eb",
+        "size_in_bytes": 1509
+      },
+      {
+        "_path": "include/X11/extensions/mitmiscproto.h",
+        "path_type": "hardlink",
+        "sha256": "6a96defa0e524702d3a2b82f4e83758ebf1d49b50cab19ab48092ea77c9b41b9",
+        "sha256_in_prefix": "6a96defa0e524702d3a2b82f4e83758ebf1d49b50cab19ab48092ea77c9b41b9",
+        "size_in_bytes": 2229
+      },
+      {
+        "_path": "include/X11/extensions/multibufconst.h",
+        "path_type": "hardlink",
+        "sha256": "0673f0f1e98f5a1221d26b6dddce42d774dc54533fdf3f474af1faae97e5d708",
+        "sha256_in_prefix": "0673f0f1e98f5a1221d26b6dddce42d774dc54533fdf3f474af1faae97e5d708",
+        "size_in_bytes": 2575
+      },
+      {
+        "_path": "include/X11/extensions/multibufproto.h",
+        "path_type": "hardlink",
+        "sha256": "6d7d0af5207799874ba8df995a2d1fe9740bc519d996a3eca78c6ab8b90f28ec",
+        "sha256_in_prefix": "6d7d0af5207799874ba8df995a2d1fe9740bc519d996a3eca78c6ab8b90f28ec",
+        "size_in_bytes": 8600
+      },
+      {
+        "_path": "include/X11/extensions/panoramiXproto.h",
+        "path_type": "hardlink",
+        "sha256": "95ddf60b563ca29aa12a213de8b02f030a45266318acdd26ad933955f2482eaf",
+        "sha256_in_prefix": "95ddf60b563ca29aa12a213de8b02f030a45266318acdd26ad933955f2482eaf",
+        "size_in_bytes": 5473
+      },
+      {
+        "_path": "include/X11/extensions/presentproto.h",
+        "path_type": "hardlink",
+        "sha256": "2a96502bcd195831be9f625275f3c83c3f02ea318721b2f3e9a49fc87e22fd5e",
+        "sha256_in_prefix": "2a96502bcd195831be9f625275f3c83c3f02ea318721b2f3e9a49fc87e22fd5e",
+        "size_in_bytes": 6036
+      },
+      {
+        "_path": "include/X11/extensions/presenttokens.h",
+        "path_type": "hardlink",
+        "sha256": "bf885155fe280d44e9ce8a987f3b9f907f1a5515b98a35e89ebeaa3cd7599ea6",
+        "sha256_in_prefix": "bf885155fe280d44e9ce8a987f3b9f907f1a5515b98a35e89ebeaa3cd7599ea6",
+        "size_in_bytes": 4131
+      },
+      {
+        "_path": "include/X11/extensions/randr.h",
+        "path_type": "hardlink",
+        "sha256": "cf25cc300807b0728ac1880f221f57a6f94c2757cf890eacf5e8c59bac729bf8",
+        "sha256_in_prefix": "cf25cc300807b0728ac1880f221f57a6f94c2757cf890eacf5e8c59bac729bf8",
+        "size_in_bytes": 6909
+      },
+      {
+        "_path": "include/X11/extensions/randrproto.h",
+        "path_type": "hardlink",
+        "sha256": "1958398c76e9c6a52e6c039749921c36388deb6c3ccd9e9e6f0aa6fc451469f5",
+        "sha256_in_prefix": "1958398c76e9c6a52e6c039749921c36388deb6c3ccd9e9e6f0aa6fc451469f5",
+        "size_in_bytes": 25751
+      },
+      {
+        "_path": "include/X11/extensions/recordconst.h",
+        "path_type": "hardlink",
+        "sha256": "a3f004dca681551fa9d1f2941b857b2b6705aab45b62a81c46d4934971fad8af",
+        "sha256_in_prefix": "a3f004dca681551fa9d1f2941b857b2b6705aab45b62a81c46d4934971fad8af",
+        "size_in_bytes": 2064
+      },
+      {
+        "_path": "include/X11/extensions/recordproto.h",
+        "path_type": "hardlink",
+        "sha256": "1572d360f49327192887869a5ca5532a0841b69d45a970c0b7fb73b8f0ed8168",
+        "sha256_in_prefix": "1572d360f49327192887869a5ca5532a0841b69d45a970c0b7fb73b8f0ed8168",
+        "size_in_bytes": 7634
+      },
+      {
+        "_path": "include/X11/extensions/recordstr.h",
+        "path_type": "hardlink",
+        "sha256": "5c503dc572b8ff89c9f7734175db253af35d3b70da7ff3a1592ddd2e095846cb",
+        "sha256_in_prefix": "5c503dc572b8ff89c9f7734175db253af35d3b70da7ff3a1592ddd2e095846cb",
+        "size_in_bytes": 258
+      },
+      {
+        "_path": "include/X11/extensions/render.h",
+        "path_type": "hardlink",
+        "sha256": "68d86876464cfe3137b980d033d742e73e38f477eeaab8bb3d2830864cc424ca",
+        "sha256_in_prefix": "68d86876464cfe3137b980d033d742e73e38f477eeaab8bb3d2830864cc424ca",
+        "size_in_bytes": 6933
+      },
+      {
+        "_path": "include/X11/extensions/renderproto.h",
+        "path_type": "hardlink",
+        "sha256": "b69c9a5e0b0a691ded3757d2fc39b84ed8acfda159070b92e7014d9459a4c45a",
+        "sha256_in_prefix": "b69c9a5e0b0a691ded3757d2fc39b84ed8acfda159070b92e7014d9459a4c45a",
+        "size_in_bytes": 13218
+      },
+      {
+        "_path": "include/X11/extensions/saver.h",
+        "path_type": "hardlink",
+        "sha256": "9536761cd417a944c7e8bf1c86adf7b49747dfe4fea0d10f7a0d7966e5e69658",
+        "sha256_in_prefix": "9536761cd417a944c7e8bf1c86adf7b49747dfe4fea0d10f7a0d7966e5e69658",
+        "size_in_bytes": 1900
+      },
+      {
+        "_path": "include/X11/extensions/saverproto.h",
+        "path_type": "hardlink",
+        "sha256": "0e69e246eb004163c8c5db7bb52697614d1a4fae6d33fe7e8ae9e1cf0e08a27e",
+        "sha256_in_prefix": "0e69e246eb004163c8c5db7bb52697614d1a4fae6d33fe7e8ae9e1cf0e08a27e",
+        "size_in_bytes": 5132
+      },
+      {
+        "_path": "include/X11/extensions/secur.h",
+        "path_type": "hardlink",
+        "sha256": "6ea2702a7a3f83bc5c9e9b8250142b2765e80850cd7863d060b2b2a04e33bdc8",
+        "sha256_in_prefix": "6ea2702a7a3f83bc5c9e9b8250142b2765e80850cd7863d060b2b2a04e33bdc8",
+        "size_in_bytes": 2141
+      },
+      {
+        "_path": "include/X11/extensions/securproto.h",
+        "path_type": "hardlink",
+        "sha256": "61eb0a9b69254e116a94344f81fba183262013f0a28d9ccae9c0c14700f0e280",
+        "sha256_in_prefix": "61eb0a9b69254e116a94344f81fba183262013f0a28d9ccae9c0c14700f0e280",
+        "size_in_bytes": 3177
+      },
+      {
+        "_path": "include/X11/extensions/shapeconst.h",
+        "path_type": "hardlink",
+        "sha256": "41e65d51df6976c3a3a2650052043de9080830b9519aa1d8f7fde073d831ffa6",
+        "sha256_in_prefix": "41e65d51df6976c3a3a2650052043de9080830b9519aa1d8f7fde073d831ffa6",
+        "size_in_bytes": 1878
+      },
+      {
+        "_path": "include/X11/extensions/shapeproto.h",
+        "path_type": "hardlink",
+        "sha256": "284ff667072c0e69f78787adc8b103de04ba0cfc0ff47c33e459b93e61dbf884",
+        "sha256_in_prefix": "284ff667072c0e69f78787adc8b103de04ba0cfc0ff47c33e459b93e61dbf884",
+        "size_in_bytes": 6730
+      },
+      {
+        "_path": "include/X11/extensions/shapestr.h",
+        "path_type": "hardlink",
+        "sha256": "a2cb83fc43b2d4b4a27571061ab600889e75ca9d8759893bb24c22accd12d45f",
+        "sha256_in_prefix": "a2cb83fc43b2d4b4a27571061ab600889e75ca9d8759893bb24c22accd12d45f",
+        "size_in_bytes": 252
+      },
+      {
+        "_path": "include/X11/extensions/shm.h",
+        "path_type": "hardlink",
+        "sha256": "7698fc62925c431a769eb71807e3ecfcd2686b1d010fb65c124e55483cc617b4",
+        "sha256_in_prefix": "7698fc62925c431a769eb71807e3ecfcd2686b1d010fb65c124e55483cc617b4",
+        "size_in_bytes": 1645
+      },
+      {
+        "_path": "include/X11/extensions/shmproto.h",
+        "path_type": "hardlink",
+        "sha256": "f4f57a83fb76630c3353436ef45697951b98f44a6a584ab0580b98b1d7d65f5c",
+        "sha256_in_prefix": "f4f57a83fb76630c3353436ef45697951b98f44a6a584ab0580b98b1d7d65f5c",
+        "size_in_bytes": 6045
+      },
+      {
+        "_path": "include/X11/extensions/shmstr.h",
+        "path_type": "hardlink",
+        "sha256": "574babc1d2c5d10c2d0b96b60266d783cf29941808d17701728dd3015896e159",
+        "sha256_in_prefix": "574babc1d2c5d10c2d0b96b60266d783cf29941808d17701728dd3015896e159",
+        "size_in_bytes": 2123
+      },
+      {
+        "_path": "include/X11/extensions/syncconst.h",
+        "path_type": "hardlink",
+        "sha256": "d1fe4e40fe978867730ec3ae0b799d94868256178fc358232ffed26cf7f22717",
+        "sha256_in_prefix": "d1fe4e40fe978867730ec3ae0b799d94868256178fc358232ffed26cf7f22717",
+        "size_in_bytes": 6748
+      },
+      {
+        "_path": "include/X11/extensions/syncproto.h",
+        "path_type": "hardlink",
+        "sha256": "e1e5169e4c82cd186ccc55004106cbebf1bc8216a655198849116be227e883f7",
+        "sha256_in_prefix": "e1e5169e4c82cd186ccc55004106cbebf1bc8216a655198849116be227e883f7",
+        "size_in_bytes": 11001
+      },
+      {
+        "_path": "include/X11/extensions/syncstr.h",
+        "path_type": "hardlink",
+        "sha256": "e52b25a54eeb192ef452ceece0038b2056a63c06d3158f03b1adec6217653a28",
+        "sha256_in_prefix": "e52b25a54eeb192ef452ceece0038b2056a63c06d3158f03b1adec6217653a28",
+        "size_in_bytes": 5605
+      },
+      {
+        "_path": "include/X11/extensions/xcmiscproto.h",
+        "path_type": "hardlink",
+        "sha256": "379daae208ad4ce1aca4063bf4a00207b5da74c128ba10437c07ed06f0c94127",
+        "sha256_in_prefix": "379daae208ad4ce1aca4063bf4a00207b5da74c128ba10437c07ed06f0c94127",
+        "size_in_bytes": 3057
+      },
+      {
+        "_path": "include/X11/extensions/xcmiscstr.h",
+        "path_type": "hardlink",
+        "sha256": "57d1c363ab65868094f6d27d81d7e2aeab57f2442abd9bec9003c3025ebaef11",
+        "sha256_in_prefix": "57d1c363ab65868094f6d27d81d7e2aeab57f2442abd9bec9003c3025ebaef11",
+        "size_in_bytes": 185
+      },
+      {
+        "_path": "include/X11/extensions/xf86bigfont.h",
+        "path_type": "hardlink",
+        "sha256": "cf37ed3052f7eb7063390d3d279cbe2b68cc7d61bc5eec540fdfc502a9abef7e",
+        "sha256_in_prefix": "cf37ed3052f7eb7063390d3d279cbe2b68cc7d61bc5eec540fdfc502a9abef7e",
+        "size_in_bytes": 414
+      },
+      {
+        "_path": "include/X11/extensions/xf86bigfproto.h",
+        "path_type": "hardlink",
+        "sha256": "266b83b83286049f31e9722c3ddc35ba24055b79b2e99583bc13c014a6cb18d8",
+        "sha256_in_prefix": "266b83b83286049f31e9722c3ddc35ba24055b79b2e99583bc13c014a6cb18d8",
+        "size_in_bytes": 2544
+      },
+      {
+        "_path": "include/X11/extensions/xf86bigfstr.h",
+        "path_type": "hardlink",
+        "sha256": "2ea0f6a31a4a885728da10660e2192439edf0c6e158248466e7507b716820681",
+        "sha256_in_prefix": "2ea0f6a31a4a885728da10660e2192439edf0c6e158248466e7507b716820681",
+        "size_in_bytes": 191
+      },
+      {
+        "_path": "include/X11/extensions/xf86dga.h",
+        "path_type": "hardlink",
+        "sha256": "af912f0989ba2a8f6900b34c7b80853a9efbbd57e8e7fc7d52c13c71b90bf487",
+        "sha256_in_prefix": "af912f0989ba2a8f6900b34c7b80853a9efbbd57e8e7fc7d52c13c71b90bf487",
+        "size_in_bytes": 369
+      },
+      {
+        "_path": "include/X11/extensions/xf86dga1const.h",
+        "path_type": "hardlink",
+        "sha256": "f4fe2d2c79b4a40760b6977b3233aac364f63820446d09cfbe8a289073921ed4",
+        "sha256_in_prefix": "f4fe2d2c79b4a40760b6977b3233aac364f63820446d09cfbe8a289073921ed4",
+        "size_in_bytes": 931
+      },
+      {
+        "_path": "include/X11/extensions/xf86dga1proto.h",
+        "path_type": "hardlink",
+        "sha256": "0ba9065e24a625d904817ab5327ad97594ab0ebbed00a210afd7f49de1fc5586",
+        "sha256_in_prefix": "0ba9065e24a625d904817ab5327ad97594ab0ebbed00a210afd7f49de1fc5586",
+        "size_in_bytes": 4506
+      },
+      {
+        "_path": "include/X11/extensions/xf86dga1str.h",
+        "path_type": "hardlink",
+        "sha256": "7a43d28c46fde05e8544c31a76fe1b2b7f6e268ba99b91d4d2cd7edf7f412823",
+        "sha256_in_prefix": "7a43d28c46fde05e8544c31a76fe1b2b7f6e268ba99b91d4d2cd7edf7f412823",
+        "size_in_bytes": 191
+      },
+      {
+        "_path": "include/X11/extensions/xf86dgaconst.h",
+        "path_type": "hardlink",
+        "sha256": "9ef9c5908ecc39e1167f8f05351395cf4f9993ade3622b120ae0b06691c38c1e",
+        "sha256_in_prefix": "9ef9c5908ecc39e1167f8f05351395cf4f9993ade3622b120ae0b06691c38c1e",
+        "size_in_bytes": 2533
+      },
+      {
+        "_path": "include/X11/extensions/xf86dgaproto.h",
+        "path_type": "hardlink",
+        "sha256": "a5a9f6dfa25ceba4c16725e4947e7d9477f1fb81c9d8a15d6321fdb9e9f8f1f5",
+        "sha256_in_prefix": "a5a9f6dfa25ceba4c16725e4947e7d9477f1fb81c9d8a15d6321fdb9e9f8f1f5",
+        "size_in_bytes": 7106
+      },
+      {
+        "_path": "include/X11/extensions/xf86dgastr.h",
+        "path_type": "hardlink",
+        "sha256": "ab0a295adf7cd4291bd3be78114fa20834063144bf966cf09373797ae8a1cbc0",
+        "sha256_in_prefix": "ab0a295adf7cd4291bd3be78114fa20834063144bf966cf09373797ae8a1cbc0",
+        "size_in_bytes": 188
+      },
+      {
+        "_path": "include/X11/extensions/xf86vm.h",
+        "path_type": "hardlink",
+        "sha256": "7fc9762fa61735daffb69833b91bd031486aa375cc8eb2a02c3978ad81ccd327",
+        "sha256_in_prefix": "7fc9762fa61735daffb69833b91bd031486aa375cc8eb2a02c3978ad81ccd327",
+        "size_in_bytes": 2106
+      },
+      {
+        "_path": "include/X11/extensions/xf86vmproto.h",
+        "path_type": "hardlink",
+        "sha256": "b86a00b97241ddf4b827c298d3165afb63de06d54829d4212fc8192f11b890cc",
+        "sha256_in_prefix": "b86a00b97241ddf4b827c298d3165afb63de06d54829d4212fc8192f11b890cc",
+        "size_in_bytes": 15700
+      },
+      {
+        "_path": "include/X11/extensions/xf86vmstr.h",
+        "path_type": "hardlink",
+        "sha256": "1c03a84d3f615c57b3b8ebbf028354ea5714c8f305ee51ac6478b406e4aba7bc",
+        "sha256_in_prefix": "1c03a84d3f615c57b3b8ebbf028354ea5714c8f305ee51ac6478b406e4aba7bc",
+        "size_in_bytes": 185
+      },
+      {
+        "_path": "include/X11/extensions/xfixesproto.h",
+        "path_type": "hardlink",
+        "sha256": "1f49db640e00e73185ee0fbeac337729f8723008dd3bf6c41a891b1ced3b593b",
+        "sha256_in_prefix": "1f49db640e00e73185ee0fbeac337729f8723008dd3bf6c41a891b1ced3b593b",
+        "size_in_bytes": 13541
+      },
+      {
+        "_path": "include/X11/extensions/xfixeswire.h",
+        "path_type": "hardlink",
+        "sha256": "83ad3d3fe09e5bfd723f73b3038a0de671f6c0d526a6d95c7dba576df0918a39",
+        "sha256_in_prefix": "83ad3d3fe09e5bfd723f73b3038a0de671f6c0d526a6d95c7dba576df0918a39",
+        "size_in_bytes": 5924
+      },
+      {
+        "_path": "include/X11/extensions/xtestconst.h",
+        "path_type": "hardlink",
+        "sha256": "52735cf666baf73492e71c40f9a509156c9e3b4344a63fef39f5889db984d984",
+        "sha256_in_prefix": "52735cf666baf73492e71c40f9a509156c9e3b4344a63fef39f5889db984d984",
+        "size_in_bytes": 1392
+      },
+      {
+        "_path": "include/X11/extensions/xtestext1const.h",
+        "path_type": "hardlink",
+        "sha256": "087021647a7f93be9f780b531e29221a9885d191f878138fcc2cbb6563b08b40",
+        "sha256_in_prefix": "087021647a7f93be9f780b531e29221a9885d191f878138fcc2cbb6563b08b40",
+        "size_in_bytes": 5439
+      },
+      {
+        "_path": "include/X11/extensions/xtestext1proto.h",
+        "path_type": "hardlink",
+        "sha256": "43d9e5e32b532bddc9e0c5fc2ba5c55404f5b35ca14f4e905e008fa61d8d5112",
+        "sha256_in_prefix": "43d9e5e32b532bddc9e0c5fc2ba5c55404f5b35ca14f4e905e008fa61d8d5112",
+        "size_in_bytes": 7790
+      },
+      {
+        "_path": "include/X11/extensions/xtestproto.h",
+        "path_type": "hardlink",
+        "sha256": "8fb8a7075f991e292346dd837f5abc243cbe0160a2c16b8f8227151483562059",
+        "sha256_in_prefix": "8fb8a7075f991e292346dd837f5abc243cbe0160a2c16b8f8227151483562059",
+        "size_in_bytes": 3254
+      },
+      {
+        "_path": "include/X11/extensions/xwaylandproto.h",
+        "path_type": "hardlink",
+        "sha256": "006374cc83aec12bf77057376d6c691b427c09ca1c361a5fae8da8f794f95627",
+        "sha256_in_prefix": "006374cc83aec12bf77057376d6c691b427c09ca1c361a5fae8da8f794f95627",
+        "size_in_bytes": 2044
+      },
+      {
+        "_path": "include/X11/fonts/FS.h",
+        "path_type": "hardlink",
+        "sha256": "a939fe23e62fffb130759d91cdccdaefaa8eb15597b07fd04578bd6d527f8149",
+        "sha256_in_prefix": "a939fe23e62fffb130759d91cdccdaefaa8eb15597b07fd04578bd6d527f8149",
+        "size_in_bytes": 4076
+      },
+      {
+        "_path": "include/X11/fonts/FSproto.h",
+        "path_type": "hardlink",
+        "sha256": "5138b931490addeb40fc3876bdfda1f62f7345c2838ce9c46d6f9a0b0e61bc7d",
+        "sha256_in_prefix": "5138b931490addeb40fc3876bdfda1f62f7345c2838ce9c46d6f9a0b0e61bc7d",
+        "size_in_bytes": 19889
+      },
+      {
+        "_path": "include/X11/fonts/font.h",
+        "path_type": "hardlink",
+        "sha256": "42b2166ad9a03d7bbf29c0e5e6193cdbf83d578ff5fa1b36fa09092d242e35b8",
+        "sha256_in_prefix": "42b2166ad9a03d7bbf29c0e5e6193cdbf83d578ff5fa1b36fa09092d242e35b8",
+        "size_in_bytes": 4253
+      },
+      {
+        "_path": "include/X11/fonts/fontproto.h",
+        "path_type": "hardlink",
+        "sha256": "1560309501298e0a4279ba942069349be0f0dadebe25943a1abcec4563dd25cb",
+        "sha256_in_prefix": "1560309501298e0a4279ba942069349be0f0dadebe25943a1abcec4563dd25cb",
+        "size_in_bytes": 3450
+      },
+      {
+        "_path": "include/X11/fonts/fontstruct.h",
+        "path_type": "hardlink",
+        "sha256": "9aa84499496ef26316b84bccfa6d91453f1a466b7ff9163241ec9dbad43137bb",
+        "sha256_in_prefix": "9aa84499496ef26316b84bccfa6d91453f1a466b7ff9163241ec9dbad43137bb",
+        "size_in_bytes": 9401
+      },
+      {
+        "_path": "include/X11/fonts/fsmasks.h",
+        "path_type": "hardlink",
+        "sha256": "0db16266f62d0c74f7fa344b99b9c155a3886f6f411f4d410e8ef0f09e2e5abf",
+        "sha256_in_prefix": "0db16266f62d0c74f7fa344b99b9c155a3886f6f411f4d410e8ef0f09e2e5abf",
+        "size_in_bytes": 3992
+      },
+      {
+        "_path": "include/X11/keysym.h",
+        "path_type": "hardlink",
+        "sha256": "1a6abb208e617e38ee069f8b014518c3c2815f6a4e46e0fb384a7bfff64405c4",
+        "sha256_in_prefix": "1a6abb208e617e38ee069f8b014518c3c2815f6a4e46e0fb384a7bfff64405c4",
+        "size_in_bytes": 2769
+      },
+      {
+        "_path": "include/X11/keysymdef.h",
+        "path_type": "hardlink",
+        "sha256": "4ba0724695c817a08b4ea3a79c5e8a52e0798cc8d5906281b10f89dc6225208d",
+        "sha256_in_prefix": "4ba0724695c817a08b4ea3a79c5e8a52e0798cc8d5906281b10f89dc6225208d",
+        "size_in_bytes": 186634
+      },
+      {
+        "_path": "share/doc/bigreqsproto/bigreq.xml",
+        "path_type": "hardlink",
+        "sha256": "ebfab1f82da0348c76a79a2c083122445e7ebfb2d0d17ca9a88114d74f310a74",
+        "sha256_in_prefix": "ebfab1f82da0348c76a79a2c083122445e7ebfb2d0d17ca9a88114d74f310a74",
+        "size_in_bytes": 12598
+      },
+      {
+        "_path": "share/doc/fontsproto/fsproto.xml",
+        "path_type": "hardlink",
+        "sha256": "4c31347982d0b3ab54151f74a4b0976e55fbed754954b6cea8dc3a472a2c10d6",
+        "sha256_in_prefix": "4c31347982d0b3ab54151f74a4b0976e55fbed754954b6cea8dc3a472a2c10d6",
+        "size_in_bytes": 204699
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-1.svg",
+        "path_type": "hardlink",
+        "sha256": "8c56e0c362bf60560acba2855db1d2ad86122a546b5bf8862b796c6f58ee7ef0",
+        "sha256_in_prefix": "8c56e0c362bf60560acba2855db1d2ad86122a546b5bf8862b796c6f58ee7ef0",
+        "size_in_bytes": 54498
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-10.svg",
+        "path_type": "hardlink",
+        "sha256": "9814702558544906c941b17fbcc7950d18b653005625132761f692cec44c8f87",
+        "sha256_in_prefix": "9814702558544906c941b17fbcc7950d18b653005625132761f692cec44c8f87",
+        "size_in_bytes": 5150
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-11.svg",
+        "path_type": "hardlink",
+        "sha256": "1924ae667875ef35594503cea2e8e8d5209dccd0409430e0e4e065966b4db645",
+        "sha256_in_prefix": "1924ae667875ef35594503cea2e8e8d5209dccd0409430e0e4e065966b4db645",
+        "size_in_bytes": 126010
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-2.svg",
+        "path_type": "hardlink",
+        "sha256": "0035a5810429961753227013ff96b71dff1a43bd528e2cb492941c2a080ac0e2",
+        "sha256_in_prefix": "0035a5810429961753227013ff96b71dff1a43bd528e2cb492941c2a080ac0e2",
+        "size_in_bytes": 23983
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-3.svg",
+        "path_type": "hardlink",
+        "sha256": "620bbad890b74e9cfa09b2653dafb23d149fda6f388f177fa7d91bf0271d7754",
+        "sha256_in_prefix": "620bbad890b74e9cfa09b2653dafb23d149fda6f388f177fa7d91bf0271d7754",
+        "size_in_bytes": 24187
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-4.svg",
+        "path_type": "hardlink",
+        "sha256": "95faa0041198c0d56a7c51b5f24927f017673d95987ad26cd8e88e9d4775bb7c",
+        "sha256_in_prefix": "95faa0041198c0d56a7c51b5f24927f017673d95987ad26cd8e88e9d4775bb7c",
+        "size_in_bytes": 26760
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-5.svg",
+        "path_type": "hardlink",
+        "sha256": "486f4dac591df63d6d1225ec8058d09701967a529e17f4c0401e330501ee6566",
+        "sha256_in_prefix": "486f4dac591df63d6d1225ec8058d09701967a529e17f4c0401e330501ee6566",
+        "size_in_bytes": 27246
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-6.svg",
+        "path_type": "hardlink",
+        "sha256": "d2a7bddab069eb7b79f0ed1d6de714e6c92637a9cde6c4adcdd47dab20675d29",
+        "sha256_in_prefix": "d2a7bddab069eb7b79f0ed1d6de714e6c92637a9cde6c4adcdd47dab20675d29",
+        "size_in_bytes": 36338
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-7.svg",
+        "path_type": "hardlink",
+        "sha256": "bf4ce4e0b3ff900d812c30f44ce05a3769a19c5f1a7f0cd49052e951d689ed37",
+        "sha256_in_prefix": "bf4ce4e0b3ff900d812c30f44ce05a3769a19c5f1a7f0cd49052e951d689ed37",
+        "size_in_bytes": 22062
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-8.svg",
+        "path_type": "hardlink",
+        "sha256": "74d841a4fbe533992b8ea287bbb2ce9681f244def02e4d082d8dcfaec2dcc3c4",
+        "sha256_in_prefix": "74d841a4fbe533992b8ea287bbb2ce9681f244def02e4d082d8dcfaec2dcc3c4",
+        "size_in_bytes": 6473
+      },
+      {
+        "_path": "share/doc/kbproto/XKBproto-9.svg",
+        "path_type": "hardlink",
+        "sha256": "74d841a4fbe533992b8ea287bbb2ce9681f244def02e4d082d8dcfaec2dcc3c4",
+        "sha256_in_prefix": "74d841a4fbe533992b8ea287bbb2ce9681f244def02e4d082d8dcfaec2dcc3c4",
+        "size_in_bytes": 6473
+      },
+      {
+        "_path": "share/doc/kbproto/acknowledgements.xml",
+        "path_type": "hardlink",
+        "sha256": "98ae3f8d86780793e7df268421b41dca8c9ae34e7fdf042116017b4ab3374629",
+        "sha256_in_prefix": "98ae3f8d86780793e7df268421b41dca8c9ae34e7fdf042116017b4ab3374629",
+        "size_in_bytes": 2743
+      },
+      {
+        "_path": "share/doc/kbproto/appA.xml",
+        "path_type": "hardlink",
+        "sha256": "5be898bfda0888eca723f237b4f985440f767e776594a099f8837abaff70495f",
+        "sha256_in_prefix": "5be898bfda0888eca723f237b4f985440f767e776594a099f8837abaff70495f",
+        "size_in_bytes": 22361
+      },
+      {
+        "_path": "share/doc/kbproto/appB.xml",
+        "path_type": "hardlink",
+        "sha256": "2afa8fe86bfea56bf9bcb10b9901b8e371ed49d93631978febd47022b27ab5c4",
+        "sha256_in_prefix": "2afa8fe86bfea56bf9bcb10b9901b8e371ed49d93631978febd47022b27ab5c4",
+        "size_in_bytes": 2981
+      },
+      {
+        "_path": "share/doc/kbproto/appC.xml",
+        "path_type": "hardlink",
+        "sha256": "11595fa4d6fe1c761885c1b829d92e41dcf822c9f4190ca7a148af7723f16657",
+        "sha256_in_prefix": "11595fa4d6fe1c761885c1b829d92e41dcf822c9f4190ca7a148af7723f16657",
+        "size_in_bytes": 15839
+      },
+      {
+        "_path": "share/doc/kbproto/appD.xml",
+        "path_type": "hardlink",
+        "sha256": "0999abc742208e12c35964a350a19e7688a39e922e0086f151910a02162611cf",
+        "sha256_in_prefix": "0999abc742208e12c35964a350a19e7688a39e922e0086f151910a02162611cf",
+        "size_in_bytes": 67191
+      },
+      {
+        "_path": "share/doc/kbproto/ch01.xml",
+        "path_type": "hardlink",
+        "sha256": "2cd0ea42d52841d850255bb0a79c008b505ec576c82d17d8b4e502215eea4ac3",
+        "sha256_in_prefix": "2cd0ea42d52841d850255bb0a79c008b505ec576c82d17d8b4e502215eea4ac3",
+        "size_in_bytes": 3931
+      },
+      {
+        "_path": "share/doc/kbproto/ch02.xml",
+        "path_type": "hardlink",
+        "sha256": "9bf29ab4964a293bfe2f920671f0652dc65707703fe5d7d34c33ba9b14d2e524",
+        "sha256_in_prefix": "9bf29ab4964a293bfe2f920671f0652dc65707703fe5d7d34c33ba9b14d2e524",
+        "size_in_bytes": 14340
+      },
+      {
+        "_path": "share/doc/kbproto/ch03.xml",
+        "path_type": "hardlink",
+        "sha256": "dd57a4aa691fe23175e6d91378e57a619e38da2c84f9f22dfbf65d6f690f3b5b",
+        "sha256_in_prefix": "dd57a4aa691fe23175e6d91378e57a619e38da2c84f9f22dfbf65d6f690f3b5b",
+        "size_in_bytes": 7401
+      },
+      {
+        "_path": "share/doc/kbproto/ch04.xml",
+        "path_type": "hardlink",
+        "sha256": "7628751b082ff6639b2bb44fa1a9f47630b2452960883d73e85c3033e3bcbb5a",
+        "sha256_in_prefix": "7628751b082ff6639b2bb44fa1a9f47630b2452960883d73e85c3033e3bcbb5a",
+        "size_in_bytes": 25756
+      },
+      {
+        "_path": "share/doc/kbproto/ch05.xml",
+        "path_type": "hardlink",
+        "sha256": "d4f90c6f47e9cad1a3c81398d520690842eb5c17fcb83cd5c62a332f6e9d80dc",
+        "sha256_in_prefix": "d4f90c6f47e9cad1a3c81398d520690842eb5c17fcb83cd5c62a332f6e9d80dc",
+        "size_in_bytes": 3671
+      },
+      {
+        "_path": "share/doc/kbproto/ch06.xml",
+        "path_type": "hardlink",
+        "sha256": "424f811b2dd5144bf52e2a3ea49ac81c4a26e45a24e1e45bf87e80632c1e3569",
+        "sha256_in_prefix": "424f811b2dd5144bf52e2a3ea49ac81c4a26e45a24e1e45bf87e80632c1e3569",
+        "size_in_bytes": 44058
+      },
+      {
+        "_path": "share/doc/kbproto/ch07.xml",
+        "path_type": "hardlink",
+        "sha256": "145e057c0015426a7e90038703c2a011376966b13c64169c14ff93421ee95c63",
+        "sha256_in_prefix": "145e057c0015426a7e90038703c2a011376966b13c64169c14ff93421ee95c63",
+        "size_in_bytes": 20038
+      },
+      {
+        "_path": "share/doc/kbproto/ch08.xml",
+        "path_type": "hardlink",
+        "sha256": "591f61ce222747d79d85dabdcb1e6dc2d4827671d21f0946b7b05d7e3266ec17",
+        "sha256_in_prefix": "591f61ce222747d79d85dabdcb1e6dc2d4827671d21f0946b7b05d7e3266ec17",
+        "size_in_bytes": 5408
+      },
+      {
+        "_path": "share/doc/kbproto/ch09.xml",
+        "path_type": "hardlink",
+        "sha256": "5fdbcd3b9489e6c8cd44a2fba3af832628c47f474c640587930bc7eedbf2281a",
+        "sha256_in_prefix": "5fdbcd3b9489e6c8cd44a2fba3af832628c47f474c640587930bc7eedbf2281a",
+        "size_in_bytes": 16703
+      },
+      {
+        "_path": "share/doc/kbproto/ch10.xml",
+        "path_type": "hardlink",
+        "sha256": "a915194d8aad059a28095d92313899bb8da2f82f851a1caef64bc683f1374025",
+        "sha256_in_prefix": "a915194d8aad059a28095d92313899bb8da2f82f851a1caef64bc683f1374025",
+        "size_in_bytes": 5246
+      },
+      {
+        "_path": "share/doc/kbproto/ch11.xml",
+        "path_type": "hardlink",
+        "sha256": "bdc417b6aa28c8638d63745017254ebe79780112e9a9046a9361d37d0d5c92ba",
+        "sha256_in_prefix": "bdc417b6aa28c8638d63745017254ebe79780112e9a9046a9361d37d0d5c92ba",
+        "size_in_bytes": 13334
+      },
+      {
+        "_path": "share/doc/kbproto/ch12.xml",
+        "path_type": "hardlink",
+        "sha256": "ba6f308bcd1ec0bc480c7771dd224c7d6acc45f12b2082f7f2a84aa5ac6afa87",
+        "sha256_in_prefix": "ba6f308bcd1ec0bc480c7771dd224c7d6acc45f12b2082f7f2a84aa5ac6afa87",
+        "size_in_bytes": 33865
+      },
+      {
+        "_path": "share/doc/kbproto/ch13.xml",
+        "path_type": "hardlink",
+        "sha256": "87938255486545589d49211f633e1550a52e3687344ad0ff5ff1b0346f8f690d",
+        "sha256_in_prefix": "87938255486545589d49211f633e1550a52e3687344ad0ff5ff1b0346f8f690d",
+        "size_in_bytes": 13600
+      },
+      {
+        "_path": "share/doc/kbproto/ch14.xml",
+        "path_type": "hardlink",
+        "sha256": "7e45a92337f54f90f290aeebff2bf74d6940827b418dcab10400a1ca21ba3e11",
+        "sha256_in_prefix": "7e45a92337f54f90f290aeebff2bf74d6940827b418dcab10400a1ca21ba3e11",
+        "size_in_bytes": 3223
+      },
+      {
+        "_path": "share/doc/kbproto/ch15.xml",
+        "path_type": "hardlink",
+        "sha256": "23072d2102342305e8a9c59ae53ae2a2964c9cfa90335ae7794d106406913ab1",
+        "sha256_in_prefix": "23072d2102342305e8a9c59ae53ae2a2964c9cfa90335ae7794d106406913ab1",
+        "size_in_bytes": 7208
+      },
+      {
+        "_path": "share/doc/kbproto/ch16.xml",
+        "path_type": "hardlink",
+        "sha256": "12ab5b2fcf92293f8c5ecb9346aa41f1819de824d392638a7245fa7e74e27c27",
+        "sha256_in_prefix": "12ab5b2fcf92293f8c5ecb9346aa41f1819de824d392638a7245fa7e74e27c27",
+        "size_in_bytes": 227290
+      },
+      {
+        "_path": "share/doc/kbproto/xkbproto.xml",
+        "path_type": "hardlink",
+        "sha256": "f957e05d18dce699e6cb7a25b7cb634f588912a22f7491d9450e7dec2cb26d59",
+        "sha256_in_prefix": "f957e05d18dce699e6cb7a25b7cb634f588912a22f7491d9450e7dec2cb26d59",
+        "size_in_bytes": 4043
+      },
+      {
+        "_path": "share/doc/recordproto/record.xml",
+        "path_type": "hardlink",
+        "sha256": "ec4b7d7e83288bd3e70ad51191379b5bcc130d39ea01bef4662c92fb4b484d38",
+        "sha256_in_prefix": "ec4b7d7e83288bd3e70ad51191379b5bcc130d39ea01bef4662c92fb4b484d38",
+        "size_in_bytes": 61083
+      },
+      {
+        "_path": "share/doc/scrnsaverproto/saver.xml",
+        "path_type": "hardlink",
+        "sha256": "f0a3c0ce0317c11170520602a248d6de375e6f83aee7eaac3ad842d36420694d",
+        "sha256_in_prefix": "f0a3c0ce0317c11170520602a248d6de375e6f83aee7eaac3ad842d36420694d",
+        "size_in_bytes": 35235
+      },
+      {
+        "_path": "share/doc/xcmiscproto/xc-misc.xml",
+        "path_type": "hardlink",
+        "sha256": "39a1519655a35272dccda67d298fc4875248e7f450ff68e3bed24eff082ba5a2",
+        "sha256_in_prefix": "39a1519655a35272dccda67d298fc4875248e7f450ff68e3bed24eff082ba5a2",
+        "size_in_bytes": 8388
+      },
+      {
+        "_path": "share/doc/xextproto/appendix.xml",
+        "path_type": "hardlink",
+        "sha256": "e2f7c382343acb1517096c3daf1f5898f2f28116b044c1813c7641bacce0e3d6",
+        "sha256_in_prefix": "e2f7c382343acb1517096c3daf1f5898f2f28116b044c1813c7641bacce0e3d6",
+        "size_in_bytes": 2101
+      },
+      {
+        "_path": "share/doc/xextproto/appgrp.xml",
+        "path_type": "hardlink",
+        "sha256": "5551881f6aa505582f5416231730abff8ee85e0054f08b30613417184440aa79",
+        "sha256_in_prefix": "5551881f6aa505582f5416231730abff8ee85e0054f08b30613417184440aa79",
+        "size_in_bytes": 36791
+      },
+      {
+        "_path": "share/doc/xextproto/dbe.xml",
+        "path_type": "hardlink",
+        "sha256": "a728384893bec337a3715ca8d8645884a2b6794f1d81b0f0a0df7a4dd9359c6b",
+        "sha256_in_prefix": "a728384893bec337a3715ca8d8645884a2b6794f1d81b0f0a0df7a4dd9359c6b",
+        "size_in_bytes": 36787
+      },
+      {
+        "_path": "share/doc/xextproto/dpms.xml",
+        "path_type": "hardlink",
+        "sha256": "2ca52a6ad36c908c44e08fa2274a3687b9a4d8fce8e7dbba31364254e8d4f483",
+        "sha256_in_prefix": "2ca52a6ad36c908c44e08fa2274a3687b9a4d8fce8e7dbba31364254e8d4f483",
+        "size_in_bytes": 21827
+      },
+      {
+        "_path": "share/doc/xextproto/evi.xml",
+        "path_type": "hardlink",
+        "sha256": "8357419f3d474caf9870f96c9ea769b8b33b133033e0bbde49b23a086addc34d",
+        "sha256_in_prefix": "8357419f3d474caf9870f96c9ea769b8b33b133033e0bbde49b23a086addc34d",
+        "size_in_bytes": 14521
+      },
+      {
+        "_path": "share/doc/xextproto/geproto.xml",
+        "path_type": "hardlink",
+        "sha256": "586b5187f1ac05f33909ce86da6416cf4a8950e6a072fb4363eab3428f7e2802",
+        "sha256_in_prefix": "586b5187f1ac05f33909ce86da6416cf4a8950e6a072fb4363eab3428f7e2802",
+        "size_in_bytes": 5135
+      },
+      {
+        "_path": "share/doc/xextproto/lbx.xml",
+        "path_type": "hardlink",
+        "sha256": "55c3b39c5a47064ba06dbf00cc4c4f26e12f910a1c3e3352d6a7ffb9b3f8c59e",
+        "sha256_in_prefix": "55c3b39c5a47064ba06dbf00cc4c4f26e12f910a1c3e3352d6a7ffb9b3f8c59e",
+        "size_in_bytes": 162642
+      },
+      {
+        "_path": "share/doc/xextproto/multibuf.xml",
+        "path_type": "hardlink",
+        "sha256": "ce0b491247e5d21edaee8fe72de27728636a684da6a4698527f502d8523fcb96",
+        "sha256_in_prefix": "ce0b491247e5d21edaee8fe72de27728636a684da6a4698527f502d8523fcb96",
+        "size_in_bytes": 50811
+      },
+      {
+        "_path": "share/doc/xextproto/security.xml",
+        "path_type": "hardlink",
+        "sha256": "5471a9592a39905f0f8481c856dacf856ac817b24167e053bd4b4ce3439b13a4",
+        "sha256_in_prefix": "5471a9592a39905f0f8481c856dacf856ac817b24167e053bd4b4ce3439b13a4",
+        "size_in_bytes": 46431
+      },
+      {
+        "_path": "share/doc/xextproto/shape.xml",
+        "path_type": "hardlink",
+        "sha256": "173613c79ad47a4f5c495311448aab834e7a531a8d844d7c188740aca75cdbff",
+        "sha256_in_prefix": "173613c79ad47a4f5c495311448aab834e7a531a8d844d7c188740aca75cdbff",
+        "size_in_bytes": 37921
+      },
+      {
+        "_path": "share/doc/xextproto/shm.xml",
+        "path_type": "hardlink",
+        "sha256": "fd17234b3a982841465ea9a157c1e5a5da851cb340f341b4f5065f7ac4616b73",
+        "sha256_in_prefix": "fd17234b3a982841465ea9a157c1e5a5da851cb340f341b4f5065f7ac4616b73",
+        "size_in_bytes": 17196
+      },
+      {
+        "_path": "share/doc/xextproto/sync.xml",
+        "path_type": "hardlink",
+        "sha256": "f1511c04912aa0eece9e74d2458e700285d3bc4489ef5b09b195a3603b3b6333",
+        "sha256_in_prefix": "f1511c04912aa0eece9e74d2458e700285d3bc4489ef5b09b195a3603b3b6333",
+        "size_in_bytes": 48176
+      },
+      {
+        "_path": "share/doc/xextproto/tog-cup.xml",
+        "path_type": "hardlink",
+        "sha256": "aa0aab3443151f6e56f84aebfc1e1ef969f7ff338dd630b467ddc48ab7283643",
+        "sha256_in_prefix": "aa0aab3443151f6e56f84aebfc1e1ef969f7ff338dd630b467ddc48ab7283643",
+        "size_in_bytes": 16996
+      },
+      {
+        "_path": "share/doc/xextproto/xtest.xml",
+        "path_type": "hardlink",
+        "sha256": "1cd135196cee7b82ade9f119e7bf603b32099bc2a2190375f4416ef470384bf1",
+        "sha256_in_prefix": "1cd135196cee7b82ade9f119e7bf603b32099bc2a2190375f4416ef470384bf1",
+        "size_in_bytes": 19672
+      },
+      {
+        "_path": "share/doc/xorgproto/compositeproto.txt",
+        "path_type": "hardlink",
+        "sha256": "39afb3a7cfa60f1fe86f85c4eef2703aa13d42fb25b05d8046fe64dd000f7110",
+        "sha256_in_prefix": "39afb3a7cfa60f1fe86f85c4eef2703aa13d42fb25b05d8046fe64dd000f7110",
+        "size_in_bytes": 12160
+      },
+      {
+        "_path": "share/doc/xorgproto/damageproto.txt",
+        "path_type": "hardlink",
+        "sha256": "9d1a89280321badd89891dd6532b3be268d5208e6bd2af8b67621942ad4aad28",
+        "sha256_in_prefix": "9d1a89280321badd89891dd6532b3be268d5208e6bd2af8b67621942ad4aad28",
+        "size_in_bytes": 7585
+      },
+      {
+        "_path": "share/doc/xorgproto/dri2proto.txt",
+        "path_type": "hardlink",
+        "sha256": "e2a82261c302d1b6bf63ffe94108d2cdc674bf1448e03249604bfe171f2eb3ac",
+        "sha256_in_prefix": "e2a82261c302d1b6bf63ffe94108d2cdc674bf1448e03249604bfe171f2eb3ac",
+        "size_in_bytes": 23086
+      },
+      {
+        "_path": "share/doc/xorgproto/dri3proto.txt",
+        "path_type": "hardlink",
+        "sha256": "dab17d9c74666e60c8d8a54b4c1fe4d1d1cf54fa0466f8833cb566307d6f160d",
+        "sha256_in_prefix": "dab17d9c74666e60c8d8a54b4c1fe4d1d1cf54fa0466f8833cb566307d6f160d",
+        "size_in_bytes": 21123
+      },
+      {
+        "_path": "share/doc/xorgproto/fixesproto.txt",
+        "path_type": "hardlink",
+        "sha256": "a122a53d209258ba7677058c55d9129dbd0eaa742661c27dfd4a294835ca3a9a",
+        "sha256_in_prefix": "a122a53d209258ba7677058c55d9129dbd0eaa742661c27dfd4a294835ca3a9a",
+        "size_in_bytes": 22305
+      },
+      {
+        "_path": "share/doc/xorgproto/presentproto.txt",
+        "path_type": "hardlink",
+        "sha256": "d564a65604cfe9a48f1366b44267e3c015a0c05a2869798fe77fba04ea6ab682",
+        "sha256_in_prefix": "d564a65604cfe9a48f1366b44267e3c015a0c05a2869798fe77fba04ea6ab682",
+        "size_in_bytes": 27825
+      },
+      {
+        "_path": "share/doc/xorgproto/randrproto.txt",
+        "path_type": "hardlink",
+        "sha256": "8fe3039b7c071d091fcc7f5512f0a64da3ed13c0eae3d494bfb14818bd96eec0",
+        "sha256_in_prefix": "8fe3039b7c071d091fcc7f5512f0a64da3ed13c0eae3d494bfb14818bd96eec0",
+        "size_in_bytes": 111306
+      },
+      {
+        "_path": "share/doc/xorgproto/renderproto.txt",
+        "path_type": "hardlink",
+        "sha256": "130c693a91437674b224372b07400667daeb23a2e0ea2f858d8a22eb9efba7ee",
+        "sha256_in_prefix": "130c693a91437674b224372b07400667daeb23a2e0ea2f858d8a22eb9efba7ee",
+        "size_in_bytes": 37809
+      },
+      {
+        "_path": "share/doc/xorgproto/resproto.txt",
+        "path_type": "hardlink",
+        "sha256": "e0b6933668423d84de06a41f5f94914bc912bcf29bc285dd1c884cbe742767d5",
+        "sha256_in_prefix": "e0b6933668423d84de06a41f5f94914bc912bcf29bc285dd1c884cbe742767d5",
+        "size_in_bytes": 18060
+      },
+      {
+        "_path": "share/doc/xorgproto/xv-protocol-v2.txt",
+        "path_type": "hardlink",
+        "sha256": "79d5a801985c87fc66fec5c88f82ef2e4a4da936371ceca6f264cd3fddeca711",
+        "sha256_in_prefix": "79d5a801985c87fc66fec5c88f82ef2e4a4da936371ceca6f264cd3fddeca711",
+        "size_in_bytes": 20332
+      },
+      {
+        "_path": "share/doc/xorgproto/xwaylandproto.txt",
+        "path_type": "hardlink",
+        "sha256": "b86d2645b20844379f70ef1fe366bf7b81d8ac1ee34dc8e3a4252ce7741f1c4b",
+        "sha256_in_prefix": "b86d2645b20844379f70ef1fe366bf7b81d8ac1ee34dc8e3a4252ce7741f1c4b",
+        "size_in_bytes": 2384
+      },
+      {
+        "_path": "share/doc/xproto/encoding.xml",
+        "path_type": "hardlink",
+        "sha256": "889733d7e288dbf634c4ee41b99b94b5de20628650e0ee5cb9eb4d8f6c58a644",
+        "sha256_in_prefix": "889733d7e288dbf634c4ee41b99b94b5de20628650e0ee5cb9eb4d8f6c58a644",
+        "size_in_bytes": 133533
+      },
+      {
+        "_path": "share/doc/xproto/glossary.xml",
+        "path_type": "hardlink",
+        "sha256": "a0d9084baaaf18da70dcbcba6559c9655c002b1b7570355d315b5da9957b079a",
+        "sha256_in_prefix": "a0d9084baaaf18da70dcbcba6559c9655c002b1b7570355d315b5da9957b079a",
+        "size_in_bytes": 49731
+      },
+      {
+        "_path": "share/doc/xproto/keysyms.xml",
+        "path_type": "hardlink",
+        "sha256": "e31966785fb48e876df8aa9a664489a5729a97c9e129ee8231953f904dff0e3f",
+        "sha256_in_prefix": "e31966785fb48e876df8aa9a664489a5729a97c9e129ee8231953f904dff0e3f",
+        "size_in_bytes": 150187
+      },
+      {
+        "_path": "share/doc/xproto/sect1-9.xml",
+        "path_type": "hardlink",
+        "sha256": "dcacf8b3f030dd05d05f0c82e8be0529b654890d9d39aa1370d2b27283aa1085",
+        "sha256_in_prefix": "dcacf8b3f030dd05d05f0c82e8be0529b654890d9d39aa1370d2b27283aa1085",
+        "size_in_bytes": 467109
+      },
+      {
+        "_path": "share/doc/xproto/x11protocol.xml",
+        "path_type": "hardlink",
+        "sha256": "cf4a8eab4a752f1e8ffdab6ff5db3485e030c8300660c2892b0d3905dd364ed8",
+        "sha256_in_prefix": "cf4a8eab4a752f1e8ffdab6ff5db3485e030c8300660c2892b0d3905dd364ed8",
+        "size_in_bytes": 2588
+      },
+      {
+        "_path": "share/pkgconfig/applewmproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "a52ea0644f4924fa22deaad0f2010daa930853751adf7fa00e6b42fcdad7c445",
+        "sha256_in_prefix": "2c01f4d71d92502e1251665955e468736966e82b1b6f83786841871f2e0a71cf",
+        "size_in_bytes": 391
+      },
+      {
+        "_path": "share/pkgconfig/bigreqsproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "736fb810109deb2bd899644b8878a9005d4985b24314d5184c752e5aa77b5738",
+        "sha256_in_prefix": "2778c3e7c3886840aa4c24b602260ce147020dc921e498b9967d934634b2c593",
+        "size_in_bytes": 391
+      },
+      {
+        "_path": "share/pkgconfig/compositeproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "36debcfbe90b67a34798547243ccb45eb3165ceee2f08c7ef6d482a389899b4a",
+        "sha256_in_prefix": "a5dc555d0fd76fbd8fbd95c26b32bfb92f5a44431522c47960d240dc040e79b3",
+        "size_in_bytes": 392
+      },
+      {
+        "_path": "share/pkgconfig/damageproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "e2522a19a9dec1f182b19a90334962d64420722910a03ba849f04813aaa440f7",
+        "sha256_in_prefix": "3c5821e971ec6f0473ee137e43836a0a25e48a4f5ff6f8118d1874a9c96f960b",
+        "size_in_bytes": 388
+      },
+      {
+        "_path": "share/pkgconfig/dmxproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "0e99d6e008c6e65f8030ec9f5f33716a8c0ae4c723b62d847a3a927d58134dd3",
+        "sha256_in_prefix": "7ccdcdbd1ec0a617c7949d3cb9c4d3ff5c9376b419a3b0b6c21725e2454ac6ea",
+        "size_in_bytes": 383
+      },
+      {
+        "_path": "share/pkgconfig/dpmsproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "61af903921e1f9dbbea7617d3709ad42d3f2aabd57800412bc66958cb4d78dc1",
+        "sha256_in_prefix": "db354f67dcc99a25e88380ce927abf2563db49b216129375792b12a3daae6656",
+        "size_in_bytes": 382
+      },
+      {
+        "_path": "share/pkgconfig/dri2proto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "d8d6730407ca4af901815420fb356de3f2be85eaa728d42928a6bae24410e0f6",
+        "sha256_in_prefix": "9ffbec8998e57bfbb82d904a3436729c75131d57c7b7e78cc9e84a9808968dcf",
+        "size_in_bytes": 383
+      },
+      {
+        "_path": "share/pkgconfig/dri3proto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "c03c01139089580ce6e16e62dff627412bb77e6260126ba249ecdfeb6990938b",
+        "sha256_in_prefix": "415ade0a53bf2168d8115059dcc24b4163df344e0e34797921f4cf62f771aae8",
+        "size_in_bytes": 383
+      },
+      {
+        "_path": "share/pkgconfig/fixesproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "472b2d118aae57aed513ce298b34bc203ce4c49aa94010a8b3f2bf71c8004d52",
+        "sha256_in_prefix": "6b071fcadab29b54c9868d612a938f34b164013f9f03808f160ac25d1410f83d",
+        "size_in_bytes": 418
+      },
+      {
+        "_path": "share/pkgconfig/fontsproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "7685900d92970d3b72361d27d2c8ebf44b197cdc39b7216822d2ea9c1853c7cf",
+        "sha256_in_prefix": "b56ed98d63eeac17e27eb7adcb5c1f05f16c16557e91052be6d3208ba1d83df2",
+        "size_in_bytes": 387
+      },
+      {
+        "_path": "share/pkgconfig/glproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "c6d2cbdd4b330201def78c008e8fc773d8d0469d58e74750b9f0b1b93350f4ca",
+        "sha256_in_prefix": "33ac25d2ed01250c6ff337aaacb821007895b4eeb5f143813b63c4d6fb46c1b2",
+        "size_in_bytes": 382
+      },
+      {
+        "_path": "share/pkgconfig/inputproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "63d3ab0b7dbbd6a7250dd409e6d3b31b272c1cd972f2c02eba22b395227420d0",
+        "sha256_in_prefix": "e4ac727e87cda52df9b1418b4efe65e3c82c7bc1615fbe0245254460f84d515b",
+        "size_in_bytes": 390
+      },
+      {
+        "_path": "share/pkgconfig/kbproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "529002e869e5c17c2a4e6dcc25e725f83ec971231ae842bb4d07998edd0d2875",
+        "sha256_in_prefix": "1e51294531e4d8ffaa9e9688ab5f43953387a43fa75c6a6f7f85f6564335a21b",
+        "size_in_bytes": 381
+      },
+      {
+        "_path": "share/pkgconfig/presentproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "ebab0aa08ecad410342bee90a75e7253f91355fccdf5f482055650fdd6c29203",
+        "sha256_in_prefix": "524e0d9817a59d8f92bafea934fd56e8ff218d6fb467886874093daa2ff6fcbe",
+        "size_in_bytes": 389
+      },
+      {
+        "_path": "share/pkgconfig/randrproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "ba57c59ff3fad19ec3a70cc47b469d9914f202a007541083274ed1a39e7b47a7",
+        "sha256_in_prefix": "dcdd8774212e97b2c794a761b445263f590d96c624295f06d12aadb822d4bf24",
+        "size_in_bytes": 387
+      },
+      {
+        "_path": "share/pkgconfig/recordproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "af25b35da39c50c31564c85c155a8c6be80b120e2e47d0b0da44f11b02fb850e",
+        "sha256_in_prefix": "f48b6ed409340be8cd7dd3bc30f343c70813db7bcfc2b0b13cc08aa5b874fab7",
+        "size_in_bytes": 390
+      },
+      {
+        "_path": "share/pkgconfig/renderproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "642868053c1e5ef458518713f2a1a607788b74b73f2fee5a3946c66c402e1e5a",
+        "sha256_in_prefix": "0bb6306a732671d06a4779c22ef0d947883677275dcc0cffd7fa259831f85a4d",
+        "size_in_bytes": 389
+      },
+      {
+        "_path": "share/pkgconfig/resourceproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "e9b6561e1d2a362130deec151d7986d1cac7c06d0ba3965b56121a386d63d6aa",
+        "sha256_in_prefix": "5fe048a0e0bd361b1259cbdffe27e6baa2a307fc4d44677281cbaee5f0b22277",
+        "size_in_bytes": 393
+      },
+      {
+        "_path": "share/pkgconfig/scrnsaverproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "7352e2679d32dce803888b1d0973002c77b5b817bdf524d3c89c3a3ed9c2dff3",
+        "sha256_in_prefix": "ddb416e4f0d997702c4600603f4f59ef3279c6046e3718528516547b6a223fba",
+        "size_in_bytes": 395
+      },
+      {
+        "_path": "share/pkgconfig/videoproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "6a02934efaef47d41857499e40815fc48edbb6886a0df3600c7e026a1e7039fd",
+        "sha256_in_prefix": "6ff2ea3f55f40cf217c6e3bddf2305ae380764b57d5f2d05accb3fbd61891d83",
+        "size_in_bytes": 386
+      },
+      {
+        "_path": "share/pkgconfig/xcmiscproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "d96a491237f97a2b98668210687443870271449b533d733453dfcf5d12444ebe",
+        "sha256_in_prefix": "f92342aeb7e4c93da3e781d6f785fdfd02a3c876baba64dedb39c4f7d77754ca",
+        "size_in_bytes": 389
+      },
+      {
+        "_path": "share/pkgconfig/xextproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "cb435bce5fcaeb2e8016237ae83be4aed802abf50f740e0632a1c7f3df2cb553",
+        "sha256_in_prefix": "a7572e330ad78d1b88023c5452f8bba663b39ada12431e9571710d9e867886ff",
+        "size_in_bytes": 385
+      },
+      {
+        "_path": "share/pkgconfig/xf86bigfontproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "7b88ff24f536c572d79b4f400c7d0bdc3434a1e0a0ffb874079f5532ce30ca6b",
+        "sha256_in_prefix": "a564843589682a1219faab6e8039a05ec30c0272df50c3b7fb82c8c83adb58c0",
+        "size_in_bytes": 399
+      },
+      {
+        "_path": "share/pkgconfig/xf86dgaproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "197ca48cf2c117c4a4984b76a5585f5043589b5c9e344ce9e03571ad97289b5c",
+        "sha256_in_prefix": "a4a6880a7c9d4a0f02d587e15ee0ac38415defce294ad9b99139ab26ff148520",
+        "size_in_bytes": 389
+      },
+      {
+        "_path": "share/pkgconfig/xf86driproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "2225bf7998fa1d2d0fb15137e1d3c43bd3840b2cac7673695d3899f9a630db4b",
+        "sha256_in_prefix": "68831043f54279088c8fa454e5d27aa5db72fc43103821f5205f4118f528d65c",
+        "size_in_bytes": 399
+      },
+      {
+        "_path": "share/pkgconfig/xf86vidmodeproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "5be0eded010ed7bbc7204daf9a38e9aff1d9d92de0d41fbba6b18d0251e022bf",
+        "sha256_in_prefix": "c9bfd165871586083ca2919eb5485cc41672556530bc6f4cfae7ff97c35546b1",
+        "size_in_bytes": 399
+      },
+      {
+        "_path": "share/pkgconfig/xineramaproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "048daf03ee56be99a48fe74686bd1a36c4dc80b2c9029cd477feba065fd4d326",
+        "sha256_in_prefix": "789e9335ebc57dca48d76ed6d2634a7451dea95bbb6f2ddfb9e9dbdf9f6cb7e4",
+        "size_in_bytes": 393
+      },
+      {
+        "_path": "share/pkgconfig/xproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "050752f0181689bb230da617fc1928dbf09d6ba94f972eb373969750bd6a95a2",
+        "sha256_in_prefix": "96f793fb1ede0a8352a666cd38a2f22df84fefbd1d0b9b02787880bf935c9990",
+        "size_in_bytes": 411
+      },
+      {
+        "_path": "share/pkgconfig/xwaylandproto.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/croot/xorg-xorgproto_1746046208107/_h_env_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_placehold_pl",
+        "sha256": "9b6bdded4c0fd1b106e623a08c54815d80e0de9fe95ca00845f50d8ab2fa4b12",
+        "sha256_in_prefix": "6566013de0b3af384ade4e71e4e0b0fd6f4182377deb300284ac8db40c376a74",
+        "size_in_bytes": 390
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "aa6d3ab9be5b43d3e8ac0c7e23f2a83c3959f8f30ec758e2fcae91f87a9b23b4",
+  "size": 594175,
+  "subdir": "linux-64",
+  "timestamp": 1746046234000,
+  "url": "https://repo.anaconda.com/pkgs/main/linux-64/xorg-xorgproto-2024.1-h5eee18b_1.conda",
+  "version": "2024.1"
+}

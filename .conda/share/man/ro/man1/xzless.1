@@ -1,0 +1,57 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Andrew Dudman
+.\"          Lasse Collin
+.\"
+.\" Romanian translation for xz-man.
+.\" Mesajele în limba română pentru manualul pachetului XZ Utils.
+.\" Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2022 - 2024.
+.\" Cronologia traducerii fișierului „xz-man”:
+.\" Traducerea inițială, făcută de R-GC, pentru versiunea xz-man 5.4.0-pre1.
+.\" Actualizare a traducerii pentru versiunea 5.4.0-pre2, făcută de R-GC, dec-2022.
+.\" Actualizare a traducerii pentru versiunea 5.4.3, făcută de R-GC, mai-2023.
+.\" Actualizare a traducerii pentru versiunea 5.4.4-pre1, făcută de R-GC, iul-2023.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre1, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre2, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea Y, făcută de X, Z(luna-anul).
+.\"
+.\" (Note that this file is not based on gzip's zless.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZLESS 1 "12 februarie 2024" Tukaani "Utilități XZ"
+.SH NUME
+xzless, lzless \- vizualizează fișierele (text) comprimate xz sau lzma
+.SH REZUMAT
+\fBxzless\fP [\fIfișier\fP...]
+.br
+\fBlzless\fP [\fIfișier\fP...]
+.SH DESCRIERE
+\fBxzless\fP este un filtru care afișează textul din fișierele comprimate pe un
+terminal.  Fișierele acceptate de \fBxz\fP(1) sunt decomprimate; se presupune
+că celelalte fișiere sunt deja în format necomprimat. Dacă nu se dă nici un
+\fIfișier\fP, \fBxzless\fP citește de la intrarea standard.
+.PP
+\fBxzless\fP folosește \fBless\fP(1) pentru a\-și prezenta rezultatul. Spre
+deosebire de \fBxzmore\fP, alegerea sa de pager nu poate fi modificată prin
+definirea unei variabile de mediu. Comenzile se bazează atât pe \fBmore\fP(1)
+cât și pe \fBvi\fP(1) și permit mișcarea înainte și înapoi și
+căutarea. Consultați manualul \fBless\fP(1) pentru mai multe informații.
+.PP
+Comanda numită \fBlzless\fP este furnizată pentru compatibilitatea cu LZMA
+Utils.
+.SH "VARIABILE DE MEDIU"
+.TP 
+\fBLESSMETACHARS\fP
+O listă de caractere speciale pentru shell. Definită de \fBxzless\fP, cu
+excepția cazului în care este deja definită în mediu.
+.TP 
+\fBLESSOPEN\fP
+Aceasta este definită în linia de comandă pentru a invoca instrumentul de
+decomprimare \fBxz\fP(1) pentru preprocesarea fișierelor de intrare pentru
+\fBless\fP(1).
+.SH "CONSULTAȚI ȘI"
+\fBless\fP(1), \fBxz\fP(1), \fBxzmore\fP(1), \fBzless\fP(1)

@@ -1,0 +1,605 @@
+<chapter id='Keyboard_Indicators'>
+<title>Keyboard Indicators</title>
+
+<para>
+Although the core X protocol supports thirty-two LEDs on a keyboard, it does
+not provide any way to link the state of the LEDs and the logical state of the
+keyboard. For example, most keyboards have a "Caps Lock" LED, but X does not
+provide any standard way to make the LED automatically follow the logical state
+of the modifier bound to the <emphasis>
+Caps Lock</emphasis>
+ key.
+</para>
+
+
+<para>
+The core protocol also gives no way to determine which bits in the <emphasis>
+led_mask</emphasis>
+ field of the keyboard state map to the particular LEDs on the keyboard. For
+example, X does not provide a method for a client to determine which bit to set
+in the <emphasis>
+led_mask</emphasis>
+ to turn on the "Scroll Lock" LED, or even if the keyboard has a "Scroll Lock"
+LED.
+</para>
+
+
+<para>
+Most X servers implement some kind of automatic behavior for one or more of the
+keyboard LEDs, but the details of that automatic behavior are
+implementation-specific and can be difficult or impossible to control.
+</para>
+
+
+<para>
+XKB provides indicator names and programmable indicators to help solve these
+problems. Using XKB, clients can determine the names of the various indicators,
+determine and control the way that the individual indicators should be updated
+to reflect keyboard changes, and determine which of the 32 keyboard indicators
+reported by the protocol are actually present on the keyboard. Clients may also
+request immediate notification of changes to the state of any subset of the
+keyboard indicators, which makes it straightforward to provide an on-screen
+"virtual" LED panel.
+</para>
+
+<sect1 id='Global_Information_About_Indicators'>
+<title>Global Information About Indicators</title>
+
+<para>
+XKB provides only two pieces of information about the indicators as a group.
+</para>
+
+
+<para>
+The <emphasis>
+physical indicators</emphasis>
+ mask reports which of the 32 logical keyboard indicators supported by the core
+protocol and XKB corresponds to some actual indicator on the keyboard itself.
+Because the physical indicators mask describes a physical characteristic of the
+keyboard, it cannot be directly changed under program control. It is possible,
+however, for the set of physical indicators to be change if a new keyboard is
+attached or if a completely new keyboard description is loaded by the <emphasis>
+XkbGetKeyboardByName</emphasis>
+ request (see <link linkend='Using_the_Servers_Database_of_Keyboard_Components'>Using the Server’s
+Database of Keyboard Components</link>).
+</para>
+
+
+<para>
+The <emphasis>
+indicator state</emphasis>
+ mask reports the current state of the 32 logical keyboard indicators. This
+field and the core protocol indicator state (as reported by the <emphasis>
+led-mask</emphasis>
+ field of the core protocol <emphasis>
+GetKeyboardControl</emphasis>
+ request) are always identical.
+</para>
+
+
+</sect1>
+<sect1 id='Per_Indicator_Information'>
+<title>Per-Indicator Information</title>
+
+<para>
+Each of the thirty-two keyboard indicators has a symbolic name, of type ATOM.
+The <emphasis>
+XkbGetNames</emphasis>
+ request reports the symbolic names for all keyboard components, including the
+indicators. Use the <emphasis>
+XkbSetNames</emphasis>
+ request to change symbolic names. Both requests are described in <link linkend='Querying_and_Changing_Symbolic_Names'>Querying and Changing Symbolic
+Names</link>.
+</para>
+
+
+<sect2 id='Indicator_Maps'>
+<title>Indicator Maps</title>
+
+<para>
+XKB also provides an <emphasis>
+indicator map</emphasis>
+ for each of the thirty-two keyboard indicators; an indicator map specifies:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The conditions under which the keyboard modifier state affects the
+indicator.
+  </para>
+</listitem>
+<listitem>
+  <para>The conditions under which the keyboard group state affects the
+indicator.
+  </para>
+</listitem>
+<listitem>
+  <para>The conditions under which the state of the boolean controls affects
+the indicator.
+  </para>
+</listitem>
+<listitem>
+  <para>The effect (if any) of attempts to explicitly change the state of the
+indicator using the core protocol <emphasis>
+SetKeyboardControl</emphasis>
+ request.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+If <emphasis>
+IM_NoAutomatic</emphasis>
+ is set in the <emphasis>
+flags</emphasis>
+ field of an indicator map, that indicator never changes in response to changes
+in keyboard state or controls, regardless of the values for the other fields of
+the indicator map. If <emphasis>
+IM_NoAutomatic</emphasis>
+ is not set in <emphasis>
+flags</emphasis>
+, the other fields of the indicator map specify the automatic changes to the
+indicator in response to changes in the keyboard state or controls.
+</para>
+
+
+<para>
+The <emphasis>
+which_groups</emphasis>
+ and the <emphasis>
+groups</emphasis>
+ fields of an indicator map determine how the keyboard group state affects the
+corresponding indicator. The <emphasis>
+which_groups</emphasis>
+ field controls the interpretation of <emphasis>
+groups</emphasis>
+ and may contain any one of the following values:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Value</entry>
+    <entry>Interpretation of the Groups Field</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+IM_UseNone</emphasis>
+</entry>
+    <entry>The <emphasis>
+groups</emphasis>
+ field and the current keyboard group state are ignored.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseBase</emphasis>
+</entry>
+    <entry>If <emphasis>
+groups</emphasis>
+ is non-zero, the indicator is lit whenever the base keyboard group is
+non-zero. If <emphasis>
+groups</emphasis>
+ is zero, the indicator is lit whenever the base keyboard group is zero.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLatched</emphasis>
+</entry>
+    <entry>If <emphasis>
+groups</emphasis>
+ is non-zero, the indicator is lit whenever the latched keyboard group is
+non-zero. If <emphasis>
+groups</emphasis>
+ is zero, the indicator is lit whenever the latched keyboard group is
+zero.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+</entry>
+    <entry>The <emphasis>
+groups</emphasis>
+ field is interpreted as a mask. The indicator is lit when the current locked
+keyboard group matches one of the bits that are set in <emphasis>
+groups</emphasis>
+.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>The <emphasis>
+groups</emphasis>
+ field is interpreted as a mask. The indicator is lit when the current
+effective keyboard group matches one of the bits that are set in <emphasis>
+groups</emphasis>
+.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The <emphasis>
+which_mods</emphasis>
+ and <emphasis>
+mods</emphasis>
+ fields of an indicator map determine how the state of the keyboard modifiers
+affect the corresponding indicator. The <emphasis>
+mods</emphasis>
+ field is an XKB modifier definition, as described in <link linkend='Modifier_Definitions'>Modifier Definitions</link>, which can
+specify both real and virtual modifiers. The mods field takes effect even if
+some or all of the virtual indicators specified in <emphasis>
+mods</emphasis>
+ are unbound.
+</para>
+
+
+<para>
+The <emphasis>
+which_mods</emphasis>
+ field can specify one or more components of the XKB keyboard state. The
+corresponding indicator is lit whenever any of the real modifiers specified in
+the <emphasis>
+mask</emphasis>
+ field of the <emphasis>
+mods</emphasis>
+ modifier definition are also set in any of the current keyboard state
+components specified by the <emphasis>
+which_mods</emphasis>
+. The <emphasis>
+which_mods</emphasis>
+ field may have any combination of the following values:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Value</entry>
+    <entry>Keyboard State Component To Be Considered</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+IM_UseBase</emphasis>
+</entry>
+    <entry>Base modifier state</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLatched</emphasis>
+</entry>
+    <entry>Latched modifier state</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+</entry>
+    <entry>Locked modifier state</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>Effective modifier state</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseCompat</emphasis>
+</entry>
+    <entry>Modifier compatibility state</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The <emphasis>
+controls</emphasis>
+ field specifies a subset of the boolean keyboard controls (see <link linkend='Boolean_Controls_and_The_EnabledControls_Control'>"Boolean" Controls and The
+EnabledControls Control</link>). The indicator is lit whenever any of the
+boolean controls specified in <emphasis>
+controls</emphasis>
+ are enabled.
+</para>
+
+
+<para>
+An indicator is lit whenever any of the conditions specified by its indicator
+map are met, unless overridden by the <emphasis>
+IM_NoAutomatic</emphasis>
+ flag (described above) or an explicit indicator change (described below).
+</para>
+
+
+<sect3 id='Effects_of_Explicit_Changes_on_Indicators'>
+<title>Effects of Explicit Changes on Indicators</title>
+
+<para>
+If the <emphasis>
+IM_NoExplicit</emphasis>
+ flag is set in an indicator map, attempts to change the state of the indicator
+are ignored.
+</para>
+
+
+<para>
+If both <emphasis>
+IM_NoExplicit</emphasis>
+ and <emphasis>
+IM_NoAutomatic</emphasis>
+ are both absent from an indicator map, requests to change the state of the
+indicator are honored but might be immediately superseded by automatic changes
+to the indicator state which reflect changes to keyboard state or controls.
+</para>
+
+
+<para>
+If the <emphasis>
+IM_LEDDrivesKB</emphasis>
+ flag is set and the <emphasis>
+IM_NoExplicit</emphasis>
+ flag is not, the keyboard state and controls are changed to reflect the other
+fields of the indicator map, as described in the remainder of this section.
+Attempts to explicitly change the value of an indicator for which <emphasis>
+IM_LEDDrivesKB</emphasis>
+ is absent or for which <emphasis>
+IM_NoExplicit</emphasis>
+ is present do not affect keyboard state or controls.
+</para>
+
+
+<para>
+The effect on group state of changing an explicit indicator which drives the
+keyboard is determined by the value of <emphasis>
+which_groups</emphasis>
+ and <emphasis>
+groups</emphasis>
+, as follows:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='3' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='2.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='2.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry> which_groups</entry>
+    <entry>New State</entry>
+    <entry>Effect on Keyboard Group State</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+IM_UseNone</emphasis>
+, or <emphasis>
+IM_UseBase</emphasis>
+</entry>
+    <entry>On or Off</entry>
+    <entry>No Effect</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLatched</emphasis>
+</entry>
+    <entry>On</entry>
+    <entry>The <emphasis>
+groups</emphasis>
+ field is treated as a group mask. The keyboard group latch is changed to the
+lowest numbered group specified in <emphasis>
+groups</emphasis>
+; if <emphasis>
+groups</emphasis>
+ is empty, the keyboard group latch is changed to zero.</entry>
+  </row>
+  <row>
+    <entry>IM_UseLatched</entry>
+    <entry>Off</entry>
+    <entry>The <emphasis>
+groups</emphasis>
+ field is treated as a group mask. If the indicator is explicitly extinguished,
+keyboard group latch is changed to the lowest numbered group not specified in
+<emphasis>
+groups</emphasis>
+; if <emphasis>
+groups</emphasis>
+ is zero, the keyboard group latch is set to the index of the highest legal
+keyboard group.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+, or <emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>On</entry>
+    <entry>If the <emphasis>
+groups</emphasis>
+ mask is empty, group is not changed, otherwise the locked keyboard group is
+changed to the lowest numbered group specified in <emphasis>
+groups</emphasis>
+.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+, or <emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>Off</entry>
+    <entry>Locked keyboard group is changed to the lowest numbered group that
+is not specified in the <emphasis>
+groups</emphasis>
+ mask, or to <emphasis>
+Group1</emphasis>
+ if the <emphasis>
+groups</emphasis>
+ mask contains all keyboard groups.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The effect on the keyboard modifiers of changing an explicit indicator which
+drives the keyboard is determined by the values that are set in of <emphasis>
+which_mods</emphasis>
+ and <emphasis>
+mods</emphasis>
+, as follows:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='3' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Set in which_mods</entry>
+    <entry>New State</entry>
+    <entry>Effect on Keyboard Modifiers</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+IM_UseBase</emphasis>
+</entry>
+    <entry>On or Off</entry>
+    <entry>No Effect</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLatched</emphasis>
+</entry>
+    <entry>On</entry>
+    <entry>Any modifiers specified in the <emphasis>
+mask</emphasis>
+ field of <emphasis>
+mods</emphasis>
+ are added to the latched modifiers.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLatched</emphasis>
+</entry>
+    <entry>Off</entry>
+    <entry>Any modifiers specified in the <emphasis>
+mask</emphasis>
+ field of <emphasis>
+mods</emphasis>
+ are removed from the latched modifiers.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+, <emphasis>
+IM_UseCompat</emphasis>
+, or <emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>On</entry>
+    <entry>Any modifiers specified in the <emphasis>
+mask</emphasis>
+ field of <emphasis>
+mods</emphasis>
+ are added to the locked modifiers.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseLocked</emphasis>
+</entry>
+    <entry>Off</entry>
+    <entry>Any modifiers specified in the <emphasis>
+mask</emphasis>
+ field of <emphasis>
+mods</emphasis>
+ are removed from the locked modifiers.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+IM_UseCompat</emphasis>
+, or <emphasis>
+IM_UseEffective</emphasis>
+</entry>
+    <entry>Off</entry>
+    <entry>Any modifiers specified in the <emphasis>
+mask</emphasis>
+ field of <emphasis>
+mods</emphasis>
+ are removed from both the locked and latched modifiers.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Lighting an explicit indicator which drives the keyboard also enables all of
+the boolean controls specified in the <emphasis>
+controls</emphasis>
+ field of its indicator map. Explicitly extinguishing such an indicator
+disables all of the boolean controls specified in <emphasis>
+controls</emphasis>
+.
+</para>
+
+
+<para>
+The effects of changing an indicator which drives the keyboard are cumulative;
+it is possible for a single change to affect keyboard group, modifiers and
+controls simultaneously.
+</para>
+
+
+<para>
+If an indicator for which both the <emphasis>
+IM_LEDDrivesKB</emphasis>
+ and <emphasis>
+IM_NoAutomatic</emphasis>
+ flags are specified is changed, the keyboard changes specified above are
+applied and the indicator is changed to reflect the state that was explicitly
+requested. The indicator will remain in the new state until it is explicitly
+changed again.
+</para>
+
+
+<para>
+If the <emphasis>
+IM_NoAutomatic</emphasis>
+ flag is not set for an indicator which drives the keyboard, the changes
+specified above are applied and the state of the indicator is set to the values
+specified by the indicator map. Note that it is possible in this case for the
+indicator to end up in a different state than the one that was explicitly
+requested. For example, an indicator with <emphasis>
+which_mods</emphasis>
+ of <emphasis>
+IM_UseBase</emphasis>
+ and <emphasis>
+mods</emphasis>
+ of <emphasis>
+Shift</emphasis>
+ is not extinguished if one of the <emphasis>
+Shift</emphasis>
+ keys is physically depressed when the request to extinguish the indicator is
+processed.
+</para>
+</sect3>
+</sect2>
+</sect1>
+</chapter>

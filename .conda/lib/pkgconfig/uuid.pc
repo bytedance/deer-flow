@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=/home/kie/code/deer-flow/.conda
+libdir=/home/kie/code/deer-flow/.conda/lib
+includedir=/home/kie/code/deer-flow/.conda/include
+
+Name: uuid
+Description: Universally unique id library
+Version: 2.32.1
+Requires:
+Cflags: -I${includedir}/uuid
+Libs: -L${libdir} -luuid

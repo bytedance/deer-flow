@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: RecordProto
+Description: Record extension headers
+Version: 1.14.2
+Cflags: -I${includedir}

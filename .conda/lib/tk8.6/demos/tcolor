@@ -1,0 +1,358 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# tcolor --
+# This script implements a simple color editor, where you can
+# create colors using either the RGB, HSB, or CYM color spaces
+# and apply the color to existing applications.
+
+package require Tk
+wm title . "Color Editor"
+
+# Global variables that control the program:
+#
+# colorSpace -			Color space currently being used for
+#				editing.  Must be "rgb", "cmy", or "hsb".
+# label1, label2, label3 -	Labels for the scales.
+# red, green, blue -		Current color intensities in decimal
+#				on a scale of 0-65535.
+# color -			A string giving the current color value
+#				in the proper form for x:
+#				#RRRRGGGGBBBB
+# updating -			Non-zero means that we're in the middle of
+#				updating the scales to load a new color,so
+#				information shouldn't be propagating back
+#				from the scales to other elements of the
+#				program:  this would make an infinite loop.
+# command -			Holds the command that has been typed
+#				into the "Command" entry.
+# autoUpdate -			1 means execute the update command
+#				automatically whenever the color changes.
+# name -			Name for new color, typed into entry.
+
+set colorSpace hsb
+set red 65535
+set green 0
+set blue 0
+set color #ffff00000000
+set updating 0
+set autoUpdate 1
+set name ""
+
+# Create the menu bar at the top of the window.
+
+. configure -menu [menu .menu]
+menu .menu.file
+.menu add cascade  -menu .menu.file  -label File  -underline 0
+.menu.file add radio -label "RGB color space" -variable colorSpace \
+	-value rgb -underline 0 -command {changeColorSpace rgb}
+.menu.file add radio -label "CMY color space" -variable colorSpace \
+	-value cmy -underline 0 -command {changeColorSpace cmy}
+.menu.file add radio -label "HSB color space" -variable colorSpace \
+	-value hsb -underline 0 -command {changeColorSpace hsb}
+.menu.file add separator
+.menu.file add radio -label "Automatic updates" -variable autoUpdate \
+	-value 1 -underline 0
+.menu.file add radio -label "Manual updates" -variable autoUpdate \
+	-value 0 -underline 0
+.menu.file add separator
+.menu.file add command -label "Exit program" -underline 0 -command {exit}
+
+# Create the command entry window at the bottom of the window, along
+# with the update button.
+
+labelframe .command -text "Command:" -padx {1m 0}
+entry .command.e -textvariable command
+button .command.update -text Update -command doUpdate
+pack .command.update -side right -pady .1c -padx {.25c 0}
+pack .command.e -expand yes -fill x -ipadx 0.25c
+
+
+# Create the listbox that holds all of the color names in rgb.txt,
+# if an rgb.txt file can be found.
+
+grid .command -sticky nsew -row 2 -columnspan 3 -padx 1m -pady {0 1m}
+
+grid columnconfigure . {1 2} -weight 1
+grid rowconfigure . 0 -weight 1
+foreach i {
+    /usr/local/lib/X11/rgb.txt /usr/lib/X11/rgb.txt
+    /X11/R5/lib/X11/rgb.txt /X11/R4/lib/rgb/rgb.txt
+    /usr/openwin/lib/X11/rgb.txt
+} {
+    if {![file readable $i]} {
+	continue;
+    }
+    set f [open $i]
+    labelframe .names -text "Select:" -padx .1c -pady .1c
+    grid .names -row 0 -column 0 -sticky nsew -padx .15c -pady .15c -rowspan 2
+    grid columnconfigure . 0 -weight 1
+    listbox .names.lb -width 20 -height 12 -yscrollcommand ".names.s set" \
+	-exportselection false
+    bind .names.lb <Double-Button-1> {
+	    tc_loadNamedColor [.names.lb get [.names.lb curselection]]
+    }
+    scrollbar .names.s -orient vertical -command ".names.lb yview"
+    pack .names.lb .names.s -side left -fill y -expand 1
+    while {[gets $f line] >= 0} {
+	if {[regexp {^\s*\d+\s+\d+\s+\d+\s+(\S+)$} $line -> col]} {
+	    .names.lb insert end $col
+	}
+    }
+    close $f
+    break
+}
+
+# Create the three scales for editing the color, and the entry for
+# typing in a color value.
+
+frame .adjust
+foreach i {1 2 3} {
+    label .adjust.l$i -textvariable label$i -pady 0
+    labelframe .adjust.$i -labelwidget .adjust.l$i -padx 1m -pady 1m
+    scale .scale$i -from 0 -to 1000 -length 6c -orient horizontal \
+	    -command tc_scaleChanged
+    pack .scale$i -in .adjust.$i
+    pack .adjust.$i
+}
+grid .adjust -row 0 -column 1 -sticky nsew -padx .15c -pady .15c
+
+labelframe .name -text "Name:" -padx 1m -pady 1m
+entry .name.e -textvariable name -width 10
+pack .name.e -side right -expand 1 -fill x
+bind .name.e <Return> {tc_loadNamedColor $name}
+grid .name   -column 1 -row 1 -sticky nsew -padx .15c -pady .15c
+
+# Create the color display swatch on the right side of the window.
+
+labelframe .sample -text "Color:" -padx 1m -pady 1m
+frame .sample.swatch -width 2c -height 5c -background $color
+label .sample.value -textvariable color -width 13 -font {Courier 12}
+pack .sample.swatch -side top -expand yes -fill both
+pack .sample.value -side bottom -pady .25c
+grid .sample -row 0 -column 2 -sticky nsew -padx .15c -pady .15c -rowspan 2
+
+
+# The procedure below is invoked when one of the scales is adjusted.
+# It propagates color information from the current scale readings
+# to everywhere else that it is used.
+
+proc tc_scaleChanged args {
+    global red green blue colorSpace color updating autoUpdate
+    if {$updating} {
+	return
+    }
+    switch $colorSpace {
+	rgb {
+	    set red   [format %.0f [expr {[.scale1 get]*65.535}]]
+	    set green [format %.0f [expr {[.scale2 get]*65.535}]]
+	    set blue  [format %.0f [expr {[.scale3 get]*65.535}]]
+	}
+	cmy {
+	    set red   [format %.0f [expr {65535 - [.scale1 get]*65.535}]]
+	    set green [format %.0f [expr {65535 - [.scale2 get]*65.535}]]
+	    set blue  [format %.0f [expr {65535 - [.scale3 get]*65.535}]]
+	}
+	hsb {
+	    set list [hsbToRgb [expr {[.scale1 get]/1000.0}] \
+		    [expr {[.scale2 get]/1000.0}] \
+		    [expr {[.scale3 get]/1000.0}]]
+	    set red [lindex $list 0]
+	    set green [lindex $list 1]
+	    set blue [lindex $list 2]
+	}
+    }
+    set color [format "#%04x%04x%04x" $red $green $blue]
+    .sample.swatch config -bg $color
+    if {$autoUpdate} doUpdate
+    update idletasks
+}
+
+# The procedure below is invoked to update the scales from the
+# current red, green, and blue intensities.  It's invoked after
+# a change in the color space and after a named color value has
+# been loaded.
+
+proc tc_setScales {} {
+    global red green blue colorSpace updating
+    set updating 1
+    switch $colorSpace {
+	rgb {
+	    .scale1 set [format %.0f [expr {$red/65.535}]]
+	    .scale2 set [format %.0f [expr {$green/65.535}]]
+	    .scale3 set [format %.0f [expr {$blue/65.535}]]
+	}
+	cmy {
+	    .scale1 set [format %.0f [expr {(65535-$red)/65.535}]]
+	    .scale2 set [format %.0f [expr {(65535-$green)/65.535}]]
+	    .scale3 set [format %.0f [expr {(65535-$blue)/65.535}]]
+	}
+	hsb {
+	    set list [rgbToHsv $red $green $blue]
+	    .scale1 set [format %.0f [expr {[lindex $list 0] * 1000.0}]]
+	    .scale2 set [format %.0f [expr {[lindex $list 1] * 1000.0}]]
+	    .scale3 set [format %.0f [expr {[lindex $list 2] * 1000.0}]]
+	}
+    }
+    set updating 0
+}
+
+# The procedure below is invoked when a named color has been
+# selected from the listbox or typed into the entry.  It loads
+# the color into the editor.
+
+proc tc_loadNamedColor name {
+    global red green blue color autoUpdate
+
+    if {[string index $name 0] != "#"} {
+	set list [winfo rgb .sample.swatch $name]
+	set red [lindex $list 0]
+	set green [lindex $list 1]
+	set blue [lindex $list 2]
+    } else {
+	switch [string length $name] {
+	    4  {set format "#%1x%1x%1x"; set shift 12}
+	    7  {set format "#%2x%2x%2x"; set shift 8}
+	    10 {set format "#%3x%3x%3x"; set shift 4}
+	    13 {set format "#%4x%4x%4x"; set shift 0}
+	    default {error "syntax error in color name \"$name\""}
+	}
+	if {[scan $name $format red green blue] != 3} {
+	    error "syntax error in color name \"$name\""
+	}
+	set red   [expr {$red<<$shift}]
+	set green [expr {$green<<$shift}]
+	set blue  [expr {$blue<<$shift}]
+    }
+    tc_setScales
+    set color [format "#%04x%04x%04x" $red $green $blue]
+    .sample.swatch config -bg $color
+    if {$autoUpdate} doUpdate
+}
+
+# The procedure below is invoked when a new color space is selected.
+# It changes the labels on the scales and re-loads the scales with
+# the appropriate values for the current color in the new color space
+
+proc changeColorSpace space {
+    global label1 label2 label3
+    switch $space {
+	rgb {
+	    set label1 "Adjust Red:"
+	    set label2 "Adjust Green:"
+	    set label3 "Adjust Blue:"
+	    tc_setScales
+	    return
+	}
+	cmy {
+	    set label1 "Adjust Cyan:"
+	    set label2 "Adjust Magenta:"
+	    set label3 "Adjust Yellow:"
+	    tc_setScales
+	    return
+	}
+	hsb {
+	    set label1 "Adjust Hue:"
+	    set label2 "Adjust Saturation:"
+	    set label3 "Adjust Brightness:"
+	    tc_setScales
+	    return
+	}
+    }
+}
+
+# The procedure below converts an RGB value to HSB.  It takes red, green,
+# and blue components (0-65535) as arguments, and returns a list containing
+# HSB components (floating-point, 0-1) as result.  The code here is a copy
+# of the code on page 615 of "Fundamentals of Interactive Computer Graphics"
+# by Foley and Van Dam.
+
+proc rgbToHsv {red green blue} {
+    if {$red > $green} {
+	set max [expr {double($red)}]
+	set min [expr {double($green)}]
+    } else {
+	set max [expr {double($green)}]
+	set min [expr {double($red)}]
+    }
+    if {$blue > $max} {
+	set max [expr {double($blue)}]
+    } elseif {$blue < $min} {
+	set min [expr {double($blue)}]
+    }
+    set range [expr {$max-$min}]
+    if {$max == 0} {
+	set sat 0
+    } else {
+	set sat [expr {($max-$min)/$max}]
+    }
+    if {$sat == 0} {
+	set hue 0
+    } else {
+	set rc [expr {($max - $red)/$range}]
+	set gc [expr {($max - $green)/$range}]
+	set bc [expr {($max - $blue)/$range}]
+	if {$red == $max} {
+	    set hue [expr {($bc - $gc)/6.0}]
+	} elseif {$green == $max} {
+	    set hue [expr {(2 + $rc - $bc)/6.0}]
+	} else {
+	    set hue [expr {(4 + $gc - $rc)/6.0}]
+	}
+	if {$hue < 0.0} {
+	    set hue [expr {$hue + 1.0}]
+	}
+    }
+    return [list $hue $sat [expr {$max/65535}]]
+}
+
+# The procedure below converts an HSB value to RGB.  It takes hue, saturation,
+# and value components (floating-point, 0-1.0) as arguments, and returns a
+# list containing RGB components (integers, 0-65535) as result.  The code
+# here is a copy of the code on page 616 of "Fundamentals of Interactive
+# Computer Graphics" by Foley and Van Dam.
+
+proc hsbToRgb {hue sat value} {
+    set v [format %.0f [expr {65535.0*$value}]]
+    if {$sat == 0} {
+	return "$v $v $v"
+    } else {
+	set hue [expr {$hue*6.0}]
+	if {$hue >= 6.0} {
+	    set hue 0.0
+	}
+	scan $hue. %d i
+	set f [expr {$hue-$i}]
+	set p [format %.0f [expr {65535.0*$value*(1 - $sat)}]]
+	set q [format %.0f [expr {65535.0*$value*(1 - ($sat*$f))}]]
+	set t [format %.0f [expr {65535.0*$value*(1 - ($sat*(1 - $f)))}]]
+	switch $i {
+	    0 {return "$v $t $p"}
+	    1 {return "$q $v $p"}
+	    2 {return "$p $v $t"}
+	    3 {return "$p $q $v"}
+	    4 {return "$t $p $v"}
+	    5 {return "$v $p $q"}
+	    default {error "i value $i is out of range"}
+	}
+    }
+}
+
+# The procedure below is invoked when the "Update" button is pressed,
+# and whenever the color changes if update mode is enabled.  It
+# propagates color information as determined by the command in the
+# Command entry.
+
+proc doUpdate {} {
+    global color command
+    set newCmd $command
+    regsub -all %% $command $color newCmd
+    eval $newCmd
+}
+
+changeColorSpace hsb
+
+# Local Variables:
+# mode: tcl
+# End:

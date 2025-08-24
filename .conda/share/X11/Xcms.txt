@@ -1,0 +1,44 @@
+/*
+ * (c) Copyright 1990 1991 Tektronix Inc.
+ * 	All Rights Reserved
+ *
+ * Permission to use, copy, modify, and distribute this software and its
+ * documentation for any purpose and without fee is hereby granted,
+ * provided that the above copyright notice appear in all copies and that
+ * both that copyright notice and this permission notice appear in
+ * supporting documentation, and that the name of Tektronix not be used
+ * in advertising or publicity pertaining to distribution of the software
+ * without specific, written prior permission.
+ *
+ * Tektronix disclaims all warranties with regard to this software, including
+ * all implied warranties of merchantability and fitness, in no event shall
+ * Tektronix be liable for any special, indirect or consequential damages or
+ * any damages whatsoever resulting from loss of use, data or profits,
+ * whether in an action of contract, negligence or other tortious action,
+ * arising out of or in connection with the use or performance of this
+ * software.
+ *
+ *
+ *	NAME
+ *		Xcms.txt
+ *
+ *	DESCRIPTION
+ *		Sample Color Name Database
+ *
+ */
+
+
+This device-independent color name database is provided just as an example.
+There are no claims that these color specifications are or should be bound
+to the corresponding color name.
+
+As you can see, the start of the database is indicated by "XCMS_COLORDB_START".
+Anything before this is assumed to be comments.  The "0.1" indicates the
+version number of the format/syntax used in this file.  The color name is
+delimited from the color specification by one or more tabs.
+
+XCMS_COLORDB_START 0.1
+cms red			CIEXYZ:0.3811/0.2073/0.0213
+cms green		CIEXYZ:0.3203/0.6805/0.1430
+cms blue		CIEXYZ:0.2483/0.1122/1.2417
+XCMS_COLORDB_END

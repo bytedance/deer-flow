@@ -1,0 +1,476 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+
+<!-- lifted from troff+ms+XMan by doclifter -->
+<book id="shm">
+
+<bookinfo>
+   <title>MIT-SHM(The MIT Shared Memory Extension)</title>
+   <subtitle>How the shared memory extension works</subtitle>
+   <authorgroup>
+      <author>
+         <firstname>Jonathan</firstname><surname>Corbet</surname>
+         <affiliation>
+            <orgname>National Center for Atmospheric Research</orgname>
+            <orgdiv>Atmospheric Technology Division</orgdiv>
+         </affiliation>
+      <email>corbet@ncar.ucar.edu</email>
+      </author>
+      <editor>
+         <firstname>Keith</firstname><surname>Packard</surname>
+         <affiliation><orgname>MIT X Consortium</orgname></affiliation>
+      </editor>
+   </authorgroup>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <copyright><year>1991</year><holder>X Consortium</holder></copyright>
+
+<legalnotice>
+<para>
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+</para>
+<para>
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+</para>
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+</para>
+<para>
+Except as contained in this notice, the name of the X Consortium shall not be
+used in advertising or otherwise to promote the sale, use or other dealings
+in this Software without prior written authorization from the X Consortium.
+</para>
+<para>X Window System is a trademark of The OpenGroup.</para>
+</legalnotice>
+
+<abstract>
+<para>
+This document briefly describes how to use the MIT-SHM shared memory
+extension.  I have tried to make it accurate, but it would not surprise me
+if some errors remained.  If you find anything wrong, do let me know and I
+will incorporate the corrections.  Meanwhile, please take this document "as
+is" (eman improvement over what was there before, but certainly not the
+definitive word.)
+</para>
+</abstract>
+
+</bookinfo>
+
+<chapter id="REQUIREMENTS">
+<title>REQUIREMENTS</title>
+<para>
+The shared memory extension is provided only by some X servers.  To find out
+if your server supports the extension, use xdpyinfo(1).  In particular, to
+be able to use this extension, your system must provide the SYSV shared
+memory primitives.  There is not an mmap-based version of this extension.
+To use shared memory on Sun systems, you must have built your kernel with
+SYSV shared memory enabled -- which is not the default configuration.
+Additionally, the shared memory maximum size will need to be increased on
+both Sun and Digital systems; the defaults are far too small for any useful
+work.
+</para>
+</chapter>
+
+<chapter id="WHAT_IS_PROVIDED">
+<title>WHAT IS PROVIDED</title>
+
+<para>
+The basic capability provided is that of shared memory XImages.  This is
+essentially a version of the ximage interface where the actual image data
+is stored in a shared memory segment, and thus need not be moved through
+the Xlib interprocess communication channel.  For large images, use of this
+facility can result in some real performance increases.
+</para>
+
+<para>
+Additionally, some implementations provided shared memory pixmaps.  These
+are 2 dimensional arrays of pixels in a format specified by the X server,
+where the image data is stored in the shared memory segment.  Through use of
+shared memory pixmaps, it is possible to change the contents of these
+pixmaps without using any Xlib routines at all.  Shared memory pixmaps can
+only be supported when the X server can use regular virtual memory for
+pixmap data; if the pixmaps are stored in some magic graphics hardware, your
+application will not be able to share them with the server.  Xdpyinfo(1)
+doesn't print this particular nugget of information.
+</para>
+</chapter>
+
+<chapter id="HOW_TO_USE_THE_SHARED_MEMORY_EXTENSION">
+<title>HOW TO USE THE SHARED MEMORY EXTENSION</title>
+<para>
+Code which uses the shared memory extension must include a number of header
+files:
+</para>
+
+<literallayout class="monospaced">
+#include &lt;X11/Xlib.h&gt;          /* of course */
+#include &lt;sys/ipc.h&gt;
+#include &lt;sys/shm.h&gt;
+#include &lt;X11/extensions/XShm.h&gt;
+</literallayout>
+
+<para>
+Of course, if the system you are building on does not support shared
+memory, the file XShm.h may not be present.  You may want to make
+liberal use of #ifdefs.
+</para>
+
+<para>
+Any code which uses the shared memory extension should first check to see
+that the server provides the extension.  You could always be running over
+the net, or in some other environment where the extension will not work.
+To perform this check, call either
+</para>
+
+<funcsynopsis id='XShmQueryExtension'>
+<funcprototype>
+  <funcdef>Status <function>XShmQueryExtension</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+or
+</para>
+
+<funcsynopsis id='XShmQueryVersion'>
+<funcprototype>
+  <funcdef>Status <function>XShmQueryVersion</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>*major</parameter></paramdef>
+    <paramdef>int <parameter>*minor</parameter></paramdef>
+    <paramdef>Bool <parameter>*pixmaps</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+Where "display" is, of course, the display on which you are running.  If
+the shared memory extension may be used, the return value from either
+function will be True; otherwise your program should operate using
+conventional Xlib calls.  When the extension is available,
+\fCXShmQueryVersion\fP also returns "major" and "minor" which are the
+version numbers of the extension implementation, and "pixmaps" which is
+True iff shared memory pixmaps are supported.
+</para>
+</chapter>
+
+<chapter id="USE_OF_SHARED_MEMORY_XIMAGES">
+<title>USE OF SHARED MEMORY XIMAGES</title>
+<para>
+The basic sequence of operations for shared memory XImages is as follows:
+</para>
+
+<orderedlist>
+  <listitem>
+    <para>
+Create the shared memory XImage structure
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Create a shared memory segment to store the image data
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Inform the server about the shared memory segment
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Use the shared memory XImage, much like a normal one.
+    </para>
+  </listitem>
+</orderedlist>
+
+<para>
+To create a shared memory XImage, use:
+</para>
+
+<funcsynopsis id='XShmCreateImage'>
+<funcprototype>
+  <funcdef>XImage <function>*XShmCreateImage</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Visual <parameter>*visual</parameter></paramdef>
+    <paramdef>unsigned int <parameter>depth</parameter></paramdef>
+    <paramdef>int <parameter>format</parameter></paramdef>
+    <paramdef>char <parameter>*data</parameter></paramdef>
+    <paramdef>XShmSegmentInfo <parameter>*shminfo</parameter></paramdef>
+    <paramdef>unsigned int <parameter>width</parameter></paramdef>
+    <paramdef>unsigned int <parameter>height</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+Most of the arguments are the same as for XCreateImage; I will not go
+through them here.  Note, however, that there are no "offset", "bitmap_pad",
+or "bytes_per_line" arguments.  These quantities will be defined by the
+server itself, and your code needs to abide by them.  Unless you have already
+allocated the shared memory segment (see below), you should pass in NULL for
+the "data" pointer.
+</para>
+
+<para>
+There is one additional argument: "shminfo", which is a pointer to a
+structure of type XShmSegmentInfo.  You must allocate one of these
+structures such that it will have a lifetime at least as long as that of
+the shared memory XImage.  There is no need to initialize this structure
+before the call to XShmCreateImage.
+</para>
+
+<para>
+The return value, if all goes well, will be an XImage structure, which you
+can use for the subsequent steps.
+</para>
+
+<para>
+The next step is to create the shared memory segment.  This is
+best done after the creation of the XImage, since you need to make use of
+the information in that XImage to know how much memory to allocate.  To
+create the segment, you need a call like:
+</para>
+
+
+<literallayout class="monospaced">
+shminfo.shmid = shmget (IPC_PRIVATE,
+          image-&gt;bytes_per_line * image-&gt;height, IPC_CREAT|0777);
+</literallayout>
+
+<para>
+(assuming that you have called your shared memory XImage "image").  You
+should, of course, follow the Rules and do error checking on all of these
+system calls.  Also, be sure to use the bytes_per_line field, not the width
+you used to create the XImage as they may well be different.
+</para>
+
+<para>
+Note that the shared memory ID returned by the system is stored in the
+shminfo structure.  The server will need that ID to attach itself to the
+segment.
+</para>
+
+<para>
+Also note that, on many systems for security reasons, the X server
+will only accept to attach to the shared memory segment if it's
+readable and writeable by "other". On systems where the X server is
+able to determine the uid of the X client over a local transport, the
+shared memory segment can be readable and writeable only by the uid of
+the client.
+</para>
+
+<para>
+Next, attach this shared memory segment to your process:
+</para>
+
+<para>
+shminfo.shmaddr = image-&gt;data = shmat (shminfo.shmid, 0, 0);
+</para>
+
+<para>
+The address returned by shmat should be stored in *both* the XImage
+structure and the shminfo structure.
+</para>
+
+<para>
+To finish filling in the shminfo structure, you need to decide how you want
+the server to attach to the shared memory segment, and set the "readOnly"
+field as follows.  Normally, you would code:
+</para>
+<para>
+shminfo.readOnly = False;
+</para>
+
+<para>
+If you set it to True, the server will not be able to write to this
+segment, and thus XShmGetImage calls will fail.
+</para>
+
+<para>
+Finally, tell the server to attach to your shared memory segment with:
+</para>
+
+<literallayout class="monospaced">
+Status XShmAttach (display, shminfo);
+</literallayout>
+
+<para>
+If all goes well, you will get a non-zero status back, and your XImage is
+ready for use.
+</para>
+
+<para>
+To write a shared memory XImage into an X drawable, use XShmPutImage:
+</para>
+
+<funcsynopsis id='XShmPutImage'>
+<funcprototype>
+  <funcdef>Status <function>XShmPutImage </function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>d</parameter></paramdef>
+    <paramdef>GC <parameter>gc</parameter></paramdef>
+    <paramdef>XImage <parameter>*image</parameter></paramdef>
+    <paramdef>int <parameter>src_x</parameter></paramdef>
+    <paramdef>int <parameter>src_y</parameter></paramdef>
+    <paramdef>int <parameter>dest_x</parameter></paramdef>
+    <paramdef>int <parameter>dest_y</parameter></paramdef>
+    <paramdef>unsigned int <parameter>width</parameter></paramdef>
+    <paramdef>unsigned int <parameter>height</parameter></paramdef>
+    <paramdef>bool <parameter>send_event</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+The interface is identical to that of XPutImage, so I will spare my fingers
+and not repeat that documentation here.  There is one additional parameter,
+however, called "send_event".  If this parameter is passed as True, the
+server will generate a "completion" event when the image write is complete;
+thus your program can know when it is safe to begin manipulating the shared
+memory segment again.
+</para>
+
+<para>
+The completion event has type XShmCompletionEvent, which is defined as the
+following:
+</para>
+
+<literallayout class="monospaced">
+typedef struct {
+    int type;              /* of event */
+    unsigned long serial;  /* # of last request processed */
+    Bool send_event;       /* true if came from a SendEvent request */
+    Display *display;      /* Display the event was read from */
+    Drawable drawable;     /* drawable of request */
+    int major_code;        /* ShmReqCode */
+    int minor_code;        /* X_ShmPutImage */
+    ShmSeg shmseg;         /* the ShmSeg used in the request */
+    unsigned long offset;  /* the offset into ShmSeg used */
+} XShmCompletionEvent;
+</literallayout>
+
+<para>
+The event type value that will be used can be determined at run time with a
+line of the form:
+</para>
+
+<para>
+int CompletionType = XShmGetEventBase (display) + ShmCompletion;
+</para>
+
+<para>
+If you modify the shared memory segment before the arrival of the
+completion event, the results you see on the screen may be inconsistent.
+</para>
+
+<para>
+To read image data into a shared memory XImage, use the following:
+</para>
+
+<funcsynopsis id='XShmGetImage'>
+<funcprototype>
+  <funcdef>Status <function>XShmGetImage </function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>d</parameter></paramdef>
+    <paramdef>XImage <parameter>*image</parameter></paramdef>
+    <paramdef>int <parameter>x</parameter></paramdef>
+    <paramdef>int <parameter>y</parameter></paramdef>
+    <paramdef>unsigned long <parameter>plane_mask</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+Where "display" is the display of interest, "d" is the source drawable,
+"image" is the destination XImage, "x" and "y" are the offsets within
+"d", and "plane_mask" defines which planes are to be read.
+</para>
+
+<para>
+To destroy a shared memory XImage, you should first instruct the server to
+detach from it, then destroy the segment itself, as follows:
+</para>
+
+<literallayout class="monospaced">
+XShmDetach (display, shminfo);
+XDestroyImage (image);
+shmdt (shminfo.shmaddr);
+shmctl (shminfo.shmid, IPC_RMID, 0);
+</literallayout>
+
+</chapter>
+
+<chapter id="USE_OF_SHARED_MEMORY_PIXMAPS">
+<title>USE OF SHARED MEMORY PIXMAPS</title>
+<para>
+Unlike X images, for which any image format is usable, the shared memory
+extension supports only a single format (i.e. XYPixmap or ZPixmap) for the
+data stored in a shared memory pixmap.  This format is independent of the
+depth of the image (for 1-bit pixmaps it doesn't really matter what this
+format is) and independent of the screen.  Use XShmPixmapFormat to get the
+format for the server:
+</para>
+
+<funcsynopsis id='XShmPixmapFormat'>
+<funcprototype>
+  <funcdef>int <function>XShmPixmapFormat</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If your application can deal with the server pixmap data format (including
+bits-per-pixel et al.), create a shared memory segment and "shminfo"
+structure in exactly the same way as is listed above for shared memory
+XImages.  While it is, not strictly necessary to create an XImage first,
+doing so incurs little overhead and will give you an appropriate
+bytes_per_line value to use.
+</para>
+
+<para>
+Once you have your shminfo structure filled in, simply call:
+</para>
+
+<funcsynopsis id='XShmCreatePixmap'>
+<funcprototype>
+  <funcdef>Pixmap <function>XShmCreatePixmap</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>d</parameter></paramdef>
+    <paramdef>char <parameter>*data</parameter></paramdef>
+    <paramdef>XShmSegmentInfo <parameter>*shminfo</parameter></paramdef>
+    <paramdef>unsigned int <parameter>width</parameter></paramdef>
+    <paramdef>unsigned int <parameter>height</parameter></paramdef>
+    <paramdef>unsigned int <parameter>depth</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+The arguments are all the same as for XCreatePixmap, with two additions:
+"data" and "shminfo".  The second of the two is the same old shminfo
+structure that has been used before.  The first is the pointer to the shared
+memory segment, and should be the same as the shminfo.shmaddr field.  I am
+not sure why this is a separate parameter.
+</para>
+
+<para>
+If everything works, you will get back a pixmap, which you can manipulate in
+all of the usual ways, with the added bonus of being able to tweak its
+contents directly through the shared memory segment.  Shared memory pixmaps
+are destroyed in the usual manner with XFreePixmap, though you should detach
+and destroy the shared memory segment itself as shown above.
+</para>
+</chapter>
+</book>

@@ -1,0 +1,43 @@
+{
+  "build": "h0ce48e5_1",
+  "build_number": 1,
+  "channel": "https://repo.anaconda.com/pkgs/main/linux-64",
+  "constrains": [],
+  "depends": [
+    "libgcc-ng >=7.2.0"
+  ],
+  "extracted_package_dir": "/home/kie/miniconda3/pkgs/pthread-stubs-0.3-h0ce48e5_1",
+  "files": [
+    "lib/pkgconfig/pthread-stubs.pc"
+  ],
+  "fn": "pthread-stubs-0.3-h0ce48e5_1.conda",
+  "license": "MIT",
+  "link": {
+    "source": "/home/kie/miniconda3/pkgs/pthread-stubs-0.3-h0ce48e5_1",
+    "type": 1
+  },
+  "md5": "973a642312d2a28927aaf5b477c67250",
+  "name": "pthread-stubs",
+  "package_tarball_full_path": "/home/kie/miniconda3/pkgs/pthread-stubs-0.3-h0ce48e5_1.conda",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "lib/pkgconfig/pthread-stubs.pc",
+        "file_mode": "text",
+        "path_type": "hardlink",
+        "prefix_placeholder": "/opt/anaconda1anaconda2anaconda3",
+        "sha256": "9ce637c8a9c65d1287a6a0aa7a1dc0a65810fe8811403f2247afdaf671a1c5db",
+        "sha256_in_prefix": "5d4648722a6de888604ff9eb61addafb65a141a4db751fba97ca9a89db64947c",
+        "size_in_bytes": 197
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "119c5ad43fb92b2f14a25c53276072ee77ff6b40c72e6617b523b9de0eb0822a",
+  "size": 5360,
+  "subdir": "linux-64",
+  "timestamp": 1505733967000,
+  "url": "https://repo.anaconda.com/pkgs/main/linux-64/pthread-stubs-0.3-h0ce48e5_1.conda",
+  "version": "0.3"
+}

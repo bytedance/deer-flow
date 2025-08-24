@@ -1,0 +1,157 @@
+<chapter id='Symbolic_Names'>
+<title>Symbolic Names</title>
+
+<para>
+The core protocol does not provide any information to clients other than that
+actually used to interpret events. This makes it difficult to write a client
+which presents the keyboard to a user in an easy-to-understand way. Such
+applications have to examine the vendor string and keycodes to determine the
+type of keyboard connected to the server and have to examine keysyms and
+modifier mappings to determine the effects of most modifiers (the <emphasis>
+Shift</emphasis>
+, <emphasis>
+Lock</emphasis>
+ and <emphasis>
+Control</emphasis>
+ modifiers are defined by the core protocol but no semantics are implied for
+any other modifiers).
+</para>
+
+
+<para>
+This extension provides such applications with symbolic names for most
+components of the keyboard extension and a description of the physical layout
+of the keyboard.
+</para>
+
+
+<para>
+The <emphasis>
+keycodes</emphasis>
+ name describes the range and meaning of the keycodes returned by the keyboard
+in question; the <emphasis>
+keyboard</emphasis>
+ <emphasis>
+geometry </emphasis>
+name describes the physical location, size and shape of the various keys on the
+keyboard. As an example to distinguish between these two names, consider
+function keys on PC-compatible keyboards. Function keys are sometimes above the
+main keyboard and sometimes to the left of the main keyboard, but the same
+keycode is used for the key that is logically <emphasis>
+F1</emphasis>
+ regardless of physical position. Thus, all PC-compatible keyboards might share
+a keycodes name but different geometry names.
+</para>
+
+<note><para>The keycodes name is intended to be a very general description of
+the keycodes returned by a keyboard; A single keycodes name might cover
+keyboards with differing numbers of keys provided that the keys that all keys
+have the same semantics when present. For example, 101 and 102 key PC keyboards
+might use the same name. Applications can use the keyboard geometry to
+determine which subset of the named keyboard type is in use.</para></note>
+
+<para>
+The <emphasis>
+symbols</emphasis>
+ name identifies the symbols bound to the keys. The symbols name is a human or
+application-readable description of the intended locale or usage of the
+keyboard with these symbols. The <emphasis>
+physical symbols</emphasis>
+ name describes the symbols actually engraved on the keyboard, which might be
+different than the symbols currently being used.
+</para>
+
+
+<para>
+The <emphasis>
+types</emphasis>
+ name provides some information about the set of key types that can be
+associated with the keyboard keys. The <emphasis>
+compat</emphasis>
+ name provides some information about the rules used to bind actions to keys
+changed using core protocol requests.
+</para>
+
+
+<para>
+The <emphasis>
+compat</emphasis>
+, <emphasis>
+types</emphasis>
+, <emphasis>
+keycodes</emphasis>
+, <emphasis>
+symbols</emphasis>
+ and <emphasis>
+geometry</emphasis>
+ names typically correspond to the keyboard components from which the current
+keyboard description was assembled. These components are stored individually in
+the server’s database of keyboard components, described in
+<link linkend='The_Server_Database_of_Keyboard_Components'>
+The Server Database of Keyboard
+Components</link>, and can be combined to assemble a complete keyboard
+description.
+</para>
+
+
+<para>
+Each key has a four-byte symbolic name. The key name links keys with similar
+functions or in similar positions on keyboards that report different scan
+codes. <emphasis>
+Key aliases</emphasis>
+ allow the keyboard layout designer to assign multiple names to a single key,
+to make it easier to refer to keys using either their position <emphasis>
+or</emphasis>
+ their "function."
+</para>
+
+
+<para>
+For example, consider the common keyboard customizations:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>Set the "key to the left of the letter a" to be a control key.
+  </para>
+</listitem>
+<listitem>
+  <para>Change the "caps lock" key, wherever it might be, to a control key.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+If we specify key names by position, the first customization is simple but the
+second is impossible; if we specify key names by function, the second
+customization is simple but the first is impossible. Using key aliases, we can
+specify both function and position for "troublesome" keys, and both
+customizations are straightforward.
+</para>
+
+
+<para>
+Key aliases can be specified both in the symbolic names component and in the
+keyboard geometry (see <link linkend='Keyboard_Geometry'>Keyboard
+Geometry</link>). Both sets of aliases are always valid, but key alias
+definitions in the keyboard geometry have priority; if both symbolic names and
+geometry include aliases, applications should consider the definitions from the
+geometry before considering the definitions from the symbolic names section.
+</para>
+
+
+<para>
+XKB provides symbolic names for each of the four keyboard groups, sixteen
+virtual modifiers, thirty-two keyboard indicators, and up to <emphasis>
+MaxRadioGroups</emphasis>
+ (32) radio groups.
+</para>
+
+
+<para>
+XKB allows keyboard layout designers or editors to assign names to each key
+type and to each of the levels in a key type. For example, the second position
+on an alphabetic key might be called the "Caps" level while the second position
+on a numeric keypad key might be called the "Num Lock" level.
+</para>
+</chapter>

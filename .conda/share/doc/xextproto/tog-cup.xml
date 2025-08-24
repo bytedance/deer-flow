@@ -1,0 +1,564 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+
+<book id="tog-cup">
+
+<bookinfo>
+   <title>Colormap Utilization Policy and Extension</title>
+   <subtitle>X Project Team Standard</subtitle>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <authorgroup>
+      <author>
+         <firstname>Kaleb</firstname>
+         <othername>S.</othername>
+         <surname>Keithley</surname>
+         <affiliation><orgname>The Open Group</orgname></affiliation>
+      </author>
+   </authorgroup>
+   <copyright><year>1986-1997</year><holder>The Open Group</holder></copyright>
+
+<legalnotice>
+
+<para>
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this
+software and associated documentation files (the Software), to use the
+Software
+without restriction, including, without limitation, the rights to copy,
+modify, merge,
+publish, distribute and sublicense the Software, to make, have made,
+license and
+distribute derivative works thereof, and to permit persons to whom the
+Software is
+furnished to do so, subject to the following conditions:
+</para>
+<para>
+The above copyright notice and the following permission notice shall be
+included in all copies of the Software:
+</para>
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+INFRINGEMENT.  IN NO EVENT SHALL THE OPEN GROUP BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OF OTHER DEALINGS IN
+THE SOFTWARE.
+</para>
+<para>
+Except as contained in this notice, the name of The Open Group shall not be
+used in
+advertising or otherwise to promote the use or other dealings in this
+Software without prior written authorization from The Open Group.
+</para>
+<para>
+X Window System is a trademark of The Open Group.
+</para>
+
+</legalnotice>
+</bookinfo>
+
+<chapter id="Overview">
+<title>Overview</title>
+<para>
+This extension has three purposes: a) to provide mechanism for a special
+application (a colormap manager) to discover any special colormap
+requirements, e.g. the colormap entries that are nominally reserved for
+desktop colors in the MS-Windows environment and initialize the default
+colormap so that it can be more easily shared; and b) to encourage colormap
+sharing and reduce colormap flashing on low-end 8-bit frame buffers by
+providing a policy for sharing; and c) when colormaps aren't shared,
+define a behavior in the X server color allocation scheme to reduce
+colormap flashing.
+</para>
+
+<para>
+To encourage colormap sharing and accommodate special colormap requirements
+two new protocols are defined: the first provides a way to query the
+server for a list of reserved colormap entries, and the second is a way
+to initialize read-only (shareable) colormap entries at specific locations
+in a colormap.
+</para>
+
+<para>
+To minimize colormap flashing when the root window's default visual is one
+of GrayScale, PseudoColor, or DirectColor, and a private colormap for the
+default visual is being used, a minor (but compatible) change to the
+server implementation of the AllocColor and AllocNamedColor requests is
+required. Where the core protocol says nothing about the pixel values
+returned, when this extension is in effect, the AllocColor and AllocNamedColor
+requests will first look for a matching color in the default colormap, and,
+if a match is found and the same cell in the private colormap has not
+already been allocated, the color will be allocated in the private colormap
+at the same locaton as in the default colormap (instead of in the first
+available location.)
+</para>
+</chapter>
+
+<chapter id="Requests">
+<title>Requests</title>
+<para>
+<function>QueryVersion</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+client_major_version: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+client_minor_version: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+=&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+server_major_version: CARD16
+      </entry>
+    </row>
+    <row>
+      <entry>
+server_minor_version: CARD16
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+If supplied, the client_major_version and client_minor_version indicate
+what version of the protocol the client wants the server to implement.
+The server version numbers returned indicate the protocol this extension
+actually supports. This might not equal the version sent by the client.
+An implementation can (but need not) support more than one version
+simultaneously. The server_major_version and the server_minor_version
+are a mechanism to support future revisions of the TOG-CUP protocol that
+may be necessary. In general, the major version would increment for
+incompatible changes, and the minor version would increment for small
+upward-compatible changes. Servers that support the protocol defined in
+this document will return a server_major_version of one (1), and a
+server_minor_version of zero (0).
+</para>
+
+<para>
+<function>GetReservedColormapEntries</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+screen: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+=&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+entries: LISTofCOLORITEM
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request returns a list of colormap entries (pixels) that are reserved
+by the system, e.g. MS-Windows reserved desktop colors. This list will, at a
+minimum, contain entries for the BlackPixel and WhitePixel of the specified
+screen. The do-red, do-green, and do-blue elements of the COLORITEMs are
+unused in this reply.
+</para>
+
+<para>
+Rationale: There are colormap entries (pixels) that, e.g., MS-Windows
+desktop reserves as desktop colors, that should not be altered. If they
+are altered then X programs will cause colormap flashing between X and
+MS-Windows applications running/displaying on the same desktop.
+</para>
+
+<para>
+<function>StoreColors</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+cmap: COLORMAP
+      </entry>
+    </row>
+    <row>
+      <entry>
+items: LISTofCOLORITEM
+      </entry>
+    </row>
+    <row>
+      <entry>
+=&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+items: LISTofCOLORITEM
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request changes the colormap entries of the specified pixels. The
+colormap entries are allocated as if by an AllocColor request. The do-red,
+do-green, and do-blue elements of the COLORITEMs are unused in this request.
+A boolean alloc-ok element (a bit) is returned indicating whether the
+particular pixel was successfully allocated or not. If successfully
+allocated the RGB and pixel are returned.
+</para>
+
+<para>
+A Value error is generated if a pixel is not a valid index into cmap. A
+BadMatch error is generated if if cmap does not belong to a GrayScale,
+PseudoColor, or DirectColor visual.
+</para>
+
+</chapter>
+
+<chapter id="Events_and_Errors">
+<title>Events and Errors</title>
+<para>
+No new events or errors are defined by this extension.
+</para>
+
+</chapter>
+<chapter id='Changes_to_existing_protocol'>
+<title>Changes to existing protocol.</title>
+<para>
+None.
+</para>
+</chapter>
+
+<chapter id="Encoding">
+<title>Encoding</title>
+<para>
+The name of this extension is "TOG-CUP".
+</para>
+
+<para>
+The conventions used here are the same as those for the core X11
+Protocol Encoding.
+</para>
+
+<literallayout class="monospaced">
+<function>QueryVersion</function>
+     1     CARD8               opcode
+     1     0                   TOG-CUP opcode
+     2     2                   request length
+     2     CARD16              client_major_version
+     2     CARD16              client_minor_version
+=&gt;
+     1     1                   reply
+     1                         unused
+     2     CARD16              sequence number
+     4     0                   length
+     2     CARD16              server_major_version
+     2     CARD16              server_minor_number
+     20                        unused
+</literallayout>
+
+<literallayout class="monospaced">
+<function>GetReservedColormapEntries</function>
+     1     CARD8               opcode
+     1     1                   TOG-CUP opcode
+     2     2                   request length
+     4     CARD32              screen
+=&gt;
+     1     1                   reply
+     1                         unused
+     2     CARD16              sequence number
+     4     3n                  length
+     24                        unused
+     12n   LISTofCOLORITEM     items
+</literallayout>
+
+<literallayout class="monospaced">
+<function>StoreColors</function>
+     1     CARD8               opcode
+     1     2                   TOG-CUP opcode
+     2     2+3n                request length
+     4     COLORMAP            cmap
+     12n   LISTofCOLORITEM     items
+=&gt;
+     1     1                   reply
+     1                         unused
+     2     CARD16              sequence number
+     4     3n                  length
+     24                        unused
+     12n   LISTofCOLORITEM     items
+</literallayout>
+
+<para>
+(The definition of COLORITEM here is only for the purpose of defining the
+additional alloc-ok member in the CUPStoreColors reply.)
+</para>
+
+<literallayout class="monospaced">
+  COLORITEM
+     4     CARD32              pixel
+     2     CARD16              red
+     2     CARD16              green
+     2     CARD16              blue
+     1                         alloc-ok
+           #x07                unused
+           #x08                alloc-ok (1 is True, 0 is False)
+           #xF0                unused
+     1                         unused
+</literallayout>
+</chapter>
+
+<chapter id="C_Language_Binding">
+<title>C Language Binding</title>
+
+<para>
+The C functions provide direct access to the protocol and add no additional
+semantics.  For complete details on the effects of these functions, refer
+to the appropriate protocol request, which can be derived by deleting XCup
+at the start of the function. All functions that have return type Status
+will return nonzero for success and zero for failure.
+</para>
+
+<para>
+The include file for this extension is
+<function>&lt;X11/extensions/Xcup.h&gt;</function>.
+</para>
+
+<funcsynopsis id='XCupQueryVersion'>
+<funcprototype>
+  <funcdef>Status <function> XCupQueryVersion</function></funcdef>
+  <paramdef>Display*<parameter> display</parameter></paramdef>
+  <paramdef>int*<parameter> major_version_return</parameter></paramdef>
+  <paramdef>int*<parameter> minor_version_return</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>display</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies the connection to the X server.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>major_version_return</emphasis>
+    </term>
+    <listitem>
+      <para>
+Returns the major version supported by the server.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>minor_version_return</emphasis>
+    </term>
+    <listitem>
+      <para>
+Returns the minor version supported by the server.
+    </para>
+  </listitem>
+  </varlistentry>
+</variablelist>
+
+
+<para>
+XCupQueryVersions sets major_version_return and minor_version_return to
+the major and minor TOG-CUP protocol version supported by the server.  If
+the TOG-CUP library is compatible with the version returned by the server,
+it returns nonzero.  If dpy does not support the TOG-CUP extension, or if
+there was an error during communication with the server, or if the server
+and library protocol versions are incompatible, it returns zero.  No other
+XCup functions may be called before this function. If a client violates
+this rule, the effects of all subsequent XCup calls that it makes are
+undefined.
+</para>
+
+<para>
+To get the list of reserved colormap entries, use
+XCupGetReservedColormapEntries.
+</para>
+
+<funcsynopsis id='XCupGetReservedColormapEntries'>
+<funcprototype>
+  <funcdef>Status <function> XCupGetReservedColormapEntries</function></funcdef>
+  <paramdef>Display*<parameter> display</parameter></paramdef>
+  <paramdef>int<parameter> screen</parameter></paramdef>
+  <paramdef>XColor**<parameter> colors_out</parameter></paramdef>
+  <paramdef>int*<parameter> ncolors</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>display</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies the connection to the X server.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>colors_out</emphasis>
+    </term>
+    <listitem>
+      <para>
+Returns the values reserved by the server.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>ncolors</emphasis>
+    </term>
+    <listitem>
+      <para>
+Returns the number of items in colors_out.
+    </para>
+  </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+The XCupGetReservedColormapEntries function gets system specific colormap
+entries. E.g. the MS-Windows desktop uses N colormap entries at the beginning
+(0..N) and end (256-N..255) of the colormap. Use XFree to free colors_out.
+</para>
+
+<para>
+To allocate one or more read-only color cells with RGB values, use
+XCupStoreColors.
+</para>
+
+<funcsynopsis id='XCupStoreColors'>
+<funcprototype>
+  <funcdef>Status <function> XCupStoreColors</function></funcdef>
+  <paramdef>Display*<parameter> display</parameter></paramdef>
+  <paramdef>Colormap<parameter> colormap</parameter></paramdef>
+  <paramdef>XColor*<parameter> colors_in_out</parameter></paramdef>
+  <paramdef>int<parameter> ncolors</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>display</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies the connection to the X server.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>colormap</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies the colormap.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>colors_in_out</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies and returns the values actually used in the colormap.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>
+      <emphasis remap='I'>ncolors</emphasis>
+    </term>
+    <listitem>
+      <para>
+Specifies the number of items in colors_in_out.
+    </para>
+  </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+The XCupStoreColors function changes the colormap entries of the pixel
+values specified in the pixel members of the XColor structures. The colormap
+entries are allocated as if an AllocColor had been used instead, i.e. the
+colors are read-only (shareable). XCupStoreColors returns the number of
+colors that were successfully allocated in the colormap.
+</para>
+
+</chapter>
+
+<chapter id="Using_the_TOG_CUP_extension_and_Colormap_Utilization_Policy">
+<title>Using the TOG-CUP extension and Colormap Utilization Policy</title>
+<para>
+The X server preallocates any hardware or desktop special colors in the
+default colormap; e.g. UNIX X servers preallocate Black and White pixels.
+PC X servers should also preallocate the MS-Windows desktop colors. (Note
+to implementors: in the Sample Implementation special colors are allocated
+in the default colormap in cfbCreateDefColormap for dumb memory framebuffers.)
+</para>
+
+<para>
+To minimize colormap flash an application which installs its own private
+colormap should query the special colors by calling
+XCupGetReservedColormapEntries, and can then store those entries (in the
+proper location) in its private colormap using XCupStoreColors.
+</para>
+
+<para>
+Applications which allocate many colors in a screen's default colormap, e.g.
+a color-cube or a gray-ramp, should allocate them with XCupStoreColors. By
+using XCupStoreColors the colors will be allocated shareable (read-only) and
+any other application which allocates the same color will share that color
+cell.
+</para>
+</chapter>
+
+</book>

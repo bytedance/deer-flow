@@ -1,0 +1,1904 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+
+<!-- lifted from troff+ms+XMan by doclifter -->
+<book id="record">
+
+<bookinfo>
+  <title>Record Extension Protocol Specification</title>
+  <subtitle>X Consortium Standard</subtitle>
+  <authorgroup>
+    <author>
+      <firstname>Martha</firstname><surname>Zimet</surname>
+      <affiliation><orgname>Network Computing Devices, Inc.</orgname></affiliation>
+    </author>
+    <editor>
+      <firstname>Stephen</firstname><surname>Gildea</surname>
+      <affiliation><orgname>X Consortium</orgname></affiliation>
+    </editor>
+  </authorgroup>
+  <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+  <copyright><year>1994</year><holder>Network Computing Devices, Inc.</holder>
+  </copyright>
+
+<legalnotice>
+<para>
+Permission to use, copy, modify, distribute, and sell this
+documentation for any purpose is hereby granted without fee,
+provided that the above copyright notice and this permission
+notice appear in all copies.  Network Computing Devices, Inc.
+makes no representations about the suitability for any purpose
+of the information in this document.  This documentation is
+provided &ldquo;as is&rdquo; without express or implied warranty.
+</para>
+</legalnotice>
+
+<legalnotice>
+<para role="multiLicensing">Copyright &copy; 1994, 1995 X Consortium</para>
+<para>
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+</para>
+
+<para>
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+</para>
+
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+</para>
+
+<para>
+Except as contained in this notice, the name of the X Consortium and
+shall not be used in advertising or otherwise to promote the sale, use
+or other dealings in this Software without prior written authorization
+from the X Consortium.
+</para>
+<para>X Window System is a trademark of The Open Group.</para>
+</legalnotice>
+</bookinfo>
+
+<chapter id="Introduction">
+<title>Introduction</title>
+<para>
+Several proposals have been written over the past few years that address some
+of the issues surrounding the recording and playback of user actions
+in the X Window System<footnote><para>
+<emphasis remap='I'>X Window System</emphasis> is a trademark of The Open Group.
+</para></footnote>
+:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+<emphasis remap='I'>Some Proposals for a Minimal X11 Testing Extension</emphasis>,
+Kieron Drake, UniSoft Ltd., April 1991
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<emphasis remap='I'>X11 Input Synthesis Extension Proposal</emphasis>, Larry Woestman,
+Hewlett Packard, November 1991
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<emphasis remap='I'>XTrap Architecture</emphasis>, Dick Annicchiario, et al, Digital Equipment Corporation,
+July 1991
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<emphasis remap='I'>XTest Extension Recording Specification</emphasis>, Yochanan Slonim,
+Mercury Interactive, December 1992
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+This document both unifies and extends the previous diverse approaches
+to generate a proposal for an X extension that provides support for
+the recording of all core X protocol and arbitrary extension protocol.
+Input synthesis, or playback, has already been implemented in the
+XTest extension, an X Consortium standard.  Therefore, this extension
+is limited to recording.
+</para>
+
+<para>
+In order to provide both record and playback functionality, a
+hypothetical record application could use this extension to capture
+both user actions and their consequences.  For example, a button press
+(a user action) may cause a window to be mapped and a corresponding
+<function>MapNotify</function>
+event to be sent (a consequence).  This information could be
+stored for later use by a playback application.
+</para>
+
+<para>
+The playback application could use the recorded actions as input for
+the XTest extension's
+<function>XTestFakeInput</function>
+operation to synthesize the
+appropriate input events.  The "consequence" or synchronization
+information is then used as a synchronization point during playback.
+That is, the playback application does not generate specific
+synthesized events until their matching synchronization condition
+occurs.  When the condition occurs the processing of synthesized
+events continues.  Determination that the condition has occurred may be
+made by capturing the consequences of the synthesized events and
+comparing them to the previously recorded synchronization information.
+For example, if a button press was followed by a
+<function>MapNotify</function>
+event on a
+particular window in the recorded data, the playback application might
+synthesize the button press then wait for the
+<function>MapNotify</function>
+event on the
+appropriate window before proceeding with subsequent synthesized
+input.
+</para>
+
+<para>
+Because
+it is impossible to predict what synchronization information will be
+required by a particular application, the extension provides
+facilities to record any subset of core X protocol and arbitrary
+extension protocol.
+As such, this extension does not enforce a specific
+synchronization methodology; any method based on information in the X
+protocol stream (e.g., watching for window mapping/unmapping, cursor
+changes, drawing of certain text strings, etc.) can capture the
+information it needs using RECORD facilities.
+</para>
+
+<sect1 id="Acknowledgements">
+<title>Acknowledgements</title>
+<para>
+The document represents the culmination of two years of debate and
+experiments done under the auspices of the X Consortium xtest working
+group.  Although this was a group effort, the author remains
+responsible for any errors or omissions.
+Two years ago, Robert Chesler of Absol-puter, Kieron Drake of UniSoft
+Ltd., Marc Evans of Synergytics and Ken Miller of Digital shared the
+vision of a standard extension for recording and were all instrumental
+in the early protocol development.  During the last two years, Bob
+Scheifler of the X Consortium and Jim Fulton of NCD continuously
+provided input to the protocol design, as well as encouragement to the
+author.  In the last few months, Stephen Gildea and Dave Wiggins,
+both X Consortium staff, have spent considerable time fine tuning the
+protocol design and reviewing the protocol specifications.  Most
+recently, Amnon Cohen of Mercury Interactive has assisted in
+clarification of the recorded event policy, and Kent Siefkes of
+Performance Awareness has assisted in clarification of the timestamp
+policy.
+</para>
+</sect1>
+
+<sect1 id="Goals">
+<title>Goals</title>
+<itemizedlist>
+  <listitem>
+    <para>
+To provide a standard for recording,
+whereby both device events and synchronization information in the
+form of device event consequences are recorded.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+To record contextual information used in synchronized playback
+without prior knowledge of the application
+that
+is being recorded.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+To provide the ability to record arbitrary X protocol extensions.
+<!-- .RE -->
+    </para>
+  </listitem>
+</itemizedlist>
+</sect1>
+
+<sect1 id="Requirements">
+<title>Requirements</title>
+<para>
+The extension should function as follows:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+It should
+not be dependent on other clients or extensions for its operation.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+It should
+not significantly impact performance.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+It should
+support the recording of all device input (core devices and XInput devices).
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+It should
+be extendible.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+It should
+support the recording of synchronization information for user events.
+    </para>
+  </listitem>
+</itemizedlist>
+</sect1>
+</chapter>
+
+<chapter id="Design">
+<title>Design</title>
+<para>
+This section gives an overview of the RECORD extension and discusses
+its overall operation and data types.
+</para>
+
+<sect1 id="Overview">
+<title>Overview</title>
+<para>
+The mechanism used by this extension for recording is to intercept
+core X protocol and arbitrary X extension protocol entirely within the X server
+itself.  When the extension has been requested to intercept specific
+protocol by one or more clients, the protocol data are formatted and
+returned to the recording clients.
+</para>
+<para>
+<!-- .LP -->
+The extension provides a mechanism for capturing all events, including
+input device events that go to no clients, that is analogous to a client
+expressing "interest" in all events in all windows, including the root
+window.  Event filtering in the extension provides a mechanism for feeding
+device events to recording clients; it does not provide a mechanism for
+in-place, synchronous event substitution, modification, or withholding.
+In addition, the
+extension does not provide data compression before intercepted protocol
+is returned to the recording clients.
+</para>
+<sect2 id="Data_Delivery">
+<title>Data Delivery</title>
+<!-- .XS -->
+<!-- (SN Data Delivery -->
+<!-- .XE -->
+<para>
+<!-- .LP -->
+Because
+events are limited in size to
+32 bytes, using events to return intercepted protocol data to recording
+clients is prohibitive in terms of performance.  Therefore, intercepted
+protocol data are returned to recording clients through multiple replies
+to the extension request to begin protocol interception and reporting.
+This utilization is consistent with
+<function>ListFontsWithInfo ,</function>
+for example, where a
+single request has multiple replies.
+</para>
+<para>
+<!-- .LP -->
+Individual requests, replies, events or errors intercepted by the extension
+on behalf of recording clients cannot be split across reply packets.  In order
+to reduce overhead, multiple intercepted requests, replies, events and errors
+might be collected
+into a single reply.
+Nevertheless, all data are returned to the client in a timely manner.
+</para>
+</sect2>
+<sect2 id="Record_Context">
+<title>Record Context</title>
+<!-- .XS -->
+<!-- (SN Record Context -->
+<!-- .XE -->
+<para>
+<!-- .LP -->
+The extension adds a record context resource (RC)
+to the set of resources managed by the server.  All the
+extension operations take an RC as an argument.  Although the protocol
+permits sharing of RCs between clients, it is expected that clients will
+use their own RCs.  The attributes used in extension operations are stored
+in the RCs, and these attributes include the protocol and clients to
+intercept.
+</para>
+<para>
+<!-- .LP -->
+The terms "register" and "unregister" are used to describe the
+relationship between clients to intercept and the RC.  To register
+a client with an RC means the client is added to the list
+of clients to intercept; to unregister a client means the client
+is deleted from the list of clients to intercept.  When the
+server is requested to register or unregister clients from an RC,
+it is required to do so immediately.  That is, it is not permissible for
+the server to wait until recording is enabled to register clients
+or recording is disabled to unregister clients.
+</para>
+</sect2>
+
+<sect2 id="Record_Client_Connections">
+<title>Record Client Connections</title>
+<!-- .XS -->
+<!-- (SN Record Client Connections -->
+<!-- .XE -->
+<para>
+<!-- .LP -->
+The typical communication model for a recording client is to open
+two connections to the server and use one for RC control and
+the other for reading protocol data.
+</para>
+<para>
+<!-- .LP -->
+The "control" connection can execute requests to obtain information about
+the supported protocol version, create and destroy RCs, specify protocol
+types to intercept and clients to be recorded, query the current state
+of an RC, and to stop interception and reporting of protocol data.  The
+"data" connection can execute a request to
+enable interception
+and reporting of specified protocol for a particular RC.  When the
+"enable" request is issued, intercepted protocol is sent back on the
+same connection, generally in more than one reply packet.  Until the last
+reply to the "enable" request is sent by the server, signifying that
+the request execution is complete, no other requests will be executed by
+the server on that connection.  That is, the connection that data are being
+reported on cannot issue the "disable" request until the last reply
+to the "enable" request is sent by the server.  Therefore, unless a
+recording client never has the need to disable the interception and reporting
+of protocol data, two client connections are necessary.
+</para>
+</sect2>
+<sect2 id="Events">
+<title>Events</title>
+<!-- .XS -->
+<!-- (SN Events -->
+<!-- .XE -->
+<para>
+<!-- .LP -->
+The terms "delivered events" and "device events" are used
+to describe the two event classes recording clients may
+select for interception.  These event classes are handled differently
+by the extension.  Delivered events are core X events or X extension events
+the server actually delivers to one or more clients.  Device events are
+events generated by core X devices or extension input devices that the
+server may or may not deliver to any clients.  When device events
+are selected for interception by a recording client, the extension
+guarantees each device event is recorded and will be forwarded
+to the recording client in the same order it is generated by the
+device.
+</para>
+<para>
+<!-- .LP -->
+The recording of selected device events is not affected
+by server grabs.  Delivered events, on the other hand, can be affected
+by server grabs.
+If a recording client selects both
+a device event and delivered events that result from that device
+event, the delivered events are recorded after the device event.
+In the absence of grabs, the delivered events for a
+device event precede later device events.
+</para>
+<para>
+<!-- .LP -->
+Requests that have side effects on
+devices, such as
+<function>WarpPointer</function>
+and
+<function>GrabPointer</function>
+with a confine-to window,
+will cause RECORD to record an associated device event.
+The XTEST extension request
+<function>XTestFakeInput</function>
+causes a device event to be recorded; the
+device events are recorded in the same order that the
+<function>XTestFakeInput</function>
+requests are received by the server.
+</para>
+<para>
+<!-- .LP -->
+If a key autorepeats, multiple
+<function>KeyPress</function>
+and
+<function>KeyRelease</function>
+device events are reported.
+</para>
+</sect2>
+
+<sect2 id="Timing">
+<title>Timing</title>
+<!-- .XS -->
+<!-- (SN Timing -->
+<!-- .XE -->
+<para>
+Requests are recorded just before
+they are executed; the time associated with a request is the server
+time when it is recorded.
+</para>
+</sect2>
+</sect1>
+
+<sect1 id="Types">
+<title>Types</title>
+<para>
+The following new types are used in the request definitions that appear
+in section 3. <!-- xref -->
+</para>
+
+<para>RC: CARD32</para>
+
+<para>
+The
+<function>"RC"</function>
+type is a resource identifier for a server record context.
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="1.0*"/>
+  <colspec colname='c3' colwidth="4.0*"/>
+  <tbody>
+    <row>
+      <entry>RANGE8:</entry>
+      <entry>[first, last:</entry>
+      <entry>CARD8]</entry>
+    </row>
+    <row>
+      <entry>RANGE16:</entry>
+      <entry>[first, last:</entry>
+      <entry>CARD16]</entry>
+    </row>
+    <row>
+      <entry>EXTRANGE:</entry>
+      <entry>[major:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>minor:</entry>
+      <entry>RANGE16]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.5*"/>
+  <colspec colname='c2' colwidth="1.0*"/>
+  <colspec colname='c3' colwidth="4.0*"/>
+  <tbody>
+    <row>
+      <entry>RECORDRANGE:</entry>
+      <entry>[core-requests:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>core-replies:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>ext-requests:</entry>
+      <entry>EXTRANGE</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>ext-replies:</entry>
+      <entry>EXTRANGE</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>delivered-events:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>device-events:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>errors:</entry>
+      <entry>RANGE8</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>client-started:</entry>
+      <entry>BOOL</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>client-died:</entry>
+      <entry>BOOL]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The
+<function>"RECORDRANGE"</function>
+structure contains the protocol values to intercept.  Typically,
+this structure is sent by recording clients over the control connection
+when creating or modifying an RC.
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+<!-- .IN "core-requests" -->
+<!-- .br -->
+Specifies core X protocol requests with an opcode field between <emphasis remap='I'>first</emphasis>
+and <emphasis remap='I'>last</emphasis> inclusive.  If <emphasis remap='I'>first</emphasis> is equal to 0 and <emphasis remap='I'>last</emphasis> is equal to 0, no
+core requests are specified by this RECORDRANGE.  If <emphasis remap='I'>first</emphasis> is greater
+than <emphasis remap='I'>last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "core-replies" -->
+<!-- .br -->
+Specifies replies resulting from core X protocol requests with an opcode
+field between <emphasis remap='I'>first</emphasis> and <emphasis remap='I'>last</emphasis> inclusive.  If <emphasis remap='I'>first</emphasis> is equal to 0 and <emphasis remap='I'>last</emphasis>
+is equal to 0, no core replies are specified by this RECORDRANGE.  If
+<emphasis remap='I'>first</emphasis> is greater than <emphasis remap='I'>last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "ext-requests" -->
+<!-- .br -->
+Specifies extension protocol requests with a major opcode field between
+<emphasis remap='I'>major.first</emphasis> and <emphasis remap='I'>major.last</emphasis> and a minor opcode field between <emphasis remap='I'>minor.first</emphasis>
+and <emphasis remap='I'>minor.last</emphasis> inclusive.
+If <emphasis remap='I'>major.first</emphasis> and <emphasis remap='I'>major.last</emphasis> are equal to 0, no
+extension protocol requests are specified by this RECORDRANGE.  If
+<emphasis remap='I'>major.first</emphasis> or <emphasis remap='I'>major.last</emphasis> is less than 128 and greater than 0,
+if <emphasis remap='I'>major.first</emphasis> is greater than <emphasis remap='I'>major.last</emphasis>,
+or if <emphasis remap='I'>minor.first</emphasis>
+is greater than <emphasis remap='I'>minor.last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "ext-replies" -->
+<!-- .br -->
+Specifies replies resulting from extension protocol requests with a
+major opcode field between <emphasis remap='I'>major.first</emphasis> and <emphasis remap='I'>major.last</emphasis> and
+a minor opcode field between <emphasis remap='I'>minor.first</emphasis> and <emphasis remap='I'>minor.last</emphasis>
+inclusive.  If <emphasis remap='I'>major.first</emphasis> and <emphasis remap='I'>major.last</emphasis> are equal to 0,
+no extension protocol replies are specified by this RECORDRANGE.  If
+<emphasis remap='I'>major.first</emphasis> or <emphasis remap='I'>major.last</emphasis> is less than 128 and greater
+than 0,
+if <emphasis remap='I'>major.first</emphasis> is greater than <emphasis remap='I'>major.last</emphasis>,
+or if <emphasis remap='I'>minor.first</emphasis> is greater than <emphasis remap='I'>minor.last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "delivered-events" -->
+<!-- .br -->
+This is used for both core X protocol events and arbitrary extension
+events.  Specifies events that are delivered to at least one client
+that have a code field between <emphasis remap='I'>first</emphasis> and <emphasis remap='I'>last</emphasis>
+inclusive.  If <emphasis remap='I'>first</emphasis> is equal to 0 and <emphasis remap='I'>last</emphasis> is equal to 0,
+no events are specified by this RECORDRANGE.
+Otherwise, if <emphasis remap='I'>first</emphasis> is less than 2
+or <emphasis remap='I'>last</emphasis> is less than 2, or if
+<emphasis remap='I'>first</emphasis> is greater than <emphasis remap='I'>last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "device-events" -->
+<!-- .br -->
+This is used for both core X device events and X extension device
+events that may or may not be delivered to a client.
+Specifies device events that have a code field between <emphasis remap='I'>first</emphasis> and
+<emphasis remap='I'>last</emphasis> inclusive.  If <emphasis remap='I'>first</emphasis> is equal to 0 and <emphasis remap='I'>last</emphasis>
+is equal to 0, no device events are specified by this RECORDRANGE.
+Otherwise,
+if <emphasis remap='I'>first</emphasis> is less than 2 or <emphasis remap='I'>last</emphasis> is less
+than 2, or if <emphasis remap='I'>first</emphasis> is greater than <emphasis remap='I'>last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Because
+the generated device event may or may not be associated with a
+client, unlike other RECORDRANGE components, which select protocol for a
+specific client, selecting for device events in any RECORDRANGE in an RC
+causes the recording client to receive one instance for each device event
+generated that is in the range specified.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "errors" -->
+<!-- .br -->
+This is used for both core X protocol errors and arbitrary extension
+errors.  Specifies errors that have a code field between <emphasis remap='I'>first</emphasis> and
+<emphasis remap='I'>last</emphasis> inclusive.  If <emphasis remap='I'>first</emphasis> is equal to 0 and <emphasis remap='I'>last</emphasis> is equal to 0, no
+errors are specified by this RECORDRANGE.  If <emphasis remap='I'>first</emphasis> is greater
+than <emphasis remap='I'>last</emphasis>, a
+<function>"Value"</function>
+error results.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "client-started" -->
+<!-- .br -->
+Specifies the connection setup reply.
+If
+<function>False ,</function>
+the connection setup reply is not specified by
+this RECORDRANGE.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+<!-- .IN "client-died" -->
+<!-- .br -->
+Specifies notification when a client disconnects.
+If
+<function>False ,</function>
+notification when a client disconnects is not specified by
+this RECORDRANGE.
+    </para>
+  </listitem>
+</itemizedlist>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="1.0*"/>
+  <colspec colname='c3' colwidth="2.0*"/>
+  <tbody>
+    <row>
+      <entry>ELEMENT_HEADER:</entry>
+      <entry>[from-server-time:</entry>
+      <entry>BOOL</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>from-client-time:</entry>
+      <entry>BOOL</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>from-client-sequence:</entry>
+      <entry>BOOL]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The
+<function>ELEMENT_HEADER</function>
+structure specifies additional data that precedes each protocol
+element in the <emphasis remap='I'>data</emphasis> field of a
+<function>RecordEnableContext</function>
+reply.
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+If <emphasis remap='I'>from-server-time</emphasis> is
+<function>True ,</function>
+each intercepted protocol element
+with category
+<function>FromServer</function>
+is preceded by the server time when the protocol was recorded.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If <emphasis remap='I'>from-client-time</emphasis> is
+<function>True ,</function>
+each intercepted protocol element
+with category
+<function>FromClient</function>
+is preceded by the server time when the protocol was recorded.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If <emphasis remap='I'>from-client-sequence</emphasis> is
+<function>True ,</function>
+each intercepted protocol
+element with category
+<function>FromClient</function>
+or
+<function>ClientDied</function>
+is preceded by the
+32-bit sequence number of the recorded client's most recent request
+processed by the server at that time.
+For
+<function>FromClient ,</function>
+this will be one less than the sequence number of the
+following request.
+For
+<function>ClientDied ,</function>
+the sequence number will be the only data, because no
+protocol is recorded.
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+Note that a reply containing device events is treated the same as
+other replies with category
+<function>FromServer</function>
+for purposes of these flags.
+Protocol with category
+<function>FromServer</function>
+is never preceded by a sequence
+number because almost all such protocol has a sequence number in it anyway.
+</para>
+
+<para>
+<!-- .LP -->
+If both a server time and a sequence number have been requested for a
+reply, each protocol request is
+preceded first by the time and second by the sequence number.
+</para>
+
+<para>XIDBASE: CARD32</para>
+
+<para>
+<!-- .LP -->
+The XIDBASE type is used to identify a particular client.  Valid
+values are any existing resource identifier
+of any connected client,
+in which case the client
+that created the resource is specified, or the resource identifier
+base sent to the target client from the server in the connection setup
+reply.  A value of 0 (zero) is valid when the XIDBASE is associated
+with device events that may not have been delivered to a client.
+</para>
+
+<para>
+CLIENTSPEC: XIDBASE or {<emphasis>CurrentClients</emphasis>,
+<emphasis>FutureClients</emphasis>, <emphasis>AllClients</emphasis>}
+</para>
+
+<para>
+The CLIENTSPEC type defines the set of clients the RC attributes are
+associated with.  This type is used by recording clients when creating
+an RC or when changing RC attributes.  XIDBASE specifies that the RC
+attributes apply to a single client only.
+<function>CurrentClients</function>
+specifies
+that the RC attributes apply to current client connections;
+<function>FutureClients</function>
+specifies future client connections;
+<function>AllClients</function>
+specifies all client connections, which includes current and future.
+</para>
+
+<para>
+The numeric values for
+<function>CurrentClients ,</function>
+<function>FutureClients</function>
+and
+<function>AllClients</function>
+are
+defined such that there will be no intersection with valid XIDBASEs.
+</para>
+
+<para>
+<!-- .LP -->
+When the context is enabled, the data connection is unregistered if it
+was registered.
+If the context is enabled,
+<function>CurrentClients</function>
+and
+<function>AllClients</function>
+silently exclude the recording data connection.
+It is an error to explicitly register the data connection.
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="1.0*"/>
+  <colspec colname='c3' colwidth="3.0*"/>
+  <tbody>
+    <row>
+      <entry>CLIENT_INFO:</entry>
+      <entry>[client-resource:</entry>
+      <entry>CLIENTSPEC</entry>
+    </row>
+    <row>
+      <entry></entry>
+      <entry>intercepted-protocol:</entry>
+      <entry>LISTofRECORDRANGE]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This structure specifies an intercepted client and the protocol to be
+intercepted for the client.  The <emphasis remap='I'>client-resource</emphasis> field is a
+resource base that identifies the intercepted client.  The
+<emphasis remap='I'>intercepted-protocol</emphasis> field specifies the protocol to intercept
+for the <emphasis remap='I'>client-resource</emphasis>.
+</para>
+</sect1>
+
+<sect1 id="Errors">
+<title>Errors</title>
+<para>
+<emphasis role="bold">RecordContext</emphasis>
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+<!-- .IN RecordContext -->
+<!-- .br -->
+This error is returned if the value for an RC argument
+in a request does not name a defined record context.
+    </para>
+  </listitem>
+</itemizedlist>
+</sect1>
+</chapter>
+
+<chapter id="Protocol_Requests">
+<title>Protocol Requests</title>
+<!-- .XS -->
+<!-- (SN Protocol Requests -->
+<!-- .XE -->
+<!-- .sp -->
+<para>
+<function>RecordQueryVersion</function>
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+<emphasis remap='I'>major-version</emphasis>,
+<emphasis remap='I'>minor-version</emphasis>: CARD16
+    </para>
+  </listitem>
+</itemizedlist>
+<para>
+-&gt;
+</para>
+<itemizedlist>
+  <listitem>
+    <para>
+<emphasis remap='I'>major-version</emphasis>,
+<emphasis remap='I'>minor-version</emphasis>: CARD16
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+This request specifies the RECORD extension protocol version the client
+would like to use.  When the specified protocol version is supported
+by the extension, the protocol version the server expects from the
+client is returned.  Clients must use this request before other RECORD
+extension requests.
+</para>
+
+<para>
+This request also determines whether or not the RECORD extension protocol
+version specified by the client is supported by the extension.  If the
+extension supports the version specified by the client, this version number
+should be returned.  If the client has requested a higher version than is
+supported by the server, the server's highest version should be returned.
+Otherwise, if the client has requested a lower version than is supported
+by the server, the server's lowest version should be returned.  This document
+defines major version one (1),
+minor version thirteen (13).
+</para>
+
+<para>
+<function>RecordCreateContext</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>element-header</emphasis>: ELEMENT_HEADER
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>client-specifiers</emphasis>: LISTofCLIENTSPEC
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>ranges</emphasis>: LISTofRECORDRANGE
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Match ,</function>
+<function>Value ,</function>
+<function>IDChoice ,</function>
+<function>Alloc</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request creates a new
+record context
+within the server and assigns the identifier <emphasis remap='I'>context</emphasis> to
+it.  After the <emphasis remap='I'>context</emphasis> is created, this request registers the
+set of clients in <emphasis remap='I'>client-specifiers</emphasis> with the <emphasis remap='I'>context</emphasis> and
+specifies the protocol to intercept for those clients.
+The recorded protocol elements will be preceded by data as specified
+by <emphasis remap='I'>element-header</emphasis>.
+Typically,
+this request is used by a recording client over the control
+connection.  Multiple RC
+objects can exist simultaneously, containing overlapping sets of
+protocol and clients to intercept.
+</para>
+
+<para>
+If any of the values in
+<emphasis remap='I'>element-header</emphasis> or
+<emphasis remap='I'>ranges</emphasis> is invalid, a
+<function>"Value"</function>
+error results.  Duplicate items in the list of <emphasis remap='I'>client-specifiers</emphasis> are
+ignored.  If any item in the <emphasis remap='I'>client-specifiers</emphasis> list is not a valid
+CLIENTSPEC, a
+<function>"Match"</function>
+error results.  Otherwise, each item in the <emphasis remap='I'>client-specifiers</emphasis> list is
+processed as follows:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+If the item is an XIDBASE identifying a particular client, the
+specified client is registered with the <emphasis remap='I'>context</emphasis> and the protocol
+to intercept for the client is then set to <emphasis remap='I'>ranges</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>CurrentClients ,</function>
+all existing clients are registered with the
+<emphasis remap='I'>context</emphasis> at this time.
+The protocol to intercept for all clients registered
+with the <emphasis remap='I'>context</emphasis> is then set to <emphasis remap='I'>ranges</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>FutureClients ,</function>
+all clients that connect to the server
+after this request executes will be automatically registered with the
+<emphasis remap='I'>context</emphasis>.  The protocol to intercept for such clients will be set to
+<emphasis remap='I'>ranges</emphasis> in the <emphasis remap='I'>context</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>AllClients ,</function>
+the effect is as if the actions described
+for
+<function>FutureClients</function>
+are performed, followed by the actions for
+<function>CurrentClients .</function>
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+The
+<function>"Alloc"</function>
+error results when the server is unable to allocate the necessary
+resources.
+</para>
+
+<para>
+<function>RecordRegisterClients</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>element-header</emphasis>: ELEMENT_HEADER
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>client-specifiers</emphasis>: LISTofCLIENTSPEC
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>ranges</emphasis>: LISTofRECORDRANGE
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Match ,</function>
+<function>Value ,</function>
+<function>RecordContext ,</function>
+<function>Alloc</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request registers the set of clients in <emphasis remap='I'>client-specifiers</emphasis> with
+the given <emphasis remap='I'>context</emphasis> and specifies the protocol to intercept for those
+clients.
+The header preceding each recorded protocol element is set as specified
+by <emphasis remap='I'>element-header</emphasis>.
+These flags affect the entire
+context; their effect is not limited to the clients registered by
+this request.
+Typically, this request is used by a recording client over
+the control connection.
+</para>
+
+<para>
+If <emphasis remap='I'>context</emphasis> does not name a valid RC, a
+<function>"RecordContext"</function>
+error results.  If any of the values in
+<emphasis remap='I'>element-header</emphasis> or <emphasis remap='I'>ranges</emphasis> is invalid, a
+<function>"Value"</function>
+error results.  Duplicate items in the list of <emphasis remap='I'>client-specifiers</emphasis> are
+ignored.  If any item in the list of <emphasis remap='I'>client-specifiers</emphasis> is not a
+valid CLIENTSPEC, a
+<function>"Match"</function>
+error results.
+If the <emphasis remap='I'>context</emphasis> is enabled and the XID of the enabling connection
+is specified, a
+<function>"Match"</function>
+error results.
+Otherwise, each item in the <emphasis remap='I'>client-specifiers</emphasis> list is
+processed as follows:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+If the item is an XIDBASE identifying a particular client, the
+specified client is registered with the <emphasis remap='I'>context</emphasis> if it is not already
+registered.  The protocol to intercept for the client is then set to
+<emphasis remap='I'>ranges</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>CurrentClients ,</function>
+all existing clients that are not
+already registered with the specified <emphasis remap='I'>context</emphasis>,
+except the enabling connection if the <emphasis remap='I'>context</emphasis> is enabled,
+are registered at this
+time.  The protocol to intercept for all clients registered with the
+<emphasis remap='I'>context</emphasis> is then set to <emphasis remap='I'>ranges</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>FutureClients ,</function>
+all clients that connect to the server
+after this request executes will be automatically registered with the
+<emphasis remap='I'>context</emphasis>.  The protocol to intercept for such clients will be set to
+<emphasis remap='I'>ranges</emphasis> in the <emphasis remap='I'>context</emphasis>.
+The set of clients that are registered with the
+<emphasis remap='I'>context</emphasis> and their corresponding sets
+of protocol to intercept are left intact.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>AllClients ,</function>
+the effect is as if the actions described
+for
+<function>FutureClients</function>
+are performed, followed by the actions for
+<function>CurrentClients .</function>
+    </para>
+  </listitem>
+</itemizedlist>
+<para>
+The
+<function>"Alloc"</function>
+error results when the server is unable to allocate the necessary
+resources.
+</para>
+
+<para>
+<function>RecordUnregisterClients</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>client-specifiers</emphasis>: LISTofCLIENTSPEC
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Match ,</function>
+<function>RecordContext</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+
+<para>
+This request removes the set of clients in <emphasis remap='I'>client-specifiers</emphasis> from the
+given <emphasis remap='I'>context</emphasis>'s set of registered clients.  Typically, this request is
+used by a recording client over the control connection.
+</para>
+
+<para>
+If <emphasis remap='I'>context</emphasis> does not name a valid RC, a
+<function>"RecordContext"</function>
+error results.  Duplicate items in the list of <emphasis remap='I'>client-specifiers</emphasis> are
+ignored.  If any item in the list is not a valid CLIENTSPEC, a
+<function>"Match"</function>
+error results.  Otherwise, each item in the <emphasis remap='I'>client-specifiers</emphasis> list is
+processed as follows:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+If the item is an XIDBASE identifying a particular client, and the
+specified client is currently registered with the <emphasis remap='I'>context</emphasis>, it is
+unregistered, and the set of protocol to intercept for the client is
+deleted from the <emphasis remap='I'>context</emphasis>.  If the specified client is not registered
+with the <emphasis remap='I'>context</emphasis>, the item has no effect.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>CurrentClients ,</function>
+all clients currently registered with
+the <emphasis remap='I'>context</emphasis> are unregistered from it, and their corresponding sets of
+protocol to intercept are deleted from the <emphasis remap='I'>context</emphasis>.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>FutureClients ,</function>
+clients that connect to the server after
+this request executes will not automatically be registered with the
+<emphasis remap='I'>context</emphasis>.  The set of clients that are registered with this context
+and their corresponding sets of protocol that will be
+intercepted are left intact.
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+If the item is
+<function>AllClients ,</function>
+the effect is as if the actions described
+for
+<function>FutureClients</function>
+are performed, followed by the actions for
+<function>CurrentClients .</function>
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+A client is unregistered automatically when it disconnects.
+</para>
+
+<para>
+<function>RecordGetContext</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+-&gt;
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>enabled</emphasis>: BOOL
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>element-header</emphasis>: ELEMENT_HEADER
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>intercepted-clients</emphasis>: LISTofCLIENT_INFO
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+      </entry>
+    </row>
+    <row>
+      <entry>
+<function>RecordContext</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request queries the current state of the specified <emphasis remap='I'>context</emphasis>
+and is typically used by a recording client over the control connection.
+The <emphasis remap='I'>enabled</emphasis> field
+specifies the state of data transfer between the extension and the
+recording client, and is either enabled
+<function>( True )</function>
+or disabled
+<function>( False ).</function>
+The initial state is disabled.
+When enabled, all core X protocol and
+extension protocol received from (requests) or sent to (replies,
+errors, events) a particular client, and requested to be intercepted
+by the recording client, is reported to the recording client over the
+data connection.
+The <emphasis remap='I'>element-header</emphasis> specifies the header that precedes each
+recorded protocol element.
+The
+<emphasis remap='I'>intercepted-clients</emphasis> field specifies the list of clients currently
+being recorded and the protocol associated with each client.
+If future clients will be automatically registered with the context,
+one of the returned CLIENT_INFO structures has a <emphasis remap='I'>client-resource</emphasis> value
+of FutureClients and an <emphasis remap='I'>intercepted-protocol</emphasis> giving the protocol to
+intercept for future clients.
+Protocol ranges may be decomposed, coalesced, or otherwise modified
+by the server from how they were specified by the client.
+All CLIENTSPECs registered with the server are returned, even if the
+RECORDRANGE(s) associated with them specify no protocol to record.
+</para>
+
+<para>
+When the <emphasis remap='I'>context</emphasis> argument is not valid, a
+<function>RecordContext</function>
+error results.
+</para>
+
+<para>
+<function>RecordEnableContext</function>
+</para>
+
+<informaltable frame="none">
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+-&gt;+
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>category</emphasis>:
+{<function>FromServer</function>, <function>FromClient</function>,
+<function>ClientStarted</function>, <function>ClientDied</function>,
+<function>StartOfData</function>,
+<function>EndOfData</function>}
+      </entry>
+    </row>
+
+    <row>
+      <entry>
+<emphasis remap='I'>element-header</emphasis>: ELEMENT_HEADER
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>client-swapped</emphasis>: BOOL
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>id-base</emphasis>: XIDBASE
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>server-time</emphasis>: TIMESTAMP
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>recorded-sequence-number</emphasis>: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+<emphasis remap='I'>data</emphasis>: LISTofBYTE
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>Match</function>,
+<function>RecordContext</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request enables data transfer between the recording client
+and the extension and returns the protocol data the recording client
+has previously expressed interest in.  Typically, this request is
+executed by the recording client over the data connection.
+</para>
+
+<para>
+If the client is registered on the <emphasis remap='I'>context</emphasis>, it is unregistered
+before any recording begins.
+</para>
+<para>
+<!-- .LP -->
+Once the server receives this request, it begins intercepting
+and reporting to the recording client all core and extension protocol
+received from or sent to clients registered with the RC that the
+recording client has expressed interest in.  All intercepted protocol data
+is returned in the byte-order of the recorded client.  Therefore,
+recording clients are responsible for all byte swapping, if required.
+More than one recording client cannot enable data transfer on the
+same RC at the same time.  Multiple intercepted requests, replies,
+events and errors might be packaged into a single reply before
+being returned to the recording clients.
+</para>
+<para>
+<!-- .LP -->
+The
+<emphasis remap='I'>category</emphasis> field determines the possible
+types of the data.
+When a context is enabled, the server will immediately send a reply of
+category
+<function>StartOfData</function>
+to notify the client that recording is enabled.
+A category of
+<function>FromClient</function>
+means the data are from the client
+(requests);
+<function>FromServer</function>
+means data are from the server (replies,
+errors, events, or device events).
+For a new client, the category is
+<function>ClientStarted</function>
+and the data are the connection setup reply.
+When
+the recorded client connection is closed, <emphasis remap='I'>category</emphasis> is
+set to the value
+<function>ClientDied</function>
+and no protocol is included in this reply.
+When the disable request is made over the control connection,
+a final reply is sent over the data connection with category
+<function>EndOfData</function>
+and no protocol.
+</para>
+<para>
+<!-- .LP -->
+The <emphasis remap='I'>element-header</emphasis> field returns the value currently set for the
+context, which tells what header information precedes each recorded
+protocol element in this reply.
+</para>
+<para>
+<!-- .LP -->
+The <emphasis remap='I'>client-swapped</emphasis> field is
+<function>True</function>
+if the byte order of
+the protocol being recorded
+is swapped
+relative to the recording client;
+otherwise, <emphasis remap='I'>client-swapped</emphasis> is
+<function>False .</function>
+The recorded protocol
+is in the byte order of the client being
+recorded; device events are in the byte order of the
+recording client.
+For replies of category
+<function>StartOfData</function>
+and
+<function>EndOfData</function>
+the
+<emphasis remap='I'>client-swapped</emphasis> bit is set
+according
+to the byte order of the server relative to the recording client.
+The <emphasis remap='I'>id-base</emphasis> field is the resource identifier base
+sent to the client from the server in the
+connection setup reply, and hence, identifies the client being
+recorded.  The <emphasis remap='I'>id-base</emphasis> field is 0 (zero) when the protocol
+data being
+returned are device events.
+The <emphasis remap='I'>server-time</emphasis> field is set to the time of the
+server when the first protocol element in this reply was intercepted.
+The <emphasis remap='I'>server-time</emphasis>
+of reply N+1 is greater than or equal to the <emphasis remap='I'>server-time</emphasis> of reply N,
+and is greater than or equal to the time of the last protocol
+element in reply N.
+</para>
+<para>
+<!-- .LP -->
+The <emphasis remap='I'>recorded-sequence-number</emphasis> field is set to the sequence number
+of the recorded client's most recent request processed by the server.
+</para>
+<para>
+<!-- .LP -->
+The <emphasis remap='I'>data</emphasis> field
+contains the raw protocol data being returned to the recording client.
+If requested by the <emphasis remap='I'>element-header</emphasis> of this record context, each
+protocol element may be preceded by a 32-bit timestamp and/or
+a 32-bit sequence number.
+If present, both the timestamp and sequence number are always in the
+byte order of the recording client.
+</para>
+<para>
+<!-- .LP -->
+For the core X events
+<function>KeyPress ,</function>
+<function>KeyRelease ,</function>
+<function>ButtonPress ,</function>
+and
+<function>ButtonRelease ,</function>
+the fields of a device event that contain
+valid information are <emphasis remap='I'>time</emphasis> and <emphasis remap='I'>detail</emphasis>.
+For the core X event
+<function>MotionNotify ,</function>
+the fields of a device event that contain
+valid information are <emphasis remap='I'>time</emphasis>, <emphasis remap='I'>root</emphasis>,
+<emphasis remap='I'>root-x</emphasis> and <emphasis remap='I'>root-y</emphasis>.
+The <emphasis remap='I'>time</emphasis> field refers to the time the event was generated by the
+device.
+</para>
+<para>
+<!-- .LP -->
+For the extension input device events
+<function>DeviceKeyPress ,</function>
+<function>DeviceKeyRelease ,</function>
+<function>DeviceButtonPress ,</function>
+and
+<function>DeviceButtonRelease ,</function>
+the fields of a device event that contain valid information are
+<emphasis remap='I'>device</emphasis>, <emphasis remap='I'>time</emphasis> and <emphasis remap='I'>detail</emphasis>.
+For
+<function>DeviceMotionNotify ,</function>
+the valid device event fields are
+<emphasis remap='I'>device</emphasis> and <emphasis remap='I'>time</emphasis>.
+For the extension input device events
+<function>ProximityIn</function>
+and
+<function>ProximityOut ,</function>
+the fields of a device event that contain valid
+information are <emphasis remap='I'>device</emphasis> and <emphasis remap='I'>time</emphasis>.
+For the extension input device event
+<function>DeviceValuator ,</function>
+the fields of a device event that contain valid information are
+<emphasis remap='I'>device</emphasis>,
+<emphasis remap='I'>num_valuators</emphasis>, <emphasis remap='I'>first_valuator</emphasis>, and <emphasis remap='I'>valuators</emphasis>.
+The <emphasis remap='I'>time</emphasis> field refers to the time the event was generated by the
+device.
+</para>
+<para>
+<!-- .LP -->
+The error
+<function>"Match"</function>
+is returned when data transfer is already enabled.
+When the <emphasis remap='I'>context</emphasis> argument is not valid, a
+<function>RecordContext</function>
+error results.
+</para>
+
+<para>
+<function>RecordDisableContext</function>
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry>
+<emphasis remap='I'>context</emphasis>: RC
+      </entry>
+    </row>
+    <row>
+      <entry>
+Errors:
+<function>RecordContext</function>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is typically executed by the recording client over the
+control connection.  This request directs the extension to immediately
+send any complete protocol elements currently buffered,
+to send a final reply with category
+<function>EndOfData ,</function>
+and to discontinue
+data transfer between the extension and the recording client.
+Protocol reporting is disabled
+on the data connection that is currently enabled for the given
+<emphasis remap='I'>context</emphasis>.  Once the extension completes
+processing this request, no additional recorded protocol will
+be reported to the recording client.  If a data connection is not
+currently enabled when this request is executed, then this request has
+no affect on the state of data transfer.
+An RC is disabled automatically when the connection to the enabling
+client is closed down.
+</para>
+
+<para>
+When the <emphasis remap='I'>context</emphasis> argument is not valid, a
+<function>RecordContext</function>
+error results.
+</para>
+
+<para>
+<function>RecordFreeContext</function>
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+<emphasis remap='I'>context</emphasis> RC
+<!-- .br -->
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Errors:
+<function>RecordContext</function>
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+This request deletes the association between the resource ID and the
+RC and destroys the RC.
+If a client has enabled data transfer on this <emphasis remap='I'>context</emphasis>, the actions
+described in
+<function>RecordDisableContext</function>
+are performed before the <emphasis remap='I'>context</emphasis>
+is freed.
+</para>
+
+<para>
+An RC is destroyed automatically when the connection to the creating client
+is closed down and the close-down mode is <function>DestroyAll</function>.  When the
+<emphasis remap='I'>context</emphasis> argument is not valid, a
+<function>RecordContext</function>
+error results.
+</para>
+</chapter>
+
+<chapter id="Encoding">
+<title>Encoding</title>
+<para>
+Please refer to the X11 Protocol Encoding document as this document uses
+conventions established there.
+</para>
+
+<para>
+The name of this extension is "RECORD".
+</para>
+
+<sect1 id="Types_2">
+<title>Types</title>
+<para>
+RC: CARD32
+</para>
+
+<literallayout class="monospaced">
+RANGE8
+     1     CARD8          first
+     1     CARD8          last
+</literallayout>
+
+<literallayout class="monospaced">
+RANGE16
+     2     CARD16          first
+     2     CARD16          last
+</literallayout>
+
+<literallayout class="monospaced">
+EXTRANGE
+     2     RANGE8          major
+     4     RANGE16         minor
+</literallayout>
+
+<literallayout class="monospaced">
+RECORDRANGE
+     2     RANGE8          core-requests
+     2     RANGE8          core-replies
+     6     EXTRANGE        ext-requests
+     6     EXTRANGE        ext-replies
+     2     RANGE8          delivered-events
+     2     RANGE8          device-events
+     2     RANGE8          errors
+     1     BOOL            client-started
+     1     BOOL            client-died
+</literallayout>
+
+<literallayout class="monospaced">
+ELEMENT_HEADER
+     1     CARD8
+          0x01     from-server-time
+          0x02     from-client-time
+          0x04     from-client-sequence
+</literallayout>
+
+<para>
+XIDBASE: CARD32
+</para>
+
+<literallayout class="monospaced">
+CLIENTSPEC
+     4    XIDBASE  client-id-base
+          1        CurrentClients
+          2        FutureClients
+          3        AllClients
+</literallayout>
+
+<literallayout class="monospaced">
+CLIENT_INFO
+     4    CLIENTSPEC          client-resource
+     4    CARD32              n, number of record ranges in
+                                 intercepted-protocol
+     24n  LISTofRECORDRANGE   intercepted-protocol
+</literallayout>
+
+</sect1>
+<sect1 id="Errors_2">
+<title>Errors</title>
+
+<literallayout class="monospaced">
+<function>RecordContext</function>
+     1     0                  Error
+     1     CARD8              extension's base error code + 0
+     2     CARD16             sequence number
+     4     CARD32             invalid record context
+     24                       unused
+</literallayout>
+</sect1>
+
+<sect1 id="Requests">
+<title>Requests</title>
+
+<literallayout class="monospaced">
+<function>RecordQueryVersion</function>
+     1     CARD8      major opcode
+     1     0          minor opcode
+     2     2          request length
+     2     CARD16     major version
+     2     CARD16     minor version
+ =&gt;
+     1     1          Reply
+     1                unused
+     2     CARD16     sequence number
+     4     0          reply length
+     2     CARD16     major version
+     2     CARD16     minor version
+     20               unused
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordCreateContext</function>
+     1     CARD8                 major opcode
+     1     1                     minor opcode
+     2     5+m+6n                request length
+     4     RC                    context
+     1     ELEMENT_HEADER        element-header
+     3                           unused
+     4     CARD32                m, number of client-specifiers
+     4     CARD32                n, number of ranges
+     4m    LISTofCLIENTSPEC      client-specifiers
+     24n   LISTofRECORDRANGE     ranges
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordRegisterClients</function>
+     1     CARD8                 major opcode
+     1     2                     minor opcode
+     2     5+m+6n                request length
+     4     RC                    context
+     1     ELEMENT_HEADER        element-header
+     3                           unused
+     4     CARD32                m, number of client-specifiers
+     4     CARD32                n, number of ranges
+     4m    LISTofCLIENTSPEC      client-specifiers
+     24n   LISTofRECORDRANGE     ranges
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordUnregisterClients</function>
+     1     CARD8                 major opcode
+     1     3                     minor opcode
+     2     3+m                   request length
+     4     RC                    context
+     4     CARD32                m, number of client-specifiers
+     4m    LISTofCLIENTSPEC      client-specifiers
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordGetContext</function>
+     1     CARD8                 major opcode
+     1     4                     minor opcode
+     2     2                     request length
+     4     RC                    context
+ =&gt;
+     1     1                     Reply
+     1     BOOL                  enabled
+     2     CARD16                sequence number
+     4     j                     reply length
+     1     ELEMENT_HEADER        element-header
+     3                           unused
+     4     CARD32                n, number of intercepted-clients
+     16                          unused
+     4j    LISTofCLIENT_INFO     intercepted-clients
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordEnableContext</function>
+     1     CARD8                 major opcode
+     1     5                     minor opcode
+     2     2                     request length
+     4     RC                    context
+ =&gt;+
+     1     1                     Reply
+     1                           category
+           0     FromServer
+           1     FromClient
+           2     ClientStarted
+           3     ClientDied
+           4     StartOfData
+           5     EndOfData
+     2     CARD16                sequence number
+     4     n                     reply length
+     1     ELEMENT_HEADER        element-header
+     1     BOOL                  client-swapped
+     2                           unused
+     4     XIDBASE               id-base
+     4     TIMESTAMP             server-time
+     4     CARD32                recorded-sequence-number
+     8                           unused
+     4n    BYTE                  data
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordDisableContext</function>
+     1     CARD8                 major opcode
+     1     6                     minor opcode
+     2     2                     request length
+     4     RC                    context
+</literallayout>
+
+<literallayout class="monospaced">
+<function>RecordFreeContext</function>
+     1     CARD8                 major opcode
+     1     7                     minor opcode
+     2     2                     request length
+     4     RC                    context
+</literallayout>
+
+</sect1>
+</chapter>
+</book>

@@ -1,0 +1,688 @@
+<chapter id='Key_Event_Processing_in_the_Client'>
+<title>Key Event Processing in the Client</title>
+
+<para>
+The XKB <emphasis>
+client map</emphasis>
+ for a keyboard is the collection of information a client needs to interpret
+key events that come from that keyboard. It contains a global list of <emphasis>
+key types</emphasis>
+, described in <link linkend='Key_Types'>Key Types</link>,
+and an array of <emphasis>
+key symbol map</emphasis>
+s, each of which describes the symbols bound to one particular key and the
+rules to be used to interpret those symbols.
+</para>
+
+<sect1 id='Notation_and_Terminology'>
+<title>Notation and Terminology</title>
+
+<para>
+XKB associates a two-dimensional array of symbols with each key. Symbols are
+addressed by keyboard group (see <link linkend='Keyboard_State'>
+Keyboard State</link>) and shift level, where level is defined as in the
+ISO9995 standard:
+</para>
+
+<variablelist>
+  <varlistentry>
+    <term>Level</term>
+    <listitem>
+      <para>
+One of several states (normally 2 or 3) which govern which graphic
+character is produced when a graphic key is actuated. In certain cases the
+level may also affect function keys.
+      </para>
+    </listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+Note that shift level is derived from the modifier state, but not necessarily
+in the same way for all keys. For example, the <emphasis>
+Shift</emphasis>
+ modifier selects shift level 2 on most keys, but for keypad keys the modifier
+bound to <emphasis>
+Num_Lock</emphasis>
+ (i.e. the <emphasis>
+NumLock</emphasis>
+ virtual modifier) also selects shift level 2.gray symbols on a key
+</para>
+
+<para>
+We use the notation G<emphasis>
+n</emphasis>
+L<emphasis>
+n</emphasis>
+ to specify the position of a symbol on a key or in memory:
+</para>
+
+<mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-6.svg"/>
+ </imageobject>
+ </mediaobject>
+
+
+<para>
+The gray characters indicate symbols that are implied or expected but are not
+actually engraved on the key.
+</para>
+
+<note><para>Unfortunately, the "natural" orientation of symbols on a key and
+the natural orientation in memory are reversed from one another, so keyboard
+group refers to a column on the key and a row in memory. There’s no real help
+for it, but we try to minimize confusion by using "group" and "level" (or
+"shift level") to refer to symbols regardless of context.</para></note>
+
+</sect1>
+<sect1 id='Determining_the_KeySym_Associated_with_a_Key_Event'>
+<title>Determining the KeySym Associated with a Key Event</title>
+
+<para>
+To look up the symbol associated with an XKB key event, we need to know the
+group and shift level that correspond to the event.
+</para>
+
+
+<para>
+Group is reported in bits 13-14 of the state field of the key event, as
+described in <link linkend='Computing_A_State_Field_from_an_XKB_State'>Computing A State
+Field from an XKB State</link>. The keyboard group reported in the event might
+be out-of-range for any particular key because the number of groups can vary
+from key to key. The XKB description of each key contains a <emphasis>
+group info</emphasis>
+ field which is interpreted identically to the global groups wrap control (see
+<link linkend='Computing_Effective_Modifier_and_Group'>Computing Effective Modifier and
+Group</link>) and which specifies the interpretation of groups that are
+out-of-range for that key.
+</para>
+
+
+<para>
+Once we have determined the group to be used for the event, we have to
+determine the shift level. The description of a key includes a <emphasis>
+key type</emphasis>
+ for each group of symbols bound to the key. Given the modifiers from the key
+event, this key type yields a shift level and a set of "leftover" modifiers, as
+described in <link linkend='Key_Types'>Key Types</link>
+below.
+</para>
+
+
+<para>
+Finally, we can use the effective group and the shift level returned by the
+type of that group to look up a symbol in a two-dimensional array of symbols
+associated with the key.
+</para>
+
+
+<sect2 id='Key_Types'>
+<title>Key Types</title>
+
+<para>
+Each entry of a key type’s <emphasis>
+map</emphasis>
+ field specifies the shift level that corresponds to some XKB modifier
+definition; any combination of modifiers that is not explicitly listed
+somewhere in the map yields shift level one. Map entries which specify unbound
+virtual modifiers (see <link linkend='Inactive_Modifier_Definitions'>Inactive
+Modifier Definitions</link>) are not considered; each entry contains an
+automatically-updated <emphasis>
+active</emphasis>
+ field which indicates whether or not it should be used.
+</para>
+
+
+<para>
+Each key type includes a few fields that are derived from the contents of the
+map and which report some commonly used values so they don’t have to be
+constantly recalculated. The <emphasis>
+numLevels</emphasis>
+ field contains the highest shift level reported by any of its map entries; XKB
+uses <emphasis>
+numLevels</emphasis>
+ to insure that the array of symbols bound to a key is large enough (the number
+of levels reported by a key type is also referred to as its width). The
+<emphasis>
+modifiers</emphasis>
+ field reports all real modifiers considered by any of the map entries for the
+type. Both <emphasis>
+modifiers</emphasis>
+<emphasis>
+ </emphasis>
+and <emphasis>
+numLevels</emphasis>
+ are updated automatically by XKB and neither can be changed explicitly.
+</para>
+
+
+<para>
+Any modifiers specified in <emphasis>
+modifiers</emphasis>
+ are normally <emphasis>
+consumed</emphasis>
+ (see <link linkend='Transforming_the_KeySym_Associated_with_a_Key_Event'>Transforming the KeySym
+Associated with a Key Event</link>), which means that they are not considered
+during any of the later stages of event processing. For those rare occasions
+that a modifier <emphasis>
+should</emphasis>
+ be considered despite having been used to look up a symbol, key types include
+an optional <emphasis>
+preserve</emphasis>
+ field. If a <emphasis>
+preserve</emphasis>
+ list is present, each entry corresponds to one of the key type’s map entries
+and lists the modifiers that should <emphasis>
+not</emphasis>
+ be consumed if the matching map entry is used to determine shift level.
+</para>
+
+
+<para>
+For example, the following key type implements caps lock as defined by the core
+protocol (using the second symbol bound to the key):
+</para>
+
+<literallayout class='monospaced'>
+type "ALPHABETIC" {
+	modifiers = Shift+Lock;
+	map[Shift]= Level2;
+	map[Lock]= Level2;
+	map[Shift+Lock]= Level2;
+};
+</literallayout>
+
+<para>
+The problem with this kind of definition is that we could assign completely
+unrelated symbols to the two shift levels, and "Caps Lock" would choose the
+second symbol. Another definition for alphabetic keys uses system routines to
+capitalize the keysym:
+</para>
+
+<literallayout class='monospaced'>
+type "ALPHABETIC" {
+	modifiers= Shift;
+	map[Shift]= Level2;
+};
+</literallayout>
+
+<para>
+When caps lock is applied using this definition, we take the symbol from shift
+level one and capitalize it using system-specific capitalization rules. If
+shift and caps lock are both set, we take the symbol from shift level two and
+try to capitalize it, which usually has no effect.
+</para>
+
+
+<para>
+The following key type implements shift-cancels-caps lock behavior for
+alphabetic keys:
+</para>
+
+<literallayout class='monospaced'>
+type "ALPHABETIC" {
+	modifiers = Shift+Lock;
+	map[Shift] = Level2;
+	preserve[Lock]= Lock;
+};
+</literallayout>
+
+<para>
+Consider the four possible states that can affect alphabetic keys: no
+modifiers, shift alone, caps lock alone or shift and caps lock together. The
+map contains no explicit entry for <emphasis>
+None</emphasis>
+ (no modifiers), so if no modifiers are set, any group with this type returns
+the first keysym. The map entry for <emphasis>
+Shift</emphasis>
+ reports <emphasis>
+Level2</emphasis>
+, so any group with this type returns the second symbol when <emphasis>
+Shift</emphasis>
+ is set. There is no map entry for <emphasis>
+Lock</emphasis>
+ alone, but the type specifies that the <emphasis>
+Lock</emphasis>
+ modifier should be preserved in this case, so <emphasis>
+Lock</emphasis>
+ alone returns the first symbol in the group but first applies the
+capitalization transformation, yielding the capital form of the symbol. In the
+final case, there is no map entry for <emphasis>
+Shift+Lock</emphasis>
+, so it returns the first symbol in the group; there is no preserve entry, so
+the <emphasis>
+Lock</emphasis>
+ modifier is consumed and the symbol is not capitalized.
+</para>
+
+
+</sect2>
+<sect2 id='Key_Symbol_Map'>
+<title>Key Symbol Map</title>
+
+<para>
+The <emphasis>
+key symbol map</emphasis>
+ for a key contains all of the information that a client needs to process
+events generated by that key. Each key symbol mapping reports:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The number of groups of symbols bound to the key (<emphasis>
+numGroups</emphasis>
+).
+  </para>
+</listitem>
+<listitem>
+  <para>The treatment of out-of-range groups (<emphasis>
+groupInfo</emphasis>
+).
+  </para>
+</listitem>
+<listitem>
+  <para>The index of the key type to for each <emphasis>
+possible</emphasis>
+ group (<emphasis>
+kt_index[MaxKbdGroups]</emphasis>
+).
+  </para>
+</listitem>
+<listitem>
+  <para>The width of the widest type associated with the key (<emphasis>
+groupsWidth</emphasis>
+).
+  </para>
+</listitem>
+<listitem>
+  <para>The two-dimensional (numGroups <emphasis>
+×</emphasis>
+ groupsWidth) array of symbols bound to the key.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+It is legal for a key to have zero groups, in which case it also has zero
+symbols and all events from that key yield <emphasis>
+NoSymbol</emphasis>
+. The array of key types is of fixed width and is large enough to hold key
+types for the maximum legal number of groups (<emphasis>
+MaxKbdGroups</emphasis>
+, currently four); if a key has fewer than <emphasis>
+MaxKbdGroups</emphasis>
+ groups, the extra key types are reported but ignored. The <emphasis>
+groupsWidth</emphasis>
+ field cannot be explicitly changed; it is updated automatically whenever the
+symbols or set of types bound to a key are changed.
+</para>
+
+
+<para>
+If, when looking up a symbol, the effective keyboard group is out-of-range for
+the key, the <emphasis>
+groupInfo</emphasis>
+ field of the key symbol map specifies the rules for determining the
+corresponding legal group as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If the <emphasis>
+RedirectIntoRange</emphasis>
+ flag is set, the two least significant bits of <emphasis>
+groupInfo</emphasis>
+ specify the index of a group to which all illegal groups correspond. If the
+specified group is also out of range, all illegal groups map to <emphasis>
+Group1</emphasis>
+.
+  </para>
+</listitem>
+<listitem>
+  <para>If <emphasis>
+ClampIntoRange</emphasis>
+ flag is set, out-of-range groups correspond to the nearest legal group.
+Effective groups larger than the highest supported group are mapped to the
+highest supported group; effective groups less than <emphasis>
+Group1</emphasis>
+ are mapped to <emphasis>
+Group1</emphasis>
+. For example, a key with two groups of symbols uses <emphasis>
+Group2</emphasis>
+ type and symbols if the global effective group is either <emphasis>
+Group3</emphasis>
+ or <emphasis>
+Group4</emphasis>
+.
+  </para>
+</listitem>
+<listitem>
+  <para>If neither flag is set, group is wrapped into range using integer
+modulus. For example, a key with two groups of symbols for which groups wrap
+uses <emphasis>
+Group1</emphasis>
+ symbols if the global effective group is <emphasis>
+Group3</emphasis>
+ or <emphasis>
+Group2</emphasis>
+ symbols if the global effective group is <emphasis>
+Group4</emphasis>
+.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+The client map contains an array of key symbol mappings, with one entry for
+each key between the minimum and maximum legal keycodes, inclusive. All
+keycodes which fall in that range have key symbol mappings, whether or not any
+key actually yields that code.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='Transforming_the_KeySym_Associated_with_a_Key_Event'>
+<title>Transforming the KeySym Associated with a Key Event</title>
+
+<para>
+Any modifiers that were not used to look up the keysym, or which were
+explicitly preserved, might indicate further transformations to be performed on
+the keysym or the character string that is derived from it. For example, If the
+<emphasis>
+Lock</emphasis>
+ modifier is set, the symbol and corresponding string should be capitalized
+according to the locale-sensitive capitalization rules specified by the system.
+If the <emphasis>
+Control</emphasis>
+ modifier is set, the keysym is not affected, but the corresponding character
+should be converted to a control character as described in <link
+linkend="default_symbol_transformations">Default Symbol Transformations</link>.
+</para>
+
+
+<para>
+This extension specifies the transformations to be applied when the <emphasis>
+Control</emphasis>
+ or <emphasis>
+Lock</emphasis>
+ modifiers are active but were not used to determine the keysym to be used:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Modifier</entry>
+    <entry>Transformation</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+Control</emphasis>
+    </entry>
+    <entry>Report the control character associated with the symbol. This
+extension defines the control characters associated with the ASCII alphabetic
+characters (both upper and lower case) and for a small set of punctuation
+characters (see
+<link linkend="default_symbol_transformations">Default Symbol Transformations</link>).
+Applications are
+free to associate control characters with any symbols that are not specified by
+this extension.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+Lock</emphasis>
+    </entry>
+    <entry>Capitalize the symbol either according to capitalization rules
+appropriate to the application locale or using the capitalization rules defined
+by this extension (see <link linkend="default_symbol_transformations">Default Symbol Transformations</link>).</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Interpretation of other modifiers is application dependent.
+</para>
+
+<note><para>This definition of capitalization is fundamentally different from
+the core protocol’s, which uses the lock modifier to select from the symbols
+bound to the key. Consider key 9 in the
+<link linkend='Client_Map_Example'>client map example</link>;
+the core protocol provides no way to generate the capital form
+of either symbol bound to this key. XKB specifies that we first look up the
+symbol and then capitalize, so XKB yields the capital form of the two symbols
+when caps lock is active. </para></note>
+
+<para>
+XKB specifies the behavior of <emphasis>
+Lock</emphasis>
+ and <emphasis>
+Control</emphasis>
+, but interpretation of other modifiers is left to the application.
+</para>
+
+
+</sect1>
+<sect1 id='Client_Map_Example'>
+<title>Client Map Example</title>
+
+<para>
+Consider a simple, if unlikely, keyboard with the following keys (gray
+characters indicate symbols that are implied or expected but are not actually
+engraved on the key):
+</para>
+
+<mediaobject>
+ <imageobject> <imagedata format="SVG" fileref="XKBproto-7.svg"/>
+ </imageobject>
+ </mediaobject>
+
+
+<para>
+The core protocol represents this keyboard as a simple array with one row per
+key and four columns (the widest key, key 10, determines the width of the
+entire array).
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='5' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='2.0*'/>
+<colspec colname='c3' colwidth='2.0*'/>
+<colspec colname='c4' colwidth='2.0*'/>
+<colspec colname='c5' colwidth='2.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Key</entry>
+    <entry>G1L1</entry>
+    <entry>G1L2</entry>
+    <entry>G2L1</entry>
+    <entry>G2L2</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>8</entry>
+    <entry>Q</entry>
+    <entry>NoSymbol</entry>
+    <entry>at</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>9</entry>
+    <entry>odiaeresis</entry>
+    <entry>egrave</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>10</entry>
+    <entry>A</entry>
+    <entry>NoSymbol</entry>
+    <entry>Æ</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>11</entry>
+    <entry>ssharp</entry>
+    <entry>question</entry>
+    <entry>backslash</entry>
+    <entry>questiondown</entry>
+  </row>
+  <row>
+    <entry>12</entry>
+    <entry>KP_End</entry>
+    <entry>KP_1</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>13</entry>
+    <entry>Num_Lock</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>14</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>15</entry>
+    <entry>Return</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+    <entry>NoSymbol</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The row to be used for a given key event is determined by keycode; the column
+to be used is determined by the symbols bound to the key, the state of the
+<emphasis>
+Shift</emphasis>
+ and <emphasis>
+Lock</emphasis>
+ Modifiers and the state of the modifiers bound to the <emphasis>
+Num_Lock</emphasis>
+ and <emphasis>
+Mode_switch</emphasis>
+ keys as specified by the core protocol.
+</para>
+
+
+<para>
+The XKB description of this keyboard consists of six key symbol maps, each of
+which specifies the types and symbols associated with each keyboard group for
+one key:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Key</entry>
+    <entry>Group: Type</entry>
+    <entry>L1</entry>
+    <entry>L2</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>8</entry>
+    <entry>G1:	ALPHABETIC</entry>
+    <entry>q</entry>
+    <entry>Q</entry>
+  </row>
+  <row>
+    <entry>G2:	ONE_LEVEL</entry>
+    <entry>@</entry>
+    <entry>NoSymbol</entry>
+  </row>
+  <row>
+    <entry>9</entry>
+    <entry>G1:	TWO_LEVEL</entry>
+    <entry>odiaeresis</entry>
+    <entry>egrave</entry>
+  </row>
+  <row>
+    <entry>10</entry>
+    <entry>G1:	ALPHABETIC</entry>
+    <entry>a</entry>
+    <entry>A</entry>
+  </row>
+  <row>
+    <entry>G2:	ALPHABETIC</entry>
+    <entry>ae</entry>
+    <entry>AE</entry>
+  </row>
+  <row>
+    <entry>11</entry>
+    <entry>G1:	TWO_LEVEL</entry>
+    <entry>ssharp</entry>
+    <entry>question</entry>
+  </row>
+  <row>
+    <entry>G2:	ONE_LEVEL</entry>
+    <entry>backslash</entry>
+    <entry>questiondown</entry>
+  </row>
+  <row>
+    <entry>12</entry>
+    <entry>G1:	KEYPAD</entry>
+    <entry>KP_End</entry>
+    <entry>KP_1</entry>
+  </row>
+  <row>
+    <entry>13</entry>
+    <entry>G1:	ONE_LEVEL</entry>
+    <entry>Num_Lock</entry>
+    <entry>&#x0020;</entry>
+  </row>
+  <row>
+    <entry>14</entry>
+    <entry>No Groups</entry>
+    <entry>&#x0020;</entry>
+    <entry>&#x0020;</entry>
+  </row>
+  <row>
+    <entry>15</entry>
+    <entry>G1:	ONE_LEVEL</entry>
+    <entry>Return</entry>
+    <entry>&#x0020;</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The keycode reported in a key event determines the row to be used for that
+event; the effective keyboard group determines the list of symbols and key type
+to be used. The key type determines which symbol is chosen from the list.
+</para>
+
+
+<para>
+<link linkend='Determining_the_KeySym_Associated_with_a_Key_Event'>Determining the KeySym Associated
+with a Key Event</link> details the procedure to map from a key event to a
+symbol and/or a string.
+</para>
+</sect1>
+</chapter>

@@ -1,0 +1,916 @@
+<appendix id='default_symbol_transformations'>
+<title>Default Symbol Transformations</title>
+
+<sect1 id='Interpreting_the_Control_Modifier'>
+<title>Interpreting the Control Modifier</title>
+
+<para>
+If the <emphasis>
+Control</emphasis>
+ modifier is not consumed by the symbol lookup process, routines that determine
+the symbol and string that correspond to an event should convert the symbol to
+a string as defined in the table below. Only the string to be returned is
+affected by the <emphasis>
+Control</emphasis>
+ modifier; the symbol is not changed.
+</para>
+
+
+<para>
+This table lists the decimal value of the standard control characters that
+correspond to some keysyms for ASCII characters. Control characters for symbols
+not listed in this table are application-specific.
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='8' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='2.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='2.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<colspec colname='c5' colwidth='2.0*'/>
+<colspec colname='c6' colwidth='1.0*'/>
+<colspec colname='c7' colwidth='2.0*'/>
+<colspec colname='c8' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Keysyms</entry>
+    <entry>Value</entry>
+    <entry>Keysyms</entry>
+    <entry>Value</entry>
+    <entry>Keysyms</entry>
+    <entry>Value</entry>
+    <entry>Keysyms</entry>
+    <entry>Value</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>atsign</entry>
+    <entry>0</entry>
+    <entry>h, H</entry>
+    <entry>8</entry>
+    <entry>p, P</entry>
+    <entry>16</entry>
+    <entry>x, X</entry>
+    <entry>24</entry>
+  </row>
+  <row>
+    <entry>a, A</entry>
+    <entry>1</entry>
+    <entry>i, I</entry>
+    <entry>9</entry>
+    <entry>q, Q</entry>
+    <entry>17</entry>
+    <entry>y, Y</entry>
+    <entry>25</entry>
+  </row>
+  <row>
+    <entry>b, B</entry>
+    <entry>2</entry>
+    <entry>j, J</entry>
+    <entry>10</entry>
+    <entry>r, R</entry>
+    <entry>18</entry>
+    <entry>z, Z</entry>
+    <entry>26</entry>
+  </row>
+  <row>
+    <entry>c, C</entry>
+    <entry>3</entry>
+    <entry>k, K</entry>
+    <entry>11</entry>
+    <entry>s, S</entry>
+    <entry>19</entry>
+    <entry>left_bracket</entry>
+    <entry>27</entry>
+  </row>
+  <row>
+    <entry>d, D</entry>
+    <entry>4</entry>
+    <entry>l, L</entry>
+    <entry>12</entry>
+    <entry>t, T</entry>
+    <entry>20</entry>
+    <entry>backslash</entry>
+    <entry>28</entry>
+  </row>
+  <row>
+    <entry>e, E</entry>
+    <entry>5</entry>
+    <entry>m, M</entry>
+    <entry>13</entry>
+    <entry>u, U</entry>
+    <entry>21</entry>
+    <entry>right_bracket</entry>
+    <entry>29</entry>
+  </row>
+  <row>
+    <entry>f, F</entry>
+    <entry>6</entry>
+    <entry>n, N</entry>
+    <entry>14</entry>
+    <entry>v, V</entry>
+    <entry>22</entry>
+    <entry>asciicircum</entry>
+    <entry>30</entry>
+  </row>
+  <row>
+    <entry>g, G</entry>
+    <entry>8</entry>
+    <entry>o, O</entry>
+    <entry>15</entry>
+    <entry>w, W</entry>
+    <entry>23</entry>
+    <entry>underbar</entry>
+    <entry>31</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect1>
+<sect1 id='Interpreting_the_Lock_Modifier'>
+<title>Interpreting the Lock Modifier</title>
+
+<para>
+If the <emphasis>
+Lock</emphasis>
+ modifier is not consumed by the symbol lookup process, routines that determine
+the symbol and string that correspond to an event should capitalize the result.
+Unlike the transformation for <emphasis>
+Control</emphasis>
+, the capitalization transformation changes both the symbol and the string
+returned by the event.
+</para>
+
+<sect2 id='Locale_Sensitive_Capitalization'>
+<title>Locale-Sensitive Capitalization</title>
+
+<para>
+If <emphasis>
+Lock</emphasis>
+ is set in an event and not consumed, applications should capitalize the string
+and symbols that result from an event according to the capitalization rules in
+effect for the system on which the application is running, taking the current
+state of the user environment (e.g. locale) into account.
+</para>
+
+
+</sect2>
+<sect2 id='Locale_Insensitive_Capitalization'>
+<title>Locale-Insensitive Capitalization</title>
+
+<para>
+XKB recommends but does not require locale-sensitive capitalization. In cases
+where the locale is unknown or where locale-sensitive capitalization is
+prohibitively expensive, applications can capitalize according to the rules
+defined in this extension.
+</para>
+
+
+<para>
+The following tables list all of the keysyms for which XKB defines
+capitalization behavior. Any keysyms not explicitly listed in these tables are
+not capitalized by XKB when locale-insensitive capitalization is in effect and
+are not automatically assigned the <emphasis>
+ALPHABETIC</emphasis>
+ type as described in the <link linkend='The_ALPHABETIC_Key_Type'>Alphabetic Key Type</link>.
+</para>
+
+
+<sect3 id='Capitalization_Rules_for_Latin_1_Keysyms'>
+<title>Capitalization Rules for Latin-1 Keysyms</title>
+
+<para>
+This table lists the Latin-11 keysyms for which XKB defines upper and lower
+case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="auto" ?>
+<tgroup cols='8' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<colspec colname='c5' colwidth='2.0*'/>
+<colspec colname='c6' colwidth='2.0*'/>
+<colspec colname='c7' colwidth='2.0*'/>
+<colspec colname='c8' colwidth='2.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>a</entry>
+    <entry>A</entry>
+    <entry>o</entry>
+    <entry>O</entry>
+    <entry>acircumflex</entry>
+    <entry>Acircumflex</entry>
+    <entry>eth</entry>
+    <entry>ETH</entry>
+  </row>
+  <row>
+    <entry>b</entry>
+    <entry>B</entry>
+    <entry>p</entry>
+    <entry>P</entry>
+    <entry>adiaeresis</entry>
+    <entry>Adiaeresis</entry>
+    <entry>ntilde</entry>
+    <entry>Ntilde</entry>
+  </row>
+  <row>
+    <entry>c</entry>
+    <entry>C</entry>
+    <entry>q</entry>
+    <entry>Q</entry>
+    <entry>atilde</entry>
+    <entry>Atilde</entry>
+    <entry>ograve</entry>
+    <entry>Ograve</entry>
+  </row>
+  <row>
+    <entry>d</entry>
+    <entry>D</entry>
+    <entry>r</entry>
+    <entry>R</entry>
+    <entry>aring</entry>
+    <entry>Aring</entry>
+    <entry>oacute</entry>
+    <entry>Oacute</entry>
+  </row>
+  <row>
+    <entry>e</entry>
+    <entry>E</entry>
+    <entry>s</entry>
+    <entry>S</entry>
+    <entry>ae</entry>
+    <entry>AE</entry>
+    <entry>ocircumflex</entry>
+    <entry>Ocircumflex</entry>
+  </row>
+  <row>
+    <entry>f</entry>
+    <entry>F</entry>
+    <entry>t</entry>
+    <entry>T</entry>
+    <entry>ccedilla</entry>
+    <entry>Ccedilla</entry>
+    <entry>otilde</entry>
+    <entry>Otilde</entry>
+  </row>
+  <row>
+    <entry>g</entry>
+    <entry>G</entry>
+    <entry>u</entry>
+    <entry>U</entry>
+    <entry>egrave</entry>
+    <entry>Egrave</entry>
+    <entry>odiaeresis</entry>
+    <entry>Odiaeresis</entry>
+  </row>
+  <row>
+    <entry>h</entry>
+    <entry>H</entry>
+    <entry>v</entry>
+    <entry>V</entry>
+    <entry>eacute</entry>
+    <entry>Eacute</entry>
+    <entry>oslash</entry>
+    <entry>Ooblique</entry>
+  </row>
+  <row>
+    <entry>i</entry>
+    <entry>I</entry>
+    <entry>w</entry>
+    <entry>W</entry>
+    <entry>ecircumflex</entry>
+    <entry>Ecircumflex</entry>
+    <entry>ugrave</entry>
+    <entry>Ugrave</entry>
+  </row>
+  <row>
+    <entry>j</entry>
+    <entry>J</entry>
+    <entry>x</entry>
+    <entry>X</entry>
+    <entry>ediaeresis</entry>
+    <entry>Ediaeresis</entry>
+    <entry>uacute</entry>
+    <entry>Uacute</entry>
+  </row>
+  <row>
+    <entry>k</entry>
+    <entry>K</entry>
+    <entry>y</entry>
+    <entry>Y</entry>
+    <entry>igrave</entry>
+    <entry>Igrave</entry>
+    <entry>ucircumflex</entry>
+    <entry>Ucircumflex</entry>
+  </row>
+  <row>
+    <entry>l</entry>
+    <entry>L</entry>
+    <entry>z</entry>
+    <entry>Z</entry>
+    <entry>iacute</entry>
+    <entry>Iacute</entry>
+    <entry>udiaeresis</entry>
+    <entry>Udiaeresis</entry>
+  </row>
+  <row>
+    <entry>m</entry>
+    <entry>M</entry>
+    <entry>agrave</entry>
+    <entry>Agrave</entry>
+    <entry>icircumflex</entry>
+    <entry>Icircumflex</entry>
+    <entry>yacute</entry>
+    <entry>Yacute</entry>
+  </row>
+  <row>
+    <entry>n</entry>
+    <entry>N</entry>
+    <entry>aacute</entry>
+    <entry>Aacute</entry>
+    <entry>idiaeresis</entry>
+    <entry>Idiaeresis</entry>
+    <entry>thorn</entry>
+    <entry>THORN</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Latin_2_Keysyms'>
+<title>Capitalization Rules for Latin-2 Keysyms</title>
+
+<para>
+This table lists the Latin-2 keysyms for which XKB defines upper and lower case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='6' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<colspec colname='c5' colwidth='1.0*'/>
+<colspec colname='c6' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>aogonek</entry>
+    <entry>Aogonek</entry>
+    <entry>zabovedot</entry>
+    <entry>Zabovedot</entry>
+    <entry>dstroke</entry>
+    <entry>Dstroke</entry>
+  </row>
+  <row>
+    <entry>lstroke</entry>
+    <entry>Lstroke</entry>
+    <entry>racute</entry>
+    <entry>Racute</entry>
+    <entry>nacute</entry>
+    <entry>Nacute</entry>
+  </row>
+  <row>
+    <entry>lcaron</entry>
+    <entry>Lcaron</entry>
+    <entry>abreve</entry>
+    <entry>Abreve</entry>
+    <entry>ncaron</entry>
+    <entry>Ncaron</entry>
+  </row>
+  <row>
+    <entry>sacute</entry>
+    <entry>Sacute</entry>
+    <entry>lacute</entry>
+    <entry>Lacute</entry>
+    <entry>odoubleacute</entry>
+    <entry>Odoubleacute</entry>
+  </row>
+  <row>
+    <entry>scaron</entry>
+    <entry>Scaron</entry>
+    <entry>cacute</entry>
+    <entry>Cacute</entry>
+    <entry>rcaron</entry>
+    <entry>Rcaron</entry>
+  </row>
+  <row>
+    <entry>scedilla</entry>
+    <entry>Scedilla</entry>
+    <entry>ccaron</entry>
+    <entry>Ccaron</entry>
+    <entry>uabovering</entry>
+    <entry>Uabovering</entry>
+  </row>
+  <row>
+    <entry>tcaron</entry>
+    <entry>Tcaron</entry>
+    <entry>eogonek</entry>
+    <entry>Eogonek</entry>
+    <entry>udoubleacute</entry>
+    <entry>Udoubleacute</entry>
+  </row>
+  <row>
+    <entry>zacute</entry>
+    <entry>Zacute</entry>
+    <entry>ecaron</entry>
+    <entry>Ecaron</entry>
+    <entry>tcedilla</entry>
+    <entry>Tcedilla</entry>
+  </row>
+  <row>
+    <entry>zcaron</entry>
+    <entry>Zcaron</entry>
+    <entry>dcaron</entry>
+    <entry>Dcaron</entry>
+    <entry>&#x0020;</entry>
+    <entry>&#x0020;</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Latin_3_Keysyms'>
+<title>Capitalization Rules for Latin-3 Keysyms</title>
+
+<para>
+This table lists the Latin-3 keysyms for which XKB defines upper and lower case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='6' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<colspec colname='c5' colwidth='1.0*'/>
+<colspec colname='c6' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>hstroke</entry>
+    <entry>Hstroke</entry>
+    <entry>jcircumflex</entry>
+    <entry>Jcircumflex</entry>
+    <entry>gcircumflex</entry>
+    <entry>Gcircumflex</entry>
+  </row>
+  <row>
+    <entry>hcircumflex</entry>
+    <entry>Hcircumflex</entry>
+    <entry>cabovedot</entry>
+    <entry>Cabovedot</entry>
+    <entry>ubreve</entry>
+    <entry>Ubreve</entry>
+  </row>
+  <row>
+    <entry>idotless</entry>
+    <entry>Iabovedot</entry>
+    <entry>ccircumflex</entry>
+    <entry>Ccircumflex</entry>
+    <entry>scircumflex</entry>
+    <entry>Scircumflex</entry>
+  </row>
+  <row>
+    <entry>gbreve</entry>
+    <entry>Gbreve</entry>
+    <entry>gabovedot</entry>
+    <entry>Gabovedot</entry>
+    <entry>&#x0020;</entry>
+    <entry>&#x0020;</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Latin_4_Keysyms'>
+<title>Capitalization Rules for Latin-4 Keysyms</title>
+
+<para>
+This table lists the Latin-4 keysyms for which XKB defines upper and lower case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='6' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<colspec colname='c5' colwidth='1.0*'/>
+<colspec colname='c6' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>rcedilla</entry>
+    <entry>Rcedilla</entry>
+    <entry>eng</entry>
+    <entry>ENG</entry>
+    <entry>omacron</entry>
+    <entry>Omacron</entry>
+  </row>
+  <row>
+    <entry>itilde</entry>
+    <entry>Itilde</entry>
+    <entry>amacron</entry>
+    <entry>Amacron</entry>
+    <entry>kcedilla</entry>
+    <entry>Kcedilla</entry>
+  </row>
+  <row>
+    <entry>lcedilla</entry>
+    <entry>Lcedilla</entry>
+    <entry>iogonek</entry>
+    <entry>Iogonek</entry>
+    <entry>uogonek</entry>
+    <entry>Uogonek</entry>
+  </row>
+  <row>
+    <entry>emacron</entry>
+    <entry>Emacron</entry>
+    <entry>eabovedot</entry>
+    <entry>eabovedot</entry>
+    <entry>utilde</entry>
+    <entry>Utilde</entry>
+  </row>
+  <row>
+    <entry>gcedilla</entry>
+    <entry>Gcedilla</entry>
+    <entry>imacron</entry>
+    <entry>Imacron</entry>
+    <entry>umacron</entry>
+    <entry>Umacron</entry>
+  </row>
+  <row>
+    <entry>tslash</entry>
+    <entry>Tslash</entry>
+    <entry>ncedilla</entry>
+    <entry>Ncedilla</entry>
+    <entry>&#x0020;</entry>
+    <entry>&#x0020;</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Cyrillic_Keysyms'>
+<title>Capitalization Rules for Cyrillic Keysyms</title>
+
+<para>
+This table lists the Cyrillic keysyms for which XKB defines upper and lower
+case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>Serbian_dje</entry>
+    <entry>Serbian_DJE</entry>
+    <entry>Cyrillic_i</entry>
+    <entry>Cyrillic_I</entry>
+  </row>
+  <row>
+    <entry>Macedonia_gje</entry>
+    <entry>Macedonia_GJE</entry>
+    <entry>Cyrillic_shorti</entry>
+    <entry>Cyrillic_SHORTI</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_io</entry>
+    <entry>Cyrillic_IO</entry>
+    <entry>Cyrillic_ka</entry>
+    <entry>Cyrillic_KA</entry>
+  </row>
+  <row>
+    <entry>Ukrainian_ie</entry>
+    <entry>Ukrainian_IE</entry>
+    <entry>Cyrillic_el</entry>
+    <entry>Cyrillic_EL</entry>
+  </row>
+  <row>
+    <entry>Macedonia_dse</entry>
+    <entry>Macedonia_DSE</entry>
+    <entry>Cyrillic_em</entry>
+    <entry>Cyrillic_EM</entry>
+  </row>
+  <row>
+    <entry>Ukrainian_i</entry>
+    <entry>Ukrainian_I</entry>
+    <entry>Cyrillic_en</entry>
+    <entry>Cyrillic_EN</entry>
+  </row>
+  <row>
+    <entry>Ukrainian_yi</entry>
+    <entry>Ukrainian_YI</entry>
+    <entry>Cyrillic_o</entry>
+    <entry>Cyrillic_O</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_je</entry>
+    <entry>Cyrillic_JE</entry>
+    <entry>Cyrillic_pe</entry>
+    <entry>Cyrillic_PE</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_lje</entry>
+    <entry>Cyrillic_LJE</entry>
+    <entry>Cyrillic_ya</entry>
+    <entry>Cyrillic_YA</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_nje</entry>
+    <entry>Cyrillic_NJE</entry>
+    <entry>Cyrillic_er</entry>
+    <entry>Cyrillic_ER</entry>
+  </row>
+  <row>
+    <entry>Serbian_tshe</entry>
+    <entry>Serbian_TSHE</entry>
+    <entry>Cyrillic_es</entry>
+    <entry>Cyrillic_ES</entry>
+  </row>
+  <row>
+    <entry>Macedonia_kje</entry>
+    <entry>Macedonia_KJE</entry>
+    <entry>Cyrillic_te</entry>
+    <entry>Cyrillic_TE</entry>
+  </row>
+  <row>
+    <entry>Byelorussian_shortu</entry>
+    <entry>Byelorussian_SHORTU</entry>
+    <entry>Cyrillic_u</entry>
+    <entry>Cyrillic_U</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_dzhe</entry>
+    <entry>Cyrillic_DZHE</entry>
+    <entry>Cyrillic_zhe</entry>
+    <entry>Cyrillic_ZHE</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_yu</entry>
+    <entry>Cyrillic_YU</entry>
+    <entry>Cyrillic_ve</entry>
+    <entry>Cyrillic_VE</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_a</entry>
+    <entry>Cyrillic_A</entry>
+    <entry>Cyrillic_softsign</entry>
+    <entry>Cyrillic_SOFTSIGN</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_be</entry>
+    <entry>Cyrillic_BE</entry>
+    <entry>Cyrillic_yeru</entry>
+    <entry>Cyrillic_YERU</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_tse</entry>
+    <entry>Cyrillic_TSE</entry>
+    <entry>Cyrillic_ze</entry>
+    <entry>Cyrillic_ZE</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_de</entry>
+    <entry>Cyrillic_DE</entry>
+    <entry>Cyrillic_sha</entry>
+    <entry>Cyrillic_SHA</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_ie</entry>
+    <entry>Cyrillic_IE</entry>
+    <entry>Cyrillic_e</entry>
+    <entry>Cyrillic_E</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_ef</entry>
+    <entry>Cyrillic_EF</entry>
+    <entry>Cyrillic_shcha</entry>
+    <entry>Cyrillic_SHCHA</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_ghe</entry>
+    <entry>Cyrillic_GHE</entry>
+    <entry>Cyrillic_che</entry>
+    <entry>Cyrillic_CHE</entry>
+  </row>
+  <row>
+    <entry>Cyrillic_ha</entry>
+    <entry>Cyrillic_HA</entry>
+    <entry>Cyrillic_hardsign</entry>
+    <entry>Cyrillic_HARDSIGN</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Greek_Keysyms'>
+<title>Capitalization Rules for Greek Keysyms</title>
+
+<para>
+This table lists the Greek keysyms for which XKB defines upper and lower case:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.8*'/>
+<colspec colname='c2' colwidth='1.8*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='1.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+    <entry>Lower Case</entry>
+    <entry>Upper Case</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>Greek_omegaaccent</entry>
+    <entry>Greek_OMEGAACCENT</entry>
+    <entry>Greek_iota</entry>
+    <entry>Greek_IOTA</entry>
+  </row>
+  <row>
+    <entry>Greek_alphaaccent</entry>
+    <entry>Greek_ALPHAACCENT</entry>
+    <entry>Greek_kappa</entry>
+    <entry>Greek_KAPPA</entry>
+  </row>
+  <row>
+    <entry>Greek_epsilonaccent</entry>
+    <entry>Greek_EPSILONACCENT</entry>
+    <entry>Greek_lamda</entry>
+    <entry>Greek_LAMDA</entry>
+  </row>
+  <row>
+    <entry>Greek_etaaccent</entry>
+    <entry>Greek_ETAACCENT</entry>
+    <entry>Greek_lambda</entry>
+    <entry>Greek_LAMBDA</entry>
+  </row>
+  <row>
+    <entry>Greek_iotaaccent</entry>
+    <entry>Greek_IOTAACCENT</entry>
+    <entry>Greek_mu</entry>
+    <entry>Greek_MU</entry>
+  </row>
+  <row>
+    <entry>Greek_iotadieresis</entry>
+    <entry>Greek_IOTADIERESIS</entry>
+    <entry>Greek_nu</entry>
+    <entry>Greek_NU</entry>
+  </row>
+  <row>
+    <entry>Greek_omicronaccent</entry>
+    <entry>Greek_OMICRONACCENT</entry>
+    <entry>Greek_xi</entry>
+    <entry>Greek_XI</entry>
+  </row>
+  <row>
+    <entry>Greek_upsilonaccent</entry>
+    <entry>Greek_UPSILONACCENT</entry>
+    <entry>Greek_omicron</entry>
+    <entry>Greek_OMICRON</entry>
+  </row>
+  <row>
+    <entry>Greek_upsilondieresis</entry>
+    <entry>Greek_UPSILONDIERESIS</entry>
+    <entry>Greek_pi</entry>
+    <entry>Greek_PI</entry>
+  </row>
+  <row>
+    <entry>Greek_alpha</entry>
+    <entry>Greek_ALPHA</entry>
+    <entry>Greek_rho</entry>
+    <entry>Greek_RHO</entry>
+  </row>
+  <row>
+    <entry>Greek_beta</entry>
+    <entry>Greek_BETA</entry>
+    <entry>Greek_sigma</entry>
+    <entry>Greek_SIGMA</entry>
+  </row>
+  <row>
+    <entry>Greek_gamma</entry>
+    <entry>Greek_GAMMA</entry>
+    <entry>Greek_tau</entry>
+    <entry>Greek_TAU</entry>
+  </row>
+  <row>
+    <entry>Greek_delta</entry>
+    <entry>Greek_DELTA</entry>
+    <entry>Greek_upsilon</entry>
+    <entry>Greek_UPSILON</entry>
+  </row>
+  <row>
+    <entry>Greek_epsilon</entry>
+    <entry>Greek_EPSILON</entry>
+    <entry>Greek_phi</entry>
+    <entry>Greek_PHI</entry>
+  </row>
+  <row>
+    <entry>Greek_zeta</entry>
+    <entry>Greek_ZETA</entry>
+    <entry>Greek_chi</entry>
+    <entry>Greek_CHI</entry>
+  </row>
+  <row>
+    <entry>Greek_eta</entry>
+    <entry>Greek_ETA</entry>
+    <entry>Greek_psi</entry>
+    <entry>Greek_PSI</entry>
+  </row>
+  <row>
+    <entry>Greek_theta</entry>
+    <entry>Greek_THETA</entry>
+    <entry>Greek_omega</entry>
+    <entry>Greek_OMEGA</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect3>
+<sect3 id='Capitalization_Rules_for_Other_Keysyms'>
+<title>Capitalization Rules for Other Keysyms</title>
+
+<para>
+XKB defines no capitalization rules for symbols in any other set of keysyms
+provided by the consortium. Applications are free to apply additional rules for
+private keysyms or for other keysyms not covered by XKB.
+</para>
+</sect3>
+</sect2>
+</sect1>
+</appendix>

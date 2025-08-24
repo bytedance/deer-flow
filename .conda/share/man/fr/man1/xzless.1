@@ -1,0 +1,49 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Andrew Dudman
+.\"          Lasse Collin
+.\"
+.\" french translation of XZ Utils man
+.\" Copyright (C) 2021 Debian French l10n team <debian-l10n-french@lists.debian.org>
+.\"  Translator
+.\" bubu <bubub@no-log.org>, 2021.
+.\"
+.\" (Note that this file is not based on gzip's zless.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZLESS 1 2024\-02\-12 Tukaani "Utilitaires XZ"
+.SH NOM
+xzless, lzless \- Voir le contenu des fichiers (texte) compressés xz ou lzma
+.SH SYNOPSIS
+\fBxzless\fP [\fIfichier\fP...]
+.br
+\fBlzless\fP [\fIfichier\fP...]
+.SH DESCRIPTION
+\fBxzless\fP is a filter that displays text from compressed files to a
+terminal.  Files supported by \fBxz\fP(1)  are decompressed; other files are
+assumed to be in uncompressed form already.  If no \fIfiles\fP are given,
+\fBxzless\fP reads from standard input.
+.PP
+\fBxzless\fP utilise \fBless\fP(1) pour afficher sa sortie. Contrairement à
+\fBxzmore\fP, son choix d'afficheur ne peut pas être modifié en indiquant une
+variable d'environnement. Les commandes sont basées sur \fBmore\fP(1) et
+\fBvi\fP(1) et permettent des déplacements en avant et en arrière et des
+recherches. Voir le manuel de \fBless\fP(1) pour plus d'information.
+.PP
+La commande nommée \fBlzless\fP est fournie pour la rétrocompatibilité avec les
+utilitaires LZMA.
+.SH ENVIRONNEMENT
+.TP 
+\fBLESSMETACHARS\fP
+Une liste de caractères spéciaux pour l'interpréteur. Définis par \fBxzless\fP
+à moins qu'ils ne l'aient déjà été dans l'environnement.
+.TP 
+\fBLESSOPEN\fP
+Définir en ligne de commande le décompresseur \fBxz\fP(1) à invoquer pour
+préparer les fichiers en entrée pour \fBless\fP(1).
+.SH "VOIR AUSSI"
+\fBless\fP(1), \fBxz\fP(1), \fBxzmore\fP(1), \fBzless\fP(1)

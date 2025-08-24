@@ -1,0 +1,58 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" German translation for xz-man.
+.\" Mario Blättermann <mario.blaettermann@gmail.com>, 2015, 2019-2020, 2022-2024.
+.\"
+.\" (Note that this file is not based on gzip's zdiff.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZDIFF 1 "13. Februar 2024" Tukaani XZ\-Dienstprogramme
+.SH BEZEICHNUNG
+xzcmp, xzdiff, lzcmp, lzdiff \- komprimierte Dateien vergleichen
+.
+.SH ÜBERSICHT
+\fBxzcmp\fP [\fIOption …\fP] \fIDatei1\fP [\fIDatei2\fP]
+.br
+\fBxzdiff\fP \&…
+.br
+\fBlzcmp\fP \&…
+.br
+\fBlzdiff\fP \&…
+.
+.SH BESCHREIBUNG
+\fBxzcmp\fP und \fBxzdiff\fP vergleichen den unkomprimierten Inhalt zweier
+Dateien. Die unkomprimierten Daten und Optionen werden an \fBcmp\fP(1) oder
+\fBdiff\fP(1) übergeben, sofern weder \fB\-\-help\fP noch \fB\-\-version\fP angegeben
+wird.
+.PP
+Wenn sowohl \fIDatei1\fP als auch \fIDatei2\fP angegeben sind, können diese
+unkomprimierte Dateien oder Dateien in Formaten sein, die \fBxz\fP(1),
+\fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1) oder \fBlz4\fP(1)
+dekomprimieren können. Die erforderlichen Dekomprimierungsbefehle werden aus
+den Dateiendungen von \fIDatei1\fP und \fIDatei2\fP abgeleitet. Für eine Datei mit
+einer unbekannten Endung wird angenommen, dass sie entweder unkomprimiert
+ist oder von \fBxz\fP(1) dekomprimiert werden kann.
+.PP
+Falls nur ein Dateiname angegeben wird, muss \fIDatei1\fP eine Endung eines
+unterstützten Kompressionsformat haben und der Name von \fIDatei2\fP wird aus
+\fIDatei1\fP abgeleitet, indem die Endung des Kompressionsformats entfernt
+wird.
+.PP
+Die Befehle \fBlzcmp\fP und \fBlzdiff\fP dienen der Abwärtskompatibilität zu den
+LZMA\-Dienstprogrammen.
+.
+.SH EXIT\-STATUS
+Falls ein Dekompressionsfehler auftritt, ist der Exit\-Status
+\fB2\fP. Anderenfalls wird der Exit\-Status von \fBcmp\fP(1) oder \fBdiff\fP(1)
+verwendet.
+.
+.SH "SIEHE AUCH"
+\fBcmp\fP(1), \fBdiff\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1),
+\fBzstd\fP(1), \fBlz4\fP(1)

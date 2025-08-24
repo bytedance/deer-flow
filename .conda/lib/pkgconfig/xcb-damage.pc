@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB Damage
+Description: XCB Damage Extension
+Version: 1.17.0
+Requires.private: xcb xcb-xfixes
+Libs: -L${libdir} -lxcb-damage
+Cflags: -I${includedir}

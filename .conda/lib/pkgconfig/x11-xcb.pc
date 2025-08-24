@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: X11 XCB
+Description: X Library XCB interface
+Version: 1.8.12
+Requires: x11 xcb
+Cflags: -I${includedir}
+Libs: -L${libdir} -lX11-xcb

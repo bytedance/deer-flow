@@ -1,0 +1,6050 @@
+<appendix id="keysym_encoding">
+<title>KEYSYM Encoding</title>
+<indexterm zone="keysym_encoding"><primary>Types</primary><secondary>KEYSYM</secondary></indexterm>
+<indexterm zone="keysym_encoding"><primary>Keysym</primary></indexterm>
+
+<para>
+KEYSYM values are 32-bit integers that encode the symbols on the
+keycaps of a keyboard. The three most significant bits are always
+zero, which leaves a 29-bit number space. For convenience, KEYSYM
+values can be viewed as split into four bytes:
+</para>
+
+<itemizedlist>
+  <listitem>
+    <para>
+Byte 1 is the most significant eight bits (three zero bits and
+the most-significant five bits of the 29-bit effective value)
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Byte 2 is the next most-significant eight bits
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Byte 3 is the next most-significant eight bits
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+Byte 4 is the least-significant eight bits
+    </para>
+  </listitem>
+</itemizedlist>
+
+<para>
+There are six categories of KEYSYM values.
+</para>
+
+<sect1 id='Special_KEYSYMs'>
+<title>Special KEYSYMs</title>
+<para>
+There are two special values:
+<keysym>NoSymbol</keysym>
+and
+<keysym>VoidSymbol</keysym>.
+They are used to indicate the absence of symbols (see
+<link linkend='Keyboards'>Section 5, Keyboards</link>).
+</para>
+
+<informaltable frame="topbot">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='6' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*'/>
+  <colspec colname='c2' colwidth='1.0*'/>
+  <colspec colname='c3' colwidth='1.0*'/>
+  <colspec colname='c4' colwidth='1.0*'/>
+  <colspec colname='c5' colwidth='1.0*'/>
+  <colspec colname='c6' colwidth='1.0*'/>
+  <thead>
+    <row rowsep='1'>
+      <entry>Byte 1</entry>
+      <entry>Byte 2</entry>
+      <entry>Byte 3</entry>
+      <entry>Byte 4</entry>
+      <entry>Hex. value</entry>
+      <entry>Name</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>0</entry>
+      <entry>0</entry>
+      <entry>0</entry>
+      <entry>0</entry>
+      <entry>#x00000000</entry>
+      <entry><keysym>NoSymbol</keysym></entry>
+    </row>
+    <row>
+      <entry>0</entry>
+      <entry>255</entry>
+      <entry>255</entry>
+      <entry>255</entry>
+      <entry>#x00FFFFFF</entry>
+      <entry><keysym>VoidSymbol</keysym></entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+</sect1>
+
+<sect1 id='Latin_1_KEYSYMs'>
+<title>Latin-1 KEYSYMs</title>
+
+<para>
+The Latin-1 KEYSYMs occupy the range #x0020 to #x007E and #x00A0 to
+#00FF and represent the ISO 10646 / Unicode characters U+0020 to
+U+007E and U+00A0 to U+00FF, respectively.
+</para>
+</sect1>
+
+<sect1 id='Unicode_KEYSYMs'>
+<title>Unicode KEYSYMs</title>
+<indexterm zone="Unicode_KEYSYMs"><primary>Keysym</primary><secondary>Unicode</secondary></indexterm>
+
+<para>
+These occupy the range #x01000100 to #x0110FFFF and represent the ISO
+10646 / Unicode characters U+0100 to U+10FFFF, respectively. The
+numeric value of a Unicode KEYSYM is the Unicode position of the
+corresponding character plus #x01000000. In the interest of backwards
+compatibility, clients should be able to process both the Unicode
+KEYSYM and the Legacy KEYSYM for those characters where both exist.
+</para>
+<para>
+Dead keys, which place an accent on the next character entered, shall
+be encoded as Function KEYSYMs, and not as the Unicode KEYSYM
+corresponding to an equivalent combining character. Where a keycap
+indicates a specific function with a graphical symbol that is also
+available in Unicode (e.g., an upwards arrow for the cursor up
+function), the appropriate Function KEYSYM should be used, and not
+the Unicode KEYSYM corresponding to the depicted symbol.
+</para>
+</sect1>
+<sect1 id='Function_KEYSYMs'>
+<title>Function KEYSYMs</title>
+
+<para>
+These represent keycap symbols that do not directly represent elements
+of a coded character set. Instead, they typically identify a software
+function, mode, or operation (e.g., cursor up, caps lock, insert) that
+can be activated using a dedicated key. Function KEYSYMs have zero
+values for bytes 1 and 2. Byte 3 distinguishes between several 8-bit
+sets within which byte 4 identifies the individual function key.
+</para>
+
+<informaltable frame="topbot">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*'/>
+  <colspec colname='c2' colwidth='1.0*'/>
+  <thead>
+    <row rowsep='1'>
+      <entry>Byte 3</entry>
+      <entry>Byte 4</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>255</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>254</entry>
+      <entry>Keyboard (XKB) Extension</entry>
+    </row>
+    <row>
+      <entry>253</entry>
+      <entry>3270</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Within a national market, keyboards tend to be comparatively standard
+with respect to the character keys, but they can differ significantly
+on the miscellaneous function keys. Some have function keys left over
+from early timesharing days, others were designed for a specific
+application, such as text processing, web browsing, or accessing
+audiovisual data. The symbols on the keycaps can differ significantly
+between manufacturers and national markets, even where they denote the
+same software function (e.g., Ctrl in the U.S. versus Strg in Germany)
+</para>
+<para>
+<!-- .LP -->
+There are two ways of thinking about how to define KEYSYMs for such a
+world:
+</para>
+<itemizedlist>
+  <listitem>
+    <para>
+The Engraving approach
+    </para>
+  </listitem>
+  <listitem>
+    <para>
+The Common approach
+    </para>
+  </listitem>
+</itemizedlist>
+<para>
+<!-- .LP -->
+The Engraving approach is to create a KEYSYM for every unique key
+engraving. This is effectively taking the union of all key engravings
+on all keyboards. For example, some keyboards label function keys
+across the top as F1 through Fn, and others label them as PF1 through
+PFn. These would be different keys under the Engraving
+approach. Likewise, Lock would differ from Shift Lock, which is
+different from the up-arrow symbol that has the effect of changing
+lowercase to uppercase. There are lots of other aliases such as Del,
+DEL, Delete, Remove, and so forth. The Engraving approach makes it
+easy to decide if a new entry should be added to the KEYSYM set: if it
+does not exactly match an existing one, then a new one is created.
+</para>
+<para>
+<!-- .LP -->
+The Common approach tries to capture all of the keys present on an
+interesting number of keyboards, folding likely aliases into the same
+KEYSYM. For example, Del, DEL, and Delete are all merged into a single
+KEYSYM. Vendors can augment the KEYSYM set (using the vendor-specific
+encoding space) to include all of their unique keys that were not
+included in the standard set. Each vendor decides which of its keys
+map into the standard KEYSYMs, which presumably can be overridden by a
+user. It is more difficult to implement this approach, because
+judgment is required about when a sufficient set of keyboards
+implements an engraving to justify making it a KEYSYM in the standard
+set and about which engravings should be merged into a single
+KEYSYM.
+</para>
+<para>
+<!-- .LP -->
+Although neither scheme is perfect or elegant, the Common approach has
+been selected because it makes it easier to write a portable
+application. Having the Delete functionality merged into a single
+KEYSYM allows an application to implement a deletion function and
+expect reasonable bindings on a wide set of workstations. Under the
+Common approach, application writers are still free to look for and
+interpret vendor-specific KEYSYMs, but because they are in the
+extended set, the application developer is more conscious that they
+are writing the application in a nonportable fashion.
+</para>
+<para>
+<!-- .LP -->
+The Keyboard set is a miscellaneous collection of commonly occurring
+keys on keyboards. Within this set, the numeric keypad symbols are
+generally duplicates of symbols found on keys on the main part of the
+keyboard, but they are distinguished here because they often have a
+distinguishable semantics associated with them.
+</para>
+
+<informaltable frame="topbot">
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*'/>
+  <colspec colname='c2' colwidth='3.0*'/>
+  <colspec colname='c3' colwidth='1.0*'/>
+  <thead>
+    <row rowsep="1">
+      <entry>KEYSYM value</entry>
+      <entry>Name</entry>
+      <entry>Set</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>#xFF08</entry>
+      <entry>BACKSPACE, BACK SPACE, BACK CHAR</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF09</entry>
+      <entry>TAB</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF0A</entry>
+      <entry>LINEFEED, LF</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF0B</entry>
+      <entry>CLEAR</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF0D</entry>
+      <entry>RETURN, ENTER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF13</entry>
+      <entry>PAUSE, HOLD</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF14</entry>
+      <entry>SCROLL LOCK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF15</entry>
+      <entry>SYS REQ, SYSTEM REQUEST</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF1B</entry>
+      <entry>ESCAPE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF20</entry>
+      <entry>MULTI-KEY CHARACTER PREFACE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF21</entry>
+      <entry>KANJI, KANJI CONVERT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF22</entry>
+      <entry>MUHENKAN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF23</entry>
+      <entry>HENKAN MODE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF24</entry>
+      <entry>ROMAJI</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF25</entry>
+      <entry>HIRAGANA</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF26</entry>
+      <entry>KATAKANA</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF27</entry>
+      <entry>HIRAGANA/KATAKANA TOGGLE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF28</entry>
+      <entry>ZENKAKU</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF29</entry>
+      <entry>HANKAKU</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2A</entry>
+      <entry>ZENKAKU/HANKAKU TOGGLE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2B</entry>
+      <entry>TOUROKU</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2C</entry>
+      <entry>MASSYO</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2D</entry>
+      <entry>KANA LOCK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2E</entry>
+      <entry>KANA SHIFT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF2F</entry>
+      <entry>EISU SHIFT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF30</entry>
+      <entry>EISU TOGGLE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF31</entry>
+      <entry>HANGUL START/STOP (TOGGLE)</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF32</entry>
+      <entry>HANGUL START</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF33</entry>
+      <entry>HANGUL END, ENGLISH START</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF34</entry>
+      <entry>START HANGUL/HANJA CONVERSION</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF35</entry>
+      <entry>HANGUL JAMO MODE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF36</entry>
+      <entry>HANGUL ROMAJA MODE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF37</entry>
+      <entry>HANGUL CODE INPUT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF38</entry>
+      <entry>HANGUL JEONJA MODE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF39</entry>
+      <entry>HANGUL BANJA MODE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3A</entry>
+      <entry>HANGUL PREHANJA CONVERSION</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3B</entry>
+      <entry>HANGUL POSTHANJA CONVERSION</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3C</entry>
+      <entry>HANGUL SINGLE CANDIDATE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3D</entry>
+      <entry>HANGUL MULTIPLE CANDIDATE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3E</entry>
+      <entry>HANGUL PREVIOUS CANDIDATE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF3F</entry>
+      <entry>HANGUL SPECIAL SYMBOLS</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF50</entry>
+      <entry>HOME</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF51</entry>
+      <entry>LEFT, MOVE LEFT, LEFT ARROW</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF52</entry>
+      <entry>UP, MOVE UP, UP ARROW</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF53</entry>
+      <entry>RIGHT, MOVE RIGHT, RIGHT ARROW</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF54</entry>
+      <entry>DOWN, MOVE DOWN, DOWN ARROW</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF55</entry>
+      <entry>PRIOR, PREVIOUS, PAGE UP</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF56</entry>
+      <entry>NEXT, PAGE DOWN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF57</entry>
+      <entry>END, EOL</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF58</entry>
+      <entry>BEGIN, BOL</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF60</entry>
+      <entry>SELECT, MARK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF61</entry>
+      <entry>PRINT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF62</entry>
+      <entry>EXECUTE, RUN, DO</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF63</entry>
+      <entry>INSERT, INSERT HERE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF65</entry>
+      <entry>UNDO, OOPS</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF66</entry>
+      <entry>REDO, AGAIN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF67</entry>
+      <entry>MENU</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF68</entry>
+      <entry>FIND, SEARCH</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF69</entry>
+      <entry>CANCEL, STOP, ABORT, EXIT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF6A</entry>
+      <entry>HELP</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF6B</entry>
+      <entry>BREAK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF7E</entry>
+      <entry>MODE SWITCH, SCRIPT SWITCH, CHARACTER SET SWITCH</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF7F</entry>
+      <entry>NUM LOCK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF80</entry>
+      <entry>KEYPAD SPACE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF89</entry>
+      <entry>KEYPAD TAB</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF8D</entry>
+      <entry>KEYPAD ENTER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF91</entry>
+      <entry>KEYPAD F1, PF1, A</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF92</entry>
+      <entry>KEYPAD F2, PF2, B</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF93</entry>
+      <entry>KEYPAD F3, PF3, C</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF94</entry>
+      <entry>KEYPAD F4, PF4, D</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF95</entry>
+      <entry>KEYPAD HOME</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF96</entry>
+      <entry>KEYPAD LEFT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF97</entry>
+      <entry>KEYPAD UP</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF98</entry>
+      <entry>KEYPAD RIGHT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF99</entry>
+      <entry>KEYPAD DOWN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9A</entry>
+      <entry>KEYPAD PRIOR, PAGE UP</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9B</entry>
+      <entry>KEYPAD NEXT, PAGE DOWN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9C</entry>
+      <entry>KEYPAD END</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9D</entry>
+      <entry>KEYPAD BEGIN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9E</entry>
+      <entry>KEYPAD INSERT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFF9F</entry>
+      <entry>KEYPAD DELETE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAA</entry>
+      <entry>KEYPAD MULTIPLICATION SIGN, ASTERISK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAB</entry>
+      <entry>KEYPAD PLUS SIGN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAC</entry>
+      <entry>KEYPAD SEPARATOR, COMMA</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAD</entry>
+      <entry>KEYPAD MINUS SIGN, HYPHEN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAE</entry>
+      <entry>KEYPAD DECIMAL POINT, FULL STOP</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFAF</entry>
+      <entry>KEYPAD DIVISION SIGN, SOLIDUS</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB0</entry>
+      <entry>KEYPAD DIGIT ZERO</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB1</entry>
+      <entry>KEYPAD DIGIT ONE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB2</entry>
+      <entry>KEYPAD DIGIT TWO</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB3</entry>
+      <entry>KEYPAD DIGIT THREE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB4</entry>
+      <entry>KEYPAD DIGIT FOUR</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB5</entry>
+      <entry>KEYPAD DIGIT FIVE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB6</entry>
+      <entry>KEYPAD DIGIT SIX</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB7</entry>
+      <entry>KEYPAD DIGIT SEVEN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB8</entry>
+      <entry>KEYPAD DIGIT EIGHT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFB9</entry>
+      <entry>KEYPAD DIGIT NINE</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFBD</entry>
+      <entry>KEYPAD EQUALS SIGN</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFBE</entry>
+      <entry>F1</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFBF</entry>
+      <entry>F2</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC0</entry>
+      <entry>F3</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC1</entry>
+      <entry>F4</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC2</entry>
+      <entry>F5</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC3</entry>
+      <entry>F6</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC4</entry>
+      <entry>F7</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC5</entry>
+      <entry>F8</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC6</entry>
+      <entry>F9</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC7</entry>
+      <entry>F10</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC8</entry>
+      <entry>F11, L1</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFC9</entry>
+      <entry>F12, L2</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCA</entry>
+      <entry>F13, L3</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCB</entry>
+      <entry>F14, L4</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCC</entry>
+      <entry>F15, L5</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCD</entry>
+      <entry>F16, L6</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCE</entry>
+      <entry>F17, L7</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFCF</entry>
+      <entry>F18, L8</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD0</entry>
+      <entry>F19, L9</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD1</entry>
+      <entry>F20, L10</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD2</entry>
+      <entry>F21, R1</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD3</entry>
+      <entry>F22, R2</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD4</entry>
+      <entry>F23, R3</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD5</entry>
+      <entry>F24, R4</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD6</entry>
+      <entry>F25, R5</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD7</entry>
+      <entry>F26, R6</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD8</entry>
+      <entry>F27, R7</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFD9</entry>
+      <entry>F28, R8</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDA</entry>
+      <entry>F29, R9</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDB</entry>
+      <entry>F30, R10</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDC</entry>
+      <entry>F31, R11</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDD</entry>
+      <entry>F32, R12</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDE</entry>
+      <entry>F33, R13</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFDF</entry>
+      <entry>F34, R14</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE0</entry>
+      <entry>F35, R15</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE1</entry>
+      <entry>LEFT SHIFT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE2</entry>
+      <entry>RIGHT SHIFT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE3</entry>
+      <entry>LEFT CONTROL</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE4</entry>
+      <entry>RIGHT CONTROL</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE5</entry>
+      <entry>CAPS LOCK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE6</entry>
+      <entry>SHIFT LOCK</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE7</entry>
+      <entry>LEFT META</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE8</entry>
+      <entry>RIGHT META</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFE9</entry>
+      <entry>LEFT ALT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFEA</entry>
+      <entry>RIGHT ALT</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFEB</entry>
+      <entry>LEFT SUPER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFEC</entry>
+      <entry>RIGHT SUPER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFED</entry>
+      <entry>LEFT HYPER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFEE</entry>
+      <entry>RIGHT HYPER</entry>
+      <entry>Keyboard</entry>
+    </row>
+    <row>
+      <entry>#xFFFF</entry>
+      <entry>DELETE, RUBOUT</entry>
+      <entry>Keyboard</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The Keyboard (XKB) Extension set, which provides among other things
+a range of dead keys, is defined in "The X Keyboard Extension:
+Protocol Specification", Appendix C. <!-- xref -->
+</para>
+
+<para>
+The 3270 set defines additional keys that are specific to IBM 3270
+terminals.
+</para>
+
+<informaltable frame="topbot">
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*' />
+  <colspec colname='c2' colwidth='3.0*' />
+  <colspec colname='c3' colwidth='1.0*' />
+  <thead>
+    <row rowsep="1">
+      <entry>KEYSYM value</entry>
+      <entry>Name</entry>
+      <entry>Set</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>#xFD01</entry>
+      <entry>3270 DUPLICATE</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD02</entry>
+      <entry>3270 FIELDMARK</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD03</entry>
+      <entry>3270 RIGHT2</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD04</entry>
+      <entry>3270 LEFT2</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD05</entry>
+      <entry>3270 BACKTAB</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD06</entry>
+      <entry>3270 ERASEEOF</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD07</entry>
+      <entry>3270 ERASEINPUT</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD08</entry>
+      <entry>3270 RESET</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD09</entry>
+      <entry>3270 QUIT</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0A</entry>
+      <entry>3270 PA1</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0B</entry>
+      <entry>3270 PA2</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0C</entry>
+      <entry>3270 PA3</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0D</entry>
+      <entry>3270 TEST</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0E</entry>
+      <entry>3270 ATTN</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD0F</entry>
+      <entry>3270 CURSORBLINK</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD10</entry>
+      <entry>3270 ALTCURSOR</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD11</entry>
+      <entry>3270 KEYCLICK</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD12</entry>
+      <entry>3270 JUMP</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD13</entry>
+      <entry>3270 IDENT</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD14</entry>
+      <entry>3270 RULE</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD15</entry>
+      <entry>3270 COPY</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD16</entry>
+      <entry>3270 PLAY</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD17</entry>
+      <entry>3270 SETUP</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD18</entry>
+      <entry>3270 RECORD</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD19</entry>
+      <entry>3270 CHANGESCREEN</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD1A</entry>
+      <entry>3270 DELETEWORD</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD1B</entry>
+      <entry>3270 EXSELECT</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD1C</entry>
+      <entry>3270 CURSORSELECT</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD1D</entry>
+      <entry>3270 PRINTSCREEN</entry>
+      <entry>3270</entry>
+    </row>
+    <row>
+      <entry>#xFD1E</entry>
+      <entry>3270 ENTER</entry>
+      <entry>3270</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+</sect1>
+
+<sect1 id='Vendor_KEYSYMs'>
+<title>Vendor KEYSYMs</title>
+
+<para>
+The KEYSYM number range #x10000000 to #x1FFFFFFF is available for
+vendor-specific extensions. Among these, the range #x11000000 to
+#x1100FFFF is designated for keypad KEYSYMs.
+</para>
+</sect1>
+
+<sect1 id='Legacy_KEYSYMs'>
+<title>Legacy KEYSYMs</title>
+
+<para>
+These date from the time before ISO 10646 / Unicode was
+available. They represent characters from a number of different older
+8-bit coded character sets and have zero values for bytes 1 and
+2. Byte 3 indicates a coded character set and byte 4 is the 8-bit
+value of the particular character within that set.
+</para>
+
+<informaltable frame="topbot">
+  <tgroup cols='4' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*' />
+  <colspec colname='c2' colwidth='2.0*' />
+  <colspec colname='c3' colwidth='1.0*' />
+  <colspec colname='c4' colwidth='1.0*' />
+  <thead>
+    <row rowsep="1">
+      <entry>Byte 3</entry>
+      <entry>Byte 4</entry>
+      <entry>Byte 3</entry>
+      <entry>Byte 4</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>1</entry>
+      <entry>Latin-2</entry>
+      <entry>11</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>2</entry>
+      <entry>Latin-3</entry>
+      <entry>12</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>3</entry>
+      <entry>Latin-4</entry>
+      <entry>13</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>4</entry>
+      <entry>Kana</entry>
+      <entry>14</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>5</entry>
+      <entry>Arabic</entry>
+      <entry>15</entry>
+      <entry>Latin-5</entry>
+    </row>
+    <row>
+      <entry>6</entry>
+      <entry>Cyrillic</entry>
+      <entry>16</entry>
+      <entry>Latin-6</entry>
+    </row>
+    <row>
+      <entry>7</entry>
+      <entry>Greek</entry>
+      <entry>17</entry>
+      <entry>Latin-7</entry>
+    </row>
+    <row>
+      <entry>8</entry>
+      <entry>Technical</entry>
+      <entry>18</entry>
+      <entry>Latin-8</entry>
+    </row>
+    <row>
+      <entry>9</entry>
+      <entry>Special</entry>
+      <entry>19</entry>
+      <entry>Latin-9</entry>
+    </row>
+    <row>
+      <entry>10</entry>
+      <entry>Publishing</entry>
+      <entry>32</entry>
+      <entry>Currency</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Each character set contains gaps where codes have been removed that
+were duplicates with codes in previous character sets (that is,
+character sets with lesser byte 3 value).
+</para>
+
+<para>
+The Latin, Arabic, Cyrillic, Greek, Hebrew, and Thai sets were taken
+from the early drafts of the relevant ISO 8859 parts available at the
+time. However, in the case of the Cyrillic and Greek sets, these
+turned out differently in the final versions of the ISO standard. The
+Technical, Special, and Publishing sets are based on Digital Equipment
+Corporation standards, as no equivalent international standards were
+available at the time.
+</para>
+
+<para>
+The table below lists all standardized Legacy KEYSYMs, along with the
+name used in the source document. Where there exists an unambiguous
+equivalent in Unicode, as it is the case with all ISO 8859 characters,
+it is given in the second column as a cross reference. Where there is
+no Unicode number provided, the exact semantics of the KEYSYM may have
+been lost and a Unicode KEYSYM should be used instead, if available.
+</para>
+
+<para>
+As support of Unicode KEYSYMs increases, some or all of the Legacy
+KEYSYMs may be phased out and withdrawn in future versions of this
+standard. Most KEYSYMs in the sets Technical, Special, Publishing, APL
+and Currency (with the exception of #x20AC) were probably never used
+in practice, and were not supported by pre-Unicode fonts. In
+particular, the Currency set, which was copied from Unicode, has
+already been deprecated by the introduction of the Unicode KEYSYMs.
+</para>
+
+<informaltable frame="topbot">
+  <tgroup cols='4' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*' />
+  <colspec colname='c2' colwidth='1.0*' />
+  <colspec colname='c3' colwidth='5.0*' />
+  <colspec colname='c4' colwidth='1.0*' />
+  <thead>
+    <row rowsep="1">
+      <entry>KEYSYM value</entry>
+      <entry>Unicode value</entry>
+      <entry>Name</entry>
+      <entry>Set</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>#x01A1</entry>
+      <entry>U+0104</entry>
+      <entry>LATIN CAPITAL LETTER A WITH OGONEK</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01A2</entry>
+      <entry>U+02D8</entry>
+      <entry>BREVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01A3</entry>
+      <entry>U+0141</entry>
+      <entry>LATIN CAPITAL LETTER L WITH STROKE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01A5</entry>
+      <entry>U+013D</entry>
+      <entry>LATIN CAPITAL LETTER L WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01A6</entry>
+      <entry>U+015A</entry>
+      <entry>LATIN CAPITAL LETTER S WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01A9</entry>
+      <entry>U+0160</entry>
+      <entry>LATIN CAPITAL LETTER S WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01AA</entry>
+      <entry>U+015E</entry>
+      <entry>LATIN CAPITAL LETTER S WITH CEDILLA</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01AB</entry>
+      <entry>U+0164</entry>
+      <entry>LATIN CAPITAL LETTER T WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01AC</entry>
+      <entry>U+0179</entry>
+      <entry>LATIN CAPITAL LETTER Z WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01AE</entry>
+      <entry>U+017D</entry>
+      <entry>LATIN CAPITAL LETTER Z WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01AF</entry>
+      <entry>U+017B</entry>
+      <entry>LATIN CAPITAL LETTER Z WITH DOT ABOVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B1</entry>
+      <entry>U+0105</entry>
+      <entry>LATIN SMALL LETTER A WITH OGONEK</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B2</entry>
+      <entry>U+02DB</entry>
+      <entry>OGONEK</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B3</entry>
+      <entry>U+0142</entry>
+      <entry>LATIN SMALL LETTER L WITH STROKE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B5</entry>
+      <entry>U+013E</entry>
+      <entry>LATIN SMALL LETTER L WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B6</entry>
+      <entry>U+015B</entry>
+      <entry>LATIN SMALL LETTER S WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B7</entry>
+      <entry>U+02C7</entry>
+      <entry>CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01B9</entry>
+      <entry>U+0161</entry>
+      <entry>LATIN SMALL LETTER S WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BA</entry>
+      <entry>U+015F</entry>
+      <entry>LATIN SMALL LETTER S WITH CEDILLA</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BB</entry>
+      <entry>U+0165</entry>
+      <entry>LATIN SMALL LETTER T WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BC</entry>
+      <entry>U+017A</entry>
+      <entry>LATIN SMALL LETTER Z WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BD</entry>
+      <entry>U+02DD</entry>
+      <entry>DOUBLE ACUTE ACCENT</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BE</entry>
+      <entry>U+017E</entry>
+      <entry>LATIN SMALL LETTER Z WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01BF</entry>
+      <entry>U+017C</entry>
+      <entry>LATIN SMALL LETTER Z WITH DOT ABOVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01C0</entry>
+      <entry>U+0154</entry>
+      <entry>LATIN CAPITAL LETTER R WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01C3</entry>
+      <entry>U+0102</entry>
+      <entry>LATIN CAPITAL LETTER A WITH BREVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01C5</entry>
+      <entry>U+0139</entry>
+      <entry>LATIN CAPITAL LETTER L WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01C6</entry>
+      <entry>U+0106</entry>
+      <entry>LATIN CAPITAL LETTER C WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01C8</entry>
+      <entry>U+010C</entry>
+      <entry>LATIN CAPITAL LETTER C WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01CA</entry>
+      <entry>U+0118</entry>
+      <entry>LATIN CAPITAL LETTER E WITH OGONEK</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01CC</entry>
+      <entry>U+011A</entry>
+      <entry>LATIN CAPITAL LETTER E WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01CF</entry>
+      <entry>U+010E</entry>
+      <entry>LATIN CAPITAL LETTER D WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D0</entry>
+      <entry>U+0110</entry>
+      <entry>LATIN CAPITAL LETTER D WITH STROKE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D1</entry>
+      <entry>U+0143</entry>
+      <entry>LATIN CAPITAL LETTER N WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D2</entry>
+      <entry>U+0147</entry>
+      <entry>LATIN CAPITAL LETTER N WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D5</entry>
+      <entry>U+0150</entry>
+      <entry>LATIN CAPITAL LETTER O WITH DOUBLE ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D8</entry>
+      <entry>U+0158</entry>
+      <entry>LATIN CAPITAL LETTER R WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01D9</entry>
+      <entry>U+016E</entry>
+      <entry>LATIN CAPITAL LETTER U WITH RING ABOVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01DB</entry>
+      <entry>U+0170</entry>
+      <entry>LATIN CAPITAL LETTER U WITH DOUBLE ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01DE</entry>
+      <entry>U+0162</entry>
+      <entry>LATIN CAPITAL LETTER T WITH CEDILLA</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01E0</entry>
+      <entry>U+0155</entry>
+      <entry>LATIN SMALL LETTER R WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01E3</entry>
+      <entry>U+0103</entry>
+      <entry>LATIN SMALL LETTER A WITH BREVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01E5</entry>
+      <entry>U+013A</entry>
+      <entry>LATIN SMALL LETTER L WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01E6</entry>
+      <entry>U+0107</entry>
+      <entry>LATIN SMALL LETTER C WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01E8</entry>
+      <entry>U+010D</entry>
+      <entry>LATIN SMALL LETTER C WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01EA</entry>
+      <entry>U+0119</entry>
+      <entry>LATIN SMALL LETTER E WITH OGONEK</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01EC</entry>
+      <entry>U+011B</entry>
+      <entry>LATIN SMALL LETTER E WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01EF</entry>
+      <entry>U+010F</entry>
+      <entry>LATIN SMALL LETTER D WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F0</entry>
+      <entry>U+0111</entry>
+      <entry>LATIN SMALL LETTER D WITH STROKE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F1</entry>
+      <entry>U+0144</entry>
+      <entry>LATIN SMALL LETTER N WITH ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F2</entry>
+      <entry>U+0148</entry>
+      <entry>LATIN SMALL LETTER N WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F5</entry>
+      <entry>U+0151</entry>
+      <entry>LATIN SMALL LETTER O WITH DOUBLE ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F8</entry>
+      <entry>U+0159</entry>
+      <entry>LATIN SMALL LETTER R WITH CARON</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01F9</entry>
+      <entry>U+016F</entry>
+      <entry>LATIN SMALL LETTER U WITH RING ABOVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01FB</entry>
+      <entry>U+0171</entry>
+      <entry>LATIN SMALL LETTER U WITH DOUBLE ACUTE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01FE</entry>
+      <entry>U+0163</entry>
+      <entry>LATIN SMALL LETTER T WITH CEDILLA</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x01FF</entry>
+      <entry>U+02D9</entry>
+      <entry>DOT ABOVE</entry>
+      <entry>Latin-2</entry>
+    </row>
+    <row>
+      <entry>#x02A1</entry>
+      <entry>U+0126</entry>
+      <entry>LATIN CAPITAL LETTER H WITH STROKE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02A6</entry>
+      <entry>U+0124</entry>
+      <entry>LATIN CAPITAL LETTER H WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02A9</entry>
+      <entry>U+0130</entry>
+      <entry>LATIN CAPITAL LETTER I WITH DOT ABOVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02AB</entry>
+      <entry>U+011E</entry>
+      <entry>LATIN CAPITAL LETTER G WITH BREVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02AC</entry>
+      <entry>U+0134</entry>
+      <entry>LATIN CAPITAL LETTER J WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02B1</entry>
+      <entry>U+0127</entry>
+      <entry>LATIN SMALL LETTER H WITH STROKE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02B6</entry>
+      <entry>U+0125</entry>
+      <entry>LATIN SMALL LETTER H WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02B9</entry>
+      <entry>U+0131</entry>
+      <entry>LATIN SMALL LETTER DOTLESS I</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02BB</entry>
+      <entry>U+011F</entry>
+      <entry>LATIN SMALL LETTER G WITH BREVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02BC</entry>
+      <entry>U+0135</entry>
+      <entry>LATIN SMALL LETTER J WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02C5</entry>
+      <entry>U+010A</entry>
+      <entry>LATIN CAPITAL LETTER C WITH DOT ABOVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02C6</entry>
+      <entry>U+0108</entry>
+      <entry>LATIN CAPITAL LETTER C WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02D5</entry>
+      <entry>U+0120</entry>
+      <entry>LATIN CAPITAL LETTER G WITH DOT ABOVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02D8</entry>
+      <entry>U+011C</entry>
+      <entry>LATIN CAPITAL LETTER G WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02DD</entry>
+      <entry>U+016C</entry>
+      <entry>LATIN CAPITAL LETTER U WITH BREVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02DE</entry>
+      <entry>U+015C</entry>
+      <entry>LATIN CAPITAL LETTER S WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02E5</entry>
+      <entry>U+010B</entry>
+      <entry>LATIN SMALL LETTER C WITH DOT ABOVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02E6</entry>
+      <entry>U+0109</entry>
+      <entry>LATIN SMALL LETTER C WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02F5</entry>
+      <entry>U+0121</entry>
+      <entry>LATIN SMALL LETTER G WITH DOT ABOVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02F8</entry>
+      <entry>U+011D</entry>
+      <entry>LATIN SMALL LETTER G WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02FD</entry>
+      <entry>U+016D</entry>
+      <entry>LATIN SMALL LETTER U WITH BREVE</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x02FE</entry>
+      <entry>U+015D</entry>
+      <entry>LATIN SMALL LETTER S WITH CIRCUMFLEX</entry>
+      <entry>Latin-3</entry>
+    </row>
+    <row>
+      <entry>#x03A2</entry>
+      <entry>U+0138</entry>
+      <entry>LATIN SMALL LETTER KRA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03A3</entry>
+      <entry>U+0156</entry>
+      <entry>LATIN CAPITAL LETTER R WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03A5</entry>
+      <entry>U+0128</entry>
+      <entry>LATIN CAPITAL LETTER I WITH TILDE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03A6</entry>
+      <entry>U+013B</entry>
+      <entry>LATIN CAPITAL LETTER L WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03AA</entry>
+      <entry>U+0112</entry>
+      <entry>LATIN CAPITAL LETTER E WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03AB</entry>
+      <entry>U+0122</entry>
+      <entry>LATIN CAPITAL LETTER G WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03AC</entry>
+      <entry>U+0166</entry>
+      <entry>LATIN CAPITAL LETTER T WITH STROKE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03B3</entry>
+      <entry>U+0157</entry>
+      <entry>LATIN SMALL LETTER R WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03B5</entry>
+      <entry>U+0129</entry>
+      <entry>LATIN SMALL LETTER I WITH TILDE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03B6</entry>
+      <entry>U+013C</entry>
+      <entry>LATIN SMALL LETTER L WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03BA</entry>
+      <entry>U+0113</entry>
+      <entry>LATIN SMALL LETTER E WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03BB</entry>
+      <entry>U+0123</entry>
+      <entry>LATIN SMALL LETTER G WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03BC</entry>
+      <entry>U+0167</entry>
+      <entry>LATIN SMALL LETTER T WITH STROKE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03BD</entry>
+      <entry>U+014A</entry>
+      <entry>LATIN CAPITAL LETTER ENG</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03BF</entry>
+      <entry>U+014B</entry>
+      <entry>LATIN SMALL LETTER ENG</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03C0</entry>
+      <entry>U+0100</entry>
+      <entry>LATIN CAPITAL LETTER A WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03C7</entry>
+      <entry>U+012E</entry>
+      <entry>LATIN CAPITAL LETTER I WITH OGONEK</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03CC</entry>
+      <entry>U+0116</entry>
+      <entry>LATIN CAPITAL LETTER E WITH DOT ABOVE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03CF</entry>
+      <entry>U+012A</entry>
+      <entry>LATIN CAPITAL LETTER I WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03D1</entry>
+      <entry>U+0145</entry>
+      <entry>LATIN CAPITAL LETTER N WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03D2</entry>
+      <entry>U+014C</entry>
+      <entry>LATIN CAPITAL LETTER O WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03D3</entry>
+      <entry>U+0136</entry>
+      <entry>LATIN CAPITAL LETTER K WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03D9</entry>
+      <entry>U+0172</entry>
+      <entry>LATIN CAPITAL LETTER U WITH OGONEK</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03DD</entry>
+      <entry>U+0168</entry>
+      <entry>LATIN CAPITAL LETTER U WITH TILDE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03DE</entry>
+      <entry>U+016A</entry>
+      <entry>LATIN CAPITAL LETTER U WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03E0</entry>
+      <entry>U+0101</entry>
+      <entry>LATIN SMALL LETTER A WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03E7</entry>
+      <entry>U+012F</entry>
+      <entry>LATIN SMALL LETTER I WITH OGONEK</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03EC</entry>
+      <entry>U+0117</entry>
+      <entry>LATIN SMALL LETTER E WITH DOT ABOVE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03EF</entry>
+      <entry>U+012B</entry>
+      <entry>LATIN SMALL LETTER I WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03F1</entry>
+      <entry>U+0146</entry>
+      <entry>LATIN SMALL LETTER N WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03F2</entry>
+      <entry>U+014D</entry>
+      <entry>LATIN SMALL LETTER O WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03F3</entry>
+      <entry>U+0137</entry>
+      <entry>LATIN SMALL LETTER K WITH CEDILLA</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03F9</entry>
+      <entry>U+0173</entry>
+      <entry>LATIN SMALL LETTER U WITH OGONEK</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03FD</entry>
+      <entry>U+0169</entry>
+      <entry>LATIN SMALL LETTER U WITH TILDE</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x03FE</entry>
+      <entry>U+016B</entry>
+      <entry>LATIN SMALL LETTER U WITH MACRON</entry>
+      <entry>Latin-4</entry>
+    </row>
+    <row>
+      <entry>#x047E</entry>
+      <entry>U+203E</entry>
+      <entry>OVERLINE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A1</entry>
+      <entry>U+3002</entry>
+      <entry>KANA FULL STOP</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A2</entry>
+      <entry>U+300C</entry>
+      <entry>KANA OPENING BRACKET</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A3</entry>
+      <entry>U+300D</entry>
+      <entry>KANA CLOSING BRACKET</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A4</entry>
+      <entry>U+3001</entry>
+      <entry>KANA COMMA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A5</entry>
+      <entry>U+30FB</entry>
+      <entry>KANA CONJUNCTIVE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A6</entry>
+      <entry>U+30F2</entry>
+      <entry>KANA LETTER WO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A7</entry>
+      <entry>U+30A1</entry>
+      <entry>KANA LETTER SMALL A</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A8</entry>
+      <entry>U+30A3</entry>
+      <entry>KANA LETTER SMALL I</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04A9</entry>
+      <entry>U+30A5</entry>
+      <entry>KANA LETTER SMALL U</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AA</entry>
+      <entry>U+30A7</entry>
+      <entry>KANA LETTER SMALL E</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AB</entry>
+      <entry>U+30A9</entry>
+      <entry>KANA LETTER SMALL O</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AC</entry>
+      <entry>U+30E3</entry>
+      <entry>KANA LETTER SMALL YA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AD</entry>
+      <entry>U+30E5</entry>
+      <entry>KANA LETTER SMALL YU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AE</entry>
+      <entry>U+30E7</entry>
+      <entry>KANA LETTER SMALL YO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04AF</entry>
+      <entry>U+30C3</entry>
+      <entry>KANA LETTER SMALL TSU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B0</entry>
+      <entry>U+30FC</entry>
+      <entry>PROLONGED SOUND SYMBOL</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B1</entry>
+      <entry>U+30A2</entry>
+      <entry>KANA LETTER A</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B2</entry>
+      <entry>U+30A4</entry>
+      <entry>KANA LETTER I</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B3</entry>
+      <entry>U+30A6</entry>
+      <entry>KANA LETTER U</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B4</entry>
+      <entry>U+30A8</entry>
+      <entry>KANA LETTER E</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B5</entry>
+      <entry>U+30AA</entry>
+      <entry>KANA LETTER O</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B6</entry>
+      <entry>U+30AB</entry>
+      <entry>KANA LETTER KA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B7</entry>
+      <entry>U+30AD</entry>
+      <entry>KANA LETTER KI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B8</entry>
+      <entry>U+30AF</entry>
+      <entry>KANA LETTER KU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04B9</entry>
+      <entry>U+30B1</entry>
+      <entry>KANA LETTER KE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BA</entry>
+      <entry>U+30B3</entry>
+      <entry>KANA LETTER KO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BB</entry>
+      <entry>U+30B5</entry>
+      <entry>KANA LETTER SA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BC</entry>
+      <entry>U+30B7</entry>
+      <entry>KANA LETTER SHI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BD</entry>
+      <entry>U+30B9</entry>
+      <entry>KANA LETTER SU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BE</entry>
+      <entry>U+30BB</entry>
+      <entry>KANA LETTER SE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04BF</entry>
+      <entry>U+30BD</entry>
+      <entry>KANA LETTER SO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C0</entry>
+      <entry>U+30BF</entry>
+      <entry>KANA LETTER TA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C1</entry>
+      <entry>U+30C1</entry>
+      <entry>KANA LETTER CHI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C2</entry>
+      <entry>U+30C4</entry>
+      <entry>KANA LETTER TSU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C3</entry>
+      <entry>U+30C6</entry>
+      <entry>KANA LETTER TE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C4</entry>
+      <entry>U+30C8</entry>
+      <entry>KANA LETTER TO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C5</entry>
+      <entry>U+30CA</entry>
+      <entry>KANA LETTER NA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C6</entry>
+      <entry>U+30CB</entry>
+      <entry>KANA LETTER NI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C7</entry>
+      <entry>U+30CC</entry>
+      <entry>KANA LETTER NU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C8</entry>
+      <entry>U+30CD</entry>
+      <entry>KANA LETTER NE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04C9</entry>
+      <entry>U+30CE</entry>
+      <entry>KANA LETTER NO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CA</entry>
+      <entry>U+30CF</entry>
+      <entry>KANA LETTER HA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CB</entry>
+      <entry>U+30D2</entry>
+      <entry>KANA LETTER HI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CC</entry>
+      <entry>U+30D5</entry>
+      <entry>KANA LETTER FU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CD</entry>
+      <entry>U+30D8</entry>
+      <entry>KANA LETTER HE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CE</entry>
+      <entry>U+30DB</entry>
+      <entry>KANA LETTER HO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04CF</entry>
+      <entry>U+30DE</entry>
+      <entry>KANA LETTER MA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D0</entry>
+      <entry>U+30DF</entry>
+      <entry>KANA LETTER MI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D1</entry>
+      <entry>U+30E0</entry>
+      <entry>KANA LETTER MU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D2</entry>
+      <entry>U+30E1</entry>
+      <entry>KANA LETTER ME</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D3</entry>
+      <entry>U+30E2</entry>
+      <entry>KANA LETTER MO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D4</entry>
+      <entry>U+30E4</entry>
+      <entry>KANA LETTER YA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D5</entry>
+      <entry>U+30E6</entry>
+      <entry>KANA LETTER YU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D6</entry>
+      <entry>U+30E8</entry>
+      <entry>KANA LETTER YO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D7</entry>
+      <entry>U+30E9</entry>
+      <entry>KANA LETTER RA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D8</entry>
+      <entry>U+30EA</entry>
+      <entry>KANA LETTER RI</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04D9</entry>
+      <entry>U+30EB</entry>
+      <entry>KANA LETTER RU</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DA</entry>
+      <entry>U+30EC</entry>
+      <entry>KANA LETTER RE</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DB</entry>
+      <entry>U+30ED</entry>
+      <entry>KANA LETTER RO</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DC</entry>
+      <entry>U+30EF</entry>
+      <entry>KANA LETTER WA</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DD</entry>
+      <entry>U+30F3</entry>
+      <entry>KANA LETTER N</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DE</entry>
+      <entry>U+309B</entry>
+      <entry>VOICED SOUND SYMBOL</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x04DF</entry>
+      <entry>U+309C</entry>
+      <entry>SEMIVOICED SOUND SYMBOL</entry>
+      <entry>Kana</entry>
+    </row>
+    <row>
+      <entry>#x05AC</entry>
+      <entry>U+060C</entry>
+      <entry>ARABIC COMMA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05BB</entry>
+      <entry>U+061B</entry>
+      <entry>ARABIC SEMICOLON</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05BF</entry>
+      <entry>U+061F</entry>
+      <entry>ARABIC QUESTION MARK</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C1</entry>
+      <entry>U+0621</entry>
+      <entry>ARABIC LETTER HAMZA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C2</entry>
+      <entry>U+0622</entry>
+      <entry>ARABIC LETTER ALEF WITH MADDA ABOVE</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C3</entry>
+      <entry>U+0623</entry>
+      <entry>ARABIC LETTER ALEF WITH HAMZA ABOVE</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C4</entry>
+      <entry>U+0624</entry>
+      <entry>ARABIC LETTER WAW WITH HAMZA ABOVE</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C5</entry>
+      <entry>U+0625</entry>
+      <entry>ARABIC LETTER ALEF WITH HAMZA BELOW</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C6</entry>
+      <entry>U+0626</entry>
+      <entry>ARABIC LETTER YEH WITH HAMZA ABOVE</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C7</entry>
+      <entry>U+0627</entry>
+      <entry>ARABIC LETTER ALEF</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C8</entry>
+      <entry>U+0628</entry>
+      <entry>ARABIC LETTER BEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05C9</entry>
+      <entry>U+0629</entry>
+      <entry>ARABIC LETTER TEH MARBUTA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CA</entry>
+      <entry>U+062A</entry>
+      <entry>ARABIC LETTER TEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CB</entry>
+      <entry>U+062B</entry>
+      <entry>ARABIC LETTER THEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CC</entry>
+      <entry>U+062C</entry>
+      <entry>ARABIC LETTER JEEM</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CD</entry>
+      <entry>U+062D</entry>
+      <entry>ARABIC LETTER HAH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CE</entry>
+      <entry>U+062E</entry>
+      <entry>ARABIC LETTER KHAH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05CF</entry>
+      <entry>U+062F</entry>
+      <entry>ARABIC LETTER DAL</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D0</entry>
+      <entry>U+0630</entry>
+      <entry>ARABIC LETTER THAL</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D1</entry>
+      <entry>U+0631</entry>
+      <entry>ARABIC LETTER REH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D2</entry>
+      <entry>U+0632</entry>
+      <entry>ARABIC LETTER ZAIN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D3</entry>
+      <entry>U+0633</entry>
+      <entry>ARABIC LETTER SEEN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D4</entry>
+      <entry>U+0634</entry>
+      <entry>ARABIC LETTER SHEEN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D5</entry>
+      <entry>U+0635</entry>
+      <entry>ARABIC LETTER SAD</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D6</entry>
+      <entry>U+0636</entry>
+      <entry>ARABIC LETTER DAD</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D7</entry>
+      <entry>U+0637</entry>
+      <entry>ARABIC LETTER TAH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D8</entry>
+      <entry>U+0638</entry>
+      <entry>ARABIC LETTER ZAH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05D9</entry>
+      <entry>U+0639</entry>
+      <entry>ARABIC LETTER AIN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05DA</entry>
+      <entry>U+063A</entry>
+      <entry>ARABIC LETTER GHAIN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E0</entry>
+      <entry>U+0640</entry>
+      <entry>ARABIC TATWEEL</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E1</entry>
+      <entry>U+0641</entry>
+      <entry>ARABIC LETTER FEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E2</entry>
+      <entry>U+0642</entry>
+      <entry>ARABIC LETTER QAF</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E3</entry>
+      <entry>U+0643</entry>
+      <entry>ARABIC LETTER KAF</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E4</entry>
+      <entry>U+0644</entry>
+      <entry>ARABIC LETTER LAM</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E5</entry>
+      <entry>U+0645</entry>
+      <entry>ARABIC LETTER MEEM</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E6</entry>
+      <entry>U+0646</entry>
+      <entry>ARABIC LETTER NOON</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E7</entry>
+      <entry>U+0647</entry>
+      <entry>ARABIC LETTER HEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E8</entry>
+      <entry>U+0648</entry>
+      <entry>ARABIC LETTER WAW</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05E9</entry>
+      <entry>U+0649</entry>
+      <entry>ARABIC LETTER ALEF MAKSURA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05EA</entry>
+      <entry>U+064A</entry>
+      <entry>ARABIC LETTER YEH</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05EB</entry>
+      <entry>U+064B</entry>
+      <entry>ARABIC FATHATAN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05EC</entry>
+      <entry>U+064C</entry>
+      <entry>ARABIC DAMMATAN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05ED</entry>
+      <entry>U+064D</entry>
+      <entry>ARABIC KASRATAN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05EE</entry>
+      <entry>U+064E</entry>
+      <entry>ARABIC FATHA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05EF</entry>
+      <entry>U+064F</entry>
+      <entry>ARABIC DAMMA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05F0</entry>
+      <entry>U+0650</entry>
+      <entry>ARABIC KASRA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05F1</entry>
+      <entry>U+0651</entry>
+      <entry>ARABIC SHADDA</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x05F2</entry>
+      <entry>U+0652</entry>
+      <entry>ARABIC SUKUN</entry>
+      <entry>Arabic</entry>
+    </row>
+    <row>
+      <entry>#x06A1</entry>
+      <entry>U+0452</entry>
+      <entry>CYRILLIC SMALL LETTER DJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A2</entry>
+      <entry>U+0453</entry>
+      <entry>CYRILLIC SMALL LETTER GJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A3</entry>
+      <entry>U+0451</entry>
+      <entry>CYRILLIC SMALL LETTER IO</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A4</entry>
+      <entry>U+0454</entry>
+      <entry>CYRILLIC SMALL LETTER UKRAINIAN IE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A5</entry>
+      <entry>U+0455</entry>
+      <entry>CYRILLIC SMALL LETTER DZE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A6</entry>
+      <entry>U+0456</entry>
+      <entry>CYRILLIC SMALL LETTER BYELORUSSIAN-UKRAINIAN I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A7</entry>
+      <entry>U+0457</entry>
+      <entry>CYRILLIC SMALL LETTER YI</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A8</entry>
+      <entry>U+0458</entry>
+      <entry>CYRILLIC SMALL LETTER JE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06A9</entry>
+      <entry>U+0459</entry>
+      <entry>CYRILLIC SMALL LETTER LJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AA</entry>
+      <entry>U+045A</entry>
+      <entry>CYRILLIC SMALL LETTER NJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AB</entry>
+      <entry>U+045B</entry>
+      <entry>CYRILLIC SMALL LETTER TSHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AC</entry>
+      <entry>U+045C</entry>
+      <entry>CYRILLIC SMALL LETTER KJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AD</entry>
+      <entry>U+0491</entry>
+      <entry>CYRILLIC SMALL LETTER GHE WITH UPTURN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AE</entry>
+      <entry>U+045E</entry>
+      <entry>CYRILLIC SMALL LETTER SHORT U</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06AF</entry>
+      <entry>U+045F</entry>
+      <entry>CYRILLIC SMALL LETTER DZHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B0</entry>
+      <entry>U+2116</entry>
+      <entry>NUMERO SIGN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B1</entry>
+      <entry>U+0402</entry>
+      <entry>CYRILLIC CAPITAL LETTER DJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B2</entry>
+      <entry>U+0403</entry>
+      <entry>CYRILLIC CAPITAL LETTER GJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B3</entry>
+      <entry>U+0401</entry>
+      <entry>CYRILLIC CAPITAL LETTER IO</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B4</entry>
+      <entry>U+0404</entry>
+      <entry>CYRILLIC CAPITAL LETTER UKRAINIAN IE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B5</entry>
+      <entry>U+0405</entry>
+      <entry>CYRILLIC CAPITAL LETTER DZE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B6</entry>
+      <entry>U+0406</entry>
+      <entry>CYRILLIC CAPITAL LETTER BYELORUSSIAN-UKRAINIAN I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B7</entry>
+      <entry>U+0407</entry>
+      <entry>CYRILLIC CAPITAL LETTER YI</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B8</entry>
+      <entry>U+0408</entry>
+      <entry>CYRILLIC CAPITAL LETTER JE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06B9</entry>
+      <entry>U+0409</entry>
+      <entry>CYRILLIC CAPITAL LETTER LJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BA</entry>
+      <entry>U+040A</entry>
+      <entry>CYRILLIC CAPITAL LETTER NJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BB</entry>
+      <entry>U+040B</entry>
+      <entry>CYRILLIC CAPITAL LETTER TSHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BC</entry>
+      <entry>U+040C</entry>
+      <entry>CYRILLIC CAPITAL LETTER KJE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BD</entry>
+      <entry>U+0490</entry>
+      <entry>CYRILLIC CAPITAL LETTER GHE WITH UPTURN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BE</entry>
+      <entry>U+040E</entry>
+      <entry>CYRILLIC CAPITAL LETTER SHORT U</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06BF</entry>
+      <entry>U+040F</entry>
+      <entry>CYRILLIC CAPITAL LETTER DZHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C0</entry>
+      <entry>U+044E</entry>
+      <entry>CYRILLIC SMALL LETTER YU</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C1</entry>
+      <entry>U+0430</entry>
+      <entry>CYRILLIC SMALL LETTER A</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C2</entry>
+      <entry>U+0431</entry>
+      <entry>CYRILLIC SMALL LETTER BE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C3</entry>
+      <entry>U+0446</entry>
+      <entry>CYRILLIC SMALL LETTER TSE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C4</entry>
+      <entry>U+0434</entry>
+      <entry>CYRILLIC SMALL LETTER DE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C5</entry>
+      <entry>U+0435</entry>
+      <entry>CYRILLIC SMALL LETTER IE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C6</entry>
+      <entry>U+0444</entry>
+      <entry>CYRILLIC SMALL LETTER EF</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C7</entry>
+      <entry>U+0433</entry>
+      <entry>CYRILLIC SMALL LETTER GHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C8</entry>
+      <entry>U+0445</entry>
+      <entry>CYRILLIC SMALL LETTER HA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06C9</entry>
+      <entry>U+0438</entry>
+      <entry>CYRILLIC SMALL LETTER I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CA</entry>
+      <entry>U+0439</entry>
+      <entry>CYRILLIC SMALL LETTER SHORT I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CB</entry>
+      <entry>U+043A</entry>
+      <entry>CYRILLIC SMALL LETTER KA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CC</entry>
+      <entry>U+043B</entry>
+      <entry>CYRILLIC SMALL LETTER EL</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CD</entry>
+      <entry>U+043C</entry>
+      <entry>CYRILLIC SMALL LETTER EM</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CE</entry>
+      <entry>U+043D</entry>
+      <entry>CYRILLIC SMALL LETTER EN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06CF</entry>
+      <entry>U+043E</entry>
+      <entry>CYRILLIC SMALL LETTER O</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D0</entry>
+      <entry>U+043F</entry>
+      <entry>CYRILLIC SMALL LETTER PE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D1</entry>
+      <entry>U+044F</entry>
+      <entry>CYRILLIC SMALL LETTER YA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D2</entry>
+      <entry>U+0440</entry>
+      <entry>CYRILLIC SMALL LETTER ER</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D3</entry>
+      <entry>U+0441</entry>
+      <entry>CYRILLIC SMALL LETTER ES</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D4</entry>
+      <entry>U+0442</entry>
+      <entry>CYRILLIC SMALL LETTER TE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D5</entry>
+      <entry>U+0443</entry>
+      <entry>CYRILLIC SMALL LETTER U</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D6</entry>
+      <entry>U+0436</entry>
+      <entry>CYRILLIC SMALL LETTER ZHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D7</entry>
+      <entry>U+0432</entry>
+      <entry>CYRILLIC SMALL LETTER VE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D8</entry>
+      <entry>U+044C</entry>
+      <entry>CYRILLIC SMALL LETTER SOFT SIGN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06D9</entry>
+      <entry>U+044B</entry>
+      <entry>CYRILLIC SMALL LETTER YERU</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DA</entry>
+      <entry>U+0437</entry>
+      <entry>CYRILLIC SMALL LETTER ZE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DB</entry>
+      <entry>U+0448</entry>
+      <entry>CYRILLIC SMALL LETTER SHA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DC</entry>
+      <entry>U+044D</entry>
+      <entry>CYRILLIC SMALL LETTER E</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DD</entry>
+      <entry>U+0449</entry>
+      <entry>CYRILLIC SMALL LETTER SHCHA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DE</entry>
+      <entry>U+0447</entry>
+      <entry>CYRILLIC SMALL LETTER CHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06DF</entry>
+      <entry>U+044A</entry>
+      <entry>CYRILLIC SMALL LETTER HARD SIGN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E0</entry>
+      <entry>U+042E</entry>
+      <entry>CYRILLIC CAPITAL LETTER YU</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E1</entry>
+      <entry>U+0410</entry>
+      <entry>CYRILLIC CAPITAL LETTER A</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E2</entry>
+      <entry>U+0411</entry>
+      <entry>CYRILLIC CAPITAL LETTER BE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E3</entry>
+      <entry>U+0426</entry>
+      <entry>CYRILLIC CAPITAL LETTER TSE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E4</entry>
+      <entry>U+0414</entry>
+      <entry>CYRILLIC CAPITAL LETTER DE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E5</entry>
+      <entry>U+0415</entry>
+      <entry>CYRILLIC CAPITAL LETTER IE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E6</entry>
+      <entry>U+0424</entry>
+      <entry>CYRILLIC CAPITAL LETTER EF</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E7</entry>
+      <entry>U+0413</entry>
+      <entry>CYRILLIC CAPITAL LETTER GHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E8</entry>
+      <entry>U+0425</entry>
+      <entry>CYRILLIC CAPITAL LETTER HA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06E9</entry>
+      <entry>U+0418</entry>
+      <entry>CYRILLIC CAPITAL LETTER I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06EA</entry>
+      <entry>U+0419</entry>
+      <entry>CYRILLIC CAPITAL LETTER SHORT I</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06EB</entry>
+      <entry>U+041A</entry>
+      <entry>CYRILLIC CAPITAL LETTER KA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06EC</entry>
+      <entry>U+041B</entry>
+      <entry>CYRILLIC CAPITAL LETTER EL</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06ED</entry>
+      <entry>U+041C</entry>
+      <entry>CYRILLIC CAPITAL LETTER EM</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06EE</entry>
+      <entry>U+041D</entry>
+      <entry>CYRILLIC CAPITAL LETTER EN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06EF</entry>
+      <entry>U+041E</entry>
+      <entry>CYRILLIC CAPITAL LETTER O</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F0</entry>
+      <entry>U+041F</entry>
+      <entry>CYRILLIC CAPITAL LETTER PE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F1</entry>
+      <entry>U+042F</entry>
+      <entry>CYRILLIC CAPITAL LETTER YA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F2</entry>
+      <entry>U+0420</entry>
+      <entry>CYRILLIC CAPITAL LETTER ER</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F3</entry>
+      <entry>U+0421</entry>
+      <entry>CYRILLIC CAPITAL LETTER ES</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F4</entry>
+      <entry>U+0422</entry>
+      <entry>CYRILLIC CAPITAL LETTER TE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F5</entry>
+      <entry>U+0423</entry>
+      <entry>CYRILLIC CAPITAL LETTER U</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F6</entry>
+      <entry>U+0416</entry>
+      <entry>CYRILLIC CAPITAL LETTER ZHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F7</entry>
+      <entry>U+0412</entry>
+      <entry>CYRILLIC CAPITAL LETTER VE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F8</entry>
+      <entry>U+042C</entry>
+      <entry>CYRILLIC CAPITAL LETTER SOFT SIGN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06F9</entry>
+      <entry>U+042B</entry>
+      <entry>CYRILLIC CAPITAL LETTER YERU</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FA</entry>
+      <entry>U+0417</entry>
+      <entry>CYRILLIC CAPITAL LETTER ZE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FB</entry>
+      <entry>U+0428</entry>
+      <entry>CYRILLIC CAPITAL LETTER SHA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FC</entry>
+      <entry>U+042D</entry>
+      <entry>CYRILLIC CAPITAL LETTER E</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FD</entry>
+      <entry>U+0429</entry>
+      <entry>CYRILLIC CAPITAL LETTER SHCHA</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FE</entry>
+      <entry>U+0427</entry>
+      <entry>CYRILLIC CAPITAL LETTER CHE</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x06FF</entry>
+      <entry>U+042A</entry>
+      <entry>CYRILLIC CAPITAL LETTER HARD SIGN</entry>
+      <entry>Cyrillic</entry>
+    </row>
+    <row>
+      <entry>#x07A1</entry>
+      <entry>U+0386</entry>
+      <entry>GREEK CAPITAL LETTER ALPHA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A2</entry>
+      <entry>U+0388</entry>
+      <entry>GREEK CAPITAL LETTER EPSILON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A3</entry>
+      <entry>U+0389</entry>
+      <entry>GREEK CAPITAL LETTER ETA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A4</entry>
+      <entry>U+038A</entry>
+      <entry>GREEK CAPITAL LETTER IOTA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A5</entry>
+      <entry>U+03AA</entry>
+      <entry>GREEK CAPITAL LETTER IOTA WITH DIALYTIKA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A7</entry>
+      <entry>U+038C</entry>
+      <entry>GREEK CAPITAL LETTER OMICRON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A8</entry>
+      <entry>U+038E</entry>
+      <entry>GREEK CAPITAL LETTER UPSILON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07A9</entry>
+      <entry>U+03AB</entry>
+      <entry>GREEK CAPITAL LETTER UPSILON WITH DIALYTIKA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07AB</entry>
+      <entry>U+038F</entry>
+      <entry>GREEK CAPITAL LETTER OMEGA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07AE</entry>
+      <entry>U+0385</entry>
+      <entry>GREEK DIALYTIKA TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07AF</entry>
+      <entry>U+2015</entry>
+      <entry>HORIZONTAL BAR</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B1</entry>
+      <entry>U+03AC</entry>
+      <entry>GREEK SMALL LETTER ALPHA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B2</entry>
+      <entry>U+03AD</entry>
+      <entry>GREEK SMALL LETTER EPSILON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B3</entry>
+      <entry>U+03AE</entry>
+      <entry>GREEK SMALL LETTER ETA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B4</entry>
+      <entry>U+03AF</entry>
+      <entry>GREEK SMALL LETTER IOTA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B5</entry>
+      <entry>U+03CA</entry>
+      <entry>GREEK SMALL LETTER IOTA WITH DIALYTIKA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B6</entry>
+      <entry>U+0390</entry>
+      <entry>GREEK SMALL LETTER IOTA WITH DIALYTIKA AND TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B7</entry>
+      <entry>U+03CC</entry>
+      <entry>GREEK SMALL LETTER OMICRON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B8</entry>
+      <entry>U+03CD</entry>
+      <entry>GREEK SMALL LETTER UPSILON WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07B9</entry>
+      <entry>U+03CB</entry>
+      <entry>GREEK SMALL LETTER UPSILON WITH DIALYTIKA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07BA</entry>
+      <entry>U+03B0</entry>
+      <entry>GREEK SMALL LETTER UPSILON WITH DIALYTIKA AND TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07BB</entry>
+      <entry>U+03CE</entry>
+      <entry>GREEK SMALL LETTER OMEGA WITH TONOS</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C1</entry>
+      <entry>U+0391</entry>
+      <entry>GREEK CAPITAL LETTER ALPHA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C2</entry>
+      <entry>U+0392</entry>
+      <entry>GREEK CAPITAL LETTER BETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C3</entry>
+      <entry>U+0393</entry>
+      <entry>GREEK CAPITAL LETTER GAMMA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C4</entry>
+      <entry>U+0394</entry>
+      <entry>GREEK CAPITAL LETTER DELTA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C5</entry>
+      <entry>U+0395</entry>
+      <entry>GREEK CAPITAL LETTER EPSILON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C6</entry>
+      <entry>U+0396</entry>
+      <entry>GREEK CAPITAL LETTER ZETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C7</entry>
+      <entry>U+0397</entry>
+      <entry>GREEK CAPITAL LETTER ETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C8</entry>
+      <entry>U+0398</entry>
+      <entry>GREEK CAPITAL LETTER THETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07C9</entry>
+      <entry>U+0399</entry>
+      <entry>GREEK CAPITAL LETTER IOTA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CA</entry>
+      <entry>U+039A</entry>
+      <entry>GREEK CAPITAL LETTER KAPPA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CB</entry>
+      <entry>U+039B</entry>
+      <entry>GREEK CAPITAL LETTER LAMDA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CC</entry>
+      <entry>U+039C</entry>
+      <entry>GREEK CAPITAL LETTER MU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CD</entry>
+      <entry>U+039D</entry>
+      <entry>GREEK CAPITAL LETTER NU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CE</entry>
+      <entry>U+039E</entry>
+      <entry>GREEK CAPITAL LETTER XI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07CF</entry>
+      <entry>U+039F</entry>
+      <entry>GREEK CAPITAL LETTER OMICRON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D0</entry>
+      <entry>U+03A0</entry>
+      <entry>GREEK CAPITAL LETTER PI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D1</entry>
+      <entry>U+03A1</entry>
+      <entry>GREEK CAPITAL LETTER RHO</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D2</entry>
+      <entry>U+03A3</entry>
+      <entry>GREEK CAPITAL LETTER SIGMA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D4</entry>
+      <entry>U+03A4</entry>
+      <entry>GREEK CAPITAL LETTER TAU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D5</entry>
+      <entry>U+03A5</entry>
+      <entry>GREEK CAPITAL LETTER UPSILON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D6</entry>
+      <entry>U+03A6</entry>
+      <entry>GREEK CAPITAL LETTER PHI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D7</entry>
+      <entry>U+03A7</entry>
+      <entry>GREEK CAPITAL LETTER CHI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D8</entry>
+      <entry>U+03A8</entry>
+      <entry>GREEK CAPITAL LETTER PSI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07D9</entry>
+      <entry>U+03A9</entry>
+      <entry>GREEK CAPITAL LETTER OMEGA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E1</entry>
+      <entry>U+03B1</entry>
+      <entry>GREEK SMALL LETTER ALPHA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E2</entry>
+      <entry>U+03B2</entry>
+      <entry>GREEK SMALL LETTER BETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E3</entry>
+      <entry>U+03B3</entry>
+      <entry>GREEK SMALL LETTER GAMMA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E4</entry>
+      <entry>U+03B4</entry>
+      <entry>GREEK SMALL LETTER DELTA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E5</entry>
+      <entry>U+03B5</entry>
+      <entry>GREEK SMALL LETTER EPSILON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E6</entry>
+      <entry>U+03B6</entry>
+      <entry>GREEK SMALL LETTER ZETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E7</entry>
+      <entry>U+03B7</entry>
+      <entry>GREEK SMALL LETTER ETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E8</entry>
+      <entry>U+03B8</entry>
+      <entry>GREEK SMALL LETTER THETA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07E9</entry>
+      <entry>U+03B9</entry>
+      <entry>GREEK SMALL LETTER IOTA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07EA</entry>
+      <entry>U+03BA</entry>
+      <entry>GREEK SMALL LETTER KAPPA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07EB</entry>
+      <entry>U+03BB</entry>
+      <entry>GREEK SMALL LETTER LAMDA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07EC</entry>
+      <entry>U+03BC</entry>
+      <entry>GREEK SMALL LETTER MU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07ED</entry>
+      <entry>U+03BD</entry>
+      <entry>GREEK SMALL LETTER NU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07EE</entry>
+      <entry>U+03BE</entry>
+      <entry>GREEK SMALL LETTER XI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07EF</entry>
+      <entry>U+03BF</entry>
+      <entry>GREEK SMALL LETTER OMICRON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F0</entry>
+      <entry>U+03C0</entry>
+      <entry>GREEK SMALL LETTER PI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F1</entry>
+      <entry>U+03C1</entry>
+      <entry>GREEK SMALL LETTER RHO</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F2</entry>
+      <entry>U+03C3</entry>
+      <entry>GREEK SMALL LETTER SIGMA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F3</entry>
+      <entry>U+03C2</entry>
+      <entry>GREEK SMALL LETTER FINAL SIGMA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F4</entry>
+      <entry>U+03C4</entry>
+      <entry>GREEK SMALL LETTER TAU</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F5</entry>
+      <entry>U+03C5</entry>
+      <entry>GREEK SMALL LETTER UPSILON</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F6</entry>
+      <entry>U+03C6</entry>
+      <entry>GREEK SMALL LETTER PHI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F7</entry>
+      <entry>U+03C7</entry>
+      <entry>GREEK SMALL LETTER CHI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F8</entry>
+      <entry>U+03C8</entry>
+      <entry>GREEK SMALL LETTER PSI</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x07F9</entry>
+      <entry>U+03C9</entry>
+      <entry>GREEK SMALL LETTER OMEGA</entry>
+      <entry>Greek</entry>
+    </row>
+    <row>
+      <entry>#x08A1</entry>
+      <entry>U+23B7</entry>
+      <entry>LEFT RADICAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A2</entry>
+      <entry>-</entry>
+      <entry>TOP LEFT RADICAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A3</entry>
+      <entry>-</entry>
+      <entry>HORIZONTAL CONNECTOR</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A4</entry>
+      <entry>U+2320</entry>
+      <entry>TOP INTEGRAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A5</entry>
+      <entry>U+2321</entry>
+      <entry>BOTTOM INTEGRAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A6</entry>
+      <entry>-</entry>
+      <entry>VERTICAL CONNECTOR</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A7</entry>
+      <entry>U+23A1</entry>
+      <entry>TOP LEFT SQUARE BRACKET</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A8</entry>
+      <entry>U+23A3</entry>
+      <entry>BOTTOM LEFT SQUARE BRACKET</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08A9</entry>
+      <entry>U+23A4</entry>
+      <entry>TOP RIGHT SQUARE BRACKET</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AA</entry>
+      <entry>U+23A6</entry>
+      <entry>BOTTOM RIGHT SQUARE BRACKET</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AB</entry>
+      <entry>U+239B</entry>
+      <entry>TOP LEFT PARENTHESIS</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AC</entry>
+      <entry>U+239D</entry>
+      <entry>BOTTOM LEFT PARENTHESIS</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AD</entry>
+      <entry>U+239E</entry>
+      <entry>TOP RIGHT PARENTHESIS</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AE</entry>
+      <entry>U+23A0</entry>
+      <entry>BOTTOM RIGHT PARENTHESIS</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08AF</entry>
+      <entry>U+23A8</entry>
+      <entry>LEFT MIDDLE CURLY BRACE</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B0</entry>
+      <entry>U+23AC</entry>
+      <entry>RIGHT MIDDLE CURLY BRACE</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B1</entry>
+      <entry>-</entry>
+      <entry>TOP LEFT SUMMATION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B2</entry>
+      <entry>-</entry>
+      <entry>BOTTOM LEFT SUMMATION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B3</entry>
+      <entry>-</entry>
+      <entry>TOP VERTICAL SUMMATION CONNECTOR</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B4</entry>
+      <entry>-</entry>
+      <entry>BOTTOM VERTICAL SUMMATION CONNECTOR</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B5</entry>
+      <entry>-</entry>
+      <entry>TOP RIGHT SUMMATION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B6</entry>
+      <entry>-</entry>
+      <entry>BOTTOM RIGHT SUMMATION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08B7</entry>
+      <entry>-</entry>
+      <entry>RIGHT MIDDLE SUMMATION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08BC</entry>
+      <entry>U+2264</entry>
+      <entry>LESS THAN OR EQUAL SIGN</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08BD</entry>
+      <entry>U+2260</entry>
+      <entry>NOT EQUAL SIGN</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08BE</entry>
+      <entry>U+2265</entry>
+      <entry>GREATER THAN OR EQUAL SIGN</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08BF</entry>
+      <entry>U+222B</entry>
+      <entry>INTEGRAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C0</entry>
+      <entry>U+2234</entry>
+      <entry>THEREFORE</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C1</entry>
+      <entry>U+221D</entry>
+      <entry>VARIATION, PROPORTIONAL TO</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C2</entry>
+      <entry>U+221E</entry>
+      <entry>INFINITY</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C5</entry>
+      <entry>U+2207</entry>
+      <entry>NABLA, DEL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C8</entry>
+      <entry>U+223C</entry>
+      <entry>IS APPROXIMATE TO</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08C9</entry>
+      <entry>U+2243</entry>
+      <entry>SIMILAR OR EQUAL TO</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08CD</entry>
+      <entry>U+21D4</entry>
+      <entry>IF AND ONLY IF</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08CE</entry>
+      <entry>U+21D2</entry>
+      <entry>IMPLIES</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08CF</entry>
+      <entry>U+2261</entry>
+      <entry>IDENTICAL TO</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08D6</entry>
+      <entry>U+221A</entry>
+      <entry>RADICAL</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DA</entry>
+      <entry>U+2282</entry>
+      <entry>IS INCLUDED IN</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DB</entry>
+      <entry>U+2283</entry>
+      <entry>INCLUDES</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DC</entry>
+      <entry>U+2229</entry>
+      <entry>INTERSECTION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DD</entry>
+      <entry>U+222A</entry>
+      <entry>UNION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DE</entry>
+      <entry>U+2227</entry>
+      <entry>LOGICAL AND</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08DF</entry>
+      <entry>U+2228</entry>
+      <entry>LOGICAL OR</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08EF</entry>
+      <entry>U+2202</entry>
+      <entry>PARTIAL DERIVATIVE</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08F6</entry>
+      <entry>U+0192</entry>
+      <entry>FUNCTION</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08FB</entry>
+      <entry>U+2190</entry>
+      <entry>LEFT ARROW</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08FC</entry>
+      <entry>U+2191</entry>
+      <entry>UPWARD ARROW</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08FD</entry>
+      <entry>U+2192</entry>
+      <entry>RIGHT ARROW</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x08FE</entry>
+      <entry>U+2193</entry>
+      <entry>DOWNWARD ARROW</entry>
+      <entry>Technical</entry>
+    </row>
+    <row>
+      <entry>#x09DF</entry>
+      <entry>-</entry>
+      <entry>BLANK</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E0</entry>
+      <entry>U+25C6</entry>
+      <entry>SOLID DIAMOND</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E1</entry>
+      <entry>U+2592</entry>
+      <entry>CHECKERBOARD</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E2</entry>
+      <entry>U+2409</entry>
+      <entry>"HT"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E3</entry>
+      <entry>U+240C</entry>
+      <entry>"FF"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E4</entry>
+      <entry>U+240D</entry>
+      <entry>"CR"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E5</entry>
+      <entry>U+240A</entry>
+      <entry>"LF"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E8</entry>
+      <entry>U+2424</entry>
+      <entry>"NL"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09E9</entry>
+      <entry>U+240B</entry>
+      <entry>"VT"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09EA</entry>
+      <entry>U+2518</entry>
+      <entry>LOWER-RIGHT CORNER</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09EB</entry>
+      <entry>U+2510</entry>
+      <entry>UPPER-RIGHT CORNER</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09EC</entry>
+      <entry>U+250C</entry>
+      <entry>UPPER-LEFT CORNER</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09ED</entry>
+      <entry>U+2514</entry>
+      <entry>LOWER-LEFT CORNER</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09EE</entry>
+      <entry>U+253C</entry>
+      <entry>CROSSING-LINES</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09EF</entry>
+      <entry>U+23BA</entry>
+      <entry>HORIZONTAL LINE, SCAN 1</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F0</entry>
+      <entry>U+23BB</entry>
+      <entry>HORIZONTAL LINE, SCAN 3</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F1</entry>
+      <entry>U+2500</entry>
+      <entry>HORIZONTAL LINE, SCAN 5</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F2</entry>
+      <entry>U+23BC</entry>
+      <entry>HORIZONTAL LINE, SCAN 7</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F3</entry>
+      <entry>U+23BD</entry>
+      <entry>HORIZONTAL LINE, SCAN 9</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F4</entry>
+      <entry>U+251C</entry>
+      <entry>LEFT "T"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F5</entry>
+      <entry>U+2524</entry>
+      <entry>RIGHT "T"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F6</entry>
+      <entry>U+2534</entry>
+      <entry>BOTTOM "T"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F7</entry>
+      <entry>U+252C</entry>
+      <entry>TOP "T"</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x09F8</entry>
+      <entry>U+2502</entry>
+      <entry>VERTICAL BAR</entry>
+      <entry>Special</entry>
+    </row>
+    <row>
+      <entry>#x0AA1</entry>
+      <entry>U+2003</entry>
+      <entry>EM SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA2</entry>
+      <entry>U+2002</entry>
+      <entry>EN SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA3</entry>
+      <entry>U+2004</entry>
+      <entry>3/EM SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA4</entry>
+      <entry>U+2005</entry>
+      <entry>4/EM SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA5</entry>
+      <entry>U+2007</entry>
+      <entry>DIGIT SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA6</entry>
+      <entry>U+2008</entry>
+      <entry>PUNCTUATION SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA7</entry>
+      <entry>U+2009</entry>
+      <entry>THIN SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA8</entry>
+      <entry>U+200A</entry>
+      <entry>HAIR SPACE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AA9</entry>
+      <entry>U+2014</entry>
+      <entry>EM DASH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AAA</entry>
+      <entry>U+2013</entry>
+      <entry>EN DASH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AAC</entry>
+      <entry>-</entry>
+      <entry>SIGNIFICANT BLANK SYMBOL</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AAE</entry>
+      <entry>U+2026</entry>
+      <entry>ELLIPSIS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AAF</entry>
+      <entry>U+2025</entry>
+      <entry>DOUBLE BASELINE DOT</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB0</entry>
+      <entry>U+2153</entry>
+      <entry>VULGAR FRACTION ONE THIRD</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB1</entry>
+      <entry>U+2154</entry>
+      <entry>VULGAR FRACTION TWO THIRDS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB2</entry>
+      <entry>U+2155</entry>
+      <entry>VULGAR FRACTION ONE FIFTH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB3</entry>
+      <entry>U+2156</entry>
+      <entry>VULGAR FRACTION TWO FIFTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB4</entry>
+      <entry>U+2157</entry>
+      <entry>VULGAR FRACTION THREE FIFTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB5</entry>
+      <entry>U+2158</entry>
+      <entry>VULGAR FRACTION FOUR FIFTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB6</entry>
+      <entry>U+2159</entry>
+      <entry>VULGAR FRACTION ONE SIXTH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB7</entry>
+      <entry>U+215A</entry>
+      <entry>VULGAR FRACTION FIVE SIXTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AB8</entry>
+      <entry>U+2105</entry>
+      <entry>CARE OF</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ABB</entry>
+      <entry>U+2012</entry>
+      <entry>FIGURE DASH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ABC</entry>
+      <entry>-</entry>
+      <entry>LEFT ANGLE BRACKET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ABD</entry>
+      <entry>-</entry>
+      <entry>DECIMAL POINT</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ABE</entry>
+      <entry>-</entry>
+      <entry>RIGHT ANGLE BRACKET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ABF</entry>
+      <entry>-</entry>
+      <entry>MARKER</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AC3</entry>
+      <entry>U+215B</entry>
+      <entry>VULGAR FRACTION ONE EIGHTH</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AC4</entry>
+      <entry>U+215C</entry>
+      <entry>VULGAR FRACTION THREE EIGHTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AC5</entry>
+      <entry>U+215D</entry>
+      <entry>VULGAR FRACTION FIVE EIGHTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AC6</entry>
+      <entry>U+215E</entry>
+      <entry>VULGAR FRACTION SEVEN EIGHTHS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AC9</entry>
+      <entry>U+2122</entry>
+      <entry>TRADEMARK SIGN</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACA</entry>
+      <entry>-</entry>
+      <entry>SIGNATURE MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACB</entry>
+      <entry>-</entry>
+      <entry>TRADEMARK SIGN IN CIRCLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACC</entry>
+      <entry>-</entry>
+      <entry>LEFT OPEN TRIANGLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACD</entry>
+      <entry>-</entry>
+      <entry>RIGHT OPEN TRIANGLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACE</entry>
+      <entry>-</entry>
+      <entry>EM OPEN CIRCLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ACF</entry>
+      <entry>-</entry>
+      <entry>EM OPEN RECTANGLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD0</entry>
+      <entry>U+2018</entry>
+      <entry>LEFT SINGLE QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD1</entry>
+      <entry>U+2019</entry>
+      <entry>RIGHT SINGLE QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD2</entry>
+      <entry>U+201C</entry>
+      <entry>LEFT DOUBLE QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD3</entry>
+      <entry>U+201D</entry>
+      <entry>RIGHT DOUBLE QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD4</entry>
+      <entry>U+211E</entry>
+      <entry>PRESCRIPTION, TAKE, RECIPE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD5</entry>
+      <entry>U+2030</entry>
+      <entry>PER MILLE SIGN</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD6</entry>
+      <entry>U+2032</entry>
+      <entry>MINUTES</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD7</entry>
+      <entry>U+2033</entry>
+      <entry>SECONDS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AD9</entry>
+      <entry>U+271D</entry>
+      <entry>LATIN CROSS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADA</entry>
+      <entry>-</entry>
+      <entry>HEXAGRAM</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADB</entry>
+      <entry>-</entry>
+      <entry>FILLED RECTANGLE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADC</entry>
+      <entry>-</entry>
+      <entry>FILLED LEFT TRIANGLE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADD</entry>
+      <entry>-</entry>
+      <entry>FILLED RIGHT TRIANGLE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADE</entry>
+      <entry>-</entry>
+      <entry>EM FILLED CIRCLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0ADF</entry>
+      <entry>-</entry>
+      <entry>EM FILLED RECTANGLE</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE0</entry>
+      <entry>-</entry>
+      <entry>EN OPEN CIRCLE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE1</entry>
+      <entry>-</entry>
+      <entry>EN OPEN SQUARE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE2</entry>
+      <entry>-</entry>
+      <entry>OPEN RECTANGULAR BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE3</entry>
+      <entry>-</entry>
+      <entry>OPEN TRIANGULAR BULLET UP</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE4</entry>
+      <entry>-</entry>
+      <entry>OPEN TRIANGULAR BULLET DOWN</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE5</entry>
+      <entry>-</entry>
+      <entry>OPEN STAR</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE6</entry>
+      <entry>-</entry>
+      <entry>EN FILLED CIRCLE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE7</entry>
+      <entry>-</entry>
+      <entry>EN FILLED SQUARE BULLET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE8</entry>
+      <entry>-</entry>
+      <entry>FILLED TRIANGULAR BULLET UP</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AE9</entry>
+      <entry>-</entry>
+      <entry>FILLED TRIANGULAR BULLET DOWN</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AEA</entry>
+      <entry>-</entry>
+      <entry>LEFT POINTER</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AEB</entry>
+      <entry>-</entry>
+      <entry>RIGHT POINTER</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AEC</entry>
+      <entry>U+2663</entry>
+      <entry>CLUB</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AED</entry>
+      <entry>U+2666</entry>
+      <entry>DIAMOND</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AEE</entry>
+      <entry>U+2665</entry>
+      <entry>HEART</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF0</entry>
+      <entry>U+2720</entry>
+      <entry>MALTESE CROSS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF1</entry>
+      <entry>U+2020</entry>
+      <entry>DAGGER</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF2</entry>
+      <entry>U+2021</entry>
+      <entry>DOUBLE DAGGER</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF3</entry>
+      <entry>U+2713</entry>
+      <entry>CHECK MARK, TICK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF4</entry>
+      <entry>U+2717</entry>
+      <entry>BALLOT CROSS</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF5</entry>
+      <entry>U+266F</entry>
+      <entry>MUSICAL SHARP</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF6</entry>
+      <entry>U+266D</entry>
+      <entry>MUSICAL FLAT</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF7</entry>
+      <entry>U+2642</entry>
+      <entry>MALE SYMBOL</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF8</entry>
+      <entry>U+2640</entry>
+      <entry>FEMALE SYMBOL</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AF9</entry>
+      <entry>U+260E</entry>
+      <entry>TELEPHONE SYMBOL</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFA</entry>
+      <entry>U+2315</entry>
+      <entry>TELEPHONE RECORDER SYMBOL</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFB</entry>
+      <entry>U+2117</entry>
+      <entry>PHONOGRAPH COPYRIGHT SIGN</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFC</entry>
+      <entry>U+2038</entry>
+      <entry>CARET</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFD</entry>
+      <entry>U+201A</entry>
+      <entry>SINGLE LOW QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFE</entry>
+      <entry>U+201E</entry>
+      <entry>DOUBLE LOW QUOTATION MARK</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0AFF</entry>
+      <entry>-</entry>
+      <entry>CURSOR</entry>
+      <entry>Publish</entry>
+    </row>
+    <row>
+      <entry>#x0BA3</entry>
+      <entry>-</entry>
+      <entry>LEFT CARET</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BA6</entry>
+      <entry>-</entry>
+      <entry>RIGHT CARET</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BA8</entry>
+      <entry>-</entry>
+      <entry>DOWN CARET</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BA9</entry>
+      <entry>-</entry>
+      <entry>UP CARET</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BC0</entry>
+      <entry>-</entry>
+      <entry>OVERBAR</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BC2</entry>
+      <entry>U+22A5</entry>
+      <entry>DOWN TACK</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BC3</entry>
+      <entry>-</entry>
+      <entry>UP SHOE (CAP)</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BC4</entry>
+      <entry>U+230A</entry>
+      <entry>DOWN STILE</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BC6</entry>
+      <entry>-</entry>
+      <entry>UNDERBAR</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BCA</entry>
+      <entry>U+2218</entry>
+      <entry>JOT</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BCC</entry>
+      <entry>U+2395</entry>
+      <entry>QUAD</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BCE</entry>
+      <entry>U+22A4</entry>
+      <entry>UP TACK</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BCF</entry>
+      <entry>U+25CB</entry>
+      <entry>CIRCLE</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BD3</entry>
+      <entry>U+2308</entry>
+      <entry>UP STILE</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BD6</entry>
+      <entry>-</entry>
+      <entry>DOWN SHOE (CUP)</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BD8</entry>
+      <entry>-</entry>
+      <entry>RIGHT SHOE</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BDA</entry>
+      <entry>-</entry>
+      <entry>LEFT SHOE</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BDC</entry>
+      <entry>U+22A2</entry>
+      <entry>LEFT TACK</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0BFC</entry>
+      <entry>U+22A3</entry>
+      <entry>RIGHT TACK</entry>
+      <entry>APL</entry>
+    </row>
+    <row>
+      <entry>#x0CDF</entry>
+      <entry>U+2017</entry>
+      <entry>DOUBLE LOW LINE</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE0</entry>
+      <entry>U+05D0</entry>
+      <entry>HEBREW LETTER ALEF</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE1</entry>
+      <entry>U+05D1</entry>
+      <entry>HEBREW LETTER BET</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE2</entry>
+      <entry>U+05D2</entry>
+      <entry>HEBREW LETTER GIMEL</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE3</entry>
+      <entry>U+05D3</entry>
+      <entry>HEBREW LETTER DALET</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE4</entry>
+      <entry>U+05D4</entry>
+      <entry>HEBREW LETTER HE</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE5</entry>
+      <entry>U+05D5</entry>
+      <entry>HEBREW LETTER VAV</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE6</entry>
+      <entry>U+05D6</entry>
+      <entry>HEBREW LETTER ZAYIN</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE7</entry>
+      <entry>U+05D7</entry>
+      <entry>HEBREW LETTER HET</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE8</entry>
+      <entry>U+05D8</entry>
+      <entry>HEBREW LETTER TET</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CE9</entry>
+      <entry>U+05D9</entry>
+      <entry>HEBREW LETTER YOD</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CEA</entry>
+      <entry>U+05DA</entry>
+      <entry>HEBREW LETTER FINAL KAF</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CEB</entry>
+      <entry>U+05DB</entry>
+      <entry>HEBREW LETTER KAF</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CEC</entry>
+      <entry>U+05DC</entry>
+      <entry>HEBREW LETTER LAMED</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CED</entry>
+      <entry>U+05DD</entry>
+      <entry>HEBREW LETTER FINAL MEM</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CEE</entry>
+      <entry>U+05DE</entry>
+      <entry>HEBREW LETTER MEM</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CEF</entry>
+      <entry>U+05DF</entry>
+      <entry>HEBREW LETTER FINAL NUN</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF0</entry>
+      <entry>U+05E0</entry>
+      <entry>HEBREW LETTER NUN</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF1</entry>
+      <entry>U+05E1</entry>
+      <entry>HEBREW LETTER SAMEKH</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF2</entry>
+      <entry>U+05E2</entry>
+      <entry>HEBREW LETTER AYIN</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF3</entry>
+      <entry>U+05E3</entry>
+      <entry>HEBREW LETTER FINAL PE</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF4</entry>
+      <entry>U+05E4</entry>
+      <entry>HEBREW LETTER PE</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF5</entry>
+      <entry>U+05E5</entry>
+      <entry>HEBREW LETTER FINAL TSADI</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF6</entry>
+      <entry>U+05E6</entry>
+      <entry>HEBREW LETTER TSADI</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF7</entry>
+      <entry>U+05E7</entry>
+      <entry>HEBREW LETTER QOF</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF8</entry>
+      <entry>U+05E8</entry>
+      <entry>HEBREW LETTER RESH</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CF9</entry>
+      <entry>U+05E9</entry>
+      <entry>HEBREW LETTER SHIN</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0CFA</entry>
+      <entry>U+05EA</entry>
+      <entry>HEBREW LETTER TAV</entry>
+      <entry>Hebrew</entry>
+    </row>
+    <row>
+      <entry>#x0DA1</entry>
+      <entry>U+0E01</entry>
+      <entry>THAI CHARACTER KO KAI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA2</entry>
+      <entry>U+0E02</entry>
+      <entry>THAI CHARACTER KHO KHAI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA3</entry>
+      <entry>U+0E03</entry>
+      <entry>THAI CHARACTER KHO KHUAT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA4</entry>
+      <entry>U+0E04</entry>
+      <entry>THAI CHARACTER KHO KHWAI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA5</entry>
+      <entry>U+0E05</entry>
+      <entry>THAI CHARACTER KHO KHON</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA6</entry>
+      <entry>U+0E06</entry>
+      <entry>THAI CHARACTER KHO RAKHANG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA7</entry>
+      <entry>U+0E07</entry>
+      <entry>THAI CHARACTER NGO NGU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA8</entry>
+      <entry>U+0E08</entry>
+      <entry>THAI CHARACTER CHO CHAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DA9</entry>
+      <entry>U+0E09</entry>
+      <entry>THAI CHARACTER CHO CHING</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAA</entry>
+      <entry>U+0E0A</entry>
+      <entry>THAI CHARACTER CHO CHANG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAB</entry>
+      <entry>U+0E0B</entry>
+      <entry>THAI CHARACTER SO SO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAC</entry>
+      <entry>U+0E0C</entry>
+      <entry>THAI CHARACTER CHO CHOE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAD</entry>
+      <entry>U+0E0D</entry>
+      <entry>THAI CHARACTER YO YING</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAE</entry>
+      <entry>U+0E0E</entry>
+      <entry>THAI CHARACTER DO CHADA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DAF</entry>
+      <entry>U+0E0F</entry>
+      <entry>THAI CHARACTER TO PATAK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB0</entry>
+      <entry>U+0E10</entry>
+      <entry>THAI CHARACTER THO THAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB1</entry>
+      <entry>U+0E11</entry>
+      <entry>THAI CHARACTER THO NANGMONTHO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB2</entry>
+      <entry>U+0E12</entry>
+      <entry>THAI CHARACTER THO PHUTHAO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB3</entry>
+      <entry>U+0E13</entry>
+      <entry>THAI CHARACTER NO NEN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB4</entry>
+      <entry>U+0E14</entry>
+      <entry>THAI CHARACTER DO DEK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB5</entry>
+      <entry>U+0E15</entry>
+      <entry>THAI CHARACTER TO TAO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB6</entry>
+      <entry>U+0E16</entry>
+      <entry>THAI CHARACTER THO THUNG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB7</entry>
+      <entry>U+0E17</entry>
+      <entry>THAI CHARACTER THO THAHAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB8</entry>
+      <entry>U+0E18</entry>
+      <entry>THAI CHARACTER THO THONG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DB9</entry>
+      <entry>U+0E19</entry>
+      <entry>THAI CHARACTER NO NU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBA</entry>
+      <entry>U+0E1A</entry>
+      <entry>THAI CHARACTER BO BAIMAI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBB</entry>
+      <entry>U+0E1B</entry>
+      <entry>THAI CHARACTER PO PLA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBC</entry>
+      <entry>U+0E1C</entry>
+      <entry>THAI CHARACTER PHO PHUNG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBD</entry>
+      <entry>U+0E1D</entry>
+      <entry>THAI CHARACTER FO FA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBE</entry>
+      <entry>U+0E1E</entry>
+      <entry>THAI CHARACTER PHO PHAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DBF</entry>
+      <entry>U+0E1F</entry>
+      <entry>THAI CHARACTER FO FAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC0</entry>
+      <entry>U+0E20</entry>
+      <entry>THAI CHARACTER PHO SAMPHAO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC1</entry>
+      <entry>U+0E21</entry>
+      <entry>THAI CHARACTER MO MA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC2</entry>
+      <entry>U+0E22</entry>
+      <entry>THAI CHARACTER YO YAK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC3</entry>
+      <entry>U+0E23</entry>
+      <entry>THAI CHARACTER RO RUA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC4</entry>
+      <entry>U+0E24</entry>
+      <entry>THAI CHARACTER RU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC5</entry>
+      <entry>U+0E25</entry>
+      <entry>THAI CHARACTER LO LING</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC6</entry>
+      <entry>U+0E26</entry>
+      <entry>THAI CHARACTER LU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC7</entry>
+      <entry>U+0E27</entry>
+      <entry>THAI CHARACTER WO WAEN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC8</entry>
+      <entry>U+0E28</entry>
+      <entry>THAI CHARACTER SO SALA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DC9</entry>
+      <entry>U+0E29</entry>
+      <entry>THAI CHARACTER SO RUSI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCA</entry>
+      <entry>U+0E2A</entry>
+      <entry>THAI CHARACTER SO SUA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCB</entry>
+      <entry>U+0E2B</entry>
+      <entry>THAI CHARACTER HO HIP</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCC</entry>
+      <entry>U+0E2C</entry>
+      <entry>THAI CHARACTER LO CHULA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCD</entry>
+      <entry>U+0E2D</entry>
+      <entry>THAI CHARACTER O ANG</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCE</entry>
+      <entry>U+0E2E</entry>
+      <entry>THAI CHARACTER HO NOKHUK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DCF</entry>
+      <entry>U+0E2F</entry>
+      <entry>THAI CHARACTER PAIYANNOI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD0</entry>
+      <entry>U+0E30</entry>
+      <entry>THAI CHARACTER SARA A</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD1</entry>
+      <entry>U+0E31</entry>
+      <entry>THAI CHARACTER MAI HAN-AKAT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD2</entry>
+      <entry>U+0E32</entry>
+      <entry>THAI CHARACTER SARA AA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD3</entry>
+      <entry>U+0E33</entry>
+      <entry>THAI CHARACTER SARA AM</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD4</entry>
+      <entry>U+0E34</entry>
+      <entry>THAI CHARACTER SARA I</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD5</entry>
+      <entry>U+0E35</entry>
+      <entry>THAI CHARACTER SARA II</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD6</entry>
+      <entry>U+0E36</entry>
+      <entry>THAI CHARACTER SARA UE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD7</entry>
+      <entry>U+0E37</entry>
+      <entry>THAI CHARACTER SARA UEE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD8</entry>
+      <entry>U+0E38</entry>
+      <entry>THAI CHARACTER SARA U</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DD9</entry>
+      <entry>U+0E39</entry>
+      <entry>THAI CHARACTER SARA UU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DDA</entry>
+      <entry>U+0E3A</entry>
+      <entry>THAI CHARACTER PHINTHU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DDF</entry>
+      <entry>U+0E3F</entry>
+      <entry>THAI CURRENCY SYMBOL BAHT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE0</entry>
+      <entry>U+0E40</entry>
+      <entry>THAI CHARACTER SARA E</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE1</entry>
+      <entry>U+0E41</entry>
+      <entry>THAI CHARACTER SARA AE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE2</entry>
+      <entry>U+0E42</entry>
+      <entry>THAI CHARACTER SARA O</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE3</entry>
+      <entry>U+0E43</entry>
+      <entry>THAI CHARACTER SARA AI MAIMUAN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE4</entry>
+      <entry>U+0E44</entry>
+      <entry>THAI CHARACTER SARA AI MAIMALAI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE5</entry>
+      <entry>U+0E45</entry>
+      <entry>THAI CHARACTER LAKKHANGYAO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE6</entry>
+      <entry>U+0E46</entry>
+      <entry>THAI CHARACTER MAIYAMOK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE7</entry>
+      <entry>U+0E47</entry>
+      <entry>THAI CHARACTER MAITAIKHU</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE8</entry>
+      <entry>U+0E48</entry>
+      <entry>THAI CHARACTER MAI EK</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DE9</entry>
+      <entry>U+0E49</entry>
+      <entry>THAI CHARACTER MAI THO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DEA</entry>
+      <entry>U+0E4A</entry>
+      <entry>THAI CHARACTER MAI TRI</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DEB</entry>
+      <entry>U+0E4B</entry>
+      <entry>THAI CHARACTER MAI CHATTAWA</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DEC</entry>
+      <entry>U+0E4C</entry>
+      <entry>THAI CHARACTER THANTHAKHAT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DED</entry>
+      <entry>U+0E4D</entry>
+      <entry>THAI CHARACTER NIKHAHIT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF0</entry>
+      <entry>U+0E50</entry>
+      <entry>THAI DIGIT ZERO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF1</entry>
+      <entry>U+0E51</entry>
+      <entry>THAI DIGIT ONE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF2</entry>
+      <entry>U+0E52</entry>
+      <entry>THAI DIGIT TWO</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF3</entry>
+      <entry>U+0E53</entry>
+      <entry>THAI DIGIT THREE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF4</entry>
+      <entry>U+0E54</entry>
+      <entry>THAI DIGIT FOUR</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF5</entry>
+      <entry>U+0E55</entry>
+      <entry>THAI DIGIT FIVE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF6</entry>
+      <entry>U+0E56</entry>
+      <entry>THAI DIGIT SIX</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF7</entry>
+      <entry>U+0E57</entry>
+      <entry>THAI DIGIT SEVEN</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF8</entry>
+      <entry>U+0E58</entry>
+      <entry>THAI DIGIT EIGHT</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0DF9</entry>
+      <entry>U+0E59</entry>
+      <entry>THAI DIGIT NINE</entry>
+      <entry>Thai</entry>
+    </row>
+    <row>
+      <entry>#x0EA1</entry>
+      <entry>-</entry>
+      <entry>HANGUL KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA2</entry>
+      <entry>-</entry>
+      <entry>HANGUL SSANG KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA3</entry>
+      <entry>-</entry>
+      <entry>HANGUL KIYEOG SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA4</entry>
+      <entry>-</entry>
+      <entry>HANGUL NIEUN</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA5</entry>
+      <entry>-</entry>
+      <entry>HANGUL NIEUN JIEUJ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA6</entry>
+      <entry>-</entry>
+      <entry>HANGUL NIEUN HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA7</entry>
+      <entry>-</entry>
+      <entry>HANGUL DIKEUD</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA8</entry>
+      <entry>-</entry>
+      <entry>HANGUL SSANG DIKEUD</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EA9</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAA</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAB</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL MIEUM</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAC</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAD</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAE</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL TIEUT</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EAF</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL PHIEUF</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB0</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB1</entry>
+      <entry>-</entry>
+      <entry>HANGUL MIEUM</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB2</entry>
+      <entry>-</entry>
+      <entry>HANGUL PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB3</entry>
+      <entry>-</entry>
+      <entry>HANGUL SSANG PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB4</entry>
+      <entry>-</entry>
+      <entry>HANGUL PIEUB SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB5</entry>
+      <entry>-</entry>
+      <entry>HANGUL SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB6</entry>
+      <entry>-</entry>
+      <entry>HANGUL SSANG SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB7</entry>
+      <entry>-</entry>
+      <entry>HANGUL IEUNG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB8</entry>
+      <entry>-</entry>
+      <entry>HANGUL JIEUJ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EB9</entry>
+      <entry>-</entry>
+      <entry>HANGUL SSANG JIEUJ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBA</entry>
+      <entry>-</entry>
+      <entry>HANGUL CIEUC</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBB</entry>
+      <entry>-</entry>
+      <entry>HANGUL KHIEUQ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBC</entry>
+      <entry>-</entry>
+      <entry>HANGUL TIEUT</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBD</entry>
+      <entry>-</entry>
+      <entry>HANGUL PHIEUF</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBE</entry>
+      <entry>-</entry>
+      <entry>HANGUL HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EBF</entry>
+      <entry>-</entry>
+      <entry>HANGUL A</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC0</entry>
+      <entry>-</entry>
+      <entry>HANGUL AE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC1</entry>
+      <entry>-</entry>
+      <entry>HANGUL YA</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC2</entry>
+      <entry>-</entry>
+      <entry>HANGUL YAE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC3</entry>
+      <entry>-</entry>
+      <entry>HANGUL EO</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC4</entry>
+      <entry>-</entry>
+      <entry>HANGUL E</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC5</entry>
+      <entry>-</entry>
+      <entry>HANGUL YEO</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC6</entry>
+      <entry>-</entry>
+      <entry>HANGUL YE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC7</entry>
+      <entry>-</entry>
+      <entry>HANGUL O</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC8</entry>
+      <entry>-</entry>
+      <entry>HANGUL WA</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EC9</entry>
+      <entry>-</entry>
+      <entry>HANGUL WAE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECA</entry>
+      <entry>-</entry>
+      <entry>HANGUL OE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECB</entry>
+      <entry>-</entry>
+      <entry>HANGUL YO</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECC</entry>
+      <entry>-</entry>
+      <entry>HANGUL U</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECD</entry>
+      <entry>-</entry>
+      <entry>HANGUL WEO</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECE</entry>
+      <entry>-</entry>
+      <entry>HANGUL WE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ECF</entry>
+      <entry>-</entry>
+      <entry>HANGUL WI</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED0</entry>
+      <entry>-</entry>
+      <entry>HANGUL YU</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED1</entry>
+      <entry>-</entry>
+      <entry>HANGUL EU</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED2</entry>
+      <entry>-</entry>
+      <entry>HANGUL YI</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED3</entry>
+      <entry>-</entry>
+      <entry>HANGUL I</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED4</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED5</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG SSANG KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED6</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG KIYEOG SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED7</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG NIEUN</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED8</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG NIEUN JIEUJ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0ED9</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG NIEUN HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDA</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG DIKEUD</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDB</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDC</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL KIYEOG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDD</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL MIEUM</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDE</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EDF</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE0</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL TIEUT</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE1</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL PHIEUF</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE2</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG RIEUL HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE3</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG MIEUM</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE4</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE5</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG PIEUB SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE6</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE7</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG SSANG SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE8</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG IEUNG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EE9</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG JIEUJ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EEA</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG CIEUC</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EEB</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG KHIEUQ</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EEC</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG TIEUT</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EED</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG PHIEUF</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EEE</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EEF</entry>
+      <entry>-</entry>
+      <entry>HANGUL RIEUL YEORIN HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF0</entry>
+      <entry>-</entry>
+      <entry>HANGUL SUNKYEONGEUM MIEUM</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF1</entry>
+      <entry>-</entry>
+      <entry>HANGUL SUNKYEONGEUM PIEUB</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF2</entry>
+      <entry>-</entry>
+      <entry>HANGUL PAN SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF3</entry>
+      <entry>-</entry>
+      <entry>HANGUL KKOGJI DALRIN IEUNG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF4</entry>
+      <entry>-</entry>
+      <entry>HANGUL SUNKYEONGEUM PHIEUF</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF5</entry>
+      <entry>-</entry>
+      <entry>HANGUL YEORIN HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF6</entry>
+      <entry>-</entry>
+      <entry>HANGUL ARAE A</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF7</entry>
+      <entry>-</entry>
+      <entry>HANGUL ARAE AE</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF8</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG PAN SIOS</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EF9</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG KKOGJI DALRIN IEUNG</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EFA</entry>
+      <entry>-</entry>
+      <entry>HANGUL JONG SEONG YEORIN HIEUH</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x0EFF</entry>
+      <entry>-</entry>
+      <entry>KOREAN WON</entry>
+      <entry>Korean</entry>
+    </row>
+    <row>
+      <entry>#x13BC</entry>
+      <entry>U+0152</entry>
+      <entry>LATIN CAPITAL LIGATURE OE</entry>
+      <entry>Latin-9</entry>
+    </row>
+    <row>
+      <entry>#x13BD</entry>
+      <entry>U+0153</entry>
+      <entry>LATIN SMALL LIGATURE OE</entry>
+      <entry>Latin-9</entry>
+    </row>
+    <row>
+      <entry>#x13BE</entry>
+      <entry>U+0178</entry>
+      <entry>LATIN CAPITAL LETTER Y WITH DIAERESIS</entry>
+      <entry>Latin-9</entry>
+    </row>
+    <row>
+      <entry>#x20A0</entry>
+      <entry>-</entry>
+      <entry>CURRENCY ECU SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A1</entry>
+      <entry>-</entry>
+      <entry>CURRENCY COLON SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A2</entry>
+      <entry>-</entry>
+      <entry>CURRENCY CRUZEIRO SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A3</entry>
+      <entry>-</entry>
+      <entry>CURRENCY FRENCH FRANC SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A4</entry>
+      <entry>-</entry>
+      <entry>CURRENCY LIRA SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A5</entry>
+      <entry>-</entry>
+      <entry>CURRENCY MILL SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A6</entry>
+      <entry>-</entry>
+      <entry>CURRENCY NAIRA SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A7</entry>
+      <entry>-</entry>
+      <entry>CURRENCY PESETA SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A8</entry>
+      <entry>-</entry>
+      <entry>CURRENCY RUPEE SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20A9</entry>
+      <entry>-</entry>
+      <entry>CURRENCY WON SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20AA</entry>
+      <entry>-</entry>
+      <entry>CURRENCY NEW SHEQEL SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20AB</entry>
+      <entry>-</entry>
+      <entry>CURRENCY DONG SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+    <row>
+      <entry>#x20AC</entry>
+      <entry>U+20AC</entry>
+      <entry>CURRENCY EURO SIGN</entry>
+      <entry>Currency</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+</sect1>
+</appendix>

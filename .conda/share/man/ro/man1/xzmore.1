@@ -1,0 +1,57 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Andrew Dudman
+.\"          Lasse Collin
+.\"
+.\" Romanian translation for xz-man.
+.\" Mesajele în limba română pentru manualul pachetului XZ Utils.
+.\" Remus-Gabriel Chelu <remusgabriel.chelu@disroot.org>, 2022 - 2024.
+.\" Cronologia traducerii fișierului „xz-man”:
+.\" Traducerea inițială, făcută de R-GC, pentru versiunea xz-man 5.4.0-pre1.
+.\" Actualizare a traducerii pentru versiunea 5.4.0-pre2, făcută de R-GC, dec-2022.
+.\" Actualizare a traducerii pentru versiunea 5.4.3, făcută de R-GC, mai-2023.
+.\" Actualizare a traducerii pentru versiunea 5.4.4-pre1, făcută de R-GC, iul-2023.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre1, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea 5.6.0-pre2, făcută de R-GC, feb-2024.
+.\" Actualizare a traducerii pentru versiunea Y, făcută de X, Z(luna-anul).
+.\"
+.\" (Note that this file is based on xzless.1 instead of gzip's zmore.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZMORE 1 "12 februarie 2024" Tukaani "Utilități XZ"
+.SH NUME
+xzmore, lzmore \- vizualizează fișierele (text) comprimate xz sau lzma
+.
+.SH REZUMAT
+\fBxzmore\fP [\fIfișier\fP...]
+.br
+\fBlzmore\fP [\fIfișier\fP...]
+.
+.SH DESCRIERE
+\fBxzmore\fP afișează textul din fișierele comprimate pe un terminal folosind
+\fBmore\fP(1). Fișierele acceptate de \fBxz\fP(1) sunt decomprimate; se presupune
+că celelalte fișiere sunt deja în format necomprimat. Dacă nu se dă nici un
+\fIfișiere\fP, \fBxzmore\fP citește de la intrarea standard. Consultați manualul
+\fBmore\fP(1) pentru comenzile de la tastatură.
+.PP
+Rețineți că este posibil ca derularea înapoi să nu fie posibilă în funcție
+de implementarea lui \fBmore\fP(1). Acest lucru se datorează faptului că
+\fBxzmore\fP utilizează o conductă pentru a transmite datele decomprimate către
+\fBmore\fP(1). \fBxzless\fP(1) utilizează \fBless\fP(1) care oferă caracteristici mai
+avansate.
+.PP
+Comanda \fBlzmore\fP este furnizată pentru compatibilitate retroactivă cu LZMA
+Utils.
+.
+.SH "VARIABILE DE MEDIU"
+.TP 
+\fBPAGER\fP
+Dacă variabila de mediu \fBPAGER\fP, este definită, valoarea sa este utilizată
+ca paginator în loc de \fBmore\fP(1).
+.
+.SH "CONSULTAȚI ȘI"
+\fBmore\fP(1), \fBxz\fP(1), \fBxzless\fP(1), \fBzmore\fP(1)

@@ -1,0 +1,943 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<book id="saver">
+
+<bookinfo>
+   <title>X11 Screen Saver Extension</title>
+   <subtitle>MIT X Consortium Proposed Standard</subtitle>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <authorgroup>
+     <author>
+      <firstname>Jim</firstname><surname>Fulton</surname>
+      <affiliation><orgname>Network Computing Devices, Inc</orgname></affiliation>
+     </author>
+     <author>
+      <firstname>Keith</firstname><surname>Packard</surname>
+      <affiliation><orgname>
+X Consortium, Laboratory for Computer Science, Massachusetts Institute of Technology
+      </orgname></affiliation>
+     </author>
+   </authorgroup>
+
+   <copyright><year>1992</year>
+     <holder>Massachusetts Institute of Technology</holder>
+     <holder>Network Computing Devices, Inc</holder>
+   </copyright>
+
+
+<legalnotice>
+<para>
+Permission to use, copy, modify, and distribute this documentation for any
+purpose and without fee is hereby granted, provided that the above copyright
+notice and this permission notice appear in all copies.  MIT and
+Network Computing Devices, Inc. make no
+representations about the suitability for any purpose of the information in
+this document.  This documentation is provided "as is" without express or
+implied warranty.
+</para>
+
+</legalnotice>
+</bookinfo>
+
+<chapter id='Introduction'>
+<title>Introduction</title>
+<para>
+The X Window System provides support for changing the image on a display screen
+after a user-settable period of inactivity to avoid burning the cathode ray
+tube phosphors.  However, no interfaces are provided for the user to control
+the image that is drawn.  This extension allows an external "screen saver"
+client to detect when the alternate image is to be displayed and to provide the
+graphics.
+</para>
+<para>
+Current X server implementations typically provide at least one form of
+"screen saver" image.  Historically, this has been a copy of the X logo
+drawn against the root background pattern.  However, many users have asked
+for the mechanism to allow them to write screen saver programs that provide
+capabilities similar to those provided by other window systems.  In
+particular, such users often wish to be able to display corporate logos,
+instructions on how to reactivate the screen, and automatic screen-locking
+utilities.  This extension provides a means for writing such clients.
+</para>
+</chapter>
+
+<chapter id="Assumptions">
+<title>Assumptions</title>
+<para>
+This extension exports the notion of a special screen saver window that is
+mapped above all other windows on a display.  This window has the
+<emphasis remap='I'>override-redirect</emphasis> attribute set so that it is not subject to manipulation by
+the window manager.  Furthermore, the X identifier for the window is never
+returned by <function>QueryTree</function> requests on the root window, so it is typically
+not visible to other clients.
+</para>
+</chapter>
+
+<chapter id="Overview">
+<title>Overview</title>
+<para>
+The core
+<function>SetScreenSaver</function>
+request can be used to set the length of time without
+activity on any input devices after which the screen saver should "activate"
+and alter the image on the screen.  This image periodically "cycles" to
+reduce
+the length of time that any particular pixel is illuminated.  Finally, the
+screen saver is "deactivated" in response to activity on any of the input
+devices
+or particular X requests.
+</para>
+
+<para>
+Screen saving is typically done by disabling video output to the display tube
+or by drawing a changing pattern onto the display.  If the server chooses the
+latter approach, a window with a special identifier is created and mapped at
+the top of the stacking order where it remains until the screen saver
+deactivates.  At this time, the window is unmapped and is not accessible to any
+client requests.
+</para>
+<para>
+The server's default mechanism is referred to as the <emphasis remap='I'>internal</emphasis> screen
+saver.  An <emphasis remap='I'>external</emphasis>
+screen saver client requires a means of determining the window
+id for the screen saver window and setting the attributes (e.g. size,
+location, visual, colormap) to be used when the window is mapped.  These
+requirements form the basis of this extension.
+</para>
+</chapter>
+
+<chapter id="Issues">
+<title>Issues</title>
+<para>
+This extension raises several interesting issues.  First is the question of
+what should be done if some other client has the server grabbed when the screen
+saver is supposed to activate?  This commonly occurs with window managers that
+automatically ask the user to position a window when it is first mapped by
+grabbing the server and drawing XORed lines on the root window.
+</para>
+<para>
+Second, a screen saver program must control the actual RGB values sent to the
+display tube to ensure that the values change periodically to avoid phosphor
+burn in.  Thus, the client must have a known colormap installed whenever the
+screen saver window is displayed.  To prevent screen flashing, the visual type
+of the screen saver window should also be controllable.
+</para>
+<para>
+Third, some implementations may wish to destroy the screen saver window when
+it is not mapped so that it need not be avoided during event delivery.  Thus,
+screen saver clients may find that the requests that reference the screen
+saver window may fail when the window is not displayed.
+</para>
+</chapter>
+
+<chapter id="Protocol">
+<title>Protocol</title>
+<para>
+The Screen Saver extension is as follows:
+</para>
+
+<sect1 id="Types">
+<title>Types</title>
+<para>
+In addition to the common types described in the core protocol, the following
+type is used in the request and event definitions in subsequent sections.
+</para>
+
+<informaltable frame="topbot">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="1.5*"/>
+  <thead>
+    <row rowsep='1'>
+      <entry>Name</entry>
+      <entry>Value</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>SCREENSAVEREVENT</entry>
+      <entry><emphasis role="bold">ScreenSaverNotify</emphasis>,
+      <emphasis role="bold">ScreenSaverCycle</emphasis></entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+</sect1>
+
+<sect1 id="Errors">
+<title>Errors</title>
+<para>
+The Screen Saver extension adds no errors beyond the core protocol.
+</para>
+</sect1>
+
+<sect1 id="Requests">
+<title>Requests</title>
+<para>
+The Screen Saver extension adds the following requests:
+</para>
+
+<literallayout>
+<emphasis role="bold">ScreenSaverQueryVersion</emphasis>
+     client-major-version: CARD8
+     client-minor-version: CARD8
+->
+     server-major-version: CARD8
+     server-minor-version: CARD8
+</literallayout>
+
+<para>
+This request allows the client and server to determine which version of
+the protocol should be used.  The client sends the version that it
+prefers; if the server understands that
+version, it returns the same values and interprets subsequent requests
+for this extension according to the specified version.  Otherwise,
+the server returns the closest version of the protocol that it can
+support and interprets subsequent requests according to that version.
+This document describes major version 1, minor version 0; the major
+and minor revision numbers should only be incremented in response to
+incompatible and compatible changes, respectively.
+</para>
+
+<literallayout>
+<emphasis role="bold">ScreenSaverQueryInfo</emphasis>
+<emphasis>drawable</emphasis> DRAWABLE
+
+saver-window: WINDOW
+state: {<emphasis role="bold">Disabled</emphasis>, <emphasis role="bold">Off</emphasis>, <emphasis role="bold">On</emphasis>}
+kind: {<emphasis role="bold">Blanked</emphasis>, <emphasis role="bold">Internal</emphasis>, <emphasis role="bold">External</emphasis>}
+til-or-since: CARD32
+idle: CARD32
+event-mask: SETofSCREENSAVEREVENT
+
+Errors: <emphasis role="bold">Drawable</emphasis>
+</literallayout>
+
+<para>
+This request returns information about the state of the screen
+saver on the screen associated with <emphasis remap='I'>drawable</emphasis>.  The <emphasis remap='I'>saver-window</emphasis>
+is the XID that is associated with the screen saver window.  This
+window is not guaranteed to exist
+except when external screen saver is active.  Although it is a
+child of the root, this window is not returned by
+<function>QueryTree</function>
+requests on the root.  Whenever this window is mapped, it is always above
+any of its siblings in the stacking order.  XXX - TranslateCoords?
+</para>
+<para>
+The <emphasis remap='I'>state</emphasis> field specifies whether or not the screen saver is currently
+active and how the <emphasis remap='I'>til-or-since</emphasis> value should be interpreted:
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="5.0*"/>
+  <tbody>
+    <row>
+      <entry><emphasis role="bold">Off</emphasis></entry>
+      <entry>
+The screen is not currently being saved;
+<emphasis remap='I'>til-or-since</emphasis>
+specifies the number of milliseconds until the screen saver is expected to
+activate.
+      </entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">On</emphasis></entry>
+      <entry>
+The screen is currently being saved;
+<emphasis remap='I'>til-or-since</emphasis> specifies
+the number of milliseconds since the screen saver activated.
+      </entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">Disabled</emphasis></entry>
+      <entry>
+The screen saver is currently disabled;
+<emphasis remap='I'>til-or-since</emphasis> is zero.
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The <emphasis remap='I'>kind</emphasis> field specifies the mechanism that either is currently being
+used or would have been were the screen being saved:
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="5.0*"/>
+  <tbody>
+    <row>
+      <entry><emphasis role="bold">Blanked</emphasis></entry>
+      <entry>The video signal to the display monitor was disabled.</entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">Internal</emphasis></entry>
+      <entry>A server-dependent, built-in screen saver image was displayed; either no
+      client had set the screen saver window attributes or a different client
+      had the server grabbed when the screen saver activated.</entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">External</emphasis></entry>
+      <entry>The screen saver window was mapped with attributes set by a
+      client using the <function>ScreenSaverSetAttributes</function> request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The <emphasis remap='I'>idle</emphasis> field specifies the number of milliseconds since the last
+input was received from the user on any of the input devices.
+</para>
+
+<para>
+The <emphasis remap='I'>event-mask</emphasis> field specifies which, if any, screen saver
+events this client has requested using <function>ScreenSaverSelectInput</function>.
+</para>
+
+<para>
+If <emphasis remap='I'>drawable</emphasis> is not a valid drawable identifier, a Drawable
+error is returned and the request is ignored.
+</para>
+
+<literallayout>
+<emphasis role="bold">ScreenSaverSelectInput</emphasis>
+drawable: DRAWABLE
+event-mask: SETofSCREENSAVEREVENT
+</literallayout>
+
+<para>
+Errors:
+<emphasis role="bold">Drawable</emphasis>,
+<emphasis role="bold">Match</emphasis>
+</para>
+
+<para>
+This request specifies which Screen Saver extension events on the screen
+associated with <emphasis remap='I'>drawable</emphasis> should be generated for this client.  If
+no bits are set in <emphasis remap='I'>event-mask</emphasis>, then no events will be generated.
+Otherwise, any combination of the following bits may be set:
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="3.0*"/>
+  <tbody>
+    <row>
+      <entry><emphasis role="bold">ScreenSaverNotify</emphasis></entry>
+      <entry>
+If this bit is set, <emphasis role="bold">ScreenSaverNotify</emphasis> events are generated whenever
+the screen saver is activated or deactivated.
+      </entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">ScreenSaverCycle</emphasis></entry>
+      <entry>
+If this bit is set, <emphasis role="bold">ScreenSaverNotify</emphasis> events are generated whenever
+the screen saver cycle interval passes.
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+If <emphasis remap='I'>drawable</emphasis> is not a valid drawable identifier, a Drawable
+error is returned.  If any undefined bits are set in <emphasis remap='I'>event-mask</emphasis>,
+a Value error is returned.  If an error is returned,
+the request is ignored.
+</para>
+
+<para>
+<emphasis role="bold">ScreenSaverSetAttributes</emphasis>
+</para>
+<literallayout>
+drawable: DRAWABLE
+class:
+{<emphasis role="bold">InputOutput</emphasis>, <emphasis role="bold">InputOnly</emphasis>, <emphasis role="bold">CopyFromParent</emphasis>}
+depth: CARD8
+visual: VISUALID or <emphasis role="bold">CopyFromParent</emphasis>
+x, y: INT16
+width, height, border-width: CARD16
+value-mask: BITMASK
+value-list: LISTofVALUE
+
+<emphasis role="bold">Access</emphasis>, <emphasis role="bold">Window</emphasis>, <emphasis role="bold">Pixmap</emphasis>, <emphasis role="bold">Colormap</emphasis>, <emphasis role="bold">Cursor</emphasis>, <emphasis role="bold">Match</emphasis>, <emphasis role="bold">Value</emphasis>, <emphasis role="bold">Alloc</emphasis>
+</literallayout>
+
+<para>
+This request sets the attributes that this client would like to see
+used in creating the screen saver window on the screen associated
+with <emphasis remap='I'>drawable</emphasis>.  If another client currently has the attributes set,
+an Access error is generated and the request is ignored.
+</para>
+
+<para>
+Otherwise, the specified window attributes are checked as if
+they were used in a core <function>CreateWindow</function> request whose
+parent is the root.  The <emphasis remap='I'>override-redirect</emphasis> field is ignored as
+it is implicitly set to True.  If the window attributes result in an
+error according to the rules for <function>CreateWindow</function>, the request is ignored.
+</para>
+<para>
+Otherwise, the attributes are stored and will take effect on the next
+activation that occurs when the server is not grabbed by another client.
+Any resources specified for the
+<emphasis remap='I'>background-pixmap</emphasis> or <emphasis remap='I'>cursor</emphasis> attributes may be
+freed immediately.  The server is free to copy the <emphasis remap='I'>background-pixmap</emphasis>
+or <emphasis remap='I'>cursor</emphasis> resources or to use them in place; therefore, the effect of
+changing the contents of those resources is undefined.  If the
+specified <emphasis remap='I'>colormap</emphasis> no longer exists when the screen saver activates,
+the parent's colormap is used instead.  If no errors are generated by this
+request, any previous
+screen saver window attributes set by this client are released.
+</para>
+<para>
+When the screen saver next activates and the server is not grabbed by
+another client, the screen saver window is
+created, if necessary, and set to the specified attributes and events
+are generated as usual.  The colormap
+associated with the screen saver window is
+installed.  Finally, the screen saver window is mapped.
+</para>
+<para>
+The window remains mapped and at the top of the stacking order
+until the screen saver is deactivated in response to activity on
+any of the user input devices, a <function>ForceScreenSaver</function> request with
+a value of Reset, or any request that would cause the window to be
+unmapped.
+</para>
+<para>
+If the screen saver activates while the server is grabbed by another
+client, the internal saver mechanism is used.  The <function>ForceScreenSaver</function>
+request may be used with a value of Active to
+deactivate the internal saver and activate the external saver.
+</para>
+<para>
+If the screen saver client's connection to the server is broken
+while the screen saver is activated and the client's close down mode has not
+been RetainPermanent or RetainTemporary, the current screen saver
+is deactivated and the internal screen saver is immediately activated.
+</para>
+<para>
+When the screen saver deactivates, the screen saver window's colormap
+is uninstalled and the window is unmapped (except as described below).
+The screen saver XID is disassociated
+with the window and the server may, but is not required to,
+destroy the window along with any children.
+</para>
+<para>
+When the screen saver is being deactivated and then immediately
+reactivated (such as when switching screen savers), the server
+may leave the screen saver window mapped (typically to avoid
+generating exposures).
+</para>
+
+<para>
+<emphasis role="bold">ScreenSaverUnsetAttributes</emphasis>
+</para>
+
+<literallayout>
+<emphasis>drawble</emphasis>: <emphasis role="bold">DRAWABLE</emphasis>
+
+Errors: <emphasis role="bold">Drawable</emphasis>
+</literallayout>
+
+<para>
+This request notifies the server that this client no longer
+wishes to control the screen saver window.  Any screen saver
+attributes set by this client and any descendents of the screen
+saver window created by this client should be released
+immediately if the screen saver is not active, else upon
+deactivation.
+</para>
+<para>
+This request is ignored if the client has not previously set the screen saver
+window attributes.
+</para>
+</sect1>
+
+<sect1 id="Events">
+<title>Events</title>
+<para>
+The Screen Saver extension adds one event:
+</para>
+<para>
+<emphasis role="bold">ScreenSaverNotify</emphasis>
+</para>
+
+<literallayout>
+<emphasis role="bold">root</emphasis>: WINDOW
+<emphasis role="bold">window</emphasis>: WINDOW
+<emphasis role="bold">state</emphasis>: {<emphasis role="bold">Off</emphasis>, <emphasis role="bold">On</emphasis>, <emphasis role="bold">Cycle</emphasis>}
+<emphasis role="bold">kind</emphasis>: { <emphasis role="bold">Blanked</emphasis>, <emphasis role="bold">Internal</emphasis> , <emphasis role="bold">External</emphasis> }
+<emphasis role="bold">forced</emphasis>: BOOL
+<emphasis role="bold">time</emphasis>: TIMESTAMP
+</literallayout>
+<para>
+This event is delivered to clients that have requested
+ScreenSaverNotify events using the <function>ScreenSaverSelectInput</function> request
+whenever the screen saver activates or deactivates.
+</para>
+<para>
+The <emphasis remap='I'>root</emphasis> field specifies root window of the screen for
+which the event was generated.  The <emphasis remap='I'>window</emphasis> field specifies
+the value that is returned by <function>ScreenSaverQueryInfo</function> as
+the identifier for the screen saver window.  This window is not
+required to exist if the external screen saver is not active.
+</para>
+<para>
+The <emphasis remap='I'>state</emphasis> field specifies the cause of the event:
+</para>
+
+<informaltable frame="none">
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='2' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <colspec colname='c2' colwidth="5.0*"/>
+  <tbody>
+    <row>
+      <entry><emphasis role="bold">Off</emphasis></entry>
+      <entry>
+The screen saver deactivated; this event is sent if the client has set the
+ScreenSaverNotify bit in its event mask.
+      </entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">On</emphasis></entry>
+      <entry>
+The screen saver activated.  This event is sent if the client has set the
+ScreenSaverNotify bit in its event mask.
+      </entry>
+    </row>
+    <row>
+      <entry><emphasis role="bold">Cycle</emphasis></entry>
+      <entry>
+The cycle interval passed and the client is expected to change the image on
+the screen.  This event is sent if the client has set the
+ScreenSaverCycle bit in its event mask.
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+If <emphasis remap='I'>state</emphasis> is set to
+<emphasis role="bold">On </emphasis> or
+<emphasis role="bold">Off</emphasis>
+then <emphasis remap='I'>forced</emphasis> indicates whether or not
+activation or deactivation was caused by a core
+<function>ForceScreenSaver</function>
+request; otherwise, <emphasis remap='I'>forced</emphasis> is set to False.
+</para>
+
+<para>
+The <emphasis remap='I'>kind</emphasis> field specifies mechanism that was used to save the screen
+when the screen saver was activated, as described in
+<function>ScreenSaverQueryInfo</function>.
+</para>
+
+<para>
+The <emphasis remap='I'>time</emphasis> field indicates the server time
+when the event was generated.
+</para>
+</sect1>
+</chapter>
+
+<chapter id="Encoding">
+<title>Encoding</title>
+<para>
+Please refer to the X11 Protocol Encoding document as this document uses
+conventions established there.
+</para>
+<para>
+The name of this extension is "SCREEN-SAVER".
+</para>
+
+<sect1 id="Common_Types">
+<title>Common Types</title>
+<literallayout class="monospaced">
+SETofSCREENSAVEREVENT
+     #x00000001     ScreenSaverNotifyMask
+     #x00000002     ScreenSaverCycleMask
+</literallayout>
+</sect1>
+
+<sect1 id="Requests_2">
+<title>Requests</title>
+<literallayout class="monospaced">
+<emphasis role="bold">ScreenSaverQueryVersion</emphasis>
+1     CARD8                   screen saver opcode
+1     0                       minor opcode
+2     2                       request length
+1     CARD8                   client major version
+1     CARD8                   client minor version
+2                             unused
+->
+1     1                       Reply
+1                             unused
+2     CARD16                  sequence number
+4     0                       reply length
+1     CARD8                   server major version
+1     CARD8                   server minor version
+22                            unused
+
+<emphasis role="bold">ScreenSaverQueryInfo</emphasis>
+1     CARD8                   screen saver opcode
+1     1                       minor opcode
+2     2                       request length
+4     DRAWABLE                drawable associated with screen
+->
+1     1                       Reply
+1     CARD8                   state
+      0          Off
+      1          On
+      3          Disabled
+2     CARD16                  sequence number
+4     0                       reply length
+4     WINDOW                  saver window
+4     CARD32                  milliseconds until saver or since saver
+4     CARD32                  milliseconds since last user device input
+4     SETofSCREENSAVEREVENT   event mask
+1     CARD8                   kind
+      0          Blanked
+      1          Internal
+      2          External
+10               unused
+
+<emphasis role="bold">ScreenSaverSelectInput</emphasis>
+1     CARD8                   screen saver opcode
+1     2                       minor opcode
+2     3                       request length
+4     DRAWABLE                drawable associated with screen
+4     SETofSCREENSAVEREVENT   event mask
+
+<emphasis role="bold">ScreenSaverSetAttributes</emphasis>
+1     CARD8                   screen saver opcode
+1     3                       minor opcode
+2     6+n                     request length
+4     DRAWABLE                drawable associated with screen
+2     INT16                   x
+2     INT16                   y
+2     CARD16                  width
+2     CARD16                  height
+2     CARD16                  border-width
+1                             class
+      0          CopyFromParent
+      1          InputOutput
+      2          InputOnly
+1     CARD8                   depth
+4     VISUALID                visual
+      0          CopyFromParent
+4     BITMASK                 value-mask (has n bits set to 1)
+      encodings are the same as for core CreateWindow
+4n    LISTofVALUE             value-list
+      encodings are the same as for core CreateWindow
+
+<emphasis role="bold">ScreenSaverUnsetAttributes</emphasis>
+1     CARD8                   screen saver opcode
+1     4                       minor opcode
+2     3                       request length
+4     DRAWABLE                drawable associated with screen
+</literallayout>
+</sect1>
+
+<sect1 id="Events_2">
+<title>Events</title>
+
+<literallayout class="monospaced">
+<emphasis role="bold">ScreenSaverNotify</emphasis>
+1     CARD8                   code assigned by core
+1     CARD8                   state
+      0          Off
+      1          On
+      2          Cycle
+2     CARD16                  sequence number
+4     TIMESTAMP               time
+4     WINDOW                  root
+4     WINDOW                  screen saver window
+1     CARD8                   kind
+      0          Blanked
+      1          Internal
+      2          External
+1     BOOL                    forced
+14                            unused
+</literallayout>
+</sect1>
+</chapter>
+
+<chapter id='Inter_Client_Communications_Conventions'>
+<title>Inter-Client Communications Conventions</title>
+<para>
+Screen saver clients should create at least one resource value whose
+identifier can be stored in a property named
+<emphasis role="bold">_SCREEN_SAVER_ID</emphasis>
+on the root of each screen it is managing.
+This property should have one 32-bit value corresponding to the resource
+identifier; the type of the property should indicate the type of the
+resource and should be one of the following:
+<emphasis role="bold">WINDOW</emphasis>,
+<emphasis role="bold">PIXMAP</emphasis>,
+<emphasis role="bold">CURSOR</emphasis>,
+<emphasis role="bold">FONT</emphasis>, or
+<emphasis role="bold">COLORMAP</emphasis>.
+</para>
+</chapter>
+
+<chapter id="C_language_binding">
+<title>C language binding</title>
+
+<para>
+The C binding for this extension simply provide access to the protocol; they
+add no semantics beyond what is described above.
+</para>
+
+<para>
+The include file for this extension is
+<emphasis role="bold">&lt;X11/extensions/scrnsaver.h&gt;</emphasis>.
+</para>
+
+
+<funcsynopsis id='XScreenSaverQueryExtension'>
+<funcprototype>
+  <funcdef>Bool <function>XScreenSaverQueryExtension</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>*event_base</parameter></paramdef>
+    <paramdef>int <parameter>*error_base</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+This routine returns
+<emphasis role="bold">True</emphasis>
+if the specified <emphasis remap='I'>display</emphasis> supports the
+SCREEN-SAVER extension; otherwise it returns
+<emphasis role="bold">False</emphasis>.
+If the extension is supported, the event number for
+<function>ScreenSaverNotify</function>
+events is returned in the value pointed to by
+<emphasis remap='I'>event_base</emphasis>.  Since
+no additional errors are defined by this extension, the results
+of <emphasis remap='I'>error_base</emphasis> are not defined.
+</para>
+
+<funcsynopsis id='XScreenSaverQueryVersion'>
+<funcprototype>
+  <funcdef>Status <function>XScreenSaverQueryVersion</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>*major</parameter></paramdef>
+    <paramdef>int <parameter>*minor</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If the specified <emphasis remap='I'>display</emphasis> supports the
+extension, the version numbers of the protocol
+expected by the server are returned in
+<emphasis remap='I'>major</emphasis> and
+<emphasis remap='I'>minor</emphasis> and
+a non-zero value is returned.  Otherwise, the arguments are not
+set and 0 is returned.
+</para>
+
+<para>XScreenSaverInfo *</para>
+<para>XScreenSaverAllocInfo()</para>
+
+<para>
+This routine allocates and returns an
+<emphasis role="bold">XScreenSaverInfo</emphasis> structure
+for use in calls to <xref linkend='XScreenSaverQueryInfo' xrefstyle='select: title'/>.
+All fields in the
+structure are initialized to zero.  If insufficient memory is available,
+NULL is returned.  The results of this routine can be released
+using <olink targetdoc='libX11' targetptr='XFree'><function>XFree</function></olink>.
+</para>
+
+<funcsynopsis id='XScreenSaverQueryInfo'>
+<funcprototype>
+  <funcdef>Status <function>XScreenSaverQueryInfo</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>drawable</parameter></paramdef>
+    <paramdef>XScreenSaverInfo <parameter>*saver_info</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If the specified <emphasis remap='I'>display</emphasis> supports the extension,
+information about the current state of the
+screen server is returned in <emphasis remap='I'>saver_info</emphasis> and a non-zero value is
+returned.  The <function>XScreenSaverInfo</function> structure is
+defined as follows:
+</para>
+
+<literallayout class="monospaced">
+typedef struct {
+    Window window;                /* screen saver window */
+    int state;                    /* ScreenSaver{Off,On,Disabled} */
+    int kind;                     /* ScreenSaver{Blanked,Internal,External} */
+    unsigned long til_or_since;   /* milliseconds */
+    unsigned long idle;           /* milliseconds */
+    unsigned long event_mask;     /* events */
+} XScreenSaverInfo;
+</literallayout>
+
+<para>
+See the <function>ScreenSaverQueryInfo</function> request for a
+description of the fields.  If the extension is not supported,
+<emphasis remap='I'>saver_info</emphasis> is not changed and 0
+is returned.
+</para>
+
+<funcsynopsis id='XScreenSaverSelectInput'>
+<funcprototype>
+  <funcdef>void <function>XScreenSaverSelectInput</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>drawable</parameter></paramdef>
+    <paramdef>unsigned long <parameter>event_mask</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If the specified <emphasis remap='I'>display</emphasis> supports the extension,
+this routine asks that events related to
+the screen saver be generated for this client.
+The format of the events generated is:
+</para>
+
+<literallayout class="monospaced">
+typedef struct {
+    int type;               /* of event */
+    unsigned long serial;   /* # of last request processed by server */
+    Bool send_event;        /* true if this came from a SendEvent request */
+    Display *display;       /* Display the event was read from */
+    Window window;          /* screen saver window */
+    Window root;            /* root window of event screen */
+    int state;              /* ScreenSaver{Off,On,Cycle} */
+    int kind;               /* ScreenSaver{Blanked,Internal,External} */
+    Bool forced;            /* extents of new region */
+    Time time;              /* event timestamp */
+} XScreenSaverNotifyEvent;
+</literallayout>
+
+<para>
+See the definition of the
+<function>ScreenSaverSelectInput</function> request for descriptions
+of the allowed event masks.   <!-- xref ? -->
+</para>
+
+<funcsynopsis id='XScreenSaverSetAttributes'>
+<funcprototype>
+  <funcdef>void <function>XScreenSaverSetAttributes</function></funcdef>
+    <paramdef>Display <parameter>*dpy</parameter></paramdef>
+    <paramdef>Drawable <parameter>drawable</parameter></paramdef>
+    <paramdef>int <parameter>x</parameter></paramdef>
+    <paramdef>int <parameter>y</parameter></paramdef>
+    <paramdef>unsigned int <parameter>width</parameter></paramdef>
+    <paramdef>unsigned int <parameter>height</parameter></paramdef>
+    <paramdef>unsigned int <parameter>border_width</parameter></paramdef>
+    <paramdef>int <parameter>depth</parameter></paramdef>
+    <paramdef>unsigned int <parameter>class</parameter></paramdef>
+    <paramdef>Visual <parameter>*visual</parameter></paramdef>
+    <paramdef>unsigned long <parameter>valuemask</parameter></paramdef>
+    <paramdef>XSetWindowAttributes <parameter>*attributes</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If the specified <emphasis remap='I'>display</emphasis> supports the
+extension, this routine sets the attributes to be used
+the next time the external screen saver is activated.  See the definition
+of the <function>ScreenSaverSetAttributes</function> request for a
+description of each of the arguments.
+</para>
+
+<funcsynopsis id='XScreenSaverUnsetAttributes'>
+<funcprototype>
+  <funcdef>void <function>XScreenSaverUnsetAttributes</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>Drawable <parameter>drawable</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+If the specified <emphasis remap='I'>display</emphasis> supports the
+extension, this routine instructs the server to discard
+any previous screen saver window attributes set by this client.
+</para>
+
+<funcsynopsis id='XScreenSaverRegister'>
+<funcprototype>
+  <funcdef>Status <function>XScreenSaverRegister</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>screen</parameter></paramdef>
+    <paramdef>XID <parameter>xid</parameter></paramdef>
+    <paramdef>Atom <parameter>type</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+This routine stores the given <emphasis remap='I'>XID</emphasis> in the
+<emphasis role="bold">_SCREEN_SAVER_ID</emphasis> property (of the given
+<emphasis remap='I'>type</emphasis>) on the root window of the specified
+<emphasis remap='I'>screen</emphasis>.  It returns zero if an error
+is encountered and the property is not changed, otherwise it returns
+non-zero.
+</para>
+
+<funcsynopsis id='XScreenSaverUnregister'>
+<funcprototype>
+  <funcdef>Status <function>XScreenSaverUnregister</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>screen</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<para>
+This routine removes any <function>_SCREEN_SAVER_ID</function> from the
+root window of the specified <emphasis remap='I'>screen</emphasis>.
+It returns zero if an error is encountered and the property is changed,
+otherwise it returns non-zero.
+</para>
+
+<funcsynopsis id='XScreenSaverGetRegistered'>
+<funcprototype>
+  <funcdef>Status <function>XScreenSaverGetRegistered</function></funcdef>
+    <paramdef>Display <parameter>*display</parameter></paramdef>
+    <paramdef>int <parameter>screen</parameter></paramdef>
+    <paramdef>XID <parameter>*xid</parameter></paramdef>
+    <paramdef>ATOM <parameter>*type</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+
+<para>
+This routine returns the
+<emphasis remap='I'>XID</emphasis> and
+<emphasis remap='I'>type</emphasis> stored in the
+<emphasis role="bold">_SCREEN_SAVER_ID</emphasis> property on the
+root window of the specified <emphasis remap='I'>screen</emphasis>.
+It returns zero if an error
+is encountered or if the property does not exist or is not of the correct
+format; otherwise it returns non-zero.
+</para>
+
+</chapter>
+</book>

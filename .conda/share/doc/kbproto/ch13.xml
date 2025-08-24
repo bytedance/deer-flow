@@ -1,0 +1,442 @@
+<chapter id='The_Server_Database_of_Keyboard_Components'>
+<title>The Server Database of Keyboard Components</title>
+
+<para>
+The X server maintains a database of keyboard components and common keyboard
+mappings. This database contains five kinds of components; when combined, these
+five components provide a complete description of a keyboard and its behavior.
+</para>
+
+
+<para>
+The X Keyboard Extension provides requests to list the contents of this
+database, to assemble and complete keyboard descriptions by merging the current
+keyboard description with the contents of this database, or to replace the
+current keyboard description with a complete keyboard description assembled as
+described below.
+</para>
+
+<sect1 id='Component_Names'>
+<title>Component Names</title>
+
+<para>
+Component and keymap names have the form "<emphasis>
+class</emphasis>
+(<emphasis>
+member</emphasis>
+)" where <emphasis>
+class</emphasis>
+ describes a subset of the available components for a particular type and the
+optional <emphasis>
+member</emphasis>
+ identifies a specific component from that subset. For example, the name
+"atlantis(acme)" might specify the symbols used for the atlantis national
+keyboard layout by the vendor "acme." Each class has an optional <emphasis>
+default</emphasis>
+ member — references which specify a class but not a member refer to the
+default member of the class, if one exists.
+</para>
+
+
+<para>
+The <emphasis>
+class</emphasis>
+ and <emphasis>
+member</emphasis>
+ names are both specified using characters from the Latin-1 character set. XKB
+implementations must accept all alphanumeric characters, minus (‘-’) and
+underscore (‘_’) in class or member names, and must not accept parentheses,
+plus, vertical bar, percent sign, asterisk, question mark or white space. The
+use of other characters is implementation-dependent.
+</para>
+
+
+</sect1>
+<sect1 id='Partial_Components_and_Combining_Multiple_Components'>
+<title>Partial Components and Combining Multiple Components</title>
+
+<para>
+Some of the elements in the server database contain describe only a piece of
+the corresponding keyboard component. These <emphasis>
+partial</emphasis>
+ components should be combined with other components of the same type to be
+useful.
+</para>
+
+
+<para>
+For example, a partial symbols map might describe the differences between a
+common ASCII keyboard and some national layout. Such a partial map is not
+useful on its own because it does not include those symbols that are the same
+on both the ASCII and national layouts (such as function keys). On the other
+hand, this partial map can configure <emphasis>
+any</emphasis>
+ ASCII keyboard to use a national layout.
+</para>
+
+
+<para>
+Two components can be combined in two ways:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If the second component <emphasis>
+overrides</emphasis>
+ the first, any definitions that are present in both components are taken from
+the second.
+  </para>
+</listitem>
+<listitem>
+  <para>If the second component <emphasis>
+augments</emphasis>
+ the first, any definitions that are present in both components are taken from
+the first.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+Applications can use a <emphasis>
+component expression</emphasis>
+ to combine multiple components of some time into a complete description of
+some aspect of the keyboard. A component expression is a string which lists the
+components to be combined separated by operators which specify the rules for
+combining them. A complete description is assembled from the listed components,
+left to right, as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If the new elements are being merged with an existing map, the special
+component name ‘%’ refers to the unmodified value of the map.
+  </para>
+</listitem>
+<listitem>
+  <para>The ‘+’ operator specifies that the next specified component should
+override the current assembled definition.
+  </para>
+</listitem>
+<listitem>
+  <para>The ‘|’ operator specifies that the next specified component should
+augment the currently assembled definition.
+  </para>
+</listitem>
+<listitem>
+  <para>If the new elements are being merged with an existing map and the
+component expression begins with an operator, a leading ‘%’ is implied.
+  </para>
+</listitem>
+<listitem>
+  <para>If any unknown or illegal characters appear anywhere in the string, the
+entire expression is invalid and is ignored.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+For example, the component expression "+de" specifies that the default element
+of the "de" map should be applied to the current keyboard mapping, overriding
+any existing definitions.
+</para>
+
+
+<para>
+A slightly more involved example: the expression
+"acme(ascii)+de(basic)|iso9995-3" constructs a German (de) mapping for the
+ASCII keyboard supplied by the "acme" vendor. The new definition begins with
+the symbols for the default ASCII keyboard for Acme, overrides them with any
+keys that are defined for the default German keyboard layout and then applies
+the definitions from the iso9995-3 to any undefined keys or groups of keys
+(part three of the iso9995 standard defines a common set of bindings for the
+secondary group, but allows national layouts to override those definitions
+where necessary).
+</para>
+
+
+</sect1>
+<sect1 id='Component_Hints'>
+<title>Component Hints</title>
+
+<para>
+Each component has a set of flags that provide some additional hints about that
+component. XKB provides these hints for clients that present the keyboard
+database to users and specifies their interpretation only loosely. Clients can
+use these hints to constrain the list of components or to control the way that
+components are presented to the user.
+</para>
+
+
+<para>
+Hints for a component are reported with its name. The least significant byte of
+the hints field has the same meaning for all five types of keyboard components,
+and can contain any combination of the following values:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Flag</entry>
+    <entry>Meaning</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+LC_Hidden</emphasis>
+</entry>
+    <entry>Indicates a component that should not normally be presented to the
+user.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+LC_Default</emphasis>
+</entry>
+    <entry>Indicates a component that is the default member of its
+class.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+LC_Partial</emphasis>
+</entry>
+    <entry>Indicates a partial component.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+The interpretation of the most significant byte of the hints field is dependent
+on the type of component. The hints defined for each kind of component are
+listed in the section below that describes that kind of component.
+</para>
+
+
+</sect1>
+<sect1 id='Keyboard_Components'>
+<title>Keyboard Components</title>
+
+<para>
+The five types of components stored in the server database of keyboard
+components correspond to the <emphasis>
+symbols</emphasis>
+, <emphasis>
+geometry</emphasis>
+, <emphasis>
+keycodes</emphasis>
+, <emphasis>
+compat</emphasis>
+ and <emphasis>
+types</emphasis>
+ symbolic names associated with a keyboard.
+</para>
+
+</sect1>
+<sect1 id='The_Keycodes_Component'>
+<title>The Keycodes Component</title>
+
+<para>
+The <emphasis>
+keycodes</emphasis>
+ component of a keyboard mapping specifies the range and interpretation of the
+raw keycodes reported by the device. It sets the <emphasis>
+keycodes</emphasis>
+ symbolic name, the minimum and maximum legal keycodes for the keyboard, and
+the symbolic name for each key. The keycodes component might also contain
+aliases for some keys, symbolic names for some indicators, and a description of
+which indicators are physically present.
+</para>
+
+
+<para>
+The special keycodes component named "computed" indicates that XKB should
+assign unused keycodes to any unknown keys referenced by name by any of the
+other components. The computed keycodes component is useful primarily when
+browsing keymaps because it makes it possible to use the symbols and geometry
+components without having to find a set of keycodes that includes keycode
+definitions for all of the keys listed in the two components.
+</para>
+
+
+<para>
+XKB defines no hints that are specific to the keycodes component.
+</para>
+
+
+<sect2 id='The_Types_Component'>
+<title>The Types Component</title>
+
+<para>
+The <emphasis>
+types</emphasis>
+ component of a keyboard mapping specifies the key types that can be associated
+with the various keyboard keys. It affects the <emphasis>
+types</emphasis>
+ symbolic name and the list of types associated with the keyboard (see
+<link linkend='Key_Types'>Key Types</link>). The types component
+of a keyboard mapping can also optionally contain real modifier bindings and
+symbolic names for one or more virtual modifiers.
+</para>
+
+
+<para>
+The special types component named "canonical" always contains the types and
+definitions listed in <link linkend="canonical_key_types">Canonical Key Types</link> of this document.
+</para>
+
+
+<para>
+XKB defines no hints that are specific to the types component.
+</para>
+
+
+</sect2>
+<sect2 id='The_Compatibility_Map_Component'>
+<title>The Compatibility Map Component</title>
+
+<para>
+The <emphasis>
+compatibility map</emphasis>
+ component of a keyboard mapping primarily specifies the rules used to assign
+actions to keysyms. It affects the <emphasis>
+compat</emphasis>
+ symbolic name, the symbol compatibility map and the group compatibility map.
+The compat component might also specify maps for some indicators and the real
+modifier bindings and symbolic names of some virtual modifiers.
+</para>
+
+
+<para>
+XKB defines no hints that are specific to the compatibility map component.
+</para>
+
+
+</sect2>
+<sect2 id='The_Symbols_Component'>
+<title>The Symbols Component</title>
+
+<para>
+The <emphasis>
+symbols</emphasis>
+ component of a keyboard mapping specifies primarily the symbols bound to each
+keyboard key. It affects the <emphasis>
+symbols</emphasis>
+ symbolic name, a key symbol mapping for each key, they keyboard modifier
+mapping, and the symbolic names for the keyboard symbol groups. Optionally, the
+<emphasis>
+symbols</emphasis>
+ component can contain explicit actions and behaviors for some keys, or the
+real modifier bindings and symbolic names for some virtual modifiers.
+</para>
+
+
+<para>
+XKB defines the following additional hints for the symbols component:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Flag</entry>
+    <entry>Meaning</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+LC_AlphanumericKeys</emphasis>
+</entry>
+    <entry>Indicates a symbol component that contains bindings primarily for an
+alphanumeric section of the keyboard.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+LC_ModifierKeys</emphasis>
+</entry>
+    <entry>Indicates a symbol component that contains bindings primarily for
+modifier keys.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+LC_KeypadKeys</emphasis>
+</entry>
+    <entry>Indicates a symbol component that contains bindings primarily for
+numeric keypad keys.</entry>
+  </row>
+  <row>
+    <entry>LC_FunctionKeys</entry>
+    <entry>Indicates a symbol component that contains bindings primarily for
+function keys.</entry>
+  </row>
+  <row>
+    <entry>LC_AlternateGroup</entry>
+    <entry>Indicates a symbol component that contains bindings for an alternate
+keyboard group.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+These hints only apply to partial symbols components; full symbols components
+are assumed to specify all of the pieces listed above.
+</para>
+
+<note><para>The alphanumeric, modifier, keypad or function keys hints should
+describe the primary intent of the component designer and should not simply an
+exhaustive list of the kinds of keys that are affected. For example, national
+keyboard layouts affect primarily alphanumeric keys, but many affect a few
+modifier keys too; such mappings should set only <emphasis>
+LC_AlphanumericKeys</emphasis>
+ hint. In general, symbol components should set only one of those four flags
+(though <emphasis>
+LC_AlternateGroup</emphasis>
+ may be combined with any of the other flags).</para></note>
+
+</sect2>
+<sect2 id='The_Geometry_Component'>
+<title>The Geometry Component</title>
+
+<para>
+The <emphasis>
+geometry</emphasis>
+ component of a keyboard mapping specifies primarily the geometry of the
+keyboard. It contains the geometry symbolic name and the keyboard geometry
+description. The geometry component might also contain aliases for some keys or
+symbolic names for some indicators and might affect the set of indicators that
+are physically present. Key aliases defined in the geometry component of a
+keyboard mapping override those defined in the keycodes component.
+</para>
+
+
+<para>
+XKB defines no hints that are specific to the geometry component.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='Complete_Keymaps'>
+<title>Complete Keymaps</title>
+
+<para>
+The X server also reports a set of fully specified keymaps. The keymaps
+specified in this list are usually assembled from the components stored in the
+rest of the database and typically represent the most commonly used keymaps for
+a particular system.
+</para>
+
+
+<para>
+XKB defines no hints that are specific to complete keymaps.
+</para>
+</sect1>
+</chapter>

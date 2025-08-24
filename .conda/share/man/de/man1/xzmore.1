@@ -1,0 +1,49 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Andrew Dudman
+.\"          Lasse Collin
+.\"
+.\" German translation for xz-man.
+.\" Mario Blättermann <mario.blaettermann@gmail.com>, 2015, 2019-2020, 2022-2024.
+.\"
+.\" (Note that this file is based on xzless.1 instead of gzip's zmore.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZMORE 1 "12. Februar 2024" Tukaani XZ\-Dienstprogramme
+.SH BEZEICHNUNG
+xzmore, lzmore \- mit xz oder lzma komprimierte (Text\-)Dateien lesen
+.
+.SH ÜBERSICHT
+\fBxzmore\fP [\fIDatei\fP …]
+.br
+\fBlzmore\fP [\fIDatei\fP …]
+.
+.SH BESCHREIBUNG
+\fBxzmore\fP zeigt Text aus komprimierten Dateien mit Hilfe des Pagers
+(Textanzeigeprogramms) \fBmore\fP(1) in einem Terminal an. Von \fBxz\fP(1)
+unterstützte Dateien werden dekomprimiert; für andere Dateien wird
+angenommen, dass sie bereits in unkomprimierter Form vorliegen. Wenn keine
+\fIDateien\fP angegeben werden, liest \fBxzmore\fP aus der Standardeingabe. Im
+\fBmore\fP(1)\-Handbuch finden Sie Informationen zu den Tastaturbefehlen.
+.PP
+Beachten Sie, dass Zurückrollen nicht möglich sein könnte, abhängig von der
+Implementierung von \fBmore\fP(1). Das kommt daher, dass \fBxzmore\fP eine Pipe
+verwendet, um die dekomprimierten Daten an \fBmore\fP(1) zu
+übergeben. \fBxzless\fP(1) verwendet \fBless\fP(1), welches fortgeschrittenere
+Funktionen bietet.
+.PP
+Der Befehl \fBlzmore\fP dient der Abwärtskompatibilität zu den
+LZMA\-Dienstprogrammen.
+.
+.SH UMGEBUNGSVARIABLEN
+.TP 
+\fBPAGER\fP
+Falls die Umgebungsvariable \fBPAGER\fP gesetzt ist, wird diese als Pager
+(Textanzeigeprogramm) anstelle von \fBmore\fP(1) verwendet.
+.
+.SH "SIEHE AUCH"
+\fBmore\fP(1), \fBxz\fP(1), \fBxzless\fP(1), \fBzmore\fP(1)

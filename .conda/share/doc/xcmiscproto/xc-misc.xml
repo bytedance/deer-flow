@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<!-- lifted from troff+ms+XMan by doclifter -->
+<book id="xc-misc">
+
+<bookinfo>
+   <title>XC-MISC Extension</title>
+   <subtitle>X Consortium Standard</subtitle>
+   <authorgroup>
+      <author>
+         <firstname>Bob</firstname><surname>Scheifler</surname>
+         <affiliation><orgname>X Consortium</orgname></affiliation>
+      </author>
+      <author>
+	<firstname>David</firstname><othername>P.</othername><surname>Wiggins</surname>
+        <affiliation><orgname>X Consortium</orgname></affiliation>
+      </author>
+   </authorgroup>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.1</releaseinfo>
+   <copyright><year>1994</year><holder>X Consortium</holder></copyright>
+
+<legalnotice>
+
+<para>Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &ldquo;Software&rdquo;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:</para>
+
+<para>The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.</para>
+
+<para>THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</para>
+
+<para>Except as contained in this notice, the name of the X Consortium shall not be used in advertising or otherwise to promote the sale, use or other dealings in this Software without prior written authorization from the X Consortium.</para>
+
+<para>X Window System is a trademark of The Open Group.</para>
+</legalnotice>
+
+</bookinfo>
+
+<chapter id='Overview'>
+<title>Overview</title>
+
+<para>When an X client connects to an X server, it receives a fixed range of
+resource IDs to use to identify the client's resources inside the X
+server.  Xlib hands these out sequentially as needed.  When it
+overruns the end of the range, an IDChoice protocol error results.
+Long running clients, or clients that use resource IDs at a rapid
+rate, may encounter this circumstance.  When it happens, there are
+usually many resource IDs available, but Xlib doesn't know about them.</para>
+
+<para>One approach to solving this problem would be to have Xlib notice when
+a resource is freed and recycle its ID for future use.  This strategy
+runs into difficulties because sometimes freeing one resource causes
+others to be freed (for example, when a window is destroyed, so are
+its children).  To do a complete job, Xlib would have to maintain a
+large amount of state that currently resides only in the server (the
+entire window tree in the above example).  Even if a less
+comprehensive strategy was adopted, such as recycling only those IDs
+that Xlib can identify without maintaining additional state, the
+additional bookkeeping at resource creation and destruction time
+would likely introduce unacceptable overhead.</para>
+
+<para>To avoid the problems listed above, the server's complete knowledge of
+all resource IDs in use by a client is leveraged.  This extension
+provides two ways for Xlib to query the server for available resource
+IDs.  Xlib can use these extension requests behind the scenes when it has
+exhausted its current pool of resource IDs.</para>
+</chapter>
+
+<chapter id='Requests'>
+<title>Requests</title>
+
+<para>
+<function>XCMiscGetVersion</function></para>
+
+<itemizedlist>
+    <listitem><para><parameter>client_major_version</parameter>: CARD16</para></listitem>
+    <listitem><para><parameter>client_minor_version</parameter>: CARD16</para></listitem>
+</itemizedlist>
+<para>   =&gt;</para>
+<itemizedlist>
+    <listitem><para><parameter>client_major_version</parameter>: CARD16</para></listitem>
+    <listitem><para><parameter>client_minor_version</parameter>: CARD16</para></listitem>
+</itemizedlist>
+
+<para>If supplied, the <parameter>client_major_version</parameter> and
+<parameter>client_minor_version</parameter> indicate what version of
+the protocol the client wants the server to implement.  The server version
+numbers returned indicate the protocol this extension actually supports.  This
+might not equal the version sent by the client.  An implementation can
+(but need not) support more than one version simultaneously.  The
+<parameter>server_major_version</parameter> and the <parameter>server_minor_version</parameter> are a
+mechanism to support future revisions of the XC-MISC protocol
+which may be necessary.  In general, the major version would increment
+for incompatible changes, and the minor version would increment for
+small, upward-compatible changes.  Servers that support the protocol
+defined in this document will return a
+<parameter>server_major_version</parameter> of one (1), and a
+<parameter>server_minor_version</parameter> of one (1).</para>
+
+<para><function>XCMiscGetXIDRange</function></para>
+
+<para>   =&gt;</para>
+<itemizedlist>
+    <listitem><para><parameter>start_id</parameter>: XID</para></listitem>
+    <listitem><para><parameter>count</parameter>: CARD32</para></listitem>
+</itemizedlist>
+
+<para>This request returns a range of available resource IDs for the client
+issuing the request.  <parameter>start_id</parameter> is the first
+ID in the range.  <parameter>count</parameter> is the number of IDs
+in the range.  The returned range may or may not be the largest possible
+range.</para>
+
+<para><function>XCMiscGetXIDList</function></para>
+
+<itemizedlist>
+    <listitem><para><parameter>count</parameter>: CARD32</para></listitem>
+</itemizedlist>
+<para>   =&gt;</para>
+<itemizedlist>
+    <listitem><para><parameter>ids</parameter>: LISTofXID</para></listitem>
+</itemizedlist>
+
+<para>This request returns the a list of individual resource IDs in
+<parameter>ids</parameter>.
+<parameter>count</parameter> is the number of resource IDs requested.
+The number returned may be smaller than the number requested.</para>
+</chapter>
+
+<chapter id='Events_and_Errors'>
+<title>Events and Errors</title>
+
+<para>No new events or errors are defined by this extension.</para>
+</chapter>
+
+<chapter id='Encoding'>
+<title>Encoding</title>
+
+<para>Please refer to the X11 Protocol Encoding document as this document uses
+conventions established there.</para>
+
+<para>The name of this extension is &ldquo;XC-MISC&rdquo;.</para>
+
+<synopsis>
+<function>XCMiscGetVersion</function>
+     1     CARD8          opcode
+     1     0                      XC-MISC opcode
+     2     2                      request length
+     2     CARD16         client_major_version
+     2     CARD16         client_minor_version
+
+ =&gt;
+     1     1          Reply
+     1                unused
+     2     CARD16     sequence number
+     4     0          length
+     2     CARD16     server_major_version
+     2     CARD16     server_minor_version
+     20               unused
+</synopsis>
+
+<synopsis>
+<function>XCMiscGetXIDRange</function>
+     1     CARD8        opcode
+     1     1                   XC-MISC opcode
+     2     1                   request length
+
+ =&gt;
+     1     1          Reply
+     1                unused
+     2     CARD16     sequence number
+     4     0          length
+     4     XID        start_id
+     4     CARD32     count
+     16               unused
+</synopsis>
+
+
+<synopsis>
+<function>XCMiscGetXIDList</function>
+     1     CARD8          opcode
+     1     2                      XC-MISC opcode
+     2     2                      request length
+     4     CARD32         count
+
+ =&gt;
+     1     1          Reply
+     1                unused
+     2     CARD16     sequence number
+     4     CARD32     length
+     4     CARD32     number of XIDs in ids
+     20               unused
+     4n    LISTofXID  ids
+</synopsis>
+</chapter>
+</book>
+

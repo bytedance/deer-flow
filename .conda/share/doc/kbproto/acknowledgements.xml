@@ -1,0 +1,41 @@
+<preface>
+<title>Acknowledgments</title>
+
+<para>
+I am grateful for all of the comments and suggestions I have received over the years. I could not possibly list everyone who has helped, but a few people have gone well above and beyond the call of duty and simply must be listed here.
+</para>
+
+<para>
+My managers here at SGI, Tom Paquin (now at Netscape) and Gianni Mariani were wonderful. Rather than insisting on some relatively quick, specialized proprietary solution to the keyboard problems we were having, both Tom and Gianni understood the importance of solving them in a general way and for the community as a whole. That was a difficult position to take and it was even harder to maintain when the scope of the project expanded beyond anything we imagined was possible. Gianni and Tom were unflagging in their support and their desire to “do the right thing” despite the schedule and budget pressure that intervened from time to time.
+</para>
+
+<para>
+Will Walker, at Digital Equipment Corporation, has been a longtime supporter of XKB. His help and input was essential to ensure that the extension as a whole fits and works together well. His focus was AccessX but the entire extension has benefited from his input and hard work. Without his unflagging good cheer and willingness to lend a hand, XKB would not be where it is today.
+</para>
+
+<para>
+Matt Landau, at the X Consortium, stood behind XKB during some tough spots in the release and standardization process. Without Matt’s support, XKB would likely not be a standard for a long time to come. When it became clear that we had too much to do for the amount of time we had remaining, Matt did a fantastic job of finding people to help finish the work needed for standardization.
+</para>
+
+<para>
+One of those people was George Sachs, at Hewlett-Packard, who jumped in to help out. His help was essential in getting the extension into this release. Another was Donna Converse, who helped figure out how to explain all of this stuff to someone who hadn’t had their head buried in it for years.
+</para>
+
+<para>
+Amber Benson and Gary Aitken were simply phenomenal. They jumped into a huge and complicated project with good cheer and unbelievable energy. They were “up to speed” and contributing within days. I stand in awe of the amount that they managed to achieve in such a short time. Thanks to Gary and Amber, the XKB library specification is a work of art and a thousand times easier to use and more useful than it would otherwise be.
+</para>
+
+<para>
+I truly cannot express my gratitude to all of you, without whom this would not have been possible.
+</para>
+
+<para>
+Erik Fortune
+</para>
+<para>
+Silicon Graphics, Inc.
+</para>
+<para>
+5 February 1996
+</para>
+</preface>

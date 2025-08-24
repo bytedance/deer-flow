@@ -1,0 +1,38 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Author: Lasse Collin
+.\"
+.\" Korean translation for the xz-man
+.\" Seong-ho Cho <darkcircle.0426@gmail.com>, 2023, 2024.
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH LZMAINFO 1 2013\-06\-30 Tukaani "XZ 유틸리티"
+.SH 이름
+lzmainfo \- .lzma 파일 헤더에 들어있는 정보를 보여줍니다
+.SH 요약
+\fBlzmainfo\fP [\fB\-\-help\fP] [\fB\-\-version\fP] [\fI<파일>...\fP]
+.SH 설명
+\fBlzmainfo\fP 는 \fB.lzma\fP 파일 헤더에 들어있는 정보를 보여줍니다.  지정 \fI<파일>\fP에서 13바이트를
+우선 읽어 헤더를 디코딩한 후, 가독 형식으로 표준 출력에 보여줍니다.  \fI<파일>\fP을 지정하지 않거나
+\fI<파일>\fP 값이 \fI\-\fP 이면 표준 입력을 읽습니다.
+.PP
+보통 대부분 관심있는 정보는 압축 해제 용량과 딕서너리 크기입니다.  압축 해제 용량의 경우 파일이 비스트림 \fB.lzma\fP 형식 계열인
+경우에만 나타납니다.  파일 압축 해제 필요 메모리 용량은 수십 킬로바이트에 딕셔너리 크기를 합친 값입니다.
+.PP
+\fBlzmainfo\fP 는 LZMA 유틸리티 하위 호환성을 목적으로 XZ 유틸리티에 기본으로 들어있습니다.
+.SH "종료 상태"
+.TP 
+\fB0\fP
+모든 상태 양호.
+.TP 
+\fB1\fP
+오류 발생.
+.SH 버그
+\fBlzmainfo\fP 프로그램은 \fBMiB\fP (2^20 바이트) 용량 단위인데 (실제로) \fBMB\fP를 사용합니다.  LZMA 유틸리티
+출력 호환 유지가 목적입니다.
+.SH "추가 참조"
+\fBxz\fP(1)

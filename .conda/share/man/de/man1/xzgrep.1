@@ -1,0 +1,96 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" German translation for xz-man.
+.\" Mario Blättermann <mario.blaettermann@gmail.com>, 2015, 2019-2020, 2022-2024.
+.\"
+.\" (Note that this file is not based on gzip's zgrep.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZGREP 1 "13. Februar 2024" Tukaani XZ\-Dienstprogramme
+.SH BEZEICHNUNG
+xzgrep \- möglicherweise komprimierte Dateien nach Mustern durchsuchen
+.
+.SH ÜBERSICHT
+\fBxzgrep\fP [\fIOption …\fP] [\fIMusterliste\fP] [\fIDatei …\fP]
+.br
+\fBxzegrep\fP …
+.br
+\fBxzfgrep\fP …
+.br
+\fBlzgrep\fP …
+.br
+\fBlzegrep\fP …
+.br
+\fBlzfgrep\fP …
+.
+.SH BESCHREIBUNG
+\fBxzgrep\fP ruft \fBgrep\fP(1) mit dem unkomprimierten Inhalt von Dateien
+auf. Die Formate der \fIDateien\fP werden aus den Dateiendungen
+abgeleitet. Jede \fIDatei\fP mit einer Endung, die von \fBxz\fP(1), \fBgzip\fP(1),
+\fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1) oder \fBlz4\fP(1) unterstützt wird, wird
+dekomprimiert; für andere Dateien wird angenommen, dass sie bereits in
+unkomprimierter Form vorliegen.
+.PP
+Wenn keine \fIDateien\fP angegeben werden oder \fIDatei\fP als \fB\-\fP angegeben
+wird, wird aus der Standardeingabe gelesen. Beim Lesen aus der
+Standardeingabe werden nur die von \fBxz\fP(1) unterstützten Dateien
+dekomprimiert. Für andere Dateien wird angenommen, dass sie bereits in
+unkomprimierter Form vorliegen.
+.PP
+Die meisten \fIOptionen\fP von \fBgrep\fP(1) werden unterstützt, die folgenden
+jedoch nicht:
+.IP "" 4
+\fB\-r\fP, \fB\-\-recursive\fP
+.IP "" 4
+\fB\-R\fP, \fB\-\-dereference\-recursive\fP
+.IP "" 4
+\fB\-d\fP, \fB\-\-directories=\fP\fIAktion\fP
+.IP "" 4
+\fB\-Z\fP, \fB\-\-null\fP
+.IP "" 4
+\fB\-z\fP, \fB\-\-null\-data\fP
+.IP "" 4
+\fB\-\-include=\fP\fIGlob\fP
+.IP "" 4
+\fB\-\-exclude=\fP\fIGlob\fP
+.IP "" 4
+\fB\-\-exclude\-from=\fP\fIDatei\fP
+.IP "" 4
+\fB\-\-exclude\-dir=\fP\fIGlob\fP
+.PP
+\fBxzegrep\fP ist ein Alias für \fBxzgrep \-E\fP.  \fBxzfgrep\fP ist ein Alias für
+\fBxzgrep \-F\fP.
+.PP
+Die Befehle \fBlzgrep\fP, \fBlzegrep\fP und \fBlzfgrep\fP dienen der
+Abwärtskompatibilität zu den LZMA\-Dienstprogrammen.
+.
+.SH EXIT\-STATUS
+.TP 
+0
+In mindestens einer der Eingabedateien wurde mindestens ein Treffer
+gefunden. Es sind keine Fehler aufgetreten.
+.TP 
+1
+In keiner der Eingabedateien wurde ein Treffer gefunden. Es sind keine
+Fehler aufgetreten.
+.TP 
+>1
+Ein oder mehrere Fehler sind aufgetreten. Es ist unbekannt, ob Treffer
+gefunden wurden.
+.
+.SH UMGEBUNGSVARIABLEN
+.TP 
+\fBGREP\fP
+Wenn die Umgebungsvariable \fBGREP\fP auf einen nicht\-leeren Wert gesetzt ist,
+wird diese anstelle von \fBgrep\fP(1), \fBgrep \-E\fP oder \fBgrep \-F\fP verwendet.
+.
+.SH "SIEHE AUCH"
+\fBgrep\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1),
+\fBlz4\fP(1), \fBzgrep\fP(1)

@@ -1,0 +1,47 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# timer --
+# This script generates a counter with start and stop buttons.
+
+package require Tk
+
+label .counter -text 0.00 -relief raised -width 10 -padx 2m -pady 1m
+button .start -text Start -command {
+    if {$stopped} {
+	set stopped 0
+	set startMoment [clock clicks -milliseconds]
+	tick
+	.stop configure -state normal
+	.start configure -state disabled
+    }
+}
+button .stop -text Stop -state disabled -command {
+    set stopped 1
+    .stop configure -state disabled
+    .start configure -state normal
+}
+pack .counter -side bottom -fill both
+pack .start -side left -fill both -expand yes
+pack .stop -side right -fill both -expand yes
+
+set startMoment {}
+
+set stopped 1
+
+proc tick {} {
+    global startMoment stopped
+    if {$stopped} {return}
+    after 50 tick
+    set elapsedMS [expr {[clock clicks -milliseconds] - $startMoment}]
+    .counter config -text [format "%.2f" [expr {double($elapsedMS)/1000}]]
+}
+
+bind . <Control-c> {destroy .}
+bind . <Control-q> {destroy .}
+focus .
+
+# Local Variables:
+# mode: tcl
+# End:

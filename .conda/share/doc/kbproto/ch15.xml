@@ -1,0 +1,233 @@
+<chapter id='Interactions_Between_XKB_and_the_X_Input_Extension'>
+<title>Interactions Between XKB and the X Input Extension</title>
+
+<para>
+All XKB interactions with the input extension are optional; implementors are
+free to restrict the effects of the X Keyboard Extension to the core keyboard
+device. The <emphasis>
+XkbGetExtensionDeviceInfo</emphasis>
+ request reports whether or not an XKB implementation supports a particular
+capability for input extension devices.
+</para>
+
+
+<para>
+XKB recognizes the following interactions with the X Input Extension:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Name</entry>
+    <entry>Capability</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>XI_Keyboards</entry>
+    <entry>If set, applications can use all XKB requests and events with
+extension keyboards.</entry>
+  </row>
+  <row>
+    <entry>XI_ButtonActions</entry>
+    <entry>If set, clients can assign key actions to buttons, even on input
+extension devices that are not keyboards.</entry>
+  </row>
+  <row>
+    <entry>XI_IndicatorNames</entry>
+    <entry>If set, clients can assign names to indicators on non-keyboard
+extension devices.</entry>
+  </row>
+  <row>
+    <entry>XI_IndicatorMaps</entry>
+    <entry>If set, clients can assign indicator maps to indicators on
+non-keyboard extension devices. </entry>
+  </row>
+  <row>
+    <entry>XI_IndicatorState</entry>
+    <entry>If set, clients can change the state of device indicators using the
+<emphasis>
+XkbSetExtensionDeviceInfo</emphasis>
+ request.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Attempts to use an XKB feature with an extension device fail with a <emphasis>
+Keyboard</emphasis>
+ error if the server does not support the <emphasis>
+XkbXI_Keyboards</emphasis>
+ optional feature. If a capability particular capability other than <emphasis>
+XkbXI_Keyboards</emphasis>
+ is not supported, attempts to use it fail silently. The replies for most
+requests that can use one of the other optional features include a field to
+report whether or not the request was successful, but such requests do not
+cause an error condition.
+</para>
+
+
+<para>
+Clients can also request an <emphasis>
+XkbExtensionDeviceNotify</emphasis>
+ event. This event notifies interested clients of changes to any of the
+supported XKB features for extension devices, or if a request from the client
+that is receiving the event attempted to use an unsupported feature.
+</para>
+
+<sect1 id='Using_XKB_Functions_with_Input_Extension_Keyboards'>
+<title>Using XKB Functions with Input Extension Keyboards</title>
+
+<para>
+All XKB requests and events include a device identifier which can refer to an
+input extension <emphasis>
+KeyClass</emphasis>
+ device, if the implementation allows XKB to control extension devices. If the
+implementation does not support XKB manipulation of extension devices, the
+device identifier is ignored but it must be either <emphasis>
+0</emphasis>
+ or <emphasis>
+UseCoreKbd</emphasis>
+.
+</para>
+
+
+<para>
+Implementations which do not support the use of XKB functions with extension
+keyboards must not set the <emphasis>
+XkbXI_Keyboards</emphasis>
+ flag. Attempts to use XKB features on an extension keyboard with an
+implementation that does not support this feature yield a <emphasis>
+Keyboard</emphasis>
+ error.
+</para>
+
+
+</sect1>
+<sect1 id='Pointer_and_Device_Button_Actions'>
+<title>Pointer and Device Button Actions</title>
+
+<para>
+The XKB extension optionally allows clients to assign any key action (see
+<link linkend='Key_Actions'>Key Actions</link>) to core
+pointer or input extension device buttons. This makes it possible to control
+the keyboard or generate keyboard key events from extension devices or from the
+core pointer.
+</para>
+
+
+<para>
+XKB implementations are required to support actions for the buttons of the core
+pointer device, but support for actions on extension devices is optional.
+Implementations which do not support button actions for extension devices must
+not set the <emphasis>
+XkbXI_ButtonActions</emphasis>
+ flag.
+</para>
+
+
+<para>
+Attempts to query or assign button actions with an implementation that does not
+support this feature report failure in the request reply and might cause the
+server to send an <emphasis>
+XkbExtensionDeviceNotify</emphasis>
+ event to the client which issued the request that failed. Such requests never
+cause an error condition.
+</para>
+
+
+</sect1>
+<sect1 id='Indicator_Maps_for_Extension_Devices'>
+<title>Indicator Maps for Extension Devices</title>
+
+<para>
+The XKB extension allows applications to assign indicator maps to the
+indicators of non-keyboard extension devices. If supported, maps can be
+assigned to all extension device indicators, whether they are part of a
+keyboard feedback or part of an indicator feedback.
+</para>
+
+
+<para>
+Implementations which do not support indicator maps for extension devices must
+not set the <emphasis>
+XkbXI_IndicatorMaps</emphasis>
+ flag.
+</para>
+
+
+<para>
+Attempts to query or assign indicator maps with an implementation that does not
+support this feature report failure in the request reply and might cause the
+server to send an <emphasis>
+XkbExtensionDeviceNotify</emphasis>
+ event to the client which issued the request that failed. Such requests never
+cause an error condition.
+</para>
+
+
+<para>
+If this feature is supported, the maps for the default indicators on the core
+keyboard device are visible both as extension indicators and as the core
+indicators. Changes made with <emphasis>
+XkbSetDeviceInfo</emphasis>
+ are visible via <emphasis>
+XkbGetIndicatorMap</emphasis>
+ and changes made with <emphasis>
+XkbSetIndicatorMap</emphasis>
+ are visible via <emphasis>
+XkbGetDeviceInfo</emphasis>
+.
+</para>
+
+
+</sect1>
+<sect1 id='Indicator_Names_for_Extension_Devices'>
+<title>Indicator Names for Extension Devices</title>
+
+<para>
+The XKB extension allows applications to assign symbolic names to the
+indicators of non-keyboard extension devices. If supported, symbolic names can
+be assigned to all extension device indicators, whether they are part of a
+keyboard feedback or part of an indicator feedback.
+</para>
+
+
+<para>
+Implementations which do not support indicator maps for extension devices must
+not set the <emphasis>
+XkbXI_IndicatorMaps</emphasis>
+ flag.
+</para>
+
+
+<para>
+Attempts to query or assign indicator names with an implementation that does
+not support this feature report failure in the request reply and might cause
+the server to send an <emphasis>
+XkbExtensionDeviceNotify</emphasis>
+ event to the client which issued the request that failed. Such requests never
+cause an error condition.
+</para>
+
+
+<para>
+If this feature is supported, the names for the default indicators on the core
+keyboard device are visible both as extension indicators and as the core
+indicators. Changes made with <emphasis>
+XkbSetDeviceInfo</emphasis>
+ are visible via <emphasis>
+XkbGetNames</emphasis>
+ and changes made with <emphasis>
+XkbSetNames</emphasis>
+ are visible via <emphasis>
+XkbGetDeviceInfo</emphasis>
+.
+</para>
+</sect1>
+</chapter>

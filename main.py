@@ -55,11 +55,13 @@ def main(
         max_plan_iterations: Maximum number of plan iterations
         max_step_num: Maximum number of steps in a plan
     """
-    # First select language
-    language = inquirer.select(
-        message="Select language / 选择语言:",
-        choices=["English", "中文"],
-    ).execute()
+    # # First select language
+    # language = inquirer.select(
+    #     message="Select language / 选择语言:",
+    #     choices=["English", "中文"],
+    # ).execute()
+
+    language = "中文"
 
     # Choose questions based on language
     questions = (
@@ -102,7 +104,8 @@ if __name__ == "__main__":
     parser.add_argument("query", nargs="*", help="The query to process")
     parser.add_argument(
         "--interactive",
-        action="store_true",
+        default=True,
+        # action="store_true",
         help="Run in interactive mode with built-in questions",
     )
     parser.add_argument(

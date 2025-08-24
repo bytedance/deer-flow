@@ -1,0 +1,66 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# browse --
+# This script generates a directory browser, which lists the working
+# directory and allows you to open files or subdirectories by
+# double-clicking.
+
+package require Tk
+
+# Create a scrollbar on the right side of the main window and a listbox
+# on the left side.
+
+scrollbar .scroll -command ".list yview"
+pack .scroll -side right -fill y
+listbox .list -yscroll ".scroll set" -relief sunken -width 20 -height 20 \
+	-setgrid yes
+pack .list -side left -fill both -expand yes
+wm minsize . 1 1
+
+# The procedure below is invoked to open a browser on a given file;  if the
+# file is a directory then another instance of this program is invoked; if
+# the file is a regular file then the Mx editor is invoked to display
+# the file.
+
+set browseScript [file join [pwd] $argv0]
+proc browse {dir file} {
+    global env browseScript
+    if {[string compare $dir "."] != 0} {set file $dir/$file}
+    switch [file type $file] {
+	directory {
+	    exec [info nameofexecutable] $browseScript $file &
+	}
+	file {
+	    if {[info exists env(EDITOR)]} {
+		eval exec $env(EDITOR) $file &
+	    } else {
+		exec xedit $file &
+	    }
+	}
+	default {
+	    puts stdout "\"$file\" isn't a directory or regular file"
+	}
+    }
+}
+
+# Fill the listbox with a list of all the files in the directory.
+
+if {$argc>0} {set dir [lindex $argv 0]} else {set dir "."}
+foreach i [lsort [glob * .* *.*]] {
+    if {[file type $i] eq "directory"} {
+	# Safe to do since it is still a directory.
+	append i /
+    }
+    .list insert end $i
+}
+
+# Set up bindings for the browser.
+
+bind all <Control-c> {destroy .}
+bind .list <Double-Button-1> {foreach i [selection get] {browse $dir $i}}
+
+# Local Variables:
+# mode: tcl
+# End:

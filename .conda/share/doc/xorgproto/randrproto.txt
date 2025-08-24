@@ -1,0 +1,3435 @@
+	       The X Resize, Rotate and Reflect Extension
+			     Version 1.6.0
+			       2017-04-01
+
+			      Jim Gettys
+			   Jim.Gettys@hp.com
+		     Cambridge Research Laboratory
+				HP Labs
+			Hewlett Packard Company
+
+			     Keith Packard
+			  keithp@keithp.com
+
+1. Introduction
+
+The X Resize, Rotate and Reflect Extension, called RandR for short,
+brings the ability to resize, rotate and reflect the root window of a
+screen. It is based on the X Resize and Rotate Extension as specified
+in the Proceedings of the 2001 Usenix Technical Conference [RANDR].
+
+RandR as implemented and integrated into the X server differs in
+one substantial fashion from the design discussed in that paper: that
+is, RandR 1.0 does not implement the depth switching described in that
+document, and the support described for that in the protocol in that
+document and in the implementation has been removed from the
+protocol described here, as it has been overtaken by events.
+
+These events include:
+      ► Modern toolkits (in this case, GTK+ 2.x) have progressed to the point
+	of implementing migration between screens of arbitrary depths
+      ► The continued advance of Moore's law has made limited amounts of VRAM
+	less of an issue, reducing the pressure to implement depth switching
+	on laptops or desktop systems
+      ► The continued decline of legacy toolkits whose design would have
+	required depth switching to support migration
+      ► The lack of depth switching implementation experience in the
+	intervening time, due to events beyond our control
+
+Additionally, the requirement to support depth switching might
+complicate other re-engineering of the device independent part of the
+X server that is currently being contemplated.
+
+Rather than further delaying RandR's widespread deployment for a feature
+long wanted by the community (resizing of screens, particularly on laptops),
+or the deployment of a protocol design that might be flawed due to lack of
+implementation experience, we decided to remove depth switching from the
+protocol. It may be implemented at a later time if resources and
+interests permit as a revision to the protocol described here, which will
+remain a stable base for applications. The protocol described here has been
+implemented in the main X.org server, and more fully in the hw/kdrive
+implementation in the distribution, which fully implements resizing,
+rotation and reflection.
+
+1.2 Introduction to version 1.2 of the extension
+
+One of the significant limitations found in version 1.1 of the RandR
+protocol was the inability to deal with the Xinerama model where multiple
+monitors display portions of a common underlying screen. In this environment,
+zero or more video outputs are associated with each CRT controller which
+defines both a set of video timings and a 'viewport' within the larger
+screen. This viewport is independent of the overall size of the screen, and
+may be located anywhere within the screen.
+
+The effect is to decouple the reported size of the screen from the size
+presented by each video output, and to permit multiple outputs to present
+information for a single screen.
+
+To extend RandR for this model, we separate out the output, CRTC and screen
+configuration information and permit them to be configured separately. For
+compatibility with the 1.1 version of the protocol, we make the 1.1 requests
+simultaneously affect both the screen and the (presumably sole) CRTC and
+output. The set of available outputs are presented with UTF-8 encoded names
+and may be connected to CRTCs as permitted by the underlying hardware. CRTC
+configuration is now done with full mode information instead of just size
+and refresh rate, and these modes have names. These names also use UTF-8
+encoding. New modes may also be added by the user.
+
+Additional requests and events are provided for this new functionality.
+
+       ┌────────────────────────────────┬──────────┐
+    ┏━━━━━━━┳───────────────┐       ╔════════╗ ╔════════╗
+    ┃   1   ┃               │       ║   A    ║ ║   B    ║
+    ┃   ┏━━━╋━━━━━━━━━━━━━━━┫       ║        ║ ║        ║
+    ┣━━━╋━━━┛               ┃       ╚════════╝ ╚════════╝
+    │   ┃         2         ┃─────────────────┐
+    │   ┃                   ┃        ╔═══════════════════╗
+    │   ┃                   ┃        ║                   ║
+    │   ┗━━━━━━━━━━━━━━━━━━━┫        ║        C          ║
+    └───────────────────────┘        ║                   ║
+    ┌──────┐  ┏━━━━┓  ╔══════╗       ║                   ║
+    │screen│  ┃CRTC┃  ║output║       ╚═══════════════════╝
+    └──────┘  ┗━━━━┛  ╚══════╝
+
+In this picture, the screen is covered (incompletely) by two CRTCs. CRTC1
+is connected to two outputs, A and B. CRTC2 is connected to output C.
+Outputs A and B will present exactly the same region of the screen using
+the same mode line. Output C will present a different (larger) region of
+the screen using a different mode line.
+
+RandR provides information about each available CRTC and output; the
+connection between CRTC and output is under application control, although
+the hardware will probably impose restrictions on the possible
+configurations. The protocol doesn't try to describe these restrictions,
+instead it provides a mechanism to find out what combinations are supported.
+
+1.3 Introduction to version 1.3 of the extension
+
+Version 1.3 builds on the changes made with version 1.2 and adds some new
+capabilities without fundamentally changing the extension again. The
+following features are added in this version:
+
+   • Projective Transforms. The implementation work for general rotation
+     support made it trivial to add full projective transformations. These
+     can be used to scale the screen up/down as well as perform projector
+     keystone correct or other effects.
+
+   • Panning. It was removed with RandR 1.2 because the old semantics didn't
+     fit any longer. With RandR 1.3 panning can be specified per crtc.
+
+1.4 Introduction to version 1.4 of the extension
+
+Version 1.4 adds an optional Border property.
+
+   • An optional Border property. This property allows a client to
+     specify that the viewport of the CRTC is smaller than the active
+     display region described its mode.  This is useful, for example,
+     for compensating for the overscan behavior of certain
+     televisions.
+
+Version 1.4 adds a new object called a provider object. A provider object
+represents a GPU or virtual device providing services to the X server.
+Providers have a set of abilities and a set of possible roles.
+
+Provider objects are used to control multi-GPU systems. Provider roles can
+be dynamically configured to provide support for:
+
+ 1) Output slaving: plug in a USB device, but have its output rendered
+ using the main GPU. On some dual-GPU laptops, the second GPU isn't
+ connected to the LVDS panel, so we need to use the first GPU as an output
+ slave for the second GPU. 
+
+ 2) offload - For dual-GPU laptops, allow direct rendered applications to be run
+ on the second GPU and display on the first GPU.
+
+ 3) GPU switching - Allow switching between two GPUs as the main screen
+ renderer.
+
+ 4) multiple GPU rendering - This replaces Xinerama.
+
+1.5. Introduction to version 1.5 of the extension
+
+Version 1.5 adds an optional TILE property to outputs.
+
+   • An optional TILE property.
+     This property is used to denote individual tiles in a tiled monitor
+     configuration, as exposed via DisplayID v1.3.
+
+Version 1.5 adds monitors
+
+ • A 'Monitor' is a rectangular subset of the screen which represents
+   a coherent collection of pixels presented to the user.
+
+ • Each Monitor is associated with a list of outputs (which may be
+   empty).
+
+ • When clients define monitors, the associated outputs are removed from
+   existing Monitors. If removing the output causes the list for that
+   monitor to become empty, that monitor will be deleted.
+
+ • For active CRTCs that have no output associated with any
+   client-defined Monitor, one server-defined monitor will
+   automatically be defined of the first Output associated with them.
+
+ • When defining a monitor, setting the geometry to all zeros will
+   cause that monitor to dynamically track the bounding box of the
+   active outputs associated with them
+
+This new object separates the physical configuration of the hardware
+from the logical subsets of the screen that applications should
+consider as single viewable areas.
+
+1.5.1. Relationship between Monitors and Xinerama
+
+Xinerama's information now comes from the Monitors instead of directly
+from the CRTCs. The Monitor marked as Primary will be listed first.
+
+1.5.2. Clarification of Output lifetimes
+
+With dynamic connectors being a possibility with the introduction of
+DisplayPort multistream (MST), a lot of RandR clients can't handle the
+XID BadMatch when a RandR output disappears. This is to clarify that
+going forward the X server will not remove outputs dynamically,
+just mark them as disconnected.
+
+1.6. Introduction to version 1.6 of the extension
+
+Version 1.6 adds resource leasing and non desktop output management.
+
+ • A “Lease” is a collection of crtcs and outputs which are made
+   available to a client for direct access via kernel KMS and DRM
+   APIs. This is done by passing a suitable file descriptor back to
+   the client which has access to those resources. While leased, those
+   resources aren't used by the X server.
+
+ • A “non-desktop” output is a device which should not normally be
+   considered as part of the desktop environment. Head-mounted
+   displays and the Apple "Touch Bar" are examples of such
+   devices. A desktop environment should be able to discover which
+   outputs are connected to such devices and, by default, not present
+   normal desktop applications on them. This is done by having
+   RRGetOutputInfo report such devices as Disconnected while reporting
+   all other information about the device correctly.
+
+1.99 Acknowledgments
+
+Our thanks to the contributors to the design found on the xpert mailing
+list, in particular:
+
+Alan Hourihane for work on the early implementation
+Andrew C. Aitchison for help with the XFree86 DDX implementation
+Andy Ritger for early questions about how mergefb/Xinerama work with RandR
+Carl Worth for editing the specification and Usenix paper
+David Dawes for XFree86 DDX integration work
+Thomas Winischhofer for the hardware-accelerated SiS rotation implementation
+Matthew Tippett and Kevin Martin for splitting outputs and CRTCs to more
+fully expose what video hardware can do
+Dave Airlie for the 1.4.0 protocol changes and for working through the
+implications of MST monitors and encouraging the introduction of the
+'Monitor' concept.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+2. Screen change model
+
+Screens may change dynamically, either under control of this extension, or
+due to external events. Examples include: monitors being swapped, pressing a
+button to switch from internal display to an external monitor on a laptop,
+or, eventually, the hotplug of a display card entirely on buses such as
+Cardbus or Express Card which permit hot-swap (which will require other work
+in addition to this extension).
+
+Since the screen configuration is dynamic and asynchronous to the client and
+may change at any time RandR provides mechanisms to ensure that your clients
+view is up to date with the configuration possibilities of the moment and
+enforces applications that wish to control the configuration to prove that
+their information is up to date before honoring requests to change the
+screen configuration (by requiring a timestamp on the request).
+
+Interested applications are notified whenever the screen configuration
+changes, providing the current size of the screen and subpixel order (see
+the Render extension [RENDER]), to enable proper rendering of subpixel
+decimated client text to continue, along with a time stamp of the
+configuration change. A client must refresh its knowledge of the screen
+configuration before attempting to change the configuration after a
+notification, or the request will fail.
+
+To avoid multiplicative explosion between orientation, reflection and sizes,
+the sizes are only those sizes in the normal (0) rotation.
+
+Rotation and reflection and how they interact can be confusing. In Randr,
+the coordinate system is rotated in a counter-clockwise direction relative
+to the normal orientation. Reflection is along the window system coordinate
+system, not the physical screen X and Y axis, so that rotation and
+reflection do not interact. The other way to consider reflection is to is
+specified in the "normal" orientation, before rotation, if you find the
+other way confusing.
+
+We expect that most clients and toolkits will be oblivious to changes to the
+screen structure, as they generally use the values in the connections Display
+structure directly. By toolkits updating the values on the fly, we believe
+pop-up menus and other pop up windows will position themselves correctly in
+the face of screen configuration changes (the issue is ensuring that pop-ups
+are visible on the reconfigured screen).
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+3. Data Types
+
+The subpixel order and transform data types are shared with the Render
+extension, and are documented there.
+
+The only datatype defined in the original extension is the screen size,
+defined in the normal (0 degree) orientation.  Several more are added
+in later revisions.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+4. Errors
+
+Errors are sent using core X error reports.
+
+Output
+	A value for an OUTPUT argument does not name a defined OUTPUT.
+CRTC
+	A value for a CRTC argument does not name a defined CRTC.
+Mode
+	A value for a MODE argument does not name a defined MODE.
+Provider
+	A value for a PROVIDER argument does not name a defined PROVIDER.
+Lease
+	A value for a LEASE argument does not name a defined LEASE
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+5. Protocol Types
+
+RRCONFIGSTATUS { Success
+		 InvalidConfigTime
+		 InvalidTime
+		 Failed }
+
+	A value of type RRCONFIGSTATUS returned when manipulating the output
+	configuration or querying information from the server that has some
+	time-dependency.
+
+	InvalidConfigTime indicates that the supplied configuration
+	timestamp does not match the current X server configuration
+	timestamp. Usually this means that the output configuration has
+	changed since the timestamp was received by the application.
+
+	InvalidTime indicates that the supplied output reconfiguration time
+	is earlier than the most recent output reconfiguration request.
+	Generally this indicates that another application has reconfigured
+	the output using a later timestamp.
+
+	Failed is returned whenever the operation is unsuccessful for some
+	other reason. This generally indicates that the requested output
+	configuration is unsupported by the hardware. The goal is to make
+	these limitations expressed by the protocol, but when that isn't
+	possible it is correct to return this error value. If, as a
+	implementer, you find this error code required, please submit the
+	hardware constraints that exist so that a future version of the
+	extension can correctly capture the configuration constraints in
+	your system.
+
+ROTATION { Rotate_0
+	   Rotate_90
+	   Rotate_180
+	   Rotate_270
+	   Reflect_X
+	   Reflect_Y }
+
+	These values are used both to indicate a set of allowed rotations
+	and reflections as well as to indicate a specific rotation and
+	reflection combination.
+
+RRSELECTMASK { RRScreenChangeNotifyMask
+	       RRCrtcChangeNotifyMask (New in version 1.2)
+	       RROutputChangeNotifyMask (New in version 1.2)
+	       RROutputPropertyNotifyMask (New in version 1.2)
+	       RRProviderChangeNotifyMask (New in version 1.4)
+	       RRProviderPropertyNotifyMask (New in version 1.4)
+	       RRResourceChangeNotifyMask (New in version 1.4) }
+
+SIZEID { CARD16 }
+
+MODE { XID or None }
+
+CRTC { XID }
+
+OUTPUT { XID }
+
+CONNECTION { Connected, Disconnected, UnknownConnection }
+
+	This value provides an indication of whether an output is actually
+	connected to a monitor or other presentation device.
+
+
+SCREENSIZE [ widthInPixels, heightInPixels: CARD16
+	     widthInMillimeters, heightInMillimeters: CARD16 ]
+
+MODEFLAG { HSyncPositive
+	   HSyncNegative
+	   VSyncPositive
+	   VSyncNegative
+	   Interlace
+	   DoubleScan
+	   CSync
+	   CSyncPositive
+	   CSyncNegative
+	   HSkewPresent
+	   BCast
+	   PixelMultiplex
+	   DoubleClock
+	   ClockDivideBy2 }
+
+MODEINFO [ id: MODE
+	   name: STRING
+	   width, height: CARD16
+	   dotClock: CARD32
+	   hSyncStart, hSyncEnd, hTotal, hSkew: CARD16
+	   vSyncStart, vSyncEnd, vTotal: CARD16
+	   modeFlags: SETofMODEFLAG ]
+
+REFRESH [ rates: LISTofCARD16 ]
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+5.1 Data Types defined by the Render extension
+
+These data types use the Render extension definitions; they are shown here
+only for convenience:
+
+SUBPIXELORDER { SubPixelUnknown
+		SubPixelHorizontalRGB
+		SubPixelHorizontalBGR
+		SubPixelVerticalRGB
+		SubPixelVerticalBGR
+		SubPixelNone }
+
+FIXED         32-bit value (top 16 are integer portion, bottom 16 are fraction)
+
+TRANSFORM     [
+                        p11, p12, p13:  FIXED
+                        p21, p22, p23:  FIXED
+                        p31, p32, p33:  FIXED
+              ]
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+5.5. Protocol Types added in version 1.4 of the extension
+
+PROVIDER { XID }
+
+PROVIDER_CAPS { SourceOutput, SinkOutput, SourceOffload, SinkOffload }
+	Capabilities for this provider:
+	SourceOutput: This device can source output buffers.
+	SinkOutput: This device can sink output buffers.
+	SourceOffload: This device can source offload buffers.
+	SinkOffload: This device can sink offload buffers.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+5.6. Protocol Types added in version 1.5 of the extension
+
+MONITORINFO { name: ATOM
+              primary: BOOL
+	      automatic: BOOL
+	      x: INT16
+	      y: INT16
+	      width: CARD16
+	      height: CARD16
+	      width-in-millimeters: CARD32
+	      height-in-millimeters: CARD32
+	      outputs: LISTofOUTPUT }
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+5.7. Protocol Types added in version 1.6 of the extension
+
+LEASE { XID }
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+6. Extension Initialization
+
+The name of this extension is "RANDR".
+
+┌───
+    RRQueryVersion
+	client-major-version:	CARD32
+	client-minor-version:	CARD32
+      ▶
+	major-version:		CARD32
+	minor-version:		CARD32
+└───
+
+	The client sends the highest supported version to the server
+	and the server sends the highest version it supports, but no
+	higher than the requested version. Major versions changes can
+	introduce incompatibilities in existing functionality, minor
+	version changes introduce only backward compatible changes.
+	It is the clients responsibility to ensure that the server
+	supports a version which is compatible with its expectations.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+7. Extension Requests
+
+┌───
+    RRSelectInput
+	window: WINDOW
+	enable: SETofRRSELECTMASK
+└───
+	Errors: Window, Value
+
+	If 'enable' is RRScreenChangeNotifyMask, RRScreenChangeNotify events
+	will be sent when the screen configuration changes, either from
+	this protocol extension, or due to detected external screen
+	configuration changes. RRScreenChangeNotify may also be sent when
+	this request executes if the screen configuration has changed since
+	the client connected, to avoid race conditions.
+
+	New for version 1.2:
+
+	If 'enable' contains RRCrtcChangeNotifyMask, RRCrtcChangeNotify events
+	will be sent when the configuration for a CRTC associated with the
+	screen changes, either through this protocol extension or due to
+	detected external changes. RRCrtcChangeNotify may also be sent when
+	this request executes if the CRTC configuration has changed since
+	the client connected, to avoid race conditions.
+
+	If 'enable' contains RROutputChangeNotifyMask, RROutputChangeNotify
+	events will be sent when the configuration for an output associated with
+	the screen changes, either through this protocol extension or due to
+	detected external changes. RROutputChangeNotify may also be sent when
+	this request executes if the output configuration has changed since the
+	client connected, to avoid race conditions.
+
+	If 'enable' contains RROutputPropertyNotifyMask,
+	RROutputPropertyNotify events will be sent when properties change on
+	this output.
+
+	New for version 1.4:
+
+	If 'enable' contains RRProviderChangeNotifyMask,
+	RRProviderChangeNotify events will be sent whenever the role for a
+	provider object has changed.
+
+	If 'enable' contains RRProviderPropertyNotifyMask,
+	RRProviderPropertyNotify events will be sent when properties change
+	on a provider object.
+
+	If 'enable' contains RRResourceChangeNotifyMask,
+	RRResourceChangeNotify events will be sent whenever the set of
+	available RandR resources associated with the screen has changed.
+
+┌───
+    RRSetScreenConfig
+	window: WINDOW
+	timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	size-id: SIZEID
+	rotation: ROTATION
+	rate: CARD16
+      ▶
+	status: RRCONFIGSTATUS
+	new-timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	root: WINDOW
+	subpixelOrder: SUBPIXELORDER
+└───
+	Errors: Value, Match
+
+	If 'timestamp' is less than the time when the configuration was last
+	successfully set, the request is ignored and InvalidTime returned in
+	status.
+
+	If 'config-timestamp' is not equal to when the server's screen
+	configurations last changed, the request is ignored and
+	InvalidConfigTime returned in status. This could occur if the
+	screen changed since you last made a RRGetScreenInfo request,
+	perhaps by a different piece of display hardware being installed.
+	Rather than allowing an incorrect call to be executed based on stale
+	data, the server will ignore the request.
+
+	'rate' contains the desired refresh rate. If it is zero, the server
+	selects an appropriate rate.
+
+	This request may fail for other indeterminate reasons, in which case
+	'status' will be set to Failed and no configuration change will be
+	made.
+
+	This request sets the screen to the specified size, rate, rotation
+	and reflection.
+
+	When this request succeeds, 'status' contains Success and the
+	requested changes to configuration will have been made.
+
+	'new-time-stamp' contains the time at which this request was
+	executed.
+
+	'config-timestamp' contains the time when the possible screen
+	configurations were last changed.
+
+	'root' contains the root window for the screen indicated by the
+	window.
+
+	'subpixelOrder' contains the resulting subpixel order of the screen
+	to allow correct subpixel rendering.
+
+	Value errors are generated when 'rotation', 'rate' or 'size-id'
+	are invalid.
+
+┌───
+    RRGetScreenInfo
+	window: WINDOW
+      ▶
+	rotations: SETofROTATION
+	root: WINDOW
+	timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	size-id: SIZEID
+	rotation: ROTATION
+	rate: CARD16
+	sizes: LISTofSCREENSIZE
+	refresh: LISTofREFRESH
+└───
+
+	Errors: Window
+
+	RRGetScreenInfo returns information about the current and available
+	configurations for the screen associated with 'window'.
+
+	'rotations' contains the set of rotations and reflections supported
+	by the screen.
+
+	'root' is the root window of the screen.
+
+	'config-timestamp' indicates when the screen configuration
+	information last changed: requests to set the screen will fail
+	unless the timestamp indicates that the information the client
+	is using is up to date, to ensure clients can be well behaved
+	in the face of race conditions.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'size-id' indicates which size is active.
+
+	'rate' is the current refresh rate. This is zero when the refresh
+	rate is unknown or on devices for which refresh is not relevant.
+
+	'sizes' is the list of possible frame buffer sizes (at the normal
+	orientation). Each size indicates both the linear physical size of
+	the screen and the pixel size.
+
+	'refresh' is the list of refresh rates for each size. Each element
+	of 'sizes' has a corresponding element in 'refresh'. An empty list
+	indicates no known rates, or a device for which refresh is not
+	relevant.
+
+	The default size of the screen (the size that would become the
+	current size when the server resets) is the first size in the
+	list.
+
+7.1. Extension Requests added in version 1.2 of the extension
+
+As introduced above, version 1.2 of the extension splits the screen size
+from the crtc and output configuration, permitting the subset of the screen
+presented by multiple outputs to be configured. As a separate notion, the
+size of the screen itself may be arbitrarily configured within a defined
+range. As crtcs and outputs are added and removed from the system, the set
+returned by the extension will change so that applications can detect
+dynamic changes in the display environment.
+
+┌───
+    RRGetScreenSizeRange
+	window: WINDOW
+      ▶
+	CARD16	minWidth, minHeight
+	CARD16	maxWidth, maxHeight
+└───
+	Errors: Window
+
+	Returns the range of possible screen sizes. The screen may be set to
+	any size within this range.
+
+┌───
+    RRSetScreenSize
+	window: WINDOW
+	width: CARD16
+	height: CARD16
+	width-in-millimeters: CARD32
+	height-in-millimeters: CARD32
+└───
+	Errors: Window, Match, Value
+
+	Sets the screen to the specified size. 'width' and 'height' must be
+	within the range allowed by GetScreenSizeRanges, otherwise a Value
+	error results. All active monitors must be configured to display a
+	subset of the specified size, else a Match error results.
+
+	'width-in-millimeters' and 'height-in-millimeters' can be set to
+	reflect the physical size of the screen reported both through this
+	extension and the core protocol. They must be non-zero, or Value
+	error results.
+
+	If panning is enabled, the width and height of the panning and the
+	tracking areas are adapted to the new size and clamped afterwards.
+	Disabled panning axes remain disabled.
+	Panning borders are disabled if their requirements are no longer met
+	(see RRSetPanning).
+
+┌───
+    RRGetScreenResources
+	window: WINDOW
+      ▶
+	timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	crtcs: LISTofCRTC
+	outputs: LISTofOUTPUT
+	modes: LISTofMODEINFO
+└───
+	Errors: Window
+
+	RRGetScreenResources returns the list of outputs and crtcs connected
+	to the screen associated with 'window'.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'config-timestamp' indicates when the configuration information last
+	changed. Requests to configure the output will fail unless the
+	timestamp indicates that the information the client is using is up
+	to date, to ensure clients can be well behaved in the face of race
+	conditions.
+
+	'crtcs' contains the list of CRTCs associated with the screen.
+
+	'outputs' contains the list of outputs associated with the screen.
+
+	'modes' contains the list of modes associated with the screen
+
+	This request explicitly asks the server to ensure that the
+	configuration data is up-to-date wrt the hardware. If that requires
+	polling, this is when such polling would take place.  If the
+	current configuration is all that's required, use
+	RRGetScreenResourcesCurrent instead.
+
+┌───
+    RRGetOutputInfo
+	output: OUTPUT
+	config-timestamp: TIMESTAMP
+      ▶
+	status: RRCONFIGSTATUS
+	timestamp: TIMESTAMP
+	crtc: CRTC
+
+	name: STRING
+	connection: CONNECTION
+	subpixel-order: SUBPIXELORDER
+	widthInMillimeters, heightInMillimeters: CARD32
+	crtcs: LISTofCRTC
+	clones: LISTofOUTPUT
+	modes: LISTofMODE
+	num-preferred: CARD16
+└───
+	Errors: Output
+
+	RRGetOutputInfo returns information about the current and available
+	configurations 'output'.
+
+	If 'config-timestamp' does not match the current configuration
+	timestamp (as returned by RRGetScreenResources), 'status' is set to
+	InvalidConfigTime and the remaining reply data is empty. Otherwise,
+	'status' is set to Success.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'crtc' is the current source CRTC for video data, or Disabled if the
+	output is not connected to any CRTC.
+
+	'name' is a UTF-8 encoded string designed to be presented to the
+	user to indicate which output this is. E.g. "S-Video" or "DVI".
+
+	'connection' indicates whether the hardware was able to detect a
+	device connected to this output. If the hardware cannot determine
+	whether something is connected, it will set this to
+	UnknownConnection.
+
+	'subpixel-order' contains the resulting subpixel order of the
+	connected device to allow correct subpixel rendering.
+
+	'widthInMillimeters' and 'heightInMillimeters' report the physical
+	size of the displayed area. If unknown, or not really fixed (e.g.,
+	for a projector), these	values are both zero.
+
+	'crtcs' is the list of CRTCs that this output may be connected to.
+	Attempting to connect this output to a different CRTC results in a
+	Match error.
+
+	'clones' is the list of outputs which may be simultaneously
+	connected to the same CRTC along with this output. Attempting to
+	connect this output with an output not in the 'clones' list
+	results in a Match error.
+
+	'modes' is the list of modes supported by this output. Attempting to
+	connect this output to a CRTC not using one of these modes results
+	in a Match error.
+
+	The first 'num-preferred' modes in 'modes' are preferred by the
+	monitor in some way; for fixed-pixel devices, this would generally
+	indicate which modes match the resolution of the output device.
+
+	Changes in version 1.6 of the protocol:
+
+	When a “non-desktop” device is connected, the 'connection'
+	field will report Disconnected but the remaining fields will
+	report information about the connected device.
+
+┌───
+    RRListOutputProperties
+	output:OUTPUT
+      ▶
+	atoms: LISTofATOM
+└───
+	Errors: Output
+
+	This request returns the atoms of properties currently defined on
+	the output.
+
+	Changes in version 1.6 of the protocol:
+
+	When a “non-desktop” device is connected, the property list
+	will be correct for the device, even though RRGetOutputInfo
+	reports the device as disconnected.
+
+┌───
+    RRQueryOutputProperty
+	output: OUTPUT
+	property: ATOM
+      ▶
+	pending: BOOL
+	range: BOOL
+	immutable: BOOL
+	valid-values: LISTofINT32
+└───
+	Errors: Name, Atom, Output
+
+	If the specified property does not exist for the specified output,
+	then a Name error is returned.
+
+	If 'pending' is TRUE, changes made to property values with
+	RRChangeOutputProperty will be saved in the pending property value
+	and be automatically copied to the current value on the next
+	RRSetCrtcConfig request involving the named output. If 'pending' is
+	FALSE, changes are copied immediately.
+
+	If 'range' is TRUE, then the valid-values list will contain
+	precisely two values indicating the minimum and maximum allowed
+	values. If 'range' is FALSE, then the valid-values list will contain
+	the list of possible values; attempts to set other values will
+	result in a Value error.
+
+	If 'immutable' is TRUE, then the property configuration cannot be
+	changed by clients. Immutable properties are interpreted by the X
+	server.
+
+	Changes in version 1.6 of the protocol:
+
+	When a “non-desktop” device is connected, the property information
+	will be correct for the device, even though RRGetOutputInfo
+	reports the device as disconnected.
+
+┌───
+    RRConfigureOutputProperty
+	output: OUTPUT
+	property: ATOM
+	pending: BOOL
+	range: BOOL
+	valid-values: LISTofINT32
+└───
+	Errors: Access, Name, Atom, Output
+
+	If the specified property is 'immutable', an Access error is
+	returned.
+
+	Otherwise, the configuration of the specified property is changed to
+	the values provided in this request.
+
+	If the specified property does not exist for the specified output,
+	it is created with an empty value and None type.
+
+┌───
+    RRChangeOutputProperty
+	output: OUTPUT
+	property, type: ATOM
+	format: {8, 16, 32}
+	mode: { Replace, Prepend, Append }
+	data: LISTofINT8 or LISTofINT16 or LISTofINT32
+└───
+	Errors: Alloc, Atom, Match, Value, Output
+
+	This request alters the value of the property for the specified
+	output. If the property is marked as a 'pending' property, only the
+	pending value of the property is changed. Otherwise, changes are
+	reflected in both the pending and current values of the property.
+	The type is uninterpreted by the server.  The format specifies
+	whether the data should be viewed as a list of 8-bit, 16-bit, or
+	32-bit quantities so that the server can correctly byte-swap as
+	necessary.
+
+	If the mode is Replace, the previous property value is discarded.
+	If the mode is Prepend or Append, then the type and format must
+	match the existing property value (or a Match error results).  If
+	the property is undefined, it is treated as defined with the correct
+	type and format with zero-length data.
+
+	For Prepend, the data is tacked on to the beginning of the existing
+	data, and for Append, it is tacked on to the end of the existing data.
+
+	This request generates a OutputPropertyNotify
+
+	The lifetime of a property is not tied to the storing client.
+	Properties remain until explicitly deleted, until the output is
+	destroyed, or until server reset (see section 10).
+
+	The maximum size of a property is server-dependent and may vary
+	dynamically.
+
+┌───
+    RRDeleteOutputProperty
+	output: OUTPUT
+	property: ATOM
+└───
+	Errors: Atom, Output
+
+	This request deletes the property from the specified window if the
+	property exists and generates a OutputPropertyNotify event unless
+	the property does not exist.
+
+┌───
+    RRGetOutputProperty
+	output: OUTPUT
+	property: ATOM
+	type: ATOM or AnyPropertyType
+	long-offset, long-length: CARD32
+	delete: BOOL
+	pending: BOOL
+      ▶
+	type: ATOM or None
+	format: {0, 8, 16, 32}
+	bytes-after: CARD32
+	value: LISTofINT8 or LISTofINT16 or LISTofINT32
+└───
+	Errors: Atom, Value, Output
+
+	If the specified property does not exist for the specified output,
+	then the return type is None, the format and bytes-after are zero,
+	and the value is empty.  The delete argument is ignored in this
+	case.
+
+	If the specified property exists but its type does not match the
+	specified type, then the return type is the actual type of the
+	property, the format is the actual format of the property (never
+	zero), the bytes-after is the length of the property in bytes (even
+	if the format is 16 or 32), and the value is empty.  The delete
+	argument is ignored in this case.
+
+	If the specified property exists and either AnyPropertyType is
+	specified or the specified type matches the actual type of the
+	property, then the return type is the actual type of the property,
+	the format is the actual format of the property (never zero), and
+	the bytes-after and value are as follows, given:
+
+		N = actual length of the stored property in bytes
+				  (even if the format is 16 or 32)
+		I = 4 × offset
+		T = N - I
+		L = MINIMUM(T, 4 × long-length)
+		A = N - (I + L)
+
+	If 'pending' is true, and if the property holds a pending value,
+	then the value returned will be the pending value of the property
+	rather than the current value.  The returned value starts at byte
+	index I in the property (indexing from 0), and its length in bytes
+	is L.  However, it is a Value error if long-offset is given such
+	that L is negative.  The value of bytes-after is A, giving the
+	number of trailing unread bytes in the stored property.  If delete
+	is True and the bytes-after is zero, the property is also deleted
+	from the output, and a RROutputPropertyNotify event is generated.
+
+	Changes in version 1.6 of the protocol:
+
+	When a “non-desktop” device is connected, the property value
+	will be correct for the device, even though RRGetOutputInfo
+	reports the device as disconnected.
+
+┌───
+    RRCreateMode
+	window: WINDOW
+	modeinfo: MODEINFO
+      ▶
+	mode: MODE
+└───
+	Errors: Window, Name, Value
+
+	'modeinfo' provides a new mode for outputs on the screen
+	associated with 'window'. If the name of 'modeinfo' names an
+	existing mode, a Name error is returned.  If some parameter of the
+	mode is not valid in some other way, a Value error is returned.
+
+	The returned 'mode' provides the id for the mode.
+
+┌───
+    RRDestroyMode
+	mode: MODE
+└───
+	Errors: Mode, Access
+
+	The user-defined 'mode' is destroyed. 'mode' must name a mode
+	defined with RRCreateMode, else an Match error is returned.  If
+	'mode' is in use by some CRTC or Output, then an Access error is
+	returned.
+
+┌───
+    RRAddOutputMode
+	output: OUTPUT
+	mode: MODE
+└───
+	Errors: Output, Mode, Match
+
+	'output' indicates which output is to be configured.
+
+	'mode' specifies which mode to add. If 'mode' is not valid for
+	'output', then a Match error is generated.
+
+	This request generates OutputChangeNotify events.
+
+┌───
+    RRDeleteOutputMode
+	output: OUTPUT
+	mode: MODE
+└───
+	Errors: Output, Mode
+
+	'output' indicates which output is to be configured.
+
+	'mode' specifies which mode to delete. 'mode' must have been added
+	with RRAddOutputMode, else an Access error is returned. 'mode' must
+	not be active, else a Match error is returned.
+
+	This request generates OutputChangeNotify events.
+
+┌───
+    RRGetCrtcInfo
+	crtc: CRTC
+	config-timestamp: TIMESTAMP
+      ▶
+	status: RRCONFIGSTATUS
+	timestamp: TIMESTAMP
+	x, y: INT16
+	width, height: CARD16
+	mode: MODE
+	rotation: ROTATION
+	outputs: LISTofOUTPUT
+
+	rotations: SETofROTATION
+	possible-outputs: LISTofOUTPUT
+└───
+
+	Errors: Window
+
+	RRGetCrtcInfo returns information about the current and available
+	configurations for the specified crtc connected to the screen
+	associated with 'window'.
+
+	If 'config-timestamp' does not match the current configuration
+	timestamp (as returned by RRGetScreenResources), 'status' is set to
+	InvalidConfigTime and the remaining reply data is empty. Otherwise,
+	'status' is set to Success.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'x' and 'y' indicate the position of this CRTC within the screen
+	region. They will be set to 0 when the CRTC is disabled.
+
+	'width' and 'height' indicate the size of the area within the screen
+	presented by this CRTC. This may be different than the size of the
+	mode due to rotation, the projective transform, and the Border property
+	described below.  They will be set to 0 when the CRTC is disabled.
+
+	'mode' indicates which mode is active, or None indicating that the
+	CRTC has been disabled and is not displaying the screen contents.
+
+	'rotation' indicates the active rotation. It is set to Rotate_0
+	when the CRTC is disabled.
+
+	'outputs' is the list of outputs currently connected to this CRTC
+	and is empty when the CRTC is disabled.
+
+	'rotations' contains the set of rotations and reflections supported
+	by the CRTC.
+
+	'possible-outputs' lists all of the outputs which may be connected
+	to this CRTC.
+
+┌───
+    RRSetCrtcConfig
+	crtc: CRTC
+	timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	x, y: INT16
+	mode: MODE
+	rotation: ROTATION
+	outputs: LISTofOUTPUT
+      ▶
+	status: RRCONFIGSTATUS
+	new-timestamp: TIMESTAMP
+└───
+	Errors: Value, Match
+
+	If 'timestamp' is less than the time when the configuration was last
+	successfully set, the request is ignored and InvalidTime returned in
+	status.
+
+	If 'config-timestamp' is not equal to when the monitor's
+	configuration last changed, the request is ignored and
+	InvalidConfigTime returned in status. This could occur if the
+	monitor changed since you last made a RRGetScreenInfo request,
+	perhaps by a different monitor being connected to the machine.
+	Rather than allowing an incorrect call to be executed based on stale
+	data, the server will ignore the request.
+
+	'x' and 'y' contain the desired location within the screen for this
+	monitor's content. 'x' and 'y' must be within the screen size, else
+	a Value error results.
+
+	'mode' is either the desired mode or None indicating the CRTC should
+	be disabled. If 'mode' is not one of these values, a Value
+	error results. 'mode' must be valid for all of the configured outputs,
+	else a Match error.
+
+	'rotation' contains the desired rotation along with which
+	reflections should be enabled. The rotation and reflection values
+	must be among those allowed for this monitor, else a Value error
+	results.
+
+	'outputs' contains the set of outputs that this CRTC should be
+	connected to. The set must be among the list of acceptable output
+	sets for this CRTC or a Match error results.
+
+	If 'mode' is None, then 'outputs' must be empty, else a Match error
+	results. Conversely, if 'mode' is not None, then 'outputs' must not be
+	empty, else a Match error results.
+
+	This request may fail for other indeterminate reasons, in which case
+	'status' will be set to Failed and no configuration change will be
+	made.
+
+	This request sets the CRTC to the specified position, mode, rotation
+	and reflection. The entire area of the CRTC must fit within the
+	screen size, else a Match error results. As an example, rotating the
+	screen so that a single CRTC fills the entire screen before and
+	after may necessitate disabling the CRTC, resizing the screen,
+	then re-enabling the CRTC at the new configuration to avoid an
+	invalid intermediate configuration.
+
+	If panning is enabled, the width and height of the panning and the
+	tracking areas are clamped to the new mode size.
+	Disabled panning axes remain disabled.
+	Panning borders are disabled if their requirements are no longer met
+	(see RRSetPanning).
+
+	When this request succeeds, 'status' contains Success and the
+	requested changes to configuration will have been made.
+
+	'new-time-stamp' contains the time at which this request was
+	executed.
+
+┌───
+    RRGetCrtcGammaSize
+	crtc: CRTC
+      ▶
+	size: CARD16
+└───
+	Errors: Crtc
+
+	This request returns the size of the gamma ramps used by 'crtc'.
+
+┌───
+    RRGetCrtcGamma
+	crtc: CRTC
+      ▶
+	red: LISTofCARD16
+	green: LISTofCARD16
+	blue: LISTofCARD16
+└───
+	Errors: Crtc
+
+	This request returns the currently set gamma ramps for 'crtc'.  All
+	three lists will be the size returned by the RRGetCrtcGammaSize
+	request.
+
+┌───
+    RRSetCrtcGamma
+	crtc: CRTC
+	red: LISTofCARD16
+	green: LISTofCARD16
+	blue: LISTofCARD16
+└───
+	Errors: Crtc, Match
+
+	This request sets the gamma ramps for 'crtc'. All three lists
+	must be the size returned by RRGetCrtcGammaSize else a Value error
+	results.
+
+7.2. Extension Requests added in version 1.3 of the extension
+
+┌───
+    RRGetScreenResourcesCurrent
+	window: WINDOW
+      ▶
+	timestamp: TIMESTAMP
+	config-timestamp: TIMESTAMP
+	crtcs: LISTofCRTC
+	outputs: LISTofOUTPUT
+	modes: LISTofMODEINFO
+└───
+	Errors: Window
+
+	RRGetScreenResourcesCurrent returns the list of outputs and crtcs
+	connected to the screen associated with 'window'.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'config-timestamp' indicates when the configuration information last
+	changed. Requests to configure the output will fail unless the
+	timestamp indicates that the information the client is using is up
+	to date, to ensure clients can be well behaved in the face of race
+	conditions.
+
+	'crtcs' contains the list of CRTCs associated with the screen.
+
+	'outputs' contains the list of outputs associated with the screen.
+
+	'modes' contains the list of modes associated with the screen.
+
+	Unlike RRGetScreenResources, this merely returns the current
+	configuration, and does not poll for hardware changes.
+
+┌───
+    RRSetCrtcTransform
+	crtc: CRTC
+	transform: TRANSFORM
+	filter: STRING8
+	values: LISTofFIXED
+└───
+	Errors: Crtc, Match
+
+	This request provides a mechanism that is more general than the
+	existing rotation and reflection values for describing the
+	transformation from frame buffer image to crtc presentation.
+	'transform' is a full 2D projective transformation from screen
+	coordinate space to crtc coordinate space. This transformation is
+	applied before the rotation and reflection values to compute the
+	complete transform.
+
+	'filter' and 'values' specify a Render filter that may be used by the
+	server when transforming data from frame buffer to crtc.
+
+	This request sets the transform to be used at the next
+	RRSetCrtcConfig request execution; it does not cause any change to
+	occur in the current configuration.
+
+	When a non-identity transformation is in use, the rectangle returned
+	by RRGetCrtcInfo defines the bounding rectangle of the screen that is
+	projected to the crtc. It is this projected rectangle which must be
+	within the area of the screen when the mode is set.
+
+┌───
+    RRGetCrtcTransform
+	crtc: CRTC
+      ▶
+	pending-transform: TRANSFORM
+	pending-filter: STRING8
+	pending-values: LISTofFIXED
+	current-transform: TRANSFORM
+	current-filter: STRING8
+	current-values: LISTofFIXED
+└───
+
+	This request returns the pending and current transforms for the
+	specified CRTC. The pending transform will be the same as the current
+	transform if no new pending transform has been set since the last call
+	to RRSetCrtcConfig.
+
+┌───
+    RRGetPanning
+	crtc: CRTC
+      ▶
+	status: RRCONFIGSTATUS
+	timestamp: TIMESTAMP
+	left, top, width, height: CARD16
+	track_left, track_top, track_width, track_height: CARD16
+	border_left, border_top, border_right, border_bottom: INT16
+└───
+
+	Errors: Crtc
+
+	Version 1.3 adds panning support again. If multiple crtcs are active
+	the panning behavior can be defined per crtc individually.
+	RRGetPanning returns information about the currently set panning
+	configuration for the specified crtc.  If the CRTC does not support
+	panning, all fields (except timestamp) will be 0.
+
+	'timestamp' indicates when the configuration was last set.
+
+	All other entries are explained for RRSetPanning.
+
+┌───
+    RRSetPanning
+	crtc: CRTC
+	timestamp: TIMESTAMP
+	left, top, width, height: CARD16
+	track_left, track_top, track_width, track_height: CARD16
+	border_left, border_top, border_right, border_bottom: INT16
+      ▶
+	status: RRCONFIGSTATUS
+	new-timestamp: TIMESTAMP
+└───
+	Errors: Crtc, Match
+
+	This request sets the panning parameters.  As soon as panning is
+	enabled, the CRTC position can change with every pointer move.
+	RRCrtcChangeNotify events are sent to the clients requesting those.
+
+	If 'timestamp' is less than the time when the configuration was last
+	successfully set, the request is ignored and InvalidTime returned in
+	status.
+
+	┌──┳━━━━━━━━━━━━━━┳─────┬ ─ ─ ─ ─ ─ ┐
+	│  ┃     CRTC     ┃     │
+	│  ┃              ┃     │           │
+	│  ┃             X┃→    │
+	│  ┃              ┃     │           │  framebuffer
+	│  ┗━━━━━━━━━━━━━━┛     │
+	│                       │           │
+	│panning area           │
+	└───────────────────────┴ ─ ─ ─ ─ ─ ┘
+
+	'left', 'top', 'width', and 'height' contain the total panning area
+	for this CRTC.  'width' has to be larger than or equal to the CRTC's
+	width or 0, and 'left'+'width' must be within the screen size, else a
+	Match error results.  Equivalent restrictions for the height exist.
+	'width' or 'height' set to 0 indicate that panning should be disabled
+	on the according axis.  Setting 'width'/'height' to the CRTC's
+	width/height will disable panning on the X/Y axis as well, but
+	RRSetScreenSize will silently enable panning if the screen size is
+	increased. This does not happen if set to 0.
+
+	┌────────┳━━━━━━━━━━━━━━┳ ─ ─ ─ ─ ─ ┐
+	│        ┃     CRTC     ┃
+	│        ┃              ┃           │
+	│        ┃              ┃
+	│        ┃              ┃           │  tracking area
+	│        ┗━━━━━━━━━━━━━━┫     X
+	│               ↓       │     ↓     │
+	│panning area           │
+	└───────────────────────┴ ─ ─ ─ ─ ─ ┘
+
+	'track_left', 'track_top', 'track_width', and 'track_height' contain
+	the pointer area for which the panning region is updated.  For normal
+	use cases it should enclose the panning area minus borders, and is
+	typically set to either the panning area minus borders, or to the
+	total screen size. If set to the total screen size, the CRTC will pan
+	in the remaining axis even if the pointer is outside the panning area
+	on a different CRTC, as shown in the figure above. If the pointer is
+	outside the tracking area, the CRTC will not pan. Zero can be used as
+	an alias for the total screen size.
+
+	┌──┳━━━━━━━━━━━━━━┳────────────┐
+	│  ┃     CRTC     ┃            │
+	│  ┃              ┃            │
+	│  ┃              ┃→           │
+	│  ┃           X←→┃            │
+	│  ┃       border_right        │
+	│  ┗━━━━━━━━━━━━━━┛            │
+	│                              │
+	│panning area                  │
+	└──────────────────────────────┘
+
+	'border_left', 'border_top', 'border_right', and 'border_bottom'
+	define the distances from the CRTC borders that will activate panning
+	if the pointer hits them.  If the borders are 0, the screen will pan
+	when the pointer hits the CRTC borders (behavior of pre-RandR Xserver
+	panning).  If the borders are positive, the screen will pan when the
+	pointer gets close to the CRTC borders, if they are negative, the
+	screen will only pan when the pointer is already way past the CRTC
+	borders.  Negative values might confuse users and disable panning to
+	the very edges of the screen.  Thus they are discouraged.
+	border_left + border_right has to be lower or equal than the CRTC's
+	width, else a Match error results.  An equivalent restriction for the
+	height exists.
+
+	Screen size changes update the panning and the tracking areas to the
+	new size. Both screen size changes and mode changes clamp these areas
+	to the current CRTC size.  In these cases panning borders are disabled
+	if their requirements are no longer met.
+
+	When this request succeeds, 'status' contains Success and the
+	requested changes to configuration will have been made.
+
+	'new-time-stamp' contains the time at which this request was
+	executed.
+
+┌───
+    RRSetOutputPrimary
+	window: WINDOW
+	output: OUTPUT
+└───
+	Errors: Match, Output, Window
+
+	RRSetOutputPrimary marks 'output' as the primary output for the
+	screen with the same root window as 'window'. This output's CRTC
+	will be sorted to the front of the list in Xinerama and RANDR
+	geometry requests for the benefit of older applications. The
+	default primary output is None, and None is a legal value to pass
+	to RRSetOutputPrimary. This request is expected to be used by
+	desktop environments to mark the screen that should hold the primary
+	menu bar or panel.
+
+	As this changes the logical layout of the screen, ConfigureNotify
+	and RRScreenChangeNotify will be generated on the appropriate root
+	window when the primary output is changed by this call. This request
+	also generates RROutputChangeNotify events on the outputs that gained
+	and lost primary status.
+
+	If an output is disconnected asynchronously (eg. due to recabling),
+	the primary status does not change, but RROutputChangeNotify events
+	will be generated if the hardware is capable of detecting this;
+	clients are expected to reconfigure if appropriate.
+
+	If an output is deleted (eg. due to device hotplug), the server will
+	act as though None was passed to RRSetOutputPrimary, including
+	generating the appropriate events.
+
+┌───
+    RRGetOutputPrimary
+	window: WINDOW
+      ▶
+	output: OUTPUT
+└───
+	Errors: Window
+
+	RRGetOutputPrimary returns the primary output for the screen.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+7.4 Extension Requests added in version 1.4 of the extension.
+
+┌───
+    RRGetProviders
+	window : WINDOW
+     ▶
+	timestamp: TIMESTAMP
+	providers: LISTofPROVIDER
+└───
+	Errors: Window
+
+	RRGetProviders returns the list of providers connected to the screen
+	associated with 'window'.
+
+	'timestamp' indicates when the configuration was last set.
+
+	'providers' contains the list of PROVIDERs associated with the
+	screen.
+
+┌───
+    RRGetProviderInfo
+	provider: PROVIDER
+     ▶
+	capabilities: PROVIDER_CAPS
+	name: STRING
+	crtcs: LISTofCRTC
+	outputs: LISTofOUTPUT
+	associated_providers: LISTofPROVIDERS
+	associated_provider_capability: LISTofPROVIDER_CAPS
+└───
+	Errors: Provider
+
+	RRGetProviderInfo return information about the specified provider.
+	The capabilities of the current provider are returned, along with
+	the list of providers currently associated with this provider and
+	the capability they are associated with. It also provides the list
+	of crtcs and outputs that this provider is responsible for.
+
+	'name' is a UTF-8 encoded string to be presented to the user to
+	indicate the device or driver supplied name.
+
+┌───
+    RRSetProviderOffloadSink
+	provider: PROVIDER
+	sink_provider: PROVIDER
+	config-timestamp: TIMESTAMP
+└───
+	Errors: Provider
+
+	RRSetOffloadSink sets the offload sink for this provider to the
+	specified provider.
+
+┌───
+    RRSetProviderOutputSource
+	provider: PROVIDER
+	source_provider: PROVIDER
+	config-timestamp: TIMESTAMP
+└───
+	Errors: Provider
+
+	RRSetOutputSource sets the output source for this provider to the
+	specified provider.
+
+┌───
+    RRListProviderProperties
+	provider:PROVIDERS
+      ▶
+	atoms: LISTofATOM
+└───
+	Errors: Provider
+
+	This request returns the atoms of properties currently defined on
+	the provider.
+
+┌───
+    RRQueryProviderProperty
+	provider: PROVIDER
+	property: ATOM
+      ▶
+	pending: BOOL
+	range: BOOL
+	immutable: BOOL
+	valid-values: LISTofINT32
+└───
+	Errors: Name, Atom, Provider
+
+	If the specified property does not exist for the specified provider,
+	then a Name error is returned.
+
+	If 'pending' is TRUE, changes made to property values with
+	RRChangeProviderProperty will be saved in the pending property value
+	and be automatically copied to the current value on the next
+	RRSetCrtcConfig request on a crtc attached to that provider.
+	If 'pending' is	FALSE, changes are copied immediately.
+
+	If 'range' is TRUE, then the valid-values list will contain
+	precisely two values indicating the minimum and maximum allowed
+	values. If 'range' is FALSE, then the valid-values list will contain
+	the list of possible values; attempts to set other values will
+	result in a Value error.
+
+	If 'immutable' is TRUE, then the property configuration cannot be
+	changed by clients. Immutable properties are interpreted by the X
+	server.
+
+┌───
+    RRConfigureProviderProperty
+	provider: PROVIDER
+	property: ATOM
+	pending: BOOL
+	range: BOOL
+	valid-values: LISTofINT32
+└───
+	Errors: Access, Name, Atom, Provider
+
+	If the specified property is 'immutable', an Access error is
+	returned.
+
+	Otherwise, the configuration of the specified property is changed to
+	the values provided in this request.
+
+	If the specified property does not exist for the specified provider,
+	it is created with an empty value and None type.
+
+┌───
+    RRChangeProviderProperty
+	provider: PROVIDER
+	property, type: ATOM
+	format: {8, 16, 32}
+	mode: { Replace, Prepend, Append }
+	data: LISTofINT8 or LISTofINT16 or LISTofINT32
+└───
+	Errors: Alloc, Atom, Match, Value, Provider
+
+	This request alters the value of the property for the specified
+	provider. If the property is marked as a 'pending' property, only the
+	pending value of the property is changed. Otherwise, changes are
+	reflected in both the pending and current values of the property.
+	The type is uninterpreted by the server.  The format specifies
+	whether the data should be viewed as a list of 8-bit, 16-bit, or
+	32-bit quantities so that the server can correctly byte-swap as
+	necessary.
+
+	If the mode is Replace, the previous property value is discarded.
+	If the mode is Prepend or Append, then the type and format must
+	match the existing property value (or a Match error results).  If
+	the property is undefined, it is treated as defined with the correct
+	type and format with zero-length data.
+
+	For Prepend, the data is tacked on to the beginning of the existing
+	data, and for Append, it is tacked on to the end of the existing data.
+
+	This request generates a ProviderPropertyNotify
+
+	The lifetime of a property is not tied to the storing client.
+	Properties remain until explicitly deleted, until the provider is
+	destroyed, or until server reset (see section 10).
+
+	The maximum size of a property is server-dependent and may vary
+	dynamically.
+┌───
+    RRDeleteProviderProperty
+	provider: Provider
+	property: ATOM
+└───
+	Errors: Atom, Provider
+
+	This request deletes the property from the specified provider if the
+	property exists and generates a ProviderPropertyNotify event unless
+	the property does not exist.
+
+┌───
+    RRGetProviderProperty
+	provider: PROVIDER
+	property: ATOM
+	type: ATOM or AnyPropertyType
+	long-offset, long-length: CARD32
+	delete: BOOL
+	pending: BOOL
+      ▶
+	type: ATOM or None
+	format: {0, 8, 16, 32}
+	bytes-after: CARD32
+	value: LISTofINT8 or LISTofINT16 or LISTofINT32
+└───
+	Errors: Atom, Value, Provider
+
+	If the specified property does not exist for the specified provider,
+	then the return type is None, the format and bytes-after are zero,
+	and the value is empty.  The delete argument is ignored in this
+	case.
+
+	If the specified property exists but its type does not match the
+	specified type, then the return type is the actual type of the
+	property, the format is the actual format of the property (never
+	zero), the bytes-after is the length of the property in bytes (even
+	if the format is 16 or 32), and the value is empty.  The delete
+	argument is ignored in this case.
+
+	If the specified property exists and either AnyPropertyType is
+	specified or the specified type matches the actual type of the
+	property, then the return type is the actual type of the property,
+	the format is the actual format of the property (never zero), and
+	the bytes-after and value are as follows, given:
+
+		N = actual length of the stored property in bytes
+				  (even if the format is 16 or 32)
+		I = 4 × offset
+		T = N - I
+		L = MINIMUM(T, 4 × long-length)
+		A = N - (I + L)
+
+	If 'pending' is true, and if the property holds a pending value,
+	then the value returned will be the pending value of the property
+	rather than the current value.  The returned value starts at byte
+	index I in the property (indexing from 0), and its length in bytes
+	is L.  However, it is a Value error if long-offset is given such
+	that L is negative.  The value of bytes-after is A, giving the
+	number of trailing unread bytes in the stored property.  If delete
+	is True and the bytes-after is zero, the property is also deleted
+	from the provider, and a RRProviderPropertyNotify event is generated.
+
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+7.5. Extension Requests added in version 1.5 of the extension.
+
+┌───
+    RRGetMonitors
+	window : WINDOW
+	get_active : BOOL
+     ▶
+	timestamp: TIMESTAMP
+	monitors: LISTofMONITORINFO
+└───
+	Errors: Window
+
+	Returns the list of Monitors for the screen containing
+	'window'. If 'get_active' is set it returns only active
+	monitors (non-0x0 monitors).  'get_active' should always
+	be set by toolkits, and not by configuration clients.
+
+	'timestamp' indicates the server time when the list of
+	monitors last changed.
+
+┌───
+    RRSetMonitor
+	window : WINDOW
+	info: MONITORINFO
+└───
+	Errors: Window, Output, Atom, Value
+
+	Create a new monitor. Any existing Monitor of the same name is deleted.
+
+	'name' must be a valid atom or an Atom error results.
+
+	'name' must not match the name of any Output on the screen, or
+	a Value error results.
+
+	If 'info.outputs' is non-empty, and if x, y, width, height are all
+	zero, then the Monitor geometry will be dynamically defined to
+	be the bounding box of the geometry of the active CRTCs
+	associated with them.
+
+	If 'name' matches an existing Monitor on the screen, the
+	existing one will be deleted as if RRDeleteMonitor were called.
+
+	If an 'info.output' contains only the automatically generated default
+	monitor, this is replaced by the new monitor. If the 'info.output' already
+	contains a user-defined monitor, the new monitor will be added.
+	This allows to have more than one monitor on an output (e.g. to split an
+	output into multiple virtual monitors).
+
+	Only one monitor per screen may be primary. If 'info.primary'
+	is true, then the primary value will be set to false on all
+	other monitors on the screen.
+
+	RRSetMonitor generates a ConfigureNotify event on the root
+	window of the screen.
+
+┌───
+    RRDeleteMonitor
+	window : WINDOW
+	name: ATOM
+└───
+	Errors: Window, Atom, Value
+
+	Deletes the named Monitor.
+
+	'name' must be a valid atom or an Atom error results.
+
+	'name' must match the name of a Monitor on the screen, or a
+	Value error results.
+
+	If the last user-defined monitor is removed from an 'info.output',
+	the automatically generated default monitor will be restored. It is not
+	possible to delete the automatically generated default monitor.
+
+	RRDeleteMonitor generates a ConfigureNotify event on the root
+	window of the screen.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+7.6. Extension Requests added in version 1.6 of the extension.
+
+┌───
+    RRCreateLease
+	window : WINDOW
+	lid: LEASE
+	crtcs: LISTofCRTC
+	outputs: LISTofOUTPUT
+     ▶
+	nfd: CARD8
+	lease: FD
+└───
+	Errors: IdChoice, Window, Access, Value, CRTC, Output
+
+	Creates a new Lease called 'lid' for the specified crtcs and
+	outputs from the screen defined by 'window'. Returns a KMS/DRM
+	file descriptor which can control the leased objects directly
+	through the kernel. While leased, all resources will appear to
+	be 'useless' to clients other than the leasing client as
+	follows:
+
+	• Crtcs are reported as having no 'possible-outputs' and all
+	  other values reported as if the crtc were disabled.
+
+	• Outputs are reported as having no crtcs they can be
+	  connected to, no clones they can share a crtc with, will
+	  report a connection status of Disconnected, and will show
+	  the current crtc as if it were disabled.
+
+	The lease remains in effect until the file descriptor is
+	closed, even if the client holding the lease disconnects from
+	the X server.
+
+	Returns an Access error if any of the named resources are
+	already leased to another client.
+
+┌───
+    RRFreeLease
+	lid: LEASE
+	terminate: BOOL
+└───
+	Errors: Lease
+
+	Frees the reference to the lease 'lid'. If 'terminate' is
+	true, then the lease is terminated and all leased resources
+	returned to the X server. If 'terminate' is false, then the
+	lease remains in effect, but the X server no longer has a name
+	for it.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+8. Extension Events
+
+Clients MAY select for ConfigureNotify on the root window to be
+informed of screen changes. This may be advantageous if all your
+client needs to know is the size of the root window, as it avoids
+round trips to set up the extension.
+
+RRScreenChangeNotify is sent if RRSelectInput has requested it
+whenever properties of the screen change, which may be due to external
+factors, such as re-cabling a monitor, etc.
+
+┌───
+    RRScreenChangeNotify
+
+	rotation: ROTATION;		new rotation
+	sequenceNumber: CARD16		low 16 bits of request seq. number
+	timestamp: TIMESTAMP		time screen was changed
+	configTimestamp: TIMESTAMP	time config data was changed
+	root: WINDOW			root window of screen
+	window: WINDOW			window requesting notification
+	size-id: SIZEID			index of new SCREENSIZE
+	subpixelOrder: SUBPIXELORDER	order of subpixels
+	widthInPixels: CARD16		width in pixels of the new SCREENSIZE
+	heightInPixels: CARD16		height in pixels of the new SCREENSIZE
+	widthInMillimeters: CARD16	width in mm of the new SCREENSIZE
+	heightInMillimeters: CARD16	height in mm of the new SCREENSIZE
+└───
+	This event is generated whenever the screen configuration is changed
+	and sent to requesting clients. 'timestamp' indicates when the
+	screen configuration was changed. 'configTimestamp' says when the
+	last time the configuration was changed. 'root' is the root of the
+	screen the change occurred on, 'window' is window selecting for this
+	event. 'size-id' contains the index of the current size.
+
+	This event is sent whenever the screen's configuration changes
+	or if a new screen configuration becomes available that was
+	not available in the past. In this case (config-timestamp in
+	the event not being equal to the config-timestamp returned in
+	the last call to RRGetScreenInfo), the client MUST call
+	RRGetScreenInfo to update its view of possible screen
+	configurations to have a correct view of possible screen
+	organizations.
+
+	Clients which select screen change notification events may be
+	sent an event immediately if the screen configuration was
+	changed between when they connected to the X server and
+	selected for notification. This is to prevent a common race
+	that might occur on log-in, where many applications start up
+	just at the time when a display manager or log in script might
+	be changing the screen size or configuration.
+
+	Note that the sizes in this event reflect the new SCREENSIZE and
+	thus will appear rotated by the 'rotation' parameter from the sizes
+	of the screen itself. In other words, when rotation is 90 or 270,
+	widthInPixels in this event will be the same as the height value
+	from a ConfigureNotify that reflects the same size change. This
+	will probably confuse developers.
+
+8.1 Events added in version 1.2 of the RandR extension
+
+┌───
+    RROutputChangeNotify:
+	timestamp: TIMESTAMP		time screen was reconfigured
+	config-timestamp: TIMESTAMP	time available config data was changed
+	window: WINDOW			window requesting notification
+	output: OUTPUT			output affected by change
+	crtc: CRTC			connected CRTC or None
+	mode: MODE			mode in use on CRTC or None
+	connection: CONNECTION		connection status
+└───
+
+	This event is generated whenever the available output configurations
+	have changed and is sent to requesting clients. 'timestamp'
+	indicates when the crtc configuration was changed by a client.
+	'config-timestamp' says when the last time the available
+	configurations changed. 'root' is the root of the screen the change
+	occurred on, 'window' is window selecting for this event. The
+	precise change can be detected by examining the new state of the
+	system.
+
+	Changes in version 1.6 of the protocol:
+
+	When a “non-desktop” device is connected, this event will be
+	delivered when the connection status of the output changes,
+	however the 'connection' value will be set to 'Disconnected'.
+
+┌───
+    RROutputPropertyNotify:
+	window: WINDOW			window requesting notification
+	output: OUTPUT			output affected by change
+	atom: ATOM			affected property
+	time: TIMESTAMP			time property was changed
+	subpixel-order: SUBPIXELORDER	order of subpixels
+	state: { NewValue, Deleted }	new property state
+└───
+
+	This event is reported to clients selecting RROutputPropertyChange
+	on the window and is generated with state NewValue when a property
+	of the window is changed using RRChangeOutputProperty even when
+	adding zero-length data and when replacing all or part of a property
+	with identical data.  It is generated with state Deleted when a
+	property of the window is deleted using either
+	RRDeleteOutputProperty or RRGetOutputProperty.  The timestamp
+	indicates the server time when the property was changed.
+
+┌───
+    RRCrtcChangeNotify
+	timestamp: TIMESTAMP		time monitor was changed
+	window: WINDOW			window requesting notification
+	crtc: CRTC			CRTC which changed
+	mode: MODE			new mode
+	rotation: ROTATION;		new rotation
+	x: INT16			x position of CRTC within screen
+	y: INT16			y position of CRTC within screen
+	width: CARD16			width of new configuration
+	height: CARD16			height of new configuration
+└───
+	This event is generated whenever the CRTC configuration is changed
+	and sent to requesting clients. 'timestamp' indicates when the
+	CRTC configuration was changed. 'window' is window selecting for this
+	event. 'mode' is the new mode, or None if the crtc is disabled.
+	'x' and 'y' mark the location in the screen where this CRTC
+	is reading data. 'width' and 'height' indicate the size of the
+	CRTC viewport, which is the mode size adjusted by the optional
+	Border output property described below. 'x', 'y, 'width' and
+	'height' are all zero when 'mode' is None.
+
+	This event is sent whenever the monitor's configuration changes
+	or if a new monitor configuration becomes available that was
+	not available in the past. In this case, the client MUST call
+	RRGetCrtcInfo to update its view of possible monitor
+	configurations to have a correct view of possible monitor
+	organizations.
+
+	Clients which select monitor change notification events may be
+	sent an event immediately if the monitor configuration was
+	changed between when they connected to the X server and
+	selected for notification. This is to prevent a common race
+	that might occur on log-in, where many applications start up
+	just at the time when a display manager or log in script might
+	be changing the monitor size or configuration.
+
+8.2 Events added in version 1.4 of the RandR extension
+
+┌───
+    RRProviderChangeNotify:
+	timestamp: TIMESTAMP		time screen was reconfigured
+	window: WINDOW			window requesting notification
+	provider: PROVIDER		provider affected by change
+└───
+
+	This event is generated whenever the role for a provider has changed
+	and is sent to requesting clients. 'timestamp' indicates when the
+	provider configuration was changed by a client.  'window' is the
+	window selecting for this event.  The precise change can be detected
+	by examining the new state of the system.
+
+┌───
+    RRProviderPropertyNotify:
+	window: WINDOW			window requesting notification
+	provider: PROVIDER		provider affected by change
+	atom: ATOM			affected property
+	time: TIMESTAMP			time property was changed
+	state: { NewValue, Deleted }	new property state
+└───
+
+	This event is reported to clients selecting RRProviderPropertyChange
+	on the window and is generated with state NewValue when a property
+	of the window is changed using RRChangeProviderProperty even when
+	adding zero-length data and when replacing all or part of a property
+	with identical data.  It is generated with state Deleted when a
+	property of the window is deleted using either
+	RRDeleteProviderProperty or RRGetProviderProperty.  The timestamp
+	indicates the server time when the property was changed.
+
+┌───
+    RRResourceChangeNotify:
+	window: WINDOW			window requesting notification
+	time: TIMESTAMP			time property was changed
+└───
+
+	This event is reported to clients selecting RRResourceChange
+	on the window and is generated whenever the set of available
+	RandR resources associated with the screen has changed, either
+	created or destroyed. Querying the list of available resources
+	with RRGetScreenResources and RRGetProviders will return the new set.
+
+8.3 Events added in version 1.6 of the RandR extension
+
+┌───
+    RRLeaseNotify:
+	timestamp : TIMESTAMP		time screen was reconfigured
+	window : WINDOW			window requesting notification
+	lease : LEASE			lease
+	created : BOOL			created/destroyed indicator
+└───
+
+	This event is generated whenever a lease has been created or
+	destroyed and is sent to requesting clients. 'timestamp'
+	indicates when the change happened.  'window' is the window
+	selecting for this event.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+9. Properties
+
+Properties are used for output specific parameters, and for announcing
+static or rarely changing data.  Announced data is typically
+immutable.  Properties are also used for evaluating new parameters
+before adding them to the RandR protocol.
+
+The following properties are hereby declared official, and drivers SHOULD
+prefix driver specific properties with '_', unless they are planned to be
+added to this specification.  List values, that are not declared by the table
+below, and will remain driver specific or are not planned to be added to this
+specification, SHOULD be prefixed with "_" as well in order to avoid name
+space or semantics clashes with future extensions of these values.
+
+Beginning with version 1.3 of the RandR extension, certain properties
+are mandatory and MUST be provided by implementations.  Earlier
+versions of the RandR extension MAY provide these properties as well,
+as long as the semantics are not altered.  Clients SHOULD fall back
+gracefully to lower version functionality, though, if the driver
+doesn't handle a mandatory property correctly.
+
+Changes in version 1.6 of the protocol:
+
+When a “non-desktop” device is connected, the property information
+will be correct for the device, even though RRGetOutputInfo
+reports the device as disconnected. The “non-desktop” property will be
+set to 1 for such devices and not present on other devices.
+
+9.1 Known properties
+
+    "Backlight"			aka RR_PROPERTY_BACKLIGHT
+	Type:			INTEGER
+	Format:			32
+	Num. items:		1
+	Flags:			-
+	Range/List:		0-x (driver specific)
+
+	This property controls the brightness on laptop panels and equivalent
+	displays with a backlight controller. The driver specific maximum
+	value MUST turn the backlight to full brightness, 1 SHOULD turn the
+	backlight to minimum brightness, 0 SHOULD turn the backlight off.
+
+    "CloneList"			aka RR_PROPERTY_CLONE_LIST
+	Type:			ATOM
+	Format:			32
+	Num. items:		2*n
+	Flags:			Immutable
+	Range/List:		0-
+
+	Some combinations of outputs on some cards cannot be served
+	independently from each other, because they are wired up to the same
+	encoder outputs.
+	This property lists all output + signal format pairs that are
+	driven together with this output, and thus can only be programmed in
+	clone mode with the same CRTC.
+	This property MUST be symmetric, but may change with changing signal
+	format. I.e. if the property for DVI-1/VGA specifies VGA-1/VGA to be
+	cloned, VGA-1/VGA has to list DVI-1/VGA as well.
+	Outputs / format pairs listed in this property MUST be included in the
+	CompatibilityList.
+
+    "CompatibilityList"		aka RR_PROPERTY_COMPATIBILITY_LIST
+	Type:			ATOM
+	Format:			32
+	Num items:		2*n
+	Flags:			Immutable
+	Range/List:		0-
+
+	Some combinations of outputs on some cards cannot be served at all,
+	because the according encoder is only capable of driving one output at
+	a time.
+	This property lists all output + signal format pairs that can be
+	driven together with this output. NULL atoms specify any output / any
+	signal format, respectively.
+	This property MUST be symmetric, but may change with changing signal
+	format. I.e. if the property for DVI-1/TMDS specifies VGA-1/VGA to be
+	available, VGA-1/VGA has to list DVI-1/TMDS as well.
+
+    "ConnectorNumber"		aka RR_PROPERTY_CONNECTOR_NUMBER
+	Type:			INTEGER
+	Format:			32
+	Num items:		1
+	Flags:			Immutable, Static
+	Range/List:		0-
+
+	Outputs that route their signal to the same connector MUST
+	have the same connector number. Outputs with the same
+	connector number MUST route their signal to the same
+	connector, except if it is 0, which indicates unknown
+	connectivity. 1 is called the primary connector, 2 the
+	secondary. 3 is typically a TV connector, but that is completely
+	driver / hardware dependent.
+	Outputs with the same connector number SHOULD have the same
+	connector type. Meaning and client behavior for mismatching
+	connector types is undefined at the moment.
+
+    "ConnectorType"		aka RR_PROPERTY_CONNECTOR_TYPE
+	Type:			ATOM
+	Format:			32
+	Num items:		1
+	Flags:			Immutable, Static
+	Range/List:		unknown VGA DVI DVI‐I DVI‐A DVI‐D HDMI Panel
+				TV TV-Composite TV-SVideo TV-Component
+				TV-SCART TV-C4 DisplayPort
+
+	Connector type, as far as known to the driver.
+	Values with dashes (TV‐Composite) describe more specific versions of
+	the base values (TV). The former SHOULD be used if the connector is
+	not capable of producing other signal formats. The later SHOULD be
+	used if the exact connector is unknown, or the connector is a
+	multi‐format connector that is not described otherwise. DVI, for
+	instance, SHOULD be handled like a DVI‐I connector, unless additional
+	information is available to the user agent. PANEL describes
+	laptop‐internal (normally LVDS) displays. TV, TV‐SCART, TV‐Component,
+	and TV‐C4 with signal format VGA are valid combinations and describe
+	RGB TV signals.
+
+    "EDID"			aka RR_PROPERTY_RANDR_EDID
+	Type:			INTEGER
+	Format:			8
+	Num items:		n
+	Flags:			Immutable
+	Range/List:		-
+
+	Raw EDID data from the device attached to the according
+	output. Should include main EDID data and all extension
+	blocks. Previously known as EdidData.
+
+    “non-desktop”	aka RR_PROPERTY_NON_DESKTOP
+	Type:			INTEGER
+	Format:			32
+	Num items:		1
+	Flags			Immutable
+	Range/List:		0-1
+
+	Indicates whether the device attached to this output should not
+	be considered part of the normal desktop. When set to 0 or not
+	present, the output should be presented as part of the
+	desktop.
+
+	When set to 1, the output should not be presented as part of
+	the desktop. To not present an output as part of the desktop,
+	the normal desktop environment should not be shown on this
+	output, nor should desktop applications be positioned on it.
+
+	When set to 1, RRGetOutputInfo will always report connection status
+	Disconnected, but RROutputChangeNotify events will still be
+	delivered when the connection status changes and all other
+	information about the output and connected device will be
+	reported correctly.
+
+    "SignalFormat"		aka RR_PROPERTY_SIGNAL_FORMAT
+	Type:			ATOM
+	Format:			32
+	Num items:		1
+	Flags:			-
+	Range/List:		unknown VGA TMDS LVDS Composite Composite-PAL
+				Composite-NTSC Composite-SECAM SVideo
+				Component DisplayPort
+
+	Signal format / physical protocol format that is used for the
+	specified output. valid-values lists all possible formats on this
+	output, which SHOULD be a subset of the list above and MUST be static.
+	Values with dashes (Composite-PAL) describe more specific versions of
+	the base values (Composite) and SHOULD be used if known to the driver.
+	A driver MAY change this property of an output if the underlying
+	hardware indicates a protocol change (e.g. TV formats).  Clients are
+	allowed to change the signal format in order to select a different
+	signal format (e.g. Composite etc.) or physical protocol (e.g. VGA or
+	TMDS on DVI-I).
+	Laptop panels SHOULD not be detected with this property, but rather by
+	ConnectorType.
+
+    "SignalProperties"		aka RR_PROPERTY_SIGNAL_FORMAT
+	Type:			ATOM
+	Format:			32
+	Num items:		n
+	Flags:			-
+	Range/List:		For Composite signals:
+				  NTSC NTSC-M NTSC-J NTSC-N NTSC-4.43 NTSC-film
+				  PAL PAL-B PAL-G PAL-H PAL-H PAL-I PAL-M PAL-D
+				  PAL-N PAL-Nc PAL-L PAL-60
+				  SECAM SECAM-L SECAM-B SECAM-G SECAM-D SECAM-K
+				  SECAM-H SECAM-K
+				For TMDS signals:
+				  SingleLink DualLink
+				For DisplayPort signals:
+				  Lane1 Lane2 Lane4 LowSpeed HiSpeed
+
+	Properties of the signal format that is currently used for the
+	specified output. valid-values lists all possible properties on this
+	output, which SHOULD be a subset of the list above. It will change if
+	SignalFormat changes.  Multiple properties are allowed.
+	Values with dashes (PAL-B) describe more specific versions of the base
+	values (PAL) and SHOULD be used if known to the driver.  A driver MAY
+	change this property of an output if the underlying hardware indicates
+	a signal change (e.g. TV formats).  Clients are allowed to change the
+	properties in order to select a different signal subformat.
+
+    "Border"			aka RR_PROPERTY_BORDER
+	Type:			CARDINAL
+	Format:			16
+	Num items:		0, 1, 2, or 4
+	Flags:			Immutable
+	Range/List:		0-
+
+	This property is a list of integers specifying adjustments for the edges
+	of the displayed image. How this property is applied depends on the
+	number of elements in the list:
+
+	  0 = No border is applied
+	  1 = A border of Border[0] is applied to all four sides of the image.
+	  2 = A border of Border[0] is applied to the left and right sides of
+	      the image, and a border of Border[1] is applied to the top and
+	      bottom.
+	  4 = The border dimensions are as follows:
+		Border[0]: left
+		Border[1]: top
+		Border[2]: right
+		Border[3]: bottom
+
+	Note that how many configuration dimensions are actually supported is
+	specified by the BorderDimensions property described below. If more than
+	BorderDimensions values are specified, the extra values are ignored.
+
+	These border dimensions shrink the region of pixels displayed by the
+	CRTC by the corresponding number of rows or columns, and is applied
+	after the CRTC transform. For example, a mode with a 1920x1080 active
+	region, border dimensions of [ 10, 20, 30, 40 ], and a ½x scaling
+	transform would display a rectangle of 940x510 pixels from the scanout
+	pixmap scaled to 1880x1020 raster pixels positioned at (10, 20) in
+	display raster space.
+
+	Raster pixels in the border are black.
+
+	This property is created with pending == TRUE, so changes are not
+	applied immediately and instead take effect at the next RRSetCrtcConfig.
+
+	If multiple outputs with different border settings are bound to the same
+	CRTC when the configuration is changed, the behavior is undefined.
+
+	If the length of the property is less than four when the CRTC is
+	configured, the missing values are assumed to be zero.  If the length is
+	greater than four, the extra values are ignored.
+
+	If the width of the mode is less than or equal to the sum of the left
+	and right borders, then the left and right border settings are ignored.
+	Likewise, if the height of the mode is less than or equal to the sum of
+	the top and bottom borders, the top and bottom borders are ignored.
+
+    "BorderDimensions"		aka RR_PROPERTY_BORDER_DIMENSIONS
+	Type:			CARDINAL
+	Format:			8
+	Num items:		1
+	Flags:			Immutable, Static
+	Range/List:		0, 1, 2, or 4
+
+	This property lists how many border adjustment parameters can actually
+	be used:
+
+	  0 = no borders are supported
+	  1 = a single border value is applied to all four sides of the image
+	  2 = left/right and top/bottom borders can be specified independently
+	  4 = all four borders can be specified independently
+
+    "GUID"			aka RR_PROPERTY_GUID
+	Type:			INTEGER
+	Format:			8
+	Num items:		16
+	Flags:			Immutable
+	Range/List:		-
+
+	Some display devices, such as DisplayPort 1.2 devices, have globally
+	unique identifiers.  When such an identifier is available, this property
+	contains its raw bytes.
+
+    "TILE"			aka RR_PROPERTY_RANDR_TILE
+	Type:			INTEGER
+	Format:			32
+	Num items:		8
+	Flags:			Immutable
+	Range/List:		-
+
+        Tile monitors have an array of values describing the tiling,
+        based on DisplayID v1.3
+
+	The 8 elements are:
+        0: group id - The tile group identifier
+        1: flags - flags for tile group
+		0x1 = single monitor enclosure
+        2: number of horizontal tiles in tile group
+        3: number of vertical tiles in tile group
+        4: horizontal tile location for this tile
+        5: vertical tile location for this tile
+        6: horizontal tile size for this tile
+        7: vertical tile size for this tile
+
+9.2 Properties introduced with version 1.2 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+EDID				yes		n/a
+
+EDID is provided by the RandR frontend, thus not driver specific.
+
+
+9.3 Properties introduced with version 1.3 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+CloneList			yes		not mandatory
+CompatibilityList		yes		not mandatory
+ConnectorNumber			yes: static	not mandatory
+ConnectorType			yes: static	RandR 1.3
+SignalFormat			no		RandR 1.3
+SignalProperties		no		not mandatory
+
+9.4 Properties introduced with version 1.3.1 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+Backlight			no		not mandatory
+
+9.5 Properties introduced with version 1.4.0 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+Border				yes		not mandatory
+BorderDimensions		yes: static	not mandatory
+
+9.6 Properties introduced with version 1.4.1 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+GUID				yes		not mandatory
+
+9.7 Properties introduced with version 1.5 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+TILE				yes		not mandatory
+
+9.8 Properties introduced with version 1.6 of the RandR extension
+
+Property			Immutable	Mandatory since
+────────			─────────	───────────────
+non-desktop			yes		not mandatory
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+10. Extension Versioning
+
+The RandR extension was developed in parallel with the implementation
+to ensure the feasibility of various portions of the design. As
+portions of the extension are implemented, the version number of the
+extension has changed to reflect the portions of the standard provided.
+This document describes the version 1.4 of the specification, the
+partial implementations have version numbers less than that. Here's a
+list of what each version provided:
+
+	0.0: This prototype implemented resize and rotation in the
+	     TinyX server Used approximately the protocol described in
+	     the Usenix paper. Appeared in the TinyX server in
+	     XFree86 4.2, but not in the XFree86 main server.
+
+	0.1: Added subpixel order, added an event for subpixel order.
+	     This version was never checked in to XFree86 CVS.
+
+	1.0: Implements resize, rotation, and reflection. Implemented
+	     both in the XFree86 main server (size change only at this
+	     date), and fully (size change, rotation, and reflection)
+	     in XFree86's TinyX server.
+
+	1.1: Added refresh rates
+
+	1.2: Separate screens from CRTCs and outputs, switch to full VESA
+	     modes
+
+	1.3: Added cheap version of RRGetScreenResources.  Added CRTC
+	     transformations.  Added panning.  Added primary outputs.
+	     Added standard properties.
+
+        1.4: Added provider objects for handling multi-GPU systems.
+
+	1.5: Added Monitors
+
+	1.6: Added Leases and non-desktop output information.
+
+Compatibility between 0.0 and 1.0 was *NOT* preserved, and 0.0 clients
+will fail against 1.0 servers. The wire encoding op-codes were
+changed for GetScreenInfo to ensure this failure in a relatively
+graceful way. Version 1.1 servers and clients are cross compatible with
+1.0. Version 1.1 is considered to be stable and we intend upward
+compatibility from this point. Version 1.2 offers an extended model of the
+system with multiple output support. Version 1.3 adds a cheap version of
+GetScreenResources to avoid expensive DDC operations, CRTC transformations,
+panning, and the primary output concept. Versions 1.2 through 1.6 are
+backward-compatible with 1.1.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+11. Relationship with other extensions
+
+Two other extensions have a direct relationship with this extension. This
+section attempts to explain how these three are supposed to work together.
+
+11.1 XFree86-VidModeExtension
+
+XFree86-VidModeExtension changes the configuration of a single monitor
+attached to the screen without changing the configuration of the screen
+itself. It provides the ability to specify new mode lines for the server to
+use along with selecting among existing mode lines. As it uses screen
+numbers instead of window identifiers, it can be used to affect multiple
+monitors in a single-screen Xinerama configuration. However, the association
+between screen numbers and root windows in a multi-Screen environment is not
+defined by the extension. Version 2.0 of this extension added the ability to
+adjust the DAC values in a TrueColor server to modify the brightness curves
+of the display.
+
+All of the utility of this extension is subsumed by RandR version 1.2, RandR
+should be used in preference to XFree86-VidModeExtension where both are
+present.
+
+11.2 Xinerama
+
+Xinerama provides a mechanism for describing the relationship between the
+overall screen display and monitors placed within that area. As such, it
+provides the query functionality of RandR 1.2 without any of the
+configuration functionality. Applications using Xinerama to discover
+monitor geometry can continue to do so, with the caveat that they will not be
+informed of changes when they occur. However, Xinerama configuration data
+will be updated, so applications selecting for RandR notification and
+re-querying the configuration with the Xinerama extension will get updated
+information. It is probably better to view RandR as a superset of Xinerama
+at this point and use it in preference to Xinerama where both are present.
+
+			      ❧❧❧❧❧❧❧❧❧❧❧
+
+Appendix A. Protocol Encoding
+
+Syntactic Conventions
+
+This document uses the same syntactic conventions as the core X
+protocol encoding document.
+
+A.1 Common Types
+
+┌───
+    ROTATION
+	0x0001	Rotate_0
+	0x0002	Rotate_90
+	0x0004	Rotate_180
+	0x0008	Rotate_270
+	0x0010	Reflect_X
+	0x0020	Reflect_Y
+└───
+	Used to encode both sets of possible rotations and individual
+	selected rotations.
+
+┌───
+    RRSELECTMASK
+	0x0001	ScreenChangeNotifyMask
+	0x0002	CrtcChangeNotifyMask		Added in version 1.2
+	0x0004	OutputChangeNotifyMask		Added in version 1.2
+	0x0008	OutputPropertyNotifyMask	Added in version 1.2
+	0x0010	ProviderChangeNotifyMask 	Added in version 1.4
+	0x0020	ProviderPropertyNotifyMask	Added in version 1.4
+	0x0040	ResourceChangeNotifyMask	Added in version 1.4
+	0x0080  LeaseNotifyMask                 Added in version 1.6
+
+└───
+      Event select mask for RRSelectInput
+
+┌───
+    RRCONFIGSTATUS
+	0x0 Success
+	0x1 InvalidConfigTime
+	0x2 InvalidTime
+	0x3 Failed
+└───
+	Return status for requests which depend on time.
+
+┌───
+    MODEINFO (32)				Added in version 1.2
+	4	CARD32		id
+	2	CARD16		width in pixels
+	2	CARD16		height in pixels
+	4	CARD32		dot clock
+	2	CARD16		h sync start
+	2	CARD16		h sync end
+	2	CARD16		h total
+	2	CARD16		h skew
+	2	CARD16		v sync start
+	2	CARD16		v sync end
+	2	CARD16		v total
+	2	CARD16		name length
+	4	SETofMODEFLAG	mode flags
+└───
+
+	An output mode specifies the complete CRTC timings for
+	a specific mode. The vertical and horizontal synchronization rates
+	can be computed given the dot clock and the h total/v total
+	values. If the dot clock is zero, then all of the timing
+	parameters and flags are not used, and must be zero as this
+	indicates that the timings are unknown or otherwise unused.
+	The name itself will be encoded separately in each usage.
+
+┌───
+    MODEFLAG
+	0x00000001	HSyncPositive
+	0x00000002	HSyncNegative
+	0x00000004	VSyncPositive
+	0x00000008	VSyncNegative
+	0x00000010	Interlace
+	0x00000020	DoubleScan
+	0x00000040	CSync
+	0x00000080	CSyncPositive
+	0x00000100	CSyncNegative
+	0x00000200	HSkewPresent
+	0x00000400	BCast
+	0x00000800	PixelMultiplex
+	0x00001000	DoubleClock
+	0x00002000	ClockDivideBy2
+└───
+┌───
+    CONNECTION
+	0		Connected
+	1		Disconnected
+	2		UnknownConnection
+└───
+
+┌───
+    PROVIDER_CAPS				Added in version 1.4
+	0x00000001	SourceOutput
+	0x00000002	SinkOutput
+	0x00000004	SourceOffload
+	0x00000008	SinkOffload
+└───
+
+A.1.1 Common Types added in version 1.5 of the protocol
+
+┌───
+    MONITORINFO (16 + 4*n)
+	4	ATOM		name
+	1	BOOL		primary
+	1	BOOL		automatic
+	2	CARD16		noutputs
+	2	INT16		x
+	2	INT16		y
+	2	CARD16		width in pixels
+	2	CARD16		height in pixels
+	4	CARD32		width in millimeters
+	4	CARD32		height in millimeters
+	4*n	OUTPUT		outputs
+└───
+
+A.2 Protocol Requests
+
+Opcodes 1 and 3 were used in the 0.0 protocols, and will return
+errors if used in version 1.0.
+
+┌───
+    RRQueryVersion
+
+	1	CARD8			major opcode
+	1	0			RandR opcode
+	2	3			length
+	4	CARD32			major version
+	4	CARD32			minor version
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	1	CARD32			major version
+	1	CARD32			minor version
+└───
+┌───
+    RRSetScreenConfig
+
+	1	CARD8			major opcode
+	1	2			RandR opcode
+	2	6			length
+	4	WINDOW			window on screen to be configured
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		config timestamp
+	2	SIZEID			size index
+	2	ROTATION		rotation/reflection
+	2	CARD16			refresh rate (1.1 only)
+	2	CARD16			pad
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	0			reply length
+	4	TIMESTAMP		new timestamp
+	4	TIMESTAMP		new configuration timestamp
+	4	WINDOW			root
+	2	SUBPIXELORDER		subpixel order defined in Render
+	2	CARD16			pad4
+	4	CARD32			pad5
+	4	CARD32			pad6
+└───
+┌───
+    RRSelectInput
+
+	1	CARD8			major opcode
+	1	4			RandR opcode
+	2	3			length
+	4	WINDOW			window
+	2	SETofRRSELECTMASK	enable
+	2	CARD16			pad
+└───
+┌───
+    RRGetScreenInfo
+
+	1	CARD8			major opcode
+	1	5			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1	CARD8			set of Rotations
+	2	CARD16			sequence number
+	4	0			reply length
+	4	WINDOW			root window
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		config timestamp
+	2	CARD16			number of SCREENSIZE following
+	2	SIZEID			current size index
+	2	ROTATION		current rotation and reflection
+	2	CARD16			current rate (added in version 1.1)
+	2	CARD16			length of rate info (number of CARD16s)
+	2	CARD16			pad
+
+	SCREENSIZE
+	2	CARD16			width in pixels
+	2	CARD16			height in pixels
+	2	CARD16			width in millimeters
+	2	CARD16			height in millimeters
+
+	REFRESH
+	2	CARD16			number of rates (n)
+	2n	CARD16			rates
+└───
+
+A.2.1 Protocol Requests added with version 1.2
+
+┌───
+    RRGetScreenSizeRange
+	1	CARD8			major opcode
+	1	6			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	2	CARD16			minWidth
+	2	CARD16			minHeight
+	2	CARD16			maxWidth
+	2	CARD16			maxHeight
+	16				unused
+└───
+┌───
+    RRSetScreenSize
+	1	CARD8			major opcode
+	1	7			RandR opcode
+	2	5			length
+	4	WINDOW			window
+	2	CARD16			width
+	2	CARD16			height
+	4	CARD32			width in millimeters
+	4	CARD32			height in millimeters
+└───
+┌───
+    RRGetScreenResources
+	1	CARD8			major opcode
+	1	8			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	c+o+8m+(b+p)/4		reply length
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		config-timestamp
+	2	c			number of CRTCs
+	2	o			number of outputs
+	2	m			number of modeinfos
+	2	b			total bytes in mode names
+	8				unused
+	4c	LISTofCRTC		crtcs
+	4o	LISTofOUTPUT		outputs
+	32m	LISTofMODEINFO		modeinfos
+	b	STRING8			mode names
+	p				unused, p=pad(b)
+└───
+┌───
+    RRGetOutputInfo
+	1	CARD8			major opcode
+	1	9			RandR opcode
+	2	3			length
+	4	OUTPUT			output
+	4	TIMESTAMP		config-timestamp
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	1+c+m+(n+p)/4		reply length
+	4	TIMESTAMP		timestamp
+	4	CRTC			current connected crtc
+	4	CARD32			width in millimeters
+	4	CARD32			height in millimeters
+	1	CONNECTION		connection
+	1	SUBPIXELORDER		subpixel-order
+	2	c			number of CRTCs
+	2	m			number of modes
+	2	p			number of preferred modes
+	2	o			number of clones
+	2	n			length of name
+	4c	LISTofCRTC		crtcs
+	4m	LISTofMODE		modes
+	4o	LISTofOUTPUT		clones
+	n	STRING8			name
+	p				unused, p=pad(n)
+└───
+┌───
+    RRListOutputProperties
+	1	CARD8			major opcode
+	1	10			RandR opcode
+	2	2			length
+	4	OUTPUT			output
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	n			reply length
+	2	n			number of ATOMs in atoms
+	22				unused
+	4n	LISTofATOM		atoms
+└───
+┌───
+    RRQueryOutputProperty
+	1	CARD8			major opcode
+	1	11			RandR opcode
+	2	3			request length
+	4	OUTPUT			output
+	4	ATOM			property
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	n			reply length
+	1	BOOL			pending
+	1	BOOL			range
+	1	BOOL			immutable
+	21				unused
+	4n	LISTofINT32		valid values
+└───
+┌───
+    RRConfigureOutputProperty
+	1	CARD8			major opcode
+	1	12			RandR opcode
+	2	4+n			request length
+	4	OUTPUT			output
+	4	ATOM			property
+	1	BOOL			pending
+	1	BOOL			range
+	2				unused
+	4n	LISTofINT32		valid values
+└───
+┌───
+    RRChangeOutputProperty
+	1	CARD8			major opcode
+	1	13			RandR opcode
+	2	6+(n+p)/4		request length
+	4	OUTPUT			output
+	4	ATOM			property
+	4	ATOM			type
+	1	CARD8			format
+	1				mode
+		0	Replace
+		1	Prepend
+		2	Append
+	2				unused
+	4	CARD32			length of data in format units
+					(= n for format = 8)
+					(= n/2 for format = 16)
+					(= n/4 for format = 32)
+	n	LISTofBYTE		data
+					(n is a multiple of 2 for format = 16)
+					(n is a multiple of 4 for format = 32)
+	p				unused, p=pad(n)
+└───
+┌───
+    RRDeleteOutputProperty
+	1	CARD8			major opcode
+	1	14			RandR opcode
+	2	3			request length
+	4	OUTPUT			output
+	4	ATOM			property
+└───
+┌───
+    RRGetOutputProperty
+	1	CARD8			major opcode
+	1	15			RandR opcode
+	2	7			request length
+	4	OUTPUT			output
+	4	ATOM			property
+	4	ATOM			type
+		0	AnyPropertyType
+	4	CARD32			long-offset
+	4	CARD32			long-length
+	1	BOOL			delete
+	1	BOOL			pending
+	2				unused
+      ▶
+	1	1			Reply
+	1	CARD8			format
+	2	CARD16			sequence number
+	4	(n+p)/4			reply length
+	4	ATOM			type
+		0	None
+	4	CARD32			bytes-after
+	4	CARD32			length of value in format units
+					(= 0 for format = 0)
+					(= n for format = 8)
+					(= n/2 for format = 16)
+					(= n/4 for format = 32)
+	12				unused
+	n	LISTofBYTE		value
+					(n is zero for format = 0)
+					(n is a multiple of 2 for format = 16)
+					(n is a multiple of 4 for format = 32)
+	p				unused, p=pad(n)
+└───
+┌───
+    RRCreateMode
+	1	CARD8			major opcode
+	1	16			RandR opcode
+	2	10+(n+p)/4		length
+	4	WINDOW			window
+	32	MODEINFO		mode
+	n	STRING8			mode name
+	p				unused, p=pad(n)
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	4	MODE			mode
+	20				unused
+└───
+┌───
+    RRDestroyMode
+	1	CARD8			major opcode
+	1	17			RandR opcode
+	2	2			length
+	4	MODE			mode
+└───
+┌───
+    RRAddOutputMode
+	1	CARD8			major opcode
+	1	18			RandR opcode
+	2	3			length
+	4	OUTPUT			output
+	4	MODE			mode
+└───
+┌───
+    RRDeleteOutputMode
+	1	CARD8			major opcode
+	1	19			RandR opcode
+	2	3			length
+	4	OUTPUT			output
+	4	MODE			mode
+└───
+┌───
+    RRGetCrtcInfo
+	1	CARD8			major opcode
+	1	20			RandR opcode
+	2	3			length
+	4	CRTC			crtc
+	4	TIMESTAMP		config-timestamp
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	o+p			reply length
+	4	TIMESTAMP		timestamp
+	2	INT16			x
+	2	INT16			y
+	2	CARD16			width
+	2	CARD16			height
+	4	MODE			mode
+	2	ROTATION		current rotation and reflection
+	2	ROTATION		set of possible rotations
+	2	o			number of outputs
+	2	p			number of possible outputs
+	4o	LISTofOUTPUT		outputs
+	4p	LISTofOUTPUT		possible outputs
+└───
+┌───
+    RRSetCrtcConfig
+	1	CARD8			major opcode
+	1	21			RandR opcode
+	2	7+n			length
+	4	CRTC			crtc
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		config timestamp
+	2	INT16			x
+	2	INT16			y
+	4	MODE			mode
+	2	ROTATION		rotation/reflection
+	2				unused
+	4n	LISTofOUTPUT		outputs
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	0			reply length
+	4	TIMESTAMP		new timestamp
+	20				unused
+└───
+┌───
+    RRGetCrtcGammaSize
+	1	CARD8			major opcode
+	1	22			RandR opcode
+	2	2			length
+	4	CRTC			crtc
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	2	CARD16			size
+	22				unused
+└───
+┌───
+    RRGetCrtcGamma
+	1	CARD8			major opcode
+	1	23			RandR opcode
+	2	2			length
+	4	CRTC			crtc
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	(6n+p)/4		reply length
+	2	n			size
+	20				unused
+	2n	LISTofCARD16		red
+	2n	LISTofCARD16		green
+	2n	LISTofCARD16		blue
+	p				unused, p=pad(6n)
+└───
+┌───
+    RRSetCrtcGamma
+	1	CARD8			major opcode
+	1	24			RandR opcode
+	2	3+(6n+p)/4		length
+	4	CRTC			crtc
+	2	n			size
+	2				unused
+	2n	LISTofCARD16		red
+	2n	LISTofCARD16		green
+	2n	LISTofCARD16		blue
+	p				unused, p=pad(6n)
+└───
+
+A.2.2 Protocol Requests added with version 1.3
+
+┌───
+    RRGetScreenResourcesCurrent
+	1	CARD8			major opcode
+	1	25			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	c+o+8m+(b+p)/4		reply length
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		config-timestamp
+	2	c			number of CRTCs
+	2	o			number of outputs
+	2	m			number of modeinfos
+	2	b			total bytes in mode names
+	8				unused
+	4c	LISTofCRTC		crtcs
+	4o	LISTofOUTPUT		outputs
+	32m	LISTofMODEINFO		modeinfos
+	b	STRING8			mode names
+	p				unused, p=pad(b)
+└───
+
+┌───
+    RRSetCrtcTransform
+	1	CARD8			major opcode
+	1	26			RandR opcode
+	2	12+(n+p)/4+v		length
+	4	CRTC			crtc
+	36	TRANSFORM		transform
+	2	CARD16			filter length
+	2				unused
+	n	STRING8			filter name
+	p				unused, p=pad(n)
+	4v	FIXED			filter params
+└───
+
+┌───
+    RRGetCrtcTransform
+	1	CARD8			major opcode
+	1	27			RandR opcode
+	2	2			length
+	4	CRTC			crtc
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	16+(pn+pnp)/4+(cn+cnp)/4+pf+cf	reply length
+	36	TRANSFORM		pending transform
+	1	BOOL			has transforms
+	3				unused
+	36	TRANSFORM		current transform
+	4				unused
+	2	pn			pending filter name length
+	2	pf			pending filter num params
+	2	cn			current filter name length
+	2	cf			current filter num params
+	pn	STRING8			pending filter name
+	pnp				unused, pnp=pad(pn)
+	4*pf	FIXED			pending filter params
+	cn	STRING8			current filter name
+	cnp				unused, cnp=pad(cn)
+	4*cf	FIXED			current filter params
+└───
+
+┌───
+    RRGetPanning
+	1	CARD8			major opcode
+	1	28			RandR opcode
+	2	2			length
+	4	CRTC			crtc
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	1			reply length
+	4	TIMESTAMP		timestamp
+	2	CARD16			left
+	2	CARD16			top
+	2	CARD16			width
+	2	CARD16			height
+	2	CARD16			track_left
+	2	CARD16			track_top
+	2	CARD16			track_width
+	2	CARD16			track_height
+	2	INT16			border_left
+	2	INT16			border_top
+	2	INT16			border_right
+	2	INT16			border_bottom
+└───
+┌───
+    RRSetPanning
+	1	CARD8			major opcode
+	1	29			RandR opcode
+	2	9			length
+	4	CRTC			crtc
+	4	TIMESTAMP		timestamp
+	2	CARD16			left
+	2	CARD16			top
+	2	CARD16			width
+	2	CARD16			height
+	2	CARD16			track_left
+	2	CARD16			track_top
+	2	CARD16			track_width
+	2	CARD16			track_height
+	2	INT16			border_left
+	2	INT16			border_top
+	2	INT16			border_right
+	2	INT16			border_bottom
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	0			reply length
+	4	TIMESTAMP		new timestamp
+	20				unused
+└───
+
+┌───
+    RRSetOutputPrimary
+	1	CARD8			major opcode
+	1	30			RandR opcode
+	2	3			length
+	4	WINDOW			window
+	4	OUTPUT			output
+└───
+
+┌───
+    RRGetOutputPrimary
+	1	CARD8			major opcode
+	1	31			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	CARD32			length
+	4	OUTPUT			output
+	4	CARD32			pad1
+	4	CARD32			pad2
+	4	CARD32			pad3
+	4	CARD32			pad4
+└───
+
+A.2.3 Protocol Requests added with version 1.4
+
+┌───
+    RRGetProviders
+	1	CARD8			major opcode
+	1	32			RandR opcode
+	2	2			length
+	4	WINDOW			window
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	p			length
+	4	TIMESTAMP		timestamp
+	2	p			number of Providers
+	18				unused
+	4p	LISTofPROVIDERS		providers
+└───
+┌───
+    RRGetProviderInfo
+	1	CARD8			major opcode
+	1	33			RandR opcode
+	2	3			length
+	4	PROVIDER		provider
+	4	TIMESTAMP		config-timestamp
+      ▶
+	1	1			Reply
+	1	RRCONFIGSTATUS		status
+	2	CARD16			sequence number
+	4	1+c+o+(a*2)+(n+p)/4		reply length
+	4	TIMESTAMP		timestamp
+	4	CARD32			capabilities
+	2	c			number of crtcs
+	2	o 			number of outputs
+	2	a 			number of associated providers
+	2	n			length of name
+	8       			unused
+	4c	LISTofCRTC		crtcs
+	4o	LISTofOUTPUT		outputs
+	4a	LISTofPROVIDER		associated providers
+	4a	CARD32			associated provider capability
+	n	STRING8			name
+	p				unused, p=pad(n)
+└───
+┌───
+    RRSetProviderOffloadSink
+	1	CARD8			major opcode
+	1	34			RandR opcode
+	2	4			length
+	4	PROVIDER		provider
+	4	PROVIDER		offload sink provider
+	4	TIMESTAMP		timestamp
+└───
+┌───
+    RRSetProviderOutputSource
+	1	CARD8			major opcode
+	1	35			RandR opcode
+	2	4			length
+	4	PROVIDER		provider
+	4	PROVIDER		output source provider
+	4	TIMESTAMP		timestamp
+└───
+┌───
+    RRListProviderProperties
+	1	CARD8			major opcode
+	1	36			RandR opcode
+	2	2			length
+	4	PROVIDER		provider
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	n			reply length
+	2	n			number of ATOMs in atoms
+	22				unused
+	4n	LISTofATOM		atoms
+└───
+┌───
+    RRQueryProviderProperty
+	1	CARD8			major opcode
+	1	37			RandR opcode
+	2	3			request length
+	4	PROVIDER		provider
+	4	ATOM			property
+      ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	n			reply length
+	1	BOOL			pending
+	1	BOOL			range
+	1	BOOL			immutable
+	21				unused
+	4n	LISTofINT32		valid values
+└───
+┌───
+    RRConfigureProviderProperty
+	1	CARD8			major opcode
+	1	38			RandR opcode
+	2	4+n			request length
+	4	PROVIDER		provider
+	4	ATOM			property
+	1	BOOL			pending
+	1	BOOL			range
+	2				unused
+	4n	LISTofINT32		valid values
+└───
+┌───
+    RRChangeProviderProperty
+	1	CARD8			major opcode
+	1	39			RandR opcode
+	2	6+(n+p)/4		request length
+	4	PROVIDER		provider
+	4	ATOM			property
+	4	ATOM			type
+	1	CARD8			format
+	1				mode
+		0	Replace
+		1	Prepend
+		2	Append
+	2				unused
+	4	CARD32			length of data in format units
+					(= n for format = 8)
+					(= n/2 for format = 16)
+					(= n/4 for format = 32)
+	n	LISTofBYTE		data
+					(n is a multiple of 2 for format = 16)
+					(n is a multiple of 4 for format = 32)
+	p				unused, p=pad(n)
+└───
+┌───
+    RRDeleteProviderProperty
+	1	CARD8			major opcode
+	1	40			RandR opcode
+	2	3			request length
+	4	PROVIDER		provider
+	4	ATOM			property
+└───
+┌───
+    RRGetProviderProperty
+	1	CARD8			major opcode
+	1	41			RandR opcode
+	2	7			request length
+	4	PROVIDER		provider
+	4	ATOM			property
+	4	ATOM			type
+		0	AnyPropertyType
+	4	CARD32			long-offset
+	4	CARD32			long-length
+	1	BOOL			delete
+	1	BOOL			pending
+	2				unused
+      ▶
+	1	1			Reply
+	1	CARD8			format
+	2	CARD16			sequence number
+	4	(n+p)/4			reply length
+	4	ATOM			type
+		0	None
+	4	CARD32			bytes-after
+	4	CARD32			length of value in format units
+					(= 0 for format = 0)
+					(= n for format = 8)
+					(= n/2 for format = 16)
+					(= n/4 for format = 32)
+	12				unused
+	n	LISTofBYTE		value
+					(n is zero for format = 0)
+					(n is a multiple of 2 for format = 16)
+					(n is a multiple of 4 for format = 32)
+	p				unused, p=pad(n)
+└───
+
+A.2.4 Protocol Requests added with version 1.5
+
+┌───
+    RRGetMonitors
+	1	CARD8			major opcode
+	1	42			RandR opcode
+	2	2			request length
+	4	WINDOW			window
+     ▶
+	1	1			Reply
+	1				unused
+	2	CARD16			sequence number
+	4	6*n + o			reply length
+	4	TIMESTAMP		timestamp
+	4	n			nmonitors
+	4	o			noutputs
+	12				unused
+	n*24+o*4 LISTofMONITORINFO	monitors
+└───
+┌───
+    RRSetMonitor
+	1	CARD8			major opcode
+	1	43			RandR opcode
+	2	6 + o			request length
+	4	WINDOW			window
+	24+o	MONITORINFO		monitorinfo
+└───
+┌───
+    RRDeleteMonitor
+	1	CARD8			major opcode
+	1	44			RandR opcode
+	2	3			request length
+	4	WINDOW			window
+	4	ATOM			name
+└───
+
+A.3 Protocol Events
+
+┌───
+    RRScreenChangeNotify
+	1	Base + 0		code
+	1	ROTATION		new rotation and reflection
+	2	CARD16			sequence number
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		configuration timestamp
+	4	WINDOW			root window
+	4	WINDOW			request window
+	2	SIZEID			size ID
+	2	SUBPIXELORDER		subpixel order defined in Render
+	2	CARD16			width in pixels
+	2	CARD16			height in pixels
+	2	CARD16			width in millimeters
+	2	CARD16			height in millimeters
+└───
+
+A.3.1 Protocol Events added with version 1.2
+
+┌───
+    RRCrtcChangeNotify
+	1	Base + 1		code
+	1	0			sub-code
+	2	CARD16			sequence number
+	4	TIMESTAMP		timestamp
+	4	WINDOW			request window
+	4	CRTC			crtc affected
+	4	MODE			mode in use
+	2	ROTATION		new rotation and reflection
+	2				unused
+	2	INT16			x
+	2	INT16			y
+	2	CARD16			width
+	2	CARD16			height
+└───
+┌───
+    RROutputChangeNotify
+	1	Base + 1		code
+	1	1			sub-code
+	2	CARD16			sequence number
+	4	TIMESTAMP		timestamp
+	4	TIMESTAMP		configuration timestamp
+	4	WINDOW			request window
+	4	OUTPUT			output affected
+	4	CRTC			crtc in use
+	4	MODE			mode in use
+	2	ROTATION		rotation in use
+	1	CONNECTION		connection status
+	1	SUBPIXELORDER		subpixel order
+└───
+┌───
+    RROutputPropertyNotify
+	1	Base + 1		code
+	1	2			sub-code
+	2	CARD16			sequence number
+	4	WINDOW			window
+	4	OUTPUT			output
+	4	ATOM			atom
+	4	TIMESTAMP		time
+	1				state
+		0	NewValue
+		1	Deleted
+	11				unused
+└───
+
+A.3.2 Protocol Events added with version 1.4
+┌───
+    RRProviderChangeNotify
+	1	Base + 1		code
+	1	3			sub-code
+	2	CARD16			sequence number
+	4	TIMESTAMP		timestamp
+	4	WINDOW			request window
+	4	PROVIDER		provider affected
+	16				unused
+└───
+┌───
+    RRProviderPropertyNotify
+	1	Base + 1		code
+	1	4			sub-code
+	2	CARD16			sequence number
+	4	WINDOW			window
+	4	PROVIDER		provider
+	4	ATOM			atom
+	4	TIMESTAMP		time
+	1				state
+		0	NewValue
+		1	Deleted
+	11				unused
+└───
+┌───
+    RRResourceChangeNotify
+	1	Base + 1		code
+	1	5			sub-code
+	2	CARD16			sequence number
+	4	TIMESTAMP		time
+	4	WINDOW			window
+	20				unused
+└───
+A.4 Protocol Errors
+
+┌───
+    ERRORS
+	Base + 0		Output
+	Base + 1		Crtc
+	Base + 2		Mode
+	Base + 3		Provider
+└───
+
+Bibliography
+
+[RANDR] Gettys, Jim and Keith Packard, "The X Resize and Rotate
+	Extension - RandR", Proceedings of the 2001 USENIX Annual
+	Technical Conference, Boston, MA
+
+[RENDER]
+	Packard, Keith, "The X Rendering Extension", work in progress,
+	https://gitlab.freedesktop.org/xorg/proto/xorgproto/raw/master/renderproto.txt

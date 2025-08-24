@@ -1,0 +1,6346 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE article
+          PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+          "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<article id="lbx">
+
+<articleinfo>
+   <title>Low Bandwidth X Extension</title>
+   <subtitle>X Consortium Standard</subtitle>
+   <authorgroup>
+     <author>
+       <firstname>Donna</firstname>
+       <surname>Converse</surname>
+     </author>
+     <author>
+       <firstname>Jim</firstname>
+       <surname>Fulton</surname>
+     </author>
+     <author>
+       <firstname>David</firstname>
+       <surname>Lemke</surname>
+     </author>
+     <author>
+       <firstname>Ralph</firstname>
+       <surname>Mor</surname>
+     </author>
+     <author>
+       <firstname>Keith</firstname>
+       <surname>Packard</surname>
+     </author>
+     <author>
+       <firstname>Ray</firstname>
+       <surname>Tice</surname>
+     </author>
+     <author>
+       <firstname>Dale</firstname>
+       <surname>Tonogai</surname>
+     </author>
+   </authorgroup>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <copyright><year>1996</year><holder>X Consortium</holder></copyright>
+
+<legalnotice>
+<para>
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated
+documentation files (the "Software"), to deal in the Software without
+restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense, and
+sell copies of the Software,
+and to permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+</para>
+<para>
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions
+of the Software.
+</para>
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE X
+CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+</para>
+<para>
+Except as contained in this notice, the name of the X Consortium shall not be
+used in advertising or otherwise
+to promote the sale, use or other dealings in this Software without prior
+written authorization from the
+X Consortium.
+</para>
+<para>X Window System is a trademark of The OpenGroup.</para>
+</legalnotice>
+</articleinfo>
+
+<sect1 id='introduction'>
+<title>Introduction</title>
+
+<para>
+Low Bandwidth X (LBX) is a network-transparent protocol for running X Window
+System applications over transport channels whose bandwidth and latency are
+significantly worse than that used in local area networks. It combines a
+variety of caching and reencoding techniques to reduce the volume of data that
+must be sent over the wire. It can be used with existing clients by placing a
+proxy between the clients and server, so that the low bandwidth/high latency
+communication occurs between the proxy and server.
+</para>
+
+
+<para>
+This extension was designed and implemented by Jim Fulton, David Lemke, Keith
+Packard, and Dale Tonogai, all of Network Computing Devices (NCD). Chris Kent
+Kantarjiev (Xerox PARC) participated in early design discussions. Ralph Mor (X
+Consortium) designed and implemented additional sections. Donna Converse (X
+Consortium) authored the protocol description and encoding from design notes
+and the implementation. Ray Tice (X Consortium) resolved the open issues in the
+design and specification. Bob Scheifler (X Consortium) helped out in many areas.
+</para>
+
+
+<para>
+The extension name is &quot;LBX&quot;.
+</para>
+
+
+</sect1>
+<sect1 id='description'>
+<title>Description</title>
+
+<para>
+The design center for LBX is to use a proxy as an intermediary between the
+client and server. The proxy reencodes and compresses requests, events, replies
+and errors, as well as the resulting data stream. Additionally, the proxy can
+cache information from the server to provide low-latency replies to clients.
+This reply generation by the proxy is known as short-circuiting. A proxy can
+handle multiple clients for a given server, but does not prevent clients from
+connecting directly to the server. The design allows the proxy to multiplex
+multiple clients into a single data stream to the server.
+</para>
+
+
+<para>
+Much of LBX is implemented as an extension. The compression and reencoding
+changes can be isolated to the transport and dispatch portions of the server,
+while short-circuiting requires minor changes to the server’s colormap and
+property code.
+</para>
+
+
+<para>
+LBX employs several different compression and short-circuiting methods. Use of
+these methods is negotiable, and in some cases, the algorithm used by a given
+method is negotiable as well. LBX also provides for negotiation of extensions
+to LBX.
+</para>
+
+
+<sect2 id='data_flow'>
+<title>Data Flow</title>
+
+<para>
+The LBX data stream goes through a number of layers:
+</para>
+
+
+<orderedlist>
+  <listitem>
+<para>Client requests</para>
+  </listitem>
+  <listitem>
+<para>Read by LBX and potential byte-swapping</para>
+  </listitem>
+  <listitem>
+<para>Request-specific compression</para>
+  </listitem>
+  <listitem>
+<para>Potential byte swapping</para>
+  </listitem>
+  <listitem>
+<para>Multiplexing of client request streams</para>
+  </listitem>
+  <listitem>
+<para>Delta replacement</para>
+  </listitem>
+  <listitem>
+<para>Stream compression</para>
+  </listitem>
+</orderedlist>
+
+<para>
+Transport
+</para>
+
+<!-- FIXME:  descending -->
+<orderedlist>
+  <listitem>
+<para>Stream decompression</para>
+  </listitem>
+  <listitem>
+<para>Delta substitution</para>
+  </listitem>
+  <listitem>
+<para>Demultiplexing of client request streams</para>
+  </listitem>
+  <listitem>
+<para>Potential byte swapping</para>
+  </listitem>
+  <listitem>
+<para>Reencoding</para>
+  </listitem>
+  <listitem>
+<para>Request processing</para>
+  </listitem>
+</orderedlist>
+
+<para>
+The reverse process occurs with X server replies, events, and errors.
+</para>
+
+
+</sect2>
+<sect2 id='tags'>
+<title>Tags</title>
+
+<para>
+Tags are used to support caching of large data items that are expected to be
+queried multiple times. Such things as the keyboard map and font metrics are
+often requested by multiple clients. Rather than send the data each time, the
+first time the data is sent it includes a tag. The proxy saves this data, so
+that subsequent requests can send only the tag to refer to that same data. The
+different types of tags are used for connection information, keyboard maps,
+modifier maps, fonts information and properties.
+</para>
+
+
+<para>
+Tag usage is negotiated as a boolean in the <emphasis>
+LbxStartProxy</emphasis>
+ message. The proxy controls how many tags are stored in the proxy. The server
+may wish to observe the proxy’s InvalidateTag behavior to limit how many tags
+are cached at any one time. Tagged data is not shared across types of tags, but
+the number space used for the tag ids is. The tag ids are generated by the
+server.
+</para>
+
+
+<para>
+The X server keeps track of what tags are known to the proxy. The proxy can
+invalidate a tag if no tag bearing replies of that type are pending. The proxy
+sends an <emphasis>
+LbxInvalidateTag</emphasis>
+ message to release the tagged data. The proxy must not invalidate connection
+tags unless instructed to do so by the server.
+</para>
+
+
+<para>
+If the server wishes to discard tagged data, it must either have received an
+<emphasis>
+LbxInvalidateTag</emphasis>
+ request from the proxy or send an <emphasis>
+LbxInvalidateTag</emphasis>
+ event to the proxy for that tag.
+</para>
+
+
+<sect3 id='tag_substitution_in_requests'>
+<title>Tag Substitution in Requests</title>
+
+<para>
+Many substitution requests have a tag field, followed by fields marked
+optional. For these requests, if the optional fields are present, the
+data in them is stored in the indicated tag, unless the tag is 0. If
+the optional fields are absent, the tag field indicates the tag that
+contains the data for the &quot;optional&quot; fields.
+</para>
+
+
+</sect3>
+<sect3 id='property_tags'>
+<title>Property Tags</title>
+
+<para>
+Property data makes special use of tags. A common use of properties is for
+inter-client communication. If both clients use the proxy, it is wasteful to
+send the data to the server and then back, when the server may never need it.
+<emphasis>
+LbxChangeProperty</emphasis>
+ request does the same work as the core <emphasis>
+ChangeProperty</emphasis>
+ request, but it does not send the data. The reply to this request contains a
+tag id corresponding to the data. If the property information is used locally,
+the server responds to <emphasis>
+LbxGetProperty</emphasis>
+ with the tag, and the property data need never be sent to the server. If the
+server does require the data, it can issue an <emphasis>
+LbxQueryTag</emphasis>
+ message. The proxy can also send the data on at any time if it judges it
+appropriate (i.e., when the wire goes idle). Since the proxy owns the property
+data, it must not invalidate the tag before sending the data back to the server
+via an <emphasis>
+LbxTagData</emphasis>
+ request.
+</para>
+
+
+</sect3>
+</sect2>
+<sect2 id='short_circuiting'>
+<title>Short-circuiting</title>
+
+<para>
+Short-circuiting is used to handle constant data. This includes atoms, color
+name/RGB mappings, and <emphasis>
+AllocColor</emphasis>
+ calls. Atoms and color name/RGB mappings stay constant for the life of the
+server. <emphasis>
+AllocColor</emphasis>
+<emphasis>
+ </emphasis>
+replies are constant for each colormap. Short-circuiting replaces round-trip
+requests with one-way requests, and can sometimes use one in place of many.
+</para>
+
+
+<para>
+Atoms are used heavily for ICCCM communication. Once the proxy knows the string
+to atom mapping, it has no need to send subsequent requests for this atom to
+the server.
+</para>
+
+
+<para>
+Colorname/RGB mappings are constant, so once the proxy sees the response from
+<emphasis>
+LookupColor</emphasis>
+, it need not forward any subsequent requests.
+</para>
+
+
+<para>
+Clients often use the same color cells, so once a read-only color allocation
+has occurred, the proxy knows what RGB values should be returned to the client.
+The proxy doesn't need to forward any <emphasis>
+AllocColor</emphasis>
+ requests it can resolve, but it must tell the server to modify the color
+cell's reference count. <emphasis>
+LbxIncrementPixel</emphasis>
+ is used to support this.
+</para>
+
+
+<para>
+For all three classes of short-circuiting, the proxy must still tell the server
+a request has occurred, so that the request sequence numbers stay in sync. This
+is done with <emphasis>
+LbxModifySequence</emphasis>
+.
+</para>
+
+
+<para>
+Sequence numbers cause the major complication with short-circuiting. X
+guarantees that any replies, events or errors generated by a previous request
+will be sent before those of a later request. This means that any requests that
+can be handled by the proxy must have their reply sent after any previous
+events or errors.
+</para>
+
+
+<para>
+If a proxy’s applications do not require strict adherence to the X protocol
+ordering of errors or events, a proxy might provide further optimization by
+avoiding the overhead of maintaining this ordering, however, the resulting
+protocol is not strictly X11 compliant.
+</para>
+
+
+</sect2>
+<sect2 id='graphics_re_encoding'>
+<title>Graphics Re-encoding</title>
+
+<para>
+The LBX proxy attempts to reencode <emphasis>PolyPoint</emphasis>,
+<emphasis>PolyLine</emphasis>, <emphasis>PolySegment</emphasis>,
+<emphasis>PolyRectangle</emphasis>, <emphasis>PolyArc</emphasis>,
+<emphasis>FillPoly</emphasis>, <emphasis>PolyFillRectangle</emphasis>,
+<emphasis>PolyFillArc</emphasis>, <emphasis>CopyArea</emphasis>,
+<emphasis>CopyPlane</emphasis>, <emphasis>PolyText8</emphasis>,
+<emphasis>PolyText16</emphasis>, <emphasis>ImageText8</emphasis>,
+and <emphasis>ImageText16</emphasis> requests. If the request can be
+reencoded, it may be replaced by an equivalent LBX form of the request.
+The requests are reencoded by attempting to reduce 2-byte coordinate,
+length, width and angle fields to 1 byte. Where applicable, the
+coordinate mode is also converted to <emphasis>Previous</emphasis>
+ to improve the compressibility of the resulting data. In image requests,
+the image data may also be compressed.
+</para>
+
+</sect2>
+<sect2 id='motion_events'>
+<title>Motion events</title>
+
+<para>
+To prevent clogging the wire with <emphasis>MotionNotify</emphasis>
+ events, the server and proxy work together to control the number
+of events on the wire. This is done with the
+<emphasis>LbxAllowMotion</emphasis>
+ request. The request adds an amount to an allowed motion count in
+the server, which is kept on a per-proxy basis. Every motion notify
+event sent to the proxy decrements the allowed motion counter. If
+the allowed motion count is less than or equal to zero, motion
+events not required by the X protocol definition are not sent to the
+proxy. The allowed motion counter has a minimum value of -2^31.
+</para>
+
+</sect2>
+<sect2 id='event_squishing'>
+<title>Event Squishing</title>
+
+<para>
+In the core protocol, all events are padded as needed to be 32 bytes long. The
+LBX extension reduces traffic by removing padding at the end of events, and
+implying the event length from its type. This is known as squishing.
+</para>
+
+</sect2>
+<sect2 id='master_client_'>
+<title>Master Client </title>
+
+<para>
+When the initial X connection between the proxy and the server is converted to
+LBX mode, the proxy itself becomes the master client. New client requests and
+some tag messages are sent in the context of the master client.
+</para>
+
+
+</sect2>
+<sect2 id='multiplexing_of_clients'>
+<title>Multiplexing of Clients</title>
+
+<para>
+The LBX proxy multiplexes the data streams of all its clients into one stream,
+and then splits them apart again when they are received. The <emphasis>
+LbxSwitch</emphasis>
+ message is used to tell each end which client is using the wire at the time.
+</para>
+
+
+<para>
+The server should process delta requests in the order that they appear on the
+LBX connection. If the server does not maintain the interclient request order
+for requests sent by the proxy, it must still obey the semantics implied by the
+interclient request order so that the delta cache functions correctly.
+</para>
+
+
+<para>
+The server can affect the multiplexing of clients by the proxy using the
+<emphasis>
+LbxListenToOne</emphasis>
+ and <emphasis>
+LbxListenToAll</emphasis>
+ messages. This is useful during grabs, since the master connection can not be
+blocked during grabs like other clients. The proxy is responsible for tracking
+server grabs issued by its clients so that the proxy can multiplex the client
+streams in an order executable by the server.
+</para>
+
+
+<para>
+Replies must be ordered in the multiplexed data stream from the server to the
+proxy such that the reply carrying tagged data precedes replies that refer to
+that tagged data.
+</para>
+
+
+</sect2>
+<sect2 id='swapping'>
+<title>Swapping</title>
+
+<para>
+Swapping is handled as with any X extension, with one caveat. Since a proxy can
+be supporting clients with different byte orders, and they all share the same
+wire, the length fields of all messages between the server and proxy are
+expressed in the proxy byte order. This prevents any problems with length
+computation that may occur when clients are switched.
+</para>
+
+
+</sect2>
+<sect2 id='delta_cache'>
+<title>Delta cache</title>
+
+<para>
+LBX takes advantage of the fact that an X message may be very similar to one
+that has been previously sent. For example, a <emphasis>
+KeyPress</emphasis>
+ event may differ from a previous <emphasis>
+KeyPress</emphasis>
+ event in just a few bytes. By sending just the bytes that differ (or
+"deltas"), the number of bytes sent over the wire can be substantially reduced.
+Delta compaction is used on requests being sent by the proxy as well as on
+replies and events being sent by the server.
+</para>
+
+
+<para>
+The server and the proxy each keep per-proxy request and response caches. The
+response cache contains events, errors and replies. All messages are saved in
+the appropriate delta cache if they are of an appropriate type and more than 8
+bytes long but fit within the delta cache. The number of entries in the delta
+cache and the maximum saved message size are negotiated in the <emphasis>
+LbxStartProxy</emphasis>
+ request.
+</para>
+
+
+<para>
+The LBX requests that are never stored in the request delta cache are the
+<emphasis>
+LbxQueryVersion</emphasis>
+, <emphasis>
+LbxStartProxy</emphasis>
+, <emphasis>
+LbxSwitch</emphasis>
+, <emphasis>
+LbxNewClient</emphasis>
+, <emphasis>
+LbxAllowMotion</emphasis>
+, <emphasis>
+LbxDelta</emphasis>
+, <emphasis>
+LbxQueryExtension</emphasis>
+, <emphasis>
+LbxPutImage</emphasis>
+, <emphasis>
+LbxGetImage</emphasis>
+, <emphasis>
+LbxBeginLargeRequest</emphasis>
+, <emphasis>
+LbxLargeRequestData</emphasis>
+, <emphasis>
+LbxEndLargeRequest</emphasis>
+ and <emphasis>
+LbxInternAtoms</emphasis>
+ requests. The responses that are never stored in the response cache are
+<emphasis>
+LbxSwitchEvent</emphasis>
+ and <emphasis>
+LbxDeltaResponse</emphasis>
+. The message carried by a <emphasis>
+delta </emphasis>
+message is also cached, if it meets the other requirements. Messages after the
+<emphasis>
+LbxStartProxy</emphasis>
+ request are cached starting at index 0, and incrementing the index, modulo the
+number of entries, thereafter. The request and response caches are
+independently indexed.
+</para>
+
+
+<para>
+If the current message is cachable and the same length as a message in the
+corresponding delta cache, a delta message may be substituted in place of the
+original message in the protocol stream.
+</para>
+
+
+</sect2>
+<sect2 id='stream_compression'>
+<title>Stream Compression</title>
+
+<para>
+Before being passed down to the transport layer messages can be passed through
+a general purpose data compressor. The choice of compression algorithm is
+negotiated with <ulink url="lbx.htm#20870">See LbxStartProxy</ulink>. The proxy
+and server are not required to support any specific stream compressor. As an
+example, however, the X Consortium implementation of a ZLIB based compressor is
+described below.
+</para>
+
+<note><para>
+The XC-ZLIB compressor is presented with a simple byte stream - the X and LBX
+message boundaries are not apparent. The data is broken up into fixed sized
+blocks. Each block is compressed using zlib 1.0 (by Gailly &amp; Adler), then a
+two byte header is prepended, and then the entire packet is transmitted. The
+header has the following information:
+</para></note>
+<para><programlisting>
+      out[0] = (length &amp; 0xfff) &gt;&gt; 8 | ((compflag) ? 0x80 : 0);
+      out[1] = length &amp; 0xff;
+</programlisting></para>
+
+</sect2>
+<sect2 id='authentication_protocols'>
+<title>Authentication Protocols</title>
+
+<para>
+The current version of LBX does not support multipass authentication protocols
+for clients of the proxy. These authentication protocols return an <emphasis>
+Authenticate</emphasis>
+ message in response to a connection setup request, and require additional
+authentication data from the client after the <emphasis>
+LbxNewClient</emphasis>
+ request, and before the reply to <emphasis>
+LbxNewClient</emphasis>
+. One example of such a protocol is XC-QUERY-SECURITY-1.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='c_library_interfaces_'>
+<title>C Library Interfaces </title>
+
+<para>
+The C Library routines for LBX are in the Xext library. The prototypes are
+located in a file named &quot;XLbx.h&quot;.
+</para>
+
+
+<sect2 id='application_library_interfaces'>
+<title>Application Library Interfaces</title>
+
+<para>
+In a proxy environment, applications do not need to call these routines to take
+advantage of LBX. Clients can, however, obtain information about the LBX
+extension to the server using this interface. Use of this routine may be
+altered when connected through a proxy, as described in <ulink
+url="lbx.htm#33319">See C Library Interfaces</ulink>.
+</para>
+
+
+<sect3 id='xlbxqueryversion'>
+<title>XLbxQueryVersion</title>
+
+<para>
+To determine the version of LBX supported by the X server, call <emphasis>
+XLbxQueryVersion</emphasis>
+.
+</para>
+
+<funcsynopsis>
+<funcprototype>
+<funcdef>Bool <function>XLbxQueryVersion</function></funcdef>
+      <paramdef>Display * <parameter>display</parameter></paramdef>
+      <paramdef>int * <parameter>major_version_return</parameter></paramdef>
+      <paramdef>int * <parameter>minor_version_return</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>display</term>
+    <listitem><para>Specifies the connection to the X server.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>major_version_return</term>
+    <listitem><para>Returns the extension major version number.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>minor_version_return</term>
+    <listitem><para>Returns the extension minor version number.</para></listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+The <emphasis>
+XLbxQueryVersion</emphasis>
+ function determines if the LBX extension is present. If the extension is not
+present, <emphasis>
+XLbxQueryVersion</emphasis>
+ returns <emphasis>
+False</emphasis>
+; otherwise, it returns <emphasis>
+True</emphasis>
+. If the extension is present, <emphasis>
+XLbxQueryVersion</emphasis>
+ returns the major and minor version numbers of the extension as supported by
+the X server.
+</para>
+
+
+</sect3>
+</sect2>
+<sect2 id='proxy_library_interfaces'>
+<title>Proxy Library Interfaces</title>
+
+<para>
+The following interfaces are intended for use by the proxy.
+</para>
+
+<sect3 id='xlbxqueryextension'>
+<title>XLbxQueryExtension</title>
+
+<para>
+To determine the dynamically assigned codes for the extension, use the Xlib
+function <emphasis>
+XQueryExtension</emphasis>
+ or the LBX function <emphasis>
+XLbxQueryExtension</emphasis>
+.</para>
+
+
+<funcsynopsis>
+<funcprototype>
+<funcdef>Bool <function>XLbxQueryExtension</function></funcdef>
+      <paramdef>Display * <parameter>display</parameter></paramdef>
+      <paramdef>int * <parameter>major_opcode_return</parameter></paramdef>
+      <paramdef>int * <parameter>first_event_return</parameter></paramdef>
+      <paramdef>int * <parameter>first_error_return</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>display</term>
+    <listitem><para>Specifies the connection to the X server.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>major_opcode_return</term>
+    <listitem><para>Returns the major opcode.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>first_event_return</term>
+    <listitem><para>Returns the first event code.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>first_error_return</term>
+    <listitem><para>Returns the first error code.</para></listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+The <emphasis>
+XLbxQueryExtension</emphasis>
+ function determines if the LBX extension is present. If the extension is not
+present, <emphasis>
+XLbxQueryExtension</emphasis>
+ returns <emphasis>
+False</emphasis>
+; otherwise, it returns <emphasis>
+True</emphasis>
+. If the extension is present, <emphasis>
+XLbxQueryExtension</emphasis>
+ returns the major opcode for the extension to major_opcode_return, the base
+event type code to first_event_return, and the base error code to
+first_error_return; otherwise, the return values are undefined.
+</para>
+
+</sect3>
+
+<sect3 id='xlbxgeteventbase'>
+<title>XLbxGetEventBase</title>
+<para>
+To determine the base event type code, use the Xlib function <emphasis>
+XQueryExtension</emphasis>
+ or the LBX function <emphasis>
+XLbxGetEventBase</emphasis>.
+</para>
+
+
+<funcsynopsis>
+<funcprototype>
+<funcdef>int <function>XLbxGetEventBase</function></funcdef>
+      <paramdef>Display * <parameter>display</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+<variablelist>
+  <varlistentry>
+    <term>display</term>
+    <listitem><para>Specifies the connection to the X server.</para></listitem>
+  </varlistentry>
+</variablelist>
+
+<para>
+The <emphasis>XLbxGetEventBase</emphasis>
+function returns the base event type code if the extension is
+present; otherwise, it returns -1.
+</para>
+
+</sect3>
+</sect2>
+</sect1>
+
+
+<sect1 id='protocol'>
+<title>Protocol</title>
+
+<sect2 id='syntactic_conventions_and_common_types'>
+<title>Syntactic Conventions and Common Types</title>
+
+<para>
+Please refer to the X Window System Protocol specification,
+as this document uses the syntactic conventions established
+there and references types defined there.
+</para>
+
+
+<para>
+The following additional types are defined by this extension:
+</para>
+
+<literallayout>
+<emphasis role='bold'>DIFFITEM</emphasis>
+1      CARD8      offset
+1      CARD8      diff
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXANGLE: CARD8 or 2 BYTE</emphasis>
+      where (in order of precedence):
+      (0 &lt;= in &lt;= A(95)) &amp;&amp; !(in % A(5))       out = 0x5a + (in /
+A(5))
+      A(105) &lt;= in &lt;= A(360) &amp;&amp; !(in % A(15))      out = 0x67 +
+(in / A(15))
+      -A(100) &lt;= in &lt;= -A(5) &amp;&amp; !(in % A(5))      out = 0xa6 +
+(in / A(5))
+      -A(360) &lt; in &lt;= -A(105) &amp;&amp; !(in % A(15))      out = 0x98 +
+(in / A(15))
+      -A(360) &lt; in &lt;= A(360)      out[0] = in &gt;&gt; 8; out[1] = in
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXARC:</emphasis>
+      [x, y: LBXINT16,
+      width, height: LBXCARD16,
+      angle1, angle2: LBXANGLE]
+</literallayout>
+
+<para>
+Within a list of arcs, after the first arc, x and y are
+relative to the corresponding fields of the prior arc.
+</para>
+
+<literallayout>
+<emphasis role='bold'>LBXCARD16: CARD8 or 2 BYTE</emphasis>
+      where:
+      0x0000 &lt;= in &lt; 0x00F0      CARD8
+      0x00F0 &lt;= in &lt; 0x10F0      out[0] = 0xF0 | ((in - 0xF0) &gt;&gt;
+8)
+            out[1] = in - 0xF0
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXGCANDDRAWENT</emphasis>
+[ gc-cache-index, drawable-cache-index: CARD4 ]
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXGCANDDRAWUPDATE</emphasis>
+      drawable: DRAWABLE      /* present only if
+<emphasis>drawable-cache-index</emphasis>
+ == 0 */
+gc: GC]      /* present only if <emphasis>gc-cache-index</emphasis> == 0 */
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXGCANDDRAWABLE</emphasis>
+      cache-entries: LBXGCANDDRAWENT
+      updates: LBXGCANDDRAWUPDATE
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXINT16</emphasis>: INT8 or 2 BYTE
+      where:
+      0xF790 &lt;= in &lt; 0xFF90      out[0] = 0x80 | (((in + 0x70) &gt;&gt;
+8) &amp; 0x0F)
+            out[1] = in + 0x70
+      0xFF90 &lt;= in &lt; 0x0080      CARD8
+      0x0080 &lt;= in &lt; 0x0880      out[0] = 0x80 | (((in - 0x80) &gt;&gt;
+8) &amp; 0x0F)
+            out[1] = in - 0x80
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXPINT16</emphasis>: CARD8 or 2 BYTE       /* for
+usually positive numbers */
+      where:
+      0xFE00 &lt;= in &lt; 0x0000      out[0] = 0xF0 | (((in + 0x1000)
+&gt;&gt; 8) &amp; 0x0F)
+            out[1] = in + 0x1000
+      0x0000 &lt;= in &lt; 0x00F0       CARD8
+      0x00F0 &lt;= in &lt; 0x0EF0      out[0] = 0xF0 | ((in - 0xF0) &gt;&gt;8)
+            out[1] = in - 0xF0
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXPOINT</emphasis>: [x, y: LBXINT16]
+      Within a list of points, after the first rectangle, x and y are
+relative to the corresponding fields of the prior point.
+</literallayout>
+
+<literallayout>
+<emphasis role='bold'>LBXRECTANGLE</emphasis>:
+      [x, y: LBXINT16,
+      width, height: LBXCARD16]
+</literallayout>
+
+<para>
+Within a list of rectangles, after the first rectangle, x and
+y are relative to the corresponding fields of the prior rectangle.
+</para>
+
+<para>
+MASK: CARD8
+</para>
+
+
+</sect2>
+<sect2 id='errors'>
+<title>Errors</title>
+
+<para>
+As with the X11 protocol, when a request terminates with an error,
+the request has no side effects (that is, there is no partial execution).
+</para>
+
+
+<para>
+There is one error, <emphasis>
+LbxClient</emphasis>
+. This error indicates that the client field of an LBX request was invalid, or
+that the proxy’s connection was in an invalid state for a start or stop proxy
+request.
+</para>
+
+
+</sect2>
+<sect2 id='requests'>
+<title>Requests</title>
+
+<para>
+There is one request that is expected to be used only by the client: <emphasis>
+LbxQueryVersion</emphasis>
+</para>
+
+
+<para>
+There is one request that is expected to be used by the client or the proxy:
+<emphasis>
+LbxQueryExtension</emphasis>
+.
+</para>
+
+
+<para>
+The following requests are expected to be used only by the proxy, and are
+instigated by the proxy: <emphasis>
+LbxStartProxy</emphasis>
+, <emphasis>
+LbxStopProxy</emphasis>
+, <emphasis>
+LbxNewClient</emphasis>
+, <emphasis>
+LbxSwitch</emphasis>
+, <emphasis>
+LbxCloseClient</emphasis>
+, <emphasis>
+LbxModifySequence</emphasis>
+, <emphasis>
+LbxAllowMotion</emphasis>
+, <emphasis>
+LbxInvalidateTag</emphasis>
+, <emphasis>
+LbxTagData</emphasis>
+ and <emphasis>
+LbxQueryTag</emphasis>
+.
+</para>
+
+
+<para>
+All other requests are sent by the proxy to the LBX server and are instigated
+by reception of an X request from the client. They replace the X request.
+</para>
+
+
+<sect3 id='requests_initiated_by_the_proxy_or_by_the_client'>
+<title>Requests Initiated by the Proxy or by the Client</title>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxQueryVersion</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+     <entry>=&gt;;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>majorVersion: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>minorVersion: CARD16</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request returns the major and minor version numbers of the LBX protocol.
+</para>
+
+
+<para>
+The encoding of this request is on <ulink url="lbx.htm#34166">See
+LbxQueryVersion</ulink>.
+</para>
+
+
+
+</sect3>
+<sect3 id='requests_initiated_or_substituted_by_the_proxy'>
+<title>Requests Initiated or Substituted by the Proxy</title>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxQueryExtension</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+nbytes</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+name</emphasis>
+: STRING8</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>num-requests: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>present: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>major-opcode: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>first-event: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>first-error: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>reply-mask: LISTofMASK      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>event-mask:LISTofMASK      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is identical to the <emphasis>
+QueryExtension</emphasis>
+ request, with an additional field, and two optional additional fields. When
+the client issues an <emphasis>
+QueryExtension</emphasis>
+ request, the proxy will substitute an <emphasis>
+LbxQueryExtension</emphasis>
+ request.
+</para>
+
+
+<para>
+This request determines if the named extension is present. If so, the major
+opcode for the extension is returned, if it has one. Otherwise, zero is
+returned. Any minor opcode and the request formats are specific to the
+extension. If the extension involves additional event types, the base event
+type code is returned. Otherwise, zero is returned. The format of events is
+specific to the extension. If the extension involves additional error codes,
+the base error code is returned. Otherwise, zero is returned. The format of
+additional data in the errors is specific to the extension.
+</para>
+
+
+<para>
+In addition, the number of requests defined by the named extension is returned.
+If the number of requests is nonzero, and if the information is available,
+reply-mask and event-mask will be included in the reply. The reply-mask
+represents a bit-wise one-to-one correspondence with the extension requests.
+The least significant bit corresponds to the first request, and the next bit
+corresponds to the next request, and so on. Each element in the list contains
+eight meaningful bits, except for the last element, which contains eight or
+fewer meaningful bits. Unused bits are not guaranteed to be zero. The bit
+corresponding to a request is set if the request could generate a reply,
+otherwise it is zero. In the same way, the event-mask represents a bit-wise
+one-to-one correspondence with the extension requests. A bit is set if the
+corresponding request could result in the generation of one or more extension
+or X11 events. If reply-mask is present in the reply, event-mask will also be
+present.
+</para>
+
+
+<para>
+The encoding of this request is on <ulink url="lbx.htm#37117">See
+LbxQueryExtension</ulink>.
+</para>
+
+
+
+</sect3>
+<sect3 id='control_requests_initiated_by_the_proxy'>
+<title>Control Requests Initiated by the Proxy</title>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxStartProxy</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+options</emphasis>
+: LISTofOPTION</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>choices: LISTofCHOICE</entry>
+    </row>
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+LbxClient</emphasis>
+, <emphasis>
+Alloc</emphasis>
+</entry>
+    </row>
+    <row>
+      <entry>where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>OPTION       [optcode: CARD8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      len: OPTLEN,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      option:       (See <ulink
+url="lbx.htm#35444">See StartProxy Options</ulink>) ]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>CHOICE      [optcode: CARD8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      len: OPTLEN,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      choice:        (See <ulink
+url="lbx.htm#35444">See StartProxy Options</ulink>) ]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+<!--
+    <row>
+      <entry role='protoargs'> -->
+
+
+<table frame='topbot'>
+ <title>StartProxy Options</title>
+ <?dbfo keep-together="always" ?>
+ <tgroup cols='4' align='left' colsep='0' rowsep='0'>
+ <colspec colname='c1' colwidth='1.0*'/>
+ <colspec colname='c2' colwidth='1.5*'/>
+ <colspec colname='c3' colwidth='1.5*'/>
+ <colspec colname='c4' colwidth='1.5*'/>
+<thead>
+<row rowsep='1'>
+  <entry>optcode</entry>
+  <entry>option</entry>
+  <entry>choice</entry>
+  <entry>default</entry>
+</row>
+</thead>
+<tbody>
+<row>
+    <entry>delta-proxy</entry>
+    <entry>DELTAOPT</entry>
+    <entry>DELTACHOICE</entry>
+    <entry>entries=16, maxlen=64</entry>
+</row>
+<row>
+    <entry>delta-server</entry>
+    <entry>DELTAOPT</entry>
+    <entry>DELTACHOICE</entry>
+    <entry>entries=16, maxlen=64</entry>
+</row>
+<row>
+    <entry>stream-comp</entry>
+    <entry>LISTofNAMEDOPT</entry>
+    <entry>INDEXEDCHOICE</entry>
+    <entry>No Compression</entry>
+</row>
+<row>
+    <entry>bitmap-comp</entry>
+    <entry>LISTofSTRING8</entry>
+    <entry>LISTofINDEXEDOPT</entry>
+    <entry>No Compression</entry>
+</row>
+<row>
+    <entry>pixmap-comp</entry>
+    <entry>LISTofPIXMAPMETHOD</entry>
+    <entry>LISTofPIXMAPCHOICE</entry>
+    <entry>No Compression</entry>
+</row>
+<row>
+    <entry>use-squish</entry>
+    <entry>BOOL</entry>
+    <entry>BOOL</entry>
+    <entry>True</entry>
+</row>
+<row>
+    <entry>use-tags</entry>
+    <entry>BOOL</entry>
+    <entry>BOOL</entry>
+    <entry>True</entry>
+</row>
+<row>
+    <entry>colormap</entry>
+    <entry>LISTofSTRING8</entry>
+    <entry>INDEXEDCHOICE</entry>
+    <entry>No Colormap Grabbing</entry>
+</row>
+<row>
+    <entry>extension</entry>
+    <entry>NAMEDOPT</entry>
+    <entry>INDEXEDCHOICE</entry>
+    <entry>Extension Disabled</entry>
+  </row>
+</tbody>
+</tgroup>
+</table>
+<!--      </entry>
+    </row>
+-->
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>DELTAOPT       [minN, maxN, prefN: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      minMaxMsgLen, maxMaxMsgLen, prefMaxMsgLen:
+CARD8]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>DELTACHOICE      [entries, maxlen:
+CARD8]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>INDEXEDCHOICE      [index: CARD8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      data: LISTofBYTE]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>INDEXEDOPT      [index, opcode: CARD8]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>NAMEDOPT      [name: STRING8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      detail: LISTofBYTE]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>OPTLEN      1 or 3 CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      (0 &lt; in &lt;= 0xFF):       out =
+in</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      (0 &lt;= in&lt;= 0xFFFF):       out[0] =
+0; out[1] = in &gt;&gt; 8; out[2] = in&amp; 0xFF;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXMAPMETHOD      [name: STRING8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      format-mask: BITMASK,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      depths: LISTofCARD8]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXMAPCHOICE      [index, opcode: CARD8,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      format-mask: BITMASK,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      depths: LISTofCARD8]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'></entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request negotiates LBX protocol options, and switches the proxy-server
+connection from X11 protocol to LBX protocol.
+</para>
+
+
+<para>
+The proxy gives the preferred protocol options in the request. The server
+chooses from the given options and informs the proxy which to use. The options
+may be listed in any order, and the proxy may choose which options to
+negotiate. If an option is not successfully negotiated, the default is used.
+</para>
+
+
+<para>
+The server delta cache and proxy delta caches can be configured for number of
+entries, and the length of entries. (See <ulink url="lbx.htm#22595">See Delta
+cache</ulink> for details.) The delta caches are configured using the <emphasis>
+delta-server</emphasis>
+ and <emphasis>
+delta-proxy</emphasis>
+ options. To configure a cache, the proxy sends the minimum, maximum and
+preferred values for the number of cache entries, (<emphasis>
+minN, maxN, prefN</emphasis>
+), and the length of the cache entries, (<emphasis>
+minMaxMsgLen, maxMaxMsgLen, prefMaxMsgLen</emphasis>
+). The server’s reply fields, <emphasis>
+entries</emphasis>
+ and <emphasis>
+maxlen</emphasis>
+, contains the values to use. These values must be within the ranges specified
+by the proxy. The server may also specify an <emphasis>
+entries</emphasis>
+ value of 0 to disable delta caching. The cache entry lengths are specified in
+units of 4 bytes.
+</para>
+
+
+<para>
+The stream compression algorithm is selected using the <emphasis>
+stream-comp </emphasis>
+option. (Stream compression is described in <ulink url="lbx.htm#11596">See
+Stream Compression</ulink>.) Each algorithm has a name that follows the naming
+conventions in <ulink url="lbx.htm#13570">See Algorithm Naming</ulink>. To
+negotiate using the stream-comp option, the proxy lists its available
+compressors. For each candidate algorithm, the proxy sends the name in the
+<emphasis>
+name</emphasis>
+ field, and uses the <emphasis>
+detail</emphasis>
+ field to send any additional data specific to each compression algorithm. The
+reply contains a 0-based index into the list of algorithms to indicate which
+algorithm to use, followed by data specific to that algorithm.
+</para>
+
+
+<para>
+Bitmap compression is negotiated using the <emphasis>
+bitmap-comp</emphasis>
+ option. The proxy sends a list of names of available algorithms, and the
+server reply lists the algorithms to use. For each bitmap algorithm in the
+reply, a 0-based index into the list of algorithms indicates the algorithm, and
+the <emphasis>
+opcode</emphasis>
+ field gives the value for use in requests. The algorithm names follow the
+conventions in <ulink url="lbx.htm#13570">See Algorithm Naming</ulink>.
+</para>
+
+
+<para>
+Pixmap compression is negotiated using the <emphasis>
+pixmap-comp</emphasis>
+ option. The proxy sends a list of available algorithms. For each algorithm,
+the list includes, the name, a bitmask of supported formats, and a list of
+depths that the format supports. The server reply lists the algorithms to use.
+For each pixmap algorithm in the reply, the reply contains a 0-based index into
+the list of proxy algorithms, the opcode to use in requests when referring to
+this algorithm, a mask of valid formats, and a list of valid depths. Algorithm
+names follow the conventions in <ulink url="lbx.htm#13570">See Algorithm
+Naming</ulink>.
+</para>
+
+
+<para>
+Squishing is negotiated using the use-squish option. If the proxy desires
+squishing, it sends a true value. The reply from the server indicates whether
+to do squishing, and will indicate squishing only if <emphasis>
+use-squish</emphasis>
+ is set to true in the request.
+</para>
+
+
+<para>
+Tag caching, described in <ulink url="lbx.htm#11018">See Tags</ulink>, is
+negotiated using the use-tag option. If the proxy desires tag caching, it sends
+a true value. The reply from the server indicates whether to do tag caching,
+and will demand caching only if <emphasis>
+use-tag</emphasis>
+ is set to true in the request.
+</para>
+
+
+<para>
+The colormap option is used to negotiate what color matching algorithm will be
+used by the proxy when the proxy uses the <emphasis>
+LbxAllocColor</emphasis>
+ request to allocate pixels in a grabbed colormap. To negotiate using the
+colormap option, the proxy lists the names of available colormap algorithms.
+The choice in the reply contains a 0-based index into the list of algorithms to
+indicate which algorithm to use, followed by data specific to that algorithm.
+If no colormap algorithm is successfully negotiated, then the <emphasis>
+LbxAllocColor</emphasis>
+, <emphasis>
+LbxGrabCmap</emphasis>
+, and <emphasis>
+LbxReleaseCmap</emphasis>
+ requests will not be used.
+</para>
+
+
+<para>
+The extension option is used to control extensions to LBX. These extensions
+may, for example, enable other types of compression. To negotiate an extension,
+the name of the extension is sent, followed by any data specific to that
+extension. The extension name follows the conventions in <ulink
+url="lbx.htm#13570">See Algorithm Naming</ulink>. The extension option may
+occur multiple times in the start proxy message, since multiple extensions can
+be negotiated. The reply to an extension option contains the zero-based index
+of the extension option, as counted in the <emphasis>
+LbxStartProxy</emphasis>
+ message. This index is followed by extension-specific information. The server
+does not respond to extensions it does not recognize.
+</para>
+
+
+<para>
+An <emphasis>
+LbxClient</emphasis>
+ error is returned when a client which is already communicating through an LBX
+proxy to the X server sends a <emphasis>
+LbxStartProxy</emphasis>
+ request.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#27452">See
+LbxStartProxy</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxStopProxy</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+LbxClient</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request terminates the connection between the proxy and X server, and
+terminates any clients connected through the proxy.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#23471">See
+LbxStopProxy</ulink>.
+</para>
+
+
+<para>
+An <emphasis>
+LbxClient</emphasis>
+ error is returned if the requesting client is not an LBX proxy.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxNewClient</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+byte-order</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+client-id</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+protocol-major-version</emphasis>
+: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+protocol-minor-version:</emphasis>
+ CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+authorization-protocol-name</emphasis>
+: STRING8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+authorization-protocol-data</emphasis>
+: STRING8</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>Core X reply (if connection is rejected)</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>OR</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>success: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>change-type: {NoDeltas, NormalClientDeltas,
+AppGroupDeltas}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>protocol-major-version: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>protocol-minor-version: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>tag-id: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>length: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>connection-data: CONINFO or CONDIF or
+CONDIFROOT</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>CONINFO:       (the &quot;additional data&quot;
+portion of the core connection reply for successes)</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>CONDIF:      [resource-id-base: CARD32,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      root-input-masks: LISTofSETofEVENT]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>CONDIFROOT:      [resource-id-base:
+CARD32,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      root: WINDOW</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      root-visual: VISUALID</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      default-colormap: COLORMAP</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      white-pixel, black-pixel: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      root-input-masks: LISTofSETofEVENT]</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Errors: LbxClient, Alloc
+</para>
+
+
+<para>
+This request, which is sent by the proxy over the control connection, creates a
+new virtual connection to the server.
+</para>
+
+
+<para>
+Much of the information in the <emphasis>
+LbxNewClient</emphasis>
+ request and reply is identical to the connection setup and reply information
+in the core X protocol.
+</para>
+
+
+<para>
+For the <emphasis>
+LbxNewClient</emphasis>
+ request, the field unique to LBX is client-id. For the <emphasis>
+LbxNewClient</emphasis>
+ reply, <emphasis>
+tag-id</emphasis>
+ and <emphasis>
+change-type</emphasis>
+ are fields unique to LBX, and the contents of connection-data may be different
+in LBX from the core X protocol (see below).
+</para>
+
+
+<para>
+The proxy assigns each virtual connection a unique identifier using the
+<emphasis>
+client-id</emphasis>
+ field in the <emphasis>
+LbxNewClient</emphasis>
+ request. This client-id is used in the LBX protocol to specify the current
+client (see the <emphasis>
+LbxSwitch</emphasis>
+ request and the <emphasis>
+LbxSwitchEvent</emphasis>
+). client-id 0 is reserved for the proxy control connection. An <emphasis>
+LbxClient</emphasis>
+ error will result if the <emphasis>
+LbxNewClient</emphasis>
+ request contains a client-id of 0 or an already in use client-id.
+</para>
+
+
+<para>
+If the server rejects this new virtual connection, the server sends a core X
+connection failure reply to the proxy. The current version of LBX does not
+support the return of an <emphasis>
+Authenticate</emphasis>
+ reply.
+</para>
+
+
+<para>
+If the <emphasis>
+change-type</emphasis>
+ field is set to <emphasis>
+NoDeltas</emphasis>
+, then <emphasis>
+connection-data</emphasis>
+ is sent using the CONINFO structure, which is identical to the additional data
+of the core connection reply. If the <emphasis>
+tag-id</emphasis>
+ is non-zero, then the connection-data is stored by the proxy using this tag
+value. Tagged connection data must be stored by the proxy, and can not be
+invalidated by the proxy until an <emphasis>
+LbxInvalidateTag</emphasis>
+ event is received for that tag.
+</para>
+
+
+<para>
+When the <emphasis>
+change-type</emphasis>
+ field is not set to <emphasis>
+NoDeltas</emphasis>
+, then connection data is sent as changes against connection information
+previously sent to the proxy. The <emphasis>
+tag-id</emphasis>
+ field, if non-zero, has the tag of the previously sent data to apply the
+changes to. A zero tag-id indicates that the changes are with respect to the
+connection information sent when the proxy connected to the server.
+</para>
+
+
+<para>
+If the <emphasis>
+change-type</emphasis>
+ field is set to <emphasis>
+NormalClientDeltas</emphasis>
+, then <emphasis>
+connection-data</emphasis>
+ is sent using the CONDIF structure. The values in the CONDIF structure are
+substituted for the identically named fields of the connection information for
+the new connection.
+</para>
+
+
+<para>
+If the <emphasis>
+change-type</emphasis>
+ field is set to <emphasis>
+AppGroupDeltas</emphasis>
+, then <emphasis>
+connection-data</emphasis>
+ is sent using the CONDIFROOT structure. The <emphasis>
+root</emphasis>
+, <emphasis>
+root-visual</emphasis>
+, and <emphasis>
+default-colormap</emphasis>
+ fields, when nonzero, are substituted for the corresponding fields in the
+reference connection information. The <emphasis>
+white-pixel</emphasis>
+ and <emphasis>
+black-pixel</emphasis>
+ fields are substituted only when the <emphasis>
+default-colormap</emphasis>
+ field of the reply is non-zero. When <emphasis>
+default-colormap</emphasis>
+ field of the reply is zero, so are <emphasis>
+white-pixel</emphasis>
+ and <emphasis>
+black-pixel</emphasis>
+. The first entry in the <emphasis>
+root-input-masks</emphasis>
+ field is the current-input-mask for the default root window. The remaining
+entries in <emphasis>
+root-input-masks</emphasis>
+ are input masks for non-video screens, as defined by the X Print Extension.
+The number of non-video screens is one less than the number of entries in
+<emphasis>
+root-input-masks</emphasis>
+. These screens are at the end of screen list in the reference connection
+information.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#15166">See The
+description of this request is on page 13.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxCloseClient</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+client</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+LbxClient</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This requests the server to close down the connection represented by the
+specified proxy’s client identifier. If the specified client wasn’t
+previously registered with the server by a <emphasis>
+LbxNewClient</emphasis>
+ request, the server will send the <emphasis>
+LbxClient</emphasis>
+ error.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#21121">See The
+description of this request is on page 12.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxSwitch</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+client</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+LbxClient</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request causes the X server to treat subsequent requests as being from a
+connection to the X server represented by the specified client identifier.
+</para>
+
+
+<para>
+If the client making the request is not the proxy, or if the client identifier
+sent in the request was not previously sent in a <emphasis>
+LbxNewClient</emphasis>
+ request, an <emphasis>
+LbxClient</emphasis>
+ error is returned.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#36790">See
+LbxSwitch</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxSync</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The sync request causes the server to send a reply when all requests before the
+sync request have been processed.
+</para>
+
+
+<para>
+The encoding for this client is on <ulink url="lbx.htm#21186">See
+LbxSync</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxModifySequence</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+adjust</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: None</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request advances the sequence number of the virtual client connection by
+the specified amount. The proxy sends the <emphasis>
+LbxModifySequence</emphasis>
+ request to the server when it replies to a client request without forwarding
+the client request on to the X server.
+</para>
+
+
+<para>
+The encoding for this client is on <ulink url="lbx.htm#10940">See The
+description of this request is on page 13.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxAllowMotion</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+num</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: None</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request controls the delivery of optional motion notify events, as
+described in <ulink url="lbx.htm#15503">See Motion events</ulink>. The num
+field specifies an increase in the allowed number of motion notify events sent.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#11897">See The
+description of this request is on page 14.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxInvalidateTag</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The LBX proxy sends this notification to the X server when it refuses to store
+tagged data, or when it releases tagged data which was previously stored and
+which was not invalidated by a notification from the X server.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#37545">See
+LbxInvalidateTag</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxTagData</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+real-length</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+data</emphasis>
+: LISTofBYTE</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request specifies the data associated with a previously assigned tag. It
+is sent in two circumstances: in response to receiving a <emphasis>
+SendTagDataEvent</emphasis>
+, and spontaneously, when the proxy must rely on the server to store data which
+was not previously received from the server. The data is carried in the byte
+order and structure as would have originally been sent in the core protocol
+request.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#37174">See
+LbxTagData</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGrabCmap</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+cmap</emphasis>
+: Colormap </entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'><emphasis>
+smart-grab</emphasis>
+: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+large-pixel: </emphasis>
+BOOL      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+auto-release: </emphasis>
+BOOL      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+three-channels</emphasis>
+: BOOL      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+bits-per-rgb: </emphasis>
+CARD4      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+cells</emphasis>
+: LISTofCHAN      /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>CHAN:      LISTofLBXPIXEL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>LBXPIXEL:       PIXELPRIVATE or PIXELPRIVATERANGE
+or </entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      PIXELALLOC or PIXELALLOCRANGE </entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXEL:      CARD8 or CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXELPRIVATE:       [ pixel: PIXEL ]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXELPRIVATERANGE:       [ first-pixel,
+last-pixel: PIXEL]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXELALLOC:       [ pixel: PIXEL,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      color: COLORSINGLE or COLORTRIPLE]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>PIXELALLOCRANGE:       [ first-pixel,
+last-pixel: PIXEL,</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      colors: LISTofCOLORSINGLE or
+LISTofCOLORTRIPLE]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>COLORSINGLE:      [ value: CARD8 or CARD16
+]</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>COLORTRIPLE:      [ r, g, b:
+COLORSINGLE]</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Colormap</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request asks the server for control of allocating new colormap cells in
+the specified colormap. The server grants control by replying to this request.
+If no changes have occurred since the last time this proxy grabbed this
+colormap, then the <emphasis>
+smart-grab</emphasis>
+ field of the reply is set to true, and the optional fields are not sent.
+Otherwise, the current contents of the colormap are placed in the reply, as
+described later in this section.
+</para>
+
+
+<para>
+Once the proxy has received the reply, it can use the <emphasis>
+LbxAllocColor</emphasis>
+ request to allocate new colormap cells without the performance penalty of
+round trips. The proxy is still permitted to use the normal colormap and
+<emphasis>
+LbxIncrementPixel</emphasis>
+ requests while the colormap is grabbed. The grab is valid across all virtual
+connections of the proxy.
+</para>
+
+
+<para>
+The <emphasis>
+LbxGrabCmap</emphasis>
+ request is limited to colormaps for the visual types negotiated as part of the
+colormap algorithm negotiation in the start proxy request at connection setup.
+</para>
+
+
+<para>
+The server and other proxies may not allocate new colormap cells in the
+colormap while the colormap is grabbed by this proxy. If the server or another
+proxy needs to allocate new colormap cells, the server sends a Lbx<emphasis>
+ReleaseCmap</emphasis>
+ event to the proxy holding the grab, which then issues an <emphasis>
+LbxReleaseCmap</emphasis>
+ request.
+</para>
+
+
+<para>
+The server and other proxies may free colormap cells in a colormap grabbed by a
+proxy. The server will send an <emphasis>
+LbxFreeCells</emphasis>
+ event to the proxy that currently has the colormap grabbed when the cell
+reference count reaches 0.
+</para>
+
+
+<para>
+If the colormap is a of a static visual type, such as <emphasis>
+StaticGray</emphasis>
+, <emphasis>
+StaticColor</emphasis>
+, <emphasis>
+GrayScale</emphasis>
+, or <emphasis>
+TrueColor</emphasis>
+, then the proxy’s grab is immediately released by the server, and the proxy
+must use <emphasis>
+LbxIncrementPixel</emphasis>
+ requests in place of <emphasis>
+LbxAllocColor</emphasis>
+ requests for this colormap.
+</para>
+
+
+<para>
+If the cmap field does not refer to a valid colormap or the colormap is already
+grabbed by this proxy then a <emphasis>
+Colormap</emphasis>
+ error is generated.
+</para>
+
+
+<para>
+The reply describes the contents of the colormap via several arguments and a
+descriptive list containing one or three channels, with each channel describing
+allocations in the colormap.
+</para>
+
+
+<para>
+The <emphasis>
+large-pixel</emphasis>
+ argument, if True, specifies that PIXEL indices will be listed as CARD16
+quantities instead of CARD8. The<emphasis>
+ auto-release</emphasis>
+ field, if True, indicates that this colormap is of a static visual type and
+the proxy’s grab is immediately released by the server.
+</para>
+
+
+<para>
+If <emphasis>
+three-channels</emphasis>
+ is False, a single channel is enclosed and color values are described using
+COLORTRIPLE, which has fields for red, green and blue. A single channel is used
+when the visual type is not <emphasis>
+DirectColor</emphasis>
+ or <emphasis>
+TrueColor</emphasis>
+.
+</para>
+
+
+<para>
+If <emphasis>
+three-channels</emphasis>
+ is True, separate red, green and blue channel lists are enclosed, for
+describing a <emphasis>
+DirectColor</emphasis>
+ or <emphasis>
+TrueColor</emphasis>
+ colormap. Color values for entries in each channel are sent using COLORSINGLE
+and the corresponding PIXEL value refers to the RGB subfield of the current
+channel, as defined by the corresponding red-mask, green-mask and blue-mask of
+the visual.
+</para>
+
+
+<para>
+The <emphasis>
+bits-per-rgb</emphasis>
+ value is one less than the bits-per-rgb-value field of the visual that the
+colormap belongs to. If the value is 7 or less, then COLORSINGLE values in the
+descriptive list are sent using CARD8 fields. Otherwise these values are sent
+using CARD16 fields.
+</para>
+
+
+<para>
+The list describing current colormap allocations contains entries of the
+following types:
+</para>
+
+
+<para>
+An LBXPIXELPRIVATE entry indicates that the pixel in the <emphasis>
+pixel </emphasis>
+field is unavailable for allocation.
+</para>
+
+
+<para>
+An LBXPIXELPRIVATERANGE entry indicates that a contiguous range of pixels are
+unavailable for allocation. The range is <emphasis>
+first-pixel</emphasis>
+ to <emphasis>
+last-pixel</emphasis>
+, and includes <emphasis>
+last-pixel</emphasis>
+.
+</para>
+
+
+<para>
+An LBXPIXELALLOC entry indicates that the pixel in the <emphasis>
+pixel </emphasis>
+field is allocated as a read-only pixel. The <emphasis>
+color</emphasis>
+ field carries the color information of the pixel.
+</para>
+
+
+<para>
+An LBXPIXELALLOCRANGE entry indicates that a contiguous range of pixels are
+allocated as read-only. The range starts <emphasis>
+first-pixel</emphasis>
+ to <emphasis>
+last-pixel</emphasis>
+, and includes <emphasis>
+last-pixel</emphasis>
+. These fields are followed by a list of COLORSINGLE or COLORTRIPLE, depending
+on the value of <emphasis>
+three-channels</emphasis>
+.
+</para>
+
+
+<para>
+A NEXTCHANNEL entry indicates that the next channel of the colormap will be
+described.
+</para>
+
+
+<para>
+A LISTEND entry indicates the end of the colormap description.
+</para>
+
+
+<para>
+All pixels not described in the reply are unallocated.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#17198">See
+LbxGrabCmap</ulink>.
+</para>
+
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxReleaseCmap</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+cmap</emphasis>
+: Colormap</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request releases the specified grabbed colormap. If the <emphasis>
+cmap</emphasis>
+ field does not refer to a colormap, a <emphasis>
+BadColormap</emphasis>
+ error is produced.
+</para>
+
+
+<para>
+The proxy must remember the state of the colormap when the <emphasis>
+LbxReleaseCmap</emphasis>
+ request is issued if this proxy may at some future time issue another
+<emphasis>
+LbxGrabCmap</emphasis>
+ request on this colormap before the state of the colormap changes.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#14796">See
+LbxReleaseCmap</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxInternAtoms</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+count</emphasis>
+: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+names: LISTofSTRING8</emphasis>
+</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'><emphasis>
+atoms</emphasis>
+: LISTofATOM</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request allows the proxy to intern a group of atoms in a single round
+trip. The server will create any atoms that do not exist.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#34140">See
+LbxInternAtoms</ulink>.
+</para>
+
+
+
+</sect3>
+<sect3 id='substitution_requests'>
+<title>Substitution Requests</title>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxAllocColor</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+cmap</emphasis>
+: Colormap</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+pixel</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+red</emphasis>
+, <emphasis>
+green</emphasis>
+, <emphasis>
+blue</emphasis>
+: CARD16</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is sent by a proxy that has given colormap grabbed to allocate a
+new read-only cell in the colormap. The proxy may substitute this request for
+the core <emphasis>
+AllocColor</emphasis>
+ and <emphasis>
+AllocNamedColor</emphasis>
+ requests.
+</para>
+
+
+<para>
+The <emphasis>
+pixel</emphasis>
+ field identifies the colormap cell to allocate. The <emphasis>
+red</emphasis>
+, <emphasis>
+green</emphasis>
+, and <emphasis>
+blue</emphasis>
+ fields are the hardware specific color values of the corresponding fields of
+the core <emphasis>
+AllocColor</emphasis>
+ request. The mapping to hardware specific colormap values by the proxy is
+performed using the color algorithm negotiated by <emphasis>
+LbxStartProxy</emphasis>
+.
+</para>
+
+
+<para>
+For colormaps of static visual types, the <emphasis>
+LbxIncrementPixel</emphasis>
+ request is used instead of LBX <emphasis>
+AllocColor</emphasis>
+.
+</para>
+
+
+<para>
+If the <emphasis>
+cmap</emphasis>
+ field does not identify a grabbed colormap then a <emphasis>
+BadAccess</emphasis>
+ error is produced. If the <emphasis>
+pixel</emphasis>
+ field refers to a read-write entry, or the pixel field refers to a pixel
+outside of the range of this colormap, a <emphasis>
+BadAlloc</emphasis>
+ error is produced.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#28429">See
+LbxAllocColor</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxIncrementPixel</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+cmap</emphasis>
+: COLORMAP</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+pixel</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: None</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+AllocColor</emphasis>
+ request for read-only pixels currently allocated for the current client. If
+the visual type of the colormap is of a static type, this request may be used
+on currently unallocated pixels. The colormap is not required to be grabbed to
+use this request.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#38053">See The
+description of this request is on page 14.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxDelta</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+count</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+cache-index</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+diffs</emphasis>
+: LISTofDIFFITEM</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request contains a minimal amount of information relative to a similar
+prior request. The information is in the form of a difference comparison to a
+prior request. The prior request is specified by an index to a cache,
+independently maintained by both the proxy and the server.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#39838">See The
+description of this request is on page 18.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGetModifierMapping</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'><emphasis>
+keyspermod</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+keycodes</emphasis>
+: LISTofKEYCODE             /* optional */</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is identical to the core <emphasis>
+GetModifierMapping</emphasis>
+ request, with the addition of a tag being returned in the reply. See <ulink
+url="lbx.htm#26534">See Tag Substitution in Requests</ulink> for a description
+of the <emphasis>
+tag</emphasis>
+ field and optional fields.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#40057">See
+LbxGetModifierMapping</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGetKeyboardMapping</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+firstKeyCode</emphasis>
+: KEYCODE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+count</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'><emphasis>
+keysperkeycode</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+keysyms</emphasis>
+: LISTofKEYSYM      /* optional */</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Value</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is identical to the X <emphasis>
+GetKeyboardMapping</emphasis>
+ protocol request, with the addition that a tag is returned in the reply. See
+<ulink url="lbx.htm#26534">See Tag Substitution in Requests</ulink> for a
+description of the <emphasis>
+tag</emphasis>
+ field and optional fields.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#21702">See
+LbxGetKeyboardMapping</ulink>.
+</para>
+
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGetWinAttrAndGeom</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+window</emphasis>
+: WINDOW</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'>visual: VISUALID</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>class: {InputOutput, InputOnly}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>bit-gravity: BITGRAVITY</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>win-gravity: WINGRAVITY</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>backing-store: {NotUseful, WhenMapped,
+Always}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>backing-planes: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>backing-pixel: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>save-under: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>colormap: COLORMAP or None</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>map-is-installed: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>map-state: {Unmapped, Unviewable,
+Viewable}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>all-event-masks, your-event-mask:
+SETofEVENT</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>do-not-propagate-mask: SETofDEVICEEVENT</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>override-redirect: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>root: WINDOW</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>depth: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>x, y: INT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>width, height, border-width: CARD16</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Window</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+<emphasis>
+GetWindowAttributes</emphasis>
+ and <emphasis>
+GetGeometry</emphasis>
+ are frequently used together in the X protocol. <emphasis>
+LbxGetWinAttrAndGeom</emphasis>
+ allows the proxy to request the same information in one round trip.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#41440">See
+LbxGetWinAttrAndGeom</ulink>.
+</para>
+
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxQueryFont</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+font</emphasis>
+: FONTABLE</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>compression: BOOL</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>tag: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>font-info: FONTINFO                  /* optional
+*/</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>char-infos: LISTofCHARINFO or LISTofLBXCHARINFO
+               /* optional */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>LBXCHARINFO:       [left-side-bearing:
+INT6</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      right-side-bearing: INT7</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      character-width: INT6</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      ascent: INT6</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>      descent: INT7]</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Font,Alloc</emphasis>
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is used to replace the core <emphasis>
+QueryFont</emphasis>
+ request and has identical semantics.
+</para>
+
+
+<para>
+See <ulink url="lbx.htm#26534">See Tag Substitution in Requests</ulink> for a
+description of the <emphasis>
+tag</emphasis>
+ field and optional fields.
+</para>
+
+
+<para>
+The <emphasis>
+compression</emphasis>
+ field is True if the <emphasis>
+char-infos</emphasis>
+ field is represented using LBXCHARINFO.
+</para>
+
+
+<para>
+The per-character information will be encoded in an LBXCHARINFO when, for every
+character, the character-width, left-side-bearing, and ascent can each be
+represented in not more than 6 bits, and the right-side-bearing and descent can
+each be represented in not more than 7 bits, and the attributes field is
+identical the attributes field of the max_bounds of the <emphasis>
+font_info</emphasis>
+ field of the font.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#24597">See
+LbxQueryFont</ulink>.
+</para>
+
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxChangeProperty</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+window</emphasis>
+: WINDOW</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+property</emphasis>
+: ATOM</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+type</emphasis>
+: ATOM</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+format</emphasis>
+: {0,8,16,32}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+mode</emphasis>
+: {Replace, Prepend, Append}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+nUnits</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>tag: CARD32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is sent to the server when the client sends an X <emphasis>
+ChangeProperty </emphasis>
+request through the proxy. The size of the data is sent with this request, but
+not the property data itself. The server reply contains a tag identifier for
+the data, which is stored in the proxy. The proxy must not discard this data
+before it is sent to the server, or invalidated by the server. This means that
+before issuing an <emphasis>
+LbxStopProxy</emphasis>
+ request, or exiting, the proxy must send Lbx<emphasis>
+TagData</emphasis>
+ requests for these items. If the server loses the connection before the
+information is sent back, the server should revert the property value to its
+last known value, if possible.
+</para>
+
+
+<para>
+If the <emphasis>
+mode</emphasis>
+ field is <emphasis>
+Prepend</emphasis>
+ or <emphasis>
+Append</emphasis>
+, the tag refers only to the prepended or appended data.
+</para>
+
+
+<para>
+If the tag in the reply is zero, then the change was ignored by the server, as
+defined in the security extension. The proxy should dump the associated data,
+since the server will never ask for it.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#18013">See
+LbxChangeProperty</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGetProperty</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+window</emphasis>
+: WINDOW</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+property</emphasis>
+: ATOM</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+type</emphasis>
+: ATOM or AnyPropertyType</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+long-offset</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+long-length</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+delete</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+
+    <row>
+      <entry role='protoargs'>type: ATOM or None</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>format: {0, 8, 16, 32}</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>bytes-after: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>nItems: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>tag: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>value: LISTofINT8 or LISTofINT16 or
+LISTofINT32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request may be used by the proxy as a substitution for a core <emphasis>
+GetProperty</emphasis>
+ request. It allows tags to be used for property data that is unlikely to
+change often in value, but is likely to be fetched by multiple clients.
+</para>
+
+
+<para>
+The <emphasis>
+LbxGetProperty</emphasis>
+ request has the same arguments as the core <emphasis>
+GetProperty</emphasis>
+ request. The reply for <emphasis>
+LbxGetProperty</emphasis>
+ has all of the fields from the core <emphasis>
+GetProperty</emphasis>
+ reply, but has the additional fields of <emphasis>
+nItems</emphasis>
+ and <emphasis>
+tag</emphasis>
+.
+</para>
+
+
+<para>
+In order to utilize tags in <emphasis>
+LbxGetProperty</emphasis>
+ for a specific property, the server must first send the complete property data
+to the proxy and associate this data with a tag. More precisely, the server
+sends an <emphasis>
+LbxGetProperty</emphasis>
+ reply with a new <emphasis>
+tag</emphasis>
+, <emphasis>
+nItems</emphasis>
+ set to the number of items in the property, the size of the property data in
+the reply length field, and the complete property data in value. The proxy
+stores the property data in its tag cache and associates it with the specified
+tag.
+</para>
+
+
+<para>
+In response to future <emphasis>
+LbxGetProperty</emphasis>
+ requests for the same property, if the server thinks that the proxy has the
+actual property data in its tag cache, it may choose to send an <emphasis>
+LbxGetProperty</emphasis>
+ reply without the actual property data. In this case, the reply would include
+a non-zero <emphasis>
+tag</emphasis>
+, a zero reply length, and no data for value.
+</para>
+
+
+<para>
+If the server chooses not to generate a tagged reply to <emphasis>
+LbxGetProperty</emphasis>
+, or for some reason is unable to do so, it would send a reply with a <emphasis>
+tag</emphasis>
+ of zero, the size of the property data in the reply length field, and the
+complete property data in value.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#13863">See
+LbxGetProperty</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyPoint</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+points</emphasis>
+: LISTofLBXPOINT</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyPoint</emphasis>
+ request. Not all <emphasis>
+PolyPoint</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyPoint</emphasis>
+ requests.
+</para>
+
+
+<para>
+The proxy will convert the representation of the points to be relative to the
+previous point, as described by previous coordinate mode in the X protocol.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#29719">See
+LbxPolyPoint</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyLine</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+points</emphasis>
+: LISTofLBXPOINT</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyLine</emphasis>
+ request. Not all <emphasis>
+PolyLine</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyline</emphasis>
+ requests.
+</para>
+
+
+<para>
+The proxy will convert the representation of the points to be relative to the
+previous point, as described by previous coordinate mode in the X protocol.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#31086">See The
+description of this request is on page 21.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolySegment</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+segments</emphasis>
+: LISTofLBXSEGMENT</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>&nbsp;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>where:</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>LBXSEGEMENT; [x1, y1, x2, y2: LBXINT16]</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolySegment</emphasis>
+ request. Not all <emphasis>
+PolySegment</emphasis>
+ requests can be represented as <emphasis>
+LbxPolySegment</emphasis>
+ requests.
+</para>
+
+
+<para>
+For segments other than the first segment of the request, [x1, y1] is
+relative to [x1, y1] of the previous segment. For all segments, [x2, y2] is
+relative to that segment’s [x1, y1].
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#27528">See
+LbxPolySegment</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyRectangle</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+rectangles</emphasis>
+: LISTofLBXRECTANGLE</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyRectangle</emphasis>
+ request. Not all <emphasis>
+PolyRectangle</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyRectangle</emphasis>
+ requests.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#33628">See The
+description of this request is on page 22.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyArc</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+arcs</emphasis>
+: LISTofLBXARC</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyArc</emphasis>
+ request. Not all <emphasis>
+PolyArc</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyArc</emphasis>
+ requests.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#25855">See
+LbxPolyArc</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyFillRectangle</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+rectangles</emphasis>
+: LISTofLBXRECTANGLE</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyFillRectangle</emphasis>
+ request. Not all <emphasis>
+PolyFillRectangle</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyFillRectangle</emphasis>
+ requests.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#26399">See
+LbxPolyFillRectangle</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyFillArc</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+arcs</emphasis>
+: LISTofLBXARC</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyFillArc</emphasis>
+ request. Not all <emphasis>
+PolyFillArc</emphasis>
+ requests can be represented as <emphasis>
+LbxPolyFillArc</emphasis>
+ requests.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#19081">See The
+description of this request is on page 22.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxFillPoly</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+shape</emphasis>
+: BYTE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+points</emphasis>
+: LISTofLBXPOINT</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+ and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+FillPoly</emphasis>
+ request. Not all <emphasis>
+FillPoly</emphasis>
+ requests can be represented as <emphasis>
+LbxFillPoly</emphasis>
+ requests.
+</para>
+
+
+<para>
+The proxy will convert the representation of the points to be relative to the
+previous point, as described by previous coordinate mode in the X protocol.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#24998">See
+LbxFillPoly</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxCopyArea</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+srcCache</emphasis>
+: CARD8      /* source drawable */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-Drawable</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-x</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+width</emphasis>
+: LBXCARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+height</emphasis>
+: LBXCARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+dst-x</emphasis>
+: LBXPINT16 </entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+dst-y</emphasis>
+: LBXPINT16</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: Those given for the corresponding X
+request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+CopyArea</emphasis>
+ request for requests within its encoding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#10231">See
+LbxCopyArea</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxCopyPlane</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+bit-plane</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-cache</emphasis>
+: CARD8      /* cache reference for source drawable */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-drawable</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-x</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+src-y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+width</emphasis>
+: LBXCARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+height</emphasis>
+: LBXCARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+dst-x</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+dst-y</emphasis>
+: LBXPINT16</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: Those given for the corresponding X
+request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+CopyPlane</emphasis>
+ request for requests within its coding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#18847">See
+LbxCopyPlane</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyText8</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+x</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+items</emphasis>
+: LISTofTEXTITEM8</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+, and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyText8</emphasis>
+ request for requests within its encoding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#39640">See The
+description of this request is on page 23.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPolyText16</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+x:</emphasis>
+ LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+items</emphasis>
+: LISTofTEXTITEM16</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+, and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+PolyText16</emphasis>
+ request for requests within its encoding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#32634">See The
+description of this request is on page 24.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxImageText8</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+nChars</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+x</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+string</emphasis>
+: STRING8</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+, and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+ImageText8</emphasis>
+ request for requests within its encoding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#17018">See The
+description of this request is on page 24.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxImageText16</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+nChars</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>x: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+string</emphasis>
+: STRING16</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+, and those given for the corresponding X request.</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request replaces the <emphasis>
+ImageText16</emphasis>
+ request for requests within its encoding range.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#23910">See The
+description of this request is on page 24.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxPutImage</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+compression-method</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+format</emphasis>
+: {<emphasis>
+Bitmap</emphasis>
+, <emphasis>
+XYPixmap</emphasis>
+, <emphasis>
+ZPixmap</emphasis>
+}                  /* packed */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+gc-and-drawable: </emphasis>
+LBXGCANDDRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+width</emphasis>
+, <emphasis>
+height</emphasis>
+: LBXCARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+dst-x</emphasis>
+, <emphasis>
+dst-y</emphasis>
+: LBXPINT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+depth</emphasis>
+: CARD8                  /* packed */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+left-pad</emphasis>
+: CARD8                  /* packed */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+pad-bytes</emphasis>
+: CARD8                  /* packed */</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+data</emphasis>
+:LISTofBYTE</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+, <emphasis>
+Value</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+When the request can be usefully compressed, this request replaces the
+<emphasis>
+PutImage</emphasis>
+ request. The <emphasis>
+compression-method</emphasis>
+ parameter contains the opcode of a compression method returned in the
+<emphasis>
+LbxStartProxy</emphasis>
+ reply. The <emphasis>
+pad-bytes</emphasis>
+ parameter gives the number of unused pad bytes that follow the compressed
+image data. All other parameters are as in the X request. If the specified
+compression method is not recognized, the server returns a <emphasis>
+Value</emphasis>
+ error.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#12268">See
+LbxPutImage</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxGetImage</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+drawable</emphasis>
+: DRAWABLE</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+x</emphasis>
+, <emphasis>
+y</emphasis>
+: INT16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+width</emphasis>
+, <emphasis>
+height</emphasis>
+: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+plane-mask</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+format</emphasis>
+: {XYPixmap, ZPixmap}</entry>
+    </row>
+    <row>
+      <entry>=&gt;</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>depth: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>x-length: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>visual: VISUALID or None</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>compression-method: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'>data: LISTofBYTE</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc,Match,Value</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request can replace the <emphasis>
+GetImage</emphasis>
+ request. The same semantics apply, with the following exceptions.
+</para>
+
+
+<para>
+The <emphasis>
+compression-method</emphasis>
+ field contains the opcode of the compression method used in the reply. The
+compression opcodes are supplied in the <emphasis>
+LbxStartProxy</emphasis>
+ reply. The <emphasis>
+x-length </emphasis>
+field<emphasis>
+ </emphasis>
+contains the length of the uncompressed version of the reply in 4 byte units.
+</para>
+
+
+<para>
+A <emphasis>
+Value</emphasis>
+ error is returned if the format is not recognized by the X server. A <emphasis>
+Match</emphasis>
+ error is returned under the same circumstances as described by the <emphasis>
+GetImage</emphasis>
+ request.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#10066">See
+LbxGetImage</ulink>.
+</para>
+
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxBeginLargeRequest</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+large-request-length</emphasis>
+: CARD32</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request, along with the Lbx<emphasis>
+LargeRequestData</emphasis>
+ and Lbx<emphasis>
+EndLargeRequest</emphasis>
+ requests, is used to transport a large request in pieces. The smaller size of
+the resulting requests allows smoother multiplexing of clients on a single low
+bandwidth connection to the server. The resulting finer-grained multiplexing
+improves responsiveness for the other clients.
+</para>
+
+
+<para>
+After a <emphasis>
+LbxBeginLargeRequest</emphasis>
+ request is sent, multiple <emphasis>
+LbxLargeRequestData</emphasis>
+ requests are sent to transport all of the data in the large request, and
+finally an <emphasis>
+LbxEndLargeRequest</emphasis>
+ request is sent. The large-request-length field expresses the total length of
+the transported large request, expressed as the number of bytes in the
+transported request divided by four.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#22013">See The
+description of this request is on page 25.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxLargeRequestData</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+data</emphasis>
+: LISTofBYTE</entry>
+    </row>
+
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Alloc</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This request is used to carry the segments of a larger request, as described in
+the definition of <emphasis>
+LbxBeginLargeRequest</emphasis>
+. The data must be carried in order, starting with the request header, and each
+segment must be multiples of 4 bytes long. If the <emphasis>
+LbxLargeRequestData</emphasis>
+ is not preceded by a corresponding <emphasis>
+LbxBeginLargeRequest</emphasis>
+, a <emphasis>
+BadAlloc</emphasis>
+ error is generated.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#31469">See The
+description of this request is on page 26.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxEndLargeRequest</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoerror'>Errors: <emphasis>
+Length, Alloc</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+As described in the definition of <emphasis>
+LbxBeginLargeRequest</emphasis>
+, <emphasis>
+LbxEndLargeRequest</emphasis>
+ is used to signal the end of a series of <emphasis>
+LargeRequestData</emphasis>
+ requests. If the total length of the data transported by the <emphasis>
+LbxLargeRequestData</emphasis>
+ requests does not match the large-request-length field of the preceding
+<emphasis>
+LbxBeginLargeRequest</emphasis>
+ request, then a <emphasis>
+Length</emphasis>
+ error occurs. If the <emphasis>
+LbxEndLargeRequest</emphasis>
+ is not preceded by a corresponding <emphasis>
+LbxBeginLargeRequest</emphasis>
+, a <emphasis>
+BadAlloc</emphasis>
+ error is generated. The request is executed in order for that client as if it
+were the request after the request preceding <emphasis>
+LbxEndLargeRequest</emphasis>
+.
+</para>
+
+
+<para>
+The encoding for this request is on <ulink url="lbx.htm#31037">See
+LbxEndLargeRequest</ulink>.
+</para>
+
+
+
+</sect3>
+</sect2>
+<sect2 id='events'>
+<title>Events</title>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxSwitchEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+client</emphasis>
+: CARD32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Notify the proxy that the subsequent replies, events, and errors are relative
+to the specified client.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#17348">See
+LbxSwitchEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxCloseEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+client</emphasis>
+: CARD32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Notify the proxy that the specified client's connection to the server is closed.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#41814">See The
+description of this event is on page 27.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxInvalidateTagEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag-type</emphasis>
+: {Modmap, Keymap, Property, Font, ConnInfo}</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This message informs the proxy that the tag and the server data referenced by
+the tag are obsolete, and should be discarded. The tag type may be one of the
+following values: <emphasis>
+LbxTagTypeModmap</emphasis>
+, <emphasis>
+LbxTagTypeKeymap</emphasis>
+, <emphasis>
+LbxTagTypeProperty</emphasis>
+, <emphasis>
+LbxTagTypeFont</emphasis>
+, <emphasis>
+LbxTagTypeConnInfo</emphasis>
+.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#34406">See
+LbxInvalidateTagEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxSendTagDataEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag</emphasis>
+: CARD32</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+tag-type</emphasis>
+: {Property}</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The server sends this event to the proxy to request a copy of tagged data which
+is being stored by the proxy. The request contains a tag which was previously
+assigned to the data by the server. The proxy should respond to <emphasis>
+SendTagData</emphasis>
+ by sending a <emphasis>
+TagData</emphasis>
+ request to the server. The tag type may be one of the following values:
+<emphasis>
+LbxTagTypeProperty</emphasis>
+.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#22353">See
+LbxSendTagDataEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxListenToOne</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+client</emphasis>
+: CARD32 or <emphasis>
+0xffffffff</emphasis>
+</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+When the server is grabbed, <emphasis>
+ListenToOne</emphasis>
+ is sent to the proxy. As an X client, the proxy itself is unaffected by grabs,
+in order that it may respond to requests for data from the X server.
+</para>
+
+
+<para>
+When the client grabbing the server is managed through the proxy, the proxy
+will permit messages from itself and the grabbing client to be sent immediately
+to the server, and may buffer requests from other clients of the proxy. The
+client is identified in the event.
+</para>
+
+
+<para>
+When the client grabbing the server is not managed through the proxy, the
+client field in the event will be <emphasis>
+0xffffffff</emphasis>
+. The proxy will communicate with the server, and it may buffer requests from
+other clients. The proxy will continue to handle new connections while the
+server is grabbed.
+</para>
+
+
+<para>
+The server will send <emphasis>
+ListenToAll</emphasis>
+ to the proxy when the server is ungrabbed. There is no time-out for this
+interval in the protocol.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#18630">See The
+description of this event is on page 27.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <tbody>
+    <row>
+      <entry role='protoname'>LbxListenToAll</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+Notify the proxy that the server has been ungrabbed, and that the proxy may now
+send all buffered client requests on to the server.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#30610">See The
+description of this event is on page 27.</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxQuickMotionDeltaEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaTime</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaX</emphasis>
+: INT8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaY</emphasis>
+: INT8</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This event is used as a replacement for the <emphasis>
+MotionNotify</emphasis>
+ event when possible. The fields are used as deltas to the most recent
+<emphasis>
+MotionNotify</emphasis>
+ event encoded as a <emphasis>
+MotionNotify</emphasis>
+ event, <emphasis>
+LbxQuickMotionDeltaEvent</emphasis>
+, or <emphasis>
+LbxMotionDeltaEvent</emphasis>
+. Not every <emphasis>
+MotionNotify</emphasis>
+ event can be encoded as a <emphasis>
+LbxQuickMotionDeltaEvent</emphasis>
+.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#35213">See
+LbxQuickMotionDeltaEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxMotionDeltaEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaX</emphasis>
+: INT8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaY</emphasis>
+: INT8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaTime</emphasis>
+: CARD16</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+deltaSequence</emphasis>
+: CARD16</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This event is used as a replacement for the <emphasis>
+MotionNotify</emphasis>
+ event when possible. The fields are used as deltas to the most recent
+<emphasis>
+MotionNotify</emphasis>
+ event encoded as a <emphasis>
+MotionNotify</emphasis>
+ event, <emphasis>
+LbxQuickMotionDeltaEvent</emphasis>
+, or <emphasis>
+LbxMotionDeltaEvent</emphasis>
+. Not every <emphasis>
+MotionNotify</emphasis>
+ event can be encoded as <emphasis>
+a LbxMotionDeltaEvent</emphasis>
+.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#35310">See
+LbxMotionDeltaEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxReleaseCmapEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+colormap</emphasis>
+: Colormap</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This event notifies the proxy that it must release the grab on this colormap
+via the ReleaseCmap request. <ulink url="lbx.htm#34675">See
+LbxReleaseCmap</ulink>
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#14052">See
+LbxReleaseCmapEvent</ulink>.
+</para>
+
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxFreeCellsEvent</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+colormap</emphasis>
+: Colormap</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+pixelStart, pixelEnd</emphasis>
+: CARD32</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+The <emphasis>
+LbxFreeCells</emphasis>
+ event is sent to a proxy that has a colormap grabbed to notify the proxy that
+the reference count of the described cells were decremented to zero by the
+server or another proxy. The reference count includes those by this proxy. The
+proxy must update its copy of the colormap state accordingly if the colormap is
+still grabbed, or if the proxy may in the future grab the colormap using
+smart-grab mode. <ulink url="lbx.htm#10922">See LbxGrabCmap</ulink>
+</para>
+
+
+<para>
+The pixelStart and pixelEnd fields of the event denote a continuous range of
+cells that were freed.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#14731">See
+LbxFreeCellsEvent</ulink>.
+</para>
+
+</sect2>
+<sect2 id='responses'>
+<title>Responses</title>
+
+<para>
+Responses are messages from the server to the proxy that not, strictly
+speaking, events, replies or errors.
+</para>
+
+<informaltable frame='none' tabstyle='proto'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth="1.0*"/>
+  <thead>
+    <row>
+      <entry role='protoname'>LbxDeltaResponse</entry>
+    </row>
+  </thead>
+  <tbody>
+    <row>
+      <entry role='protoargs'><emphasis>
+count</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+cache-index</emphasis>
+: CARD8</entry>
+    </row>
+    <row>
+      <entry role='protoargs'><emphasis>
+diffs</emphasis>
+: LISTofDIFFITEM</entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+<para>
+This response carries an event, reply, or error that has been encoded relative
+to a message in the response delta cache. The <emphasis>
+cache-index</emphasis>
+ field is the index into the cache. Each entry in <emphasis>
+diffs</emphasis>
+ provides a byte offset and replacement value to use in reconstructing the
+response.
+</para>
+
+
+<para>
+The encoding for this event is on <ulink url="lbx.htm#17100">See
+LbxDeltaResponse</ulink>.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='algorithm_naming'>
+<title>Algorithm Naming</title>
+
+<para>
+To avoid potential clashes between different but similar algorithms for stream,
+bitmap, and pixmap compression, the following naming scheme will be adhered to:
+</para>
+
+
+<para>
+Each algorithm has a unique name, which is a STRING8, of the following form:
+</para>
+
+
+<para>
+   &lt;organization&gt;-&lt;some-descriptive-name&gt;
+</para>
+
+
+<para>
+The organization field above is the organization name as registered in section
+1 of the X Registry (the registry is provided as a free service by the X
+Consortium.) This prevents conflicts among different vendor’s extensions.
+</para>
+
+
+<para>
+As an example, the X Consortium defines a zlib-based stream compression
+algorithm called XC-ZLIB.
+</para>
+
+
+</sect1>
+<sect1 id='encoding'>
+<title>Encoding</title>
+
+<para>
+The syntax and types used in the encoding are taken from the X protocol
+encoding. Where LBX defines new types, they are defined earlier in this
+document.
+</para>
+
+
+<para>
+As in the X protocol, in various cases, the number of bytes occupied by a
+component will be specified by a lowercase single-letter variable name instead
+of a specific numeric value, and often some other component will have its value
+specified as a simple numeric expression involving these variables. Components
+specified with such expressions are always interpreted as unsigned integers.
+The scope of such variables is always just the enclosing request, reply, error,
+event, or compound type structure.
+</para>
+
+
+<para>
+For unused bytes, the encode-form is:
+</para>
+
+<literallayout>
+N            unused
+</literallayout>
+
+<para>
+If the number of unused bytes is variable, the encode-form typically is:
+</para>
+
+<literallayout>
+p            unused, p=pad(E)
+</literallayout>
+
+<para>
+where E is some expression, and pad(E) is the number of bytes needed to round E
+up to a multiple of four.
+</para>
+
+
+<para>
+pad(E) = (4 - (E mod 4)) mod 4
+</para>
+
+
+<para>
+In many of the encodings, the length depends on many variable length fields.
+The variable L is used to indicate the number of padded 4 byte units needed to
+carry the request. Similarly, the variable Lpad indicates the number of bytes
+needed to pad the request to a 4 byte boundary.
+</para>
+
+<literallayout>
+For counted lists there is a common encoding of NLISTofFOO:
+</literallayout>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>NLISTofFOO</emphasis>
+1      m      num items
+m      LISTofFOO      items
+</literallayout>
+
+<para>
+For cached GC and Drawables:
+</para>
+
+<literallayout>
+<emphasis role='bold'>LBXGCANDDRAWUPDATE</emphasis>
+4 or 0      DRAWBLE      optional drawable
+4 or 0      GC           optional GC
+</literallayout>
+
+
+
+<literallayout>
+<emphasis role='bold'>LBXGCANDDRAWABLE</emphasis>
+8      LBXGCANDDRAWENT      cache-entries
+8                           unused
+m      LBXGCANDDRAWUPDATE   optional GC and Drawable
+</literallayout>
+
+
+<sect2 id='errors2'>
+<title>Errors</title>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxClient</emphasis>
+1      0          Error
+1      CARD8      error-base + 0
+2      CARD16     sequence number
+4                 unused
+2      CARD16     lbx opcode
+1      CARD8      major opcode
+21                unused
+</literallayout>
+
+</sect2>
+<sect2 id='requests2'>
+<title>Requests</title>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxQueryVersion</emphasis>
+1      CARD8      opcode
+1      0          lbx opcode
+2      1          request length
+=&gt;
+1      1          Reply
+1                 unused
+2      CARD16     sequence number
+4      0          reply length
+2      CARD16     major version
+2      CARD16     minor version
+20                unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#18761">See
+LbxQueryVersion</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxStartProxy</emphasis>
+1      CARD8                      opcode
+1      1                          lbx opcode
+2      L                          request length
+n      NLISTofOPTION-REQUEST      options
+p                                 unused, p=pad(n)
+
+<emphasis role='bold'>OPTION-REQUEST</emphasis>
+1      OPTCODE                    option-code
+m      OPTLEN                     option-request-byte-length, (b=m+a+1)
+a      DELTAOPT or                option
+       NLISTofNAMEDOPT or
+       NLISTofSTR or
+       NLISTofPIXMAPMETHOD or
+       BOOL
+</literallayout>
+
+<para>
+The encoding of the option field depends on the option-code.
+See <ulink url="lbx.htm#35444">See StartProxy Options</ulink>.
+</para>
+
+<literallayout class='monospaced'>
+1      OPTCODE                               option-code
+0      LbxOptionDeltaProxy
+1      LbxOptionDeltaServer
+2      LbxOptionStreamCompression
+3      LbxOptionBitmapCompression
+4      LbxOptionPixmapCompression
+5      LbxOptionMessageCompression              /* also known as squishing */
+6      LbxOptionUseTags
+7      LbxOptionColormapAllocation
+255    LbxOptionExtension
+</literallayout>
+
+<para>
+OPTLEN has two possible encodings, depending on the size of the value carried:
+</para>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>OPTLEN</emphasis>
+1      CARD8              b (0 &lt; b &lt;= 255)
+
+<emphasis role='bold'>OPTLEN</emphasis>
+1      0                  long length header
+1      c                  length0, c = b &gt;&gt; 8
+1      d                  length1, d= b &amp; #xff
+
+<emphasis role='bold'>DELTAOPT</emphasis>
+1      CARD8      min-cache-size
+1      CARD8      max-cache-size
+1      CARD8      preferred-cache-size
+1      CARD8      min-message-length
+1      CARD8      max-message-length (in 4-byte units)
+1      CARD8      preferred-message-length
+
+<emphasis role='bold'>NAMEDOPT</emphasis>
+f      STR             type-name
+1      g+1             option-data-length
+g      LISTofBYTE      option-data (option specific)
+
+<emphasis role='bold'>PIXMAPMETHOD</emphasis>
+h      STR              name
+1      BITMASK          format mask
+1      j                depth count
+j      LISTofCARD8      depths
+
+=&gt;
+=&gt;
+
+1      1                 Reply
+1      CARD8             count
+
+0xff      options in request cannot be decoded
+2      CARD16            sequence number
+4      (a+p-32)/4        reply length
+a      LISTofCHOICE      options-reply
+p            unused, if (n&lt;24) p=24-n else p=pad(n)
+
+<emphasis role='bold'>CHOICE</emphasis>
+1      CARD8                request-option-index
+b      OPTLEN               reply-option-byte-length
+c      DELTACHOICE or       choice
+      INDEXEDCHOICE or
+      NLISTofINDEXEDOPT or
+      NLISTofPIXMAPCHOICE or
+      BOOL or
+      INDEXEDCHOICE
+</literallayout>
+
+<para>
+The encoding of the choice field depends on the option-code. See <ulink
+url="lbx.htm#35444">See StartProxy Options</ulink>.
+</para>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>DELTACHOICE</emphasis>
+1      CARD8      preferred cache size
+1      CARD8      preferred message length in 4-byte units
+
+<emphasis role='bold'>INDEXEDCHOICE</emphasis>
+1      CARD8           index
+d      LISTofBYTE      data
+
+<emphasis role='bold'>PIXMAPCHOICE</emphasis>
+1      CARD8           index
+1      CARD8           opcode
+1      BITMASK         format mask
+e      NLISTofCARD8    depths
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#20870">See
+LbxStartProxy</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxStopProxy</emphasis>
+1      CARD8      opcode
+1      2          lbx opcode
+2      1          request length
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#27455">See
+LbxStopProxy</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxSwitch</emphasis>
+1      CARD8      opcode
+1      3          lbx opcode
+2      2          request length
+4      CARD32     client
+</literallayout>
+
+<para>
+The description of this request is on
+<ulink url="lbx.htm#33500">See LbxSwitch</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxNewClient</emphasis>
+1      CARD8      opcode
+1      4          lbx opcode
+2      L          request length
+4      CARD32     client
+The remaining bytes of the request are the core connection setup.
+=&gt;
+If the connection is rejected, a core connection reply is sent. Otherwise the
+reply has the form:
+1      BOOL      success
+1                change type
+      0          no-deltas
+      1          normal-client-deltas
+      2          app-group-deltas
+2      CARD16    major version
+2      CARD16    minor version
+2      1 + a     length
+4      CARD32    tag id
+</literallayout>
+
+<para>
+The remaining bytes depend on the value of change-type and length.
+</para>
+
+<para>
+For no-deltas, the remaining bytes are the &quot;additional data&quot;
+bytes of the core reply. (a = length of core reply, in 4 byte quantities).
+</para>
+
+<para>
+For normal-client-deltas, the additional bytes have the form, with a length (a
+= 1 +b):
+</para>
+
+<literallayout class='monospaced'>
+4      CARD32                 resource id base
+4b      LISTofSETofEVENT      root input masks
+</literallayout>
+
+<para>
+For app-group-deltas, the additional bytes have the following form, with a
+length of (a = 1 + 4c):
+</para>
+
+<literallayout class='monospaced'>
+4      CARD32                resource id base
+4      WINDOW                root id base
+4      VISUALID              visual
+4      COLORMAP              colormap
+4      CARD32                white pixel
+4      CARD32                black pixel
+4c     LISTofSETofEVENT      root input masks
+</literallayout>
+
+<para>
+The description of this request is on
+<ulink url="lbx.htm#17810">See LbxNewClient</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxCloseClient</emphasis>
+1      CARD8      opcode
+1      5          lbx opcode
+2      2          request length
+4      CARD32     client
+</literallayout>
+
+<para>
+The description of this request is on
+<ulink url="lbx.htm#21625">See LbxCloseClient</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxModifySequence</emphasis>
+1      CARD8      opcode
+1      6          lbx opcode
+2      2          request length
+4      CARD32     offset to sequence number
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#36693">See
+LbxModifySequence</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxAllowMotion</emphasis>
+1      CARD8      opcode
+1      7          lbx opcode
+2      2          request length
+4      CARD32     number of MotionNotify events
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#15895">See
+LbxAllowMotion</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxIncrementPixel</emphasis>
+1      CARD8      opcode
+1      8          lbx opcode
+2      3          request length
+4      COLORMAP   colormap
+4      CARD32      pixel
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#27227">See
+LbxIncrementPixel</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxDelta</emphasis>
+1      CARD8              opcode
+1      9                  lbx opcode
+2      1+(2n +p+2)/4      request length
+1      n                  count of diffs
+1      CARD8              cache index
+2n      LISTofDIFFITEM    offsets and differences
+p                         unused, p=pad(2n + 2)
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#26857">See
+LbxDelta</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGetModifierMapping</emphasis>
+1      CARD8      opcode
+1      10         lbx opcode
+2      1          request length
+=&gt;
+1      1          Reply
+1      n          keycodes-per-modifier
+2      CARD16     sequence number
+4      2n         reply length
+4      CARD32     tag
+20                unused
+8n     LISTofKEYCODE      keycodes
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#37687">See
+LbxGetModifierMapping</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxInvalidateTag</emphasis>
+1      CARD8      opcode
+1      12         lbx opcode
+2      2          request length
+4      CARD32     tag
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#12515">See
+LbxInvalidateTag</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyPoint</emphasis>
+1      CARD8      opcode
+1      13      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXPOINT      points (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#37179">See
+LbxPolyPoint</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyLine</emphasis>
+1      CARD8      opcode
+1      14      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXPOINT      points (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#16574">See
+LbxPolyLine</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolySegment</emphasis>
+1      CARD8      opcode
+1      15      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXSEGMENT      segments (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#26077">See
+LbxPolySegment</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyRectangle</emphasis>
+1      CARD8      opcode
+1      16      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXRECTANGLE      rectangles (n is data-dependent)
+p      0      unused, p=pad(m+n)
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#40958">See
+LbxPolyRectangle</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyArc</emphasis>
+1      CARD8      opcode
+1      17      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXARCS      arcs (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#15317">See
+LbxPolyArc</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxFillPoly</emphasis>
+1      CARD8      opcode
+1      18      lbx opcode
+2      1+(3+m+n+p)/4      request length
+1      LBXGCANDDRAWENT      cache entries
+1            shape
+0      Complex
+1      Nonconvex
+2      Convex
+1      p      pad byte count
+m      LBXGCANDDRAWUPDATE      optional gc and drawable
+n      LISTofLBXPOINT      points (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#35796">See
+LbxFillPoly</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyFillRectangle</emphasis>
+1      CARD8      opcode
+1      19      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXRECTANGLE      rectangles (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#25511">See
+LbxPolyFillRectangle</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyFillArc</emphasis>
+1      CARD8      opcode
+1      20      lbx opcode
+2      1+(m+n+p)/4      request length
+m      LBXGCANDDRAWABLE      cache entries
+n      LISTofLBXARC      arcs (n is data-dependent)
+p      0      unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#42698">See
+LbxPolyFillArc</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGetKeyboardMapping</emphasis>
+1      CARD8      opcode
+1      21      lbx opcode
+2      2      request length
+1      KEYCODE      first keycode
+1      m      count
+2            unused
+=&gt;
+1      1      Reply
+1      n      keysyms-per-keycode
+2      CARD16      sequence number
+4      nm      reply length (m = count field from the request)
+4      CARD32      tag
+20            unused
+4nm      LISTofKEYSYM      keysyms
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#33719">See
+LbxGetKeyboardMapping</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxQueryFont</emphasis>
+1      CARD8      opcode
+1      22      lbx opcode
+2      2      request length
+4      FONTABLE      font
+=&gt;
+1      1      Reply
+1      BOOL      compression
+2      CARD16      sequence number
+4      L      reply length
+4      CARD32      tag
+20            unused
+All of the following is conditional:
+12      CHARINFO      min-bounds
+4            unused
+12      CHARINFO      max-bounds
+4            unused
+2      CARD16      min-char-or-byte2
+2      CARD16      max-char-or-byte2
+2      CARD16      default-char
+2      n      number of FONTPROPs in properties
+1            draw-direction
+0      <emphasis>LeftToRight</emphasis>
+1      <emphasis>RightToLeft</emphasis>
+1      CARD8      min-byte1
+1      CARD8      max-byte1
+1      BOOL      all-chars-exist
+2      INT16      font-ascent
+2      INT16      font-descent
+4      m      number of elements in char-infos
+8n      LISTofFONTPROP      properties
+and either
+12m      LISTofCHARINFO      char-infos
+or
+m      LISTofLBXCHARINFO      char-infos
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#18818">See
+LbxQueryFont</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxChangeProperty</emphasis>
+1      CARD8      opcode
+1      23      lbx opcode
+2      6      request length
+4      WINDOW      window
+4      ATOM      property
+4      ATOM      type
+1      CARD8      format
+1            mode
+0      Replace
+1      Preprend
+2      Append
+2            unused
+4      CARD32      length of data in format units
+            (= n for format = 8)
+            (= n/2 for format = 16)
+            (= n/4 for format = 32)
+=&gt;
+1      1      Reply
+1            unused
+2      CARD16      sequence number
+4      0      reply length
+4      CARD32      tag
+20            unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#40098">See
+LbxChangeProperty</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGetProperty</emphasis>
+1      CARD8      opcode
+1      24      lbx opcode
+2      7      request length
+4      WINDOW      window
+4      ATOM      property
+4      ATOM      type
+0      AnyPropertyType
+1      CARD8      delete
+3            unused
+4      CARD32      long-offset
+4      CARD32      long-length
+=&gt;
+1      1      Reply
+1      CARD8      format
+2      CARD16      sequence number
+4      CARD32      reply length
+4      ATOM      type
+0      None
+4      CARD32      bytes-after
+4      CARD32      length of value in format units
+            (= 0 for format = 0)
+            (= n for format = 8)
+            (= n/2 for format = 16)
+            (= n/4 for format = 32)
+4      CARD32      tag
+8            unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#31397">See
+LbxGetProperty</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxTagData</emphasis>
+1      CARD8      opcode
+1      25      lbx opcode
+2      3+(n+p)/4      request length
+4      CARD32      tag
+4      CARD32      length of data in bytes
+n      LISTofBYTE      data
+p            unused, p=pad(n)
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#17987">See
+LbxTagData</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxCopyArea</emphasis>
+1      CARD8      opcode
+1      26      lbx opcode
+2      L      request length
+1      CARD8      source drawable cache entry
+1      LBXGCANDDRAWENT      cache entries
+4 or 0      DRAWABLE      optional source drawable
+b      LBXGCANDDRAWUPDATE      optional gc and dest drawable
+c      LBXPINT16      src-x
+d      LBXPINT16      src-y
+e      LBXPINT16      dst-x
+f      LBXPINT16      dst-y
+g      LBXCARD16      width
+h      LBXCARD16      height
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#11409">See
+LbxCopyArea</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxCopyPlane</emphasis>
+1      CARD8      opcode
+1      27      lbx opcode
+2      L      request length
+4      CARD32      bit plane
+1      CARD8      source drawable cache entry
+1      LBXGCANDDRAWENT      cache entries
+4 or 0      DRAWABLE      optional source drawable
+b      LBXGCANDDRAWUPDATE      optional gc and dest drawable
+c      LBXPINT16      src-x
+d      LBXPINT16      src-y
+e      LBXPINT16      dst-x
+f      LBXPINT16      dst-y
+g      LBXCARD16      width
+h      LBXCARD16      height
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#36772">See
+LbxCopyPlane</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyText8</emphasis>
+1      CARD8      opcode
+1      28      lbx opcode
+2      L      request length
+1      LBXGCANDDRAWENT      cache entries
+a      LBXGCANDDRAWUPDATE      optional gc and drawable
+b      LBXPINT16      x
+c      LBXPINT16      y
+n      LISTofTEXTITEM8      items
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#23201">See
+LbxPolyText8</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPolyText16</emphasis>
+1      CARD8      opcode
+1      29      lbx opcode
+2      L      request length
+1      LBXGCANDDRAWENT      cache entries
+a      LBXGCANDDRAWUPDATE      optional gc and drawable
+b      LBXPINT16      x
+c      LBXPINT16      y
+2n      LISTofTEXTITEM16      items
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#13228">See
+LbxPolyText16</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxImageText8</emphasis>
+1      CARD8      opcode
+1      30      lbx opcode
+2      L      request length
+1      LBXGCANDDRAWENT      cache entries
+a      LBXGCANDDRAWUPDATE      optional gc and drawable
+b      LBXPINT16      x
+c      LBXPINT16      y
+n      STRING8      string
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#10990">See
+LbxImageText8</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxImageText16</emphasis>
+1      CARD8      opcode
+1      31      lbx opcode
+2      L      request length
+1      LBXGCANDDRAWENT      cache entries
+a      LBXGCANDDRAWUPDATE      optional gc and drawable
+b      LBXPINT16      x
+c      LBXPINT16      y
+2n      STRING16      string
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#39584">See
+LbxImageText16</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxQueryExtension</emphasis>
+1      CARD8      opcode
+1      32      lbx opcode
+2      2+(n+p)/4      request length
+4      n      length of extension name
+n      STRING8      extension name
+p            unused, p=pad(n)
+=&gt;
+1      1      Reply
+1      n      number of requests in the extension
+2      CARD16      sequence number
+4      0 or 2*(m + p)      reply length, m = (n+7)/8
+1      BOOL      present
+1      CARD8      major opcode
+1      CARD8      first event
+1      CARD8      first error
+20            unused
+m      LISTofMASK      optional reply-mask
+p            unused, p=pad(m)
+m      LISTofMASK      optional event-mask
+p            unused, p=pad(m)
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#36662">See
+LbxQueryExtension</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxPutImage</emphasis>
+1      CARD8      opcode
+1      33      lbx opcode
+2      L      request length
+1      CARD8      compression method
+1      LBXGCANDDRAWENT      cache entries
+a      PIPACKED            bit-packed
+b      LBXGCANDDRAWUPDATE      optional gc and drawable
+c      LBXCARD16      width
+d      LBXCARD16      height
+e      LBXPINT16      x
+f      LBXPINT16      y
+n      LISTofBYTE      compressed image data
+p            unused, p=Lpad
+</literallayout>
+
+<para>
+If there is no left padding and the depth is less than or equal to nine,
+PIPPACKED is encoded as follows:
+</para>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>PIPACKED</emphasis>
+1      #x80 | (format &lt;&lt; 5) | ((depth -1) &lt;&lt; 2)
+</literallayout>
+
+<para>
+Otherwise PIPACKED is defined as:
+</para>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>PIPACKED</emphasis>
+1      (depth -1) &lt;&lt; 2)
+1      (format &lt;&lt; 5) | left-pad
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#21218">See
+LbxPutImage</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGetImage</emphasis>
+1      CARD8      opcode
+1      34      lbx opcode
+2      6      request length
+4      DRAWABLE      drawable
+2      INT16      x
+2      INT16      y
+2      CARD16      width
+2      CARD16      height
+4      CARD32      plane mask
+1      CARD8      format
+3            unused
+=&gt;
+1      1      Reply
+1      CARD8      depth
+2      CARD16      sequence number
+4      (n+p)/4      reply length
+4      (m+p)/4      X reply length; if uncompressed, m=n
+4      VISUALID      visual
+0      None
+1            compression method
+15            unused
+n      LISTofBYTE      data
+p            unused, p=pad(n)
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#26896">See
+LbxGetImage</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxBeginLargeRequest</emphasis>
+1      CARD8      opcode
+1      35      lbx opcode
+2      2      request length
+4      CARD32      large request length
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#31209">See
+LbxBeginLargeRequest</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxLargeRequestData</emphasis>
+1      CARD8      opcode
+1      36      lbx opcode
+2      1+n      request length
+4n      LISTofBYTE      data
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#36982">See
+LbxLargeRequestData</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxEndLargeRequest</emphasis>
+1      CARD8      opcode
+1      37      lbx opcode
+2      1      request length
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#31841">See
+LbxEndLargeRequest</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxInternAtoms</emphasis>
+1      CARD8      opcode
+1      38      lbx opcode
+2      1+(2+m+n+p)/4      request length
+2      m      num-atoms
+n      LISTofLONGSTR      names
+p            pad p=Lpad
+=&gt;
+1      1      Reply
+1            unused
+2      CARD16      sequence number
+4      a      reply length, a = MAX(m - 6, 0)
+4*m      LISTofATOM      atoms
+p            pad p = MAX(0, 4*(6 - m))
+&nbsp;
+LONGSTR
+2      c      string length
+c      STRING8      string
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#21636">See
+LbxInternAtoms</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGetWinAttrAndGeom</emphasis>
+1      CARD8      opcode
+1      39      lbx opcode
+2      2      request length
+4      CARD32      window id
+=&gt;
+1      1      Reply
+1            backing store
+0      NotUseful
+1      WhenMapped
+2      Always
+2      CARD16      sequence number
+4      7      reply length
+4      VISUALID      visual id
+2            class
+1      InputOutput
+2      InputOnly
+1      BITGRAVITY      bit gravity
+1      WINGRAVITY      window gravity
+4      CARD32      backing bit planes
+4      CARD32      backing pixel
+1      BOOL      save under
+1      BOOL      map installed
+1            map state
+0      Unmapped
+1      Unviewable
+2      Viewable
+1      BOOL      override
+4      COLORMAP      colormap
+4      SETofEVENT      all events mask
+4      SETofEVENT      your event mask
+2      SETofDEVICEEVENT      do not propagate mask
+2            unused
+4      WINDOW      root
+2      INT16      x
+2      INT16      y
+2      CARD16      width
+2      CARD16      height
+2      CARD16      border width
+1      CARD8      depth
+1            unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#39382">See
+LbxGetWinAttrAndGeom</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxGrabCmap</emphasis>
+1      CARD8      opcode
+1      40      lbx opcode
+2      2      request length
+4      COLORMAP      colormap
+=&gt;
+</literallayout>
+
+<para>
+If smart-grab is true, the reply is as follows:
+</para>
+
+<literallayout class='monospaced'>
+1      1      Reply
+1      #x80      flags
+2      CARD16      sequence number
+4      0      reply length
+24            unused
+
+If smart-grab is false, the reply is as follows:
+
+1      1      Reply
+1            flags (set of)
+       #x40      auto-release
+       #x20      three-channels
+       #x10      two-byte-pixels
+lower four bits specifies bits-per-pixel
+2      CARD16      sequence number
+4      L      reply length
+m      CHAN or CHANNELS      cells (CHAN if !three-channels)
+p      0      pad(m)
+
+<emphasis role='bold'>CHANNELS</emphasis>
+a      CHAN      red
+1      5            next channel
+b      CHAN      green
+1      5      next channel
+c      CHAN      blue
+1      0      list end
+
+<emphasis role='bold'>CHAN</emphasis>
+d      LISTofLBXPIXEL
+
+<emphasis role='bold'>LBXPIXEL</emphasis>
+e      PIXELPRIVATE or
+      PIXELPRIVATERANGE or
+      PIXELALLOC or
+      PIXELALLOCRANGE
+
+<emphasis role='bold'>PIXELPRIVATE</emphasis>
+1      1      pixel-private
+f      PIXEL      pixel
+
+<emphasis role='bold'>PIXEL</emphasis>
+f      CARD8 or CARD16      (CARD8 if !two-byte-pixels)
+
+<emphasis role='bold'>PIXELPRIVATERANGE</emphasis>
+1      2      pixel-private-range
+f      PIXEL      fist-pixel
+f      PIXEL      last-pixel
+
+<emphasis role='bold'>PIXELALLOC</emphasis>
+1      3      pixel-private
+f      PIXEL      pixel
+g      COLORSINGLE or COLORTRIPLE      color       (COLORSINGLE if
+three-channels)
+
+<emphasis role='bold'>COLORSINGLE</emphasis>
+h      CARD8 or CARD16      value (CARD8       if bits-per-rgb =&lt; 7)
+
+<emphasis role='bold'>COLORTRIPLE</emphasis>
+h      COLORSINGLE      red
+h      COLORSINGLE      green
+h      COLORSINGLE      blue
+
+<emphasis role='bold'>PIXELALLOCRANGE</emphasis>
+1      4      pixel-private
+f      PIXEL      first-pixel
+f      PIXEL      last-pixel
+j      LISTofCOLORSINGLE or       color       (COLORSINGLE if three-channels)
+      LISTofCOLORTRIPLE
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#10922">See
+LbxGrabCmap</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxReleaseCmap</emphasis>
+1      CARD8      opcode
+1      41      lbx opcode
+2      2      request length
+4      COLORMAP      cmap
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#34675">See
+LbxReleaseCmap</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxAllocColor</emphasis>
+1      CARD8      opcode
+1      42      lbx opcode
+2      5      request length
+4      COLORMAP      colormap
+4      CARD32      pixel
+2      CARD16      red
+2      CARD16      green
+2      CARD16            blue
+2            unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#10446">See
+LbxAllocColor</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxSync</emphasis>
+1      CARD8      opcode
+1      43      lbx opcode
+2      1      request length
+=&gt;
+1      1      Reply
+1      n      unused
+2      CARD16      sequence number
+4      0      reply length
+24            unused
+</literallayout>
+
+<para>
+The description of this request is on <ulink url="lbx.htm#30719">See
+LbxSync</ulink>.
+</para>
+
+
+
+</sect2>
+<sect2 id='events2'>
+<title>Events</title>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxSwitchEvent</emphasis>
+1      base + 0      code
+1      0      lbx type
+2      CARD16      sequence number
+4      CARD32      client
+24            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#33748">See
+LbxSwitchEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxCloseEvent</emphasis>
+1      base + 0      code
+1      1      lbx type
+2      CARD16      sequence number
+4      CARD32      client
+24            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#17292">See
+LbxCloseEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxInvalidateTagEvent</emphasis>
+1      base + 0      code
+1      3      lbx type
+2      CARD16      sequence number
+4      CARD32      tag
+4            tag-type
+1      <emphasis>LbxTagTypeModmap</emphasis>
+2      <emphasis>LbxTagTypeKeymap</emphasis>
+3      <emphasis>LbxTagTypeProperty</emphasis>
+4      <emphasis>LbxTagTypeFont</emphasis>
+5      <emphasis>LbxTagTypeConnInfo</emphasis>
+20            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#23016">See
+LbxInvalidateTagEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxSendTagDataEvent</emphasis>
+1      base + 0      code
+1      4      lbx type
+2      CARD16      sequence number
+4      CARD32      tag
+4            tag-type
+3      <emphasis>LbxTagTypeProperty</emphasis>
+20            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#20373">See
+LbxSendTagDataEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxListenToOne</emphasis>
+1      base + 0      code
+1      5      lbx type
+2      CARD16      sequence number
+4      CARD32      client
+<emphasis>#xFFFFFFFF</emphasis>
+a client not managed by the proxy
+24            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#25209">See
+LbxListenToOne</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxListenToAll</emphasis>
+1      base + 0      code
+1      6      lbx type
+2      CARD16      sequence number
+28            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#11095">See
+LbxListenToAll</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxQuickMotionDeltaEvent</emphasis>
+1      base + 1      code
+1      CARD8      delta-time
+1      INT8      delta-x
+1      INT8      delta-y
+</literallayout>
+
+<para>
+This event is not padded to 32 bytes.
+</para>
+
+
+<para>
+The description of this event is on <ulink url="lbx.htm#40268">See
+LbxQuickMotionDeltaEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxMotionDeltaEvent</emphasis>
+1      base + 0      code
+1      7                  lbx type
+1      INT8      delta-x
+1      INT8      delta-y
+2      CARD16      delta-time
+2      CARD16      delta-sequence
+</literallayout>
+
+<para>
+This event is not padded to 32 bytes.
+</para>
+
+
+<para>
+The description of this event is on <ulink url="lbx.htm#30033">See
+LbxMotionDeltaEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxReleaseCmapEvent</emphasis>
+1      base + 0      code
+1      8                  lbx type
+2      CARD16      sequence number
+4      COLORMAP      colormap
+24            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#19129">See
+LbxReleaseCmapEvent</ulink>.
+</para>
+
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxFreeCellsEvent</emphasis>
+1      base + 0      code
+1      9                  lbx type
+2      CARD16      sequence number
+4      COLORMAP      colormap
+4      PIXEL      pixel start
+4      PIXEL      pixel end
+16            unused
+</literallayout>
+
+<para>
+The description of this event is on <ulink url="lbx.htm#38041">See
+LbxFreeCellsEvent</ulink>.
+</para>
+
+
+</sect2>
+<sect2 id='re_encoding_of_x_events'>
+<title>Re-encoding of X Events</title>
+
+<para>
+The X protocol requires all X events to be 32 bytes. The LBX server reduces the
+number of bytes sent between the server and the proxy for some X events by not
+appending unused pad bytes to the event data. The offsets of X event data are
+unchanged. The proxy will pad the events to 32 bytes before passing them on to
+the client.
+</para>
+
+
+<para>
+LBX reencodes X event representations into the following sizes, if squishing is
+enabled:
+</para>
+
+<para><programlisting>
+KeyOrButton            32
+EnterOrLeave           32
+Keymap                 32
+Expose                 20
+GraphicsExposure       24
+NoExposure             12
+VisibilityNotify       12
+CreateNotify           24
+DestroyNotify          12
+UnmapNotify            16
+MapNotify              16
+MapRequest             12
+Reparent               24
+ConfigureNotify        28
+ConfigureRequest       28
+GravityNotify          16
+ResizeRequest          12
+Circulate              20
+Property      Notify   20
+SelectionClear         20
+SelectionRequest       28
+SelectionNotify        24
+Colormap      Notify   16
+MappingNotify          8
+ClientMessage          32
+Unknown                32
+</programlisting></para>
+
+</sect2>
+<sect2 id='responses2'>
+<title>Responses</title>
+
+<literallayout class='monospaced'>
+<emphasis role='bold'>LbxDeltaResponse</emphasis>
+1      event_base + 0      event code
+1      2      lbx type
+2      1+(2+2n+p)/4      request length
+1      n      count of diffs
+1      CARD8      cache index
+2n      LISTofDIFFITEM      offsets and differences
+p            unused, p=pad(2n)
+</literallayout>
+
+<para>
+The description of this response is on <ulink url="lbx.htm#34042">See
+LbxDeltaResponse</ulink>.
+</para>
+
+</sect2>
+</sect1>
+</article>

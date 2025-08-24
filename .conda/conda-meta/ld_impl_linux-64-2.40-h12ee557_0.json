@@ -1,0 +1,62 @@
+{
+  "build": "h12ee557_0",
+  "build_number": 0,
+  "channel": "https://repo.anaconda.com/pkgs/main/linux-64",
+  "constrains": [
+    "binutils_impl_linux-64 2.40"
+  ],
+  "depends": [],
+  "extracted_package_dir": "/home/kie/miniconda3/pkgs/ld_impl_linux-64-2.40-h12ee557_0",
+  "files": [
+    "bin/x86_64-conda-linux-gnu-ld",
+    "bin/x86_64-conda_cos7-linux-gnu-ld",
+    "x86_64-conda-linux-gnu/bin/ld",
+    "x86_64-conda_cos7-linux-gnu/bin/ld"
+  ],
+  "fn": "ld_impl_linux-64-2.40-h12ee557_0.conda",
+  "license": "GPL-3.0-only",
+  "link": {
+    "source": "/home/kie/miniconda3/pkgs/ld_impl_linux-64-2.40-h12ee557_0",
+    "type": 1
+  },
+  "md5": "ee672b5f635340734f58d618b7bca024",
+  "name": "ld_impl_linux-64",
+  "package_tarball_full_path": "/home/kie/miniconda3/pkgs/ld_impl_linux-64-2.40-h12ee557_0",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "bin/x86_64-conda-linux-gnu-ld",
+        "path_type": "hardlink",
+        "sha256": "aaaab6b3200c6f71e5f2970b01a074c958d5af546e5f43c011192307f69d9cac",
+        "sha256_in_prefix": "aaaab6b3200c6f71e5f2970b01a074c958d5af546e5f43c011192307f69d9cac",
+        "size_in_bytes": 2195376
+      },
+      {
+        "_path": "bin/x86_64-conda_cos7-linux-gnu-ld",
+        "path_type": "softlink",
+        "sha256": "aaaab6b3200c6f71e5f2970b01a074c958d5af546e5f43c011192307f69d9cac",
+        "size_in_bytes": 2195376
+      },
+      {
+        "_path": "x86_64-conda-linux-gnu/bin/ld",
+        "path_type": "softlink",
+        "sha256": "aaaab6b3200c6f71e5f2970b01a074c958d5af546e5f43c011192307f69d9cac",
+        "size_in_bytes": 2195376
+      },
+      {
+        "_path": "x86_64-conda_cos7-linux-gnu/bin/ld",
+        "path_type": "softlink",
+        "sha256": "aaaab6b3200c6f71e5f2970b01a074c958d5af546e5f43c011192307f69d9cac",
+        "size_in_bytes": 2195376
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "07137855558e3749fc88812644ab30fc543bc31bcf274403e1a23764bed78127",
+  "size": 726762,
+  "subdir": "linux-64",
+  "timestamp": 1727336193000,
+  "url": "https://repo.anaconda.com/pkgs/main/linux-64/ld_impl_linux-64-2.40-h12ee557_0.conda",
+  "version": "2.40"
+}

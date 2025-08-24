@@ -1,0 +1,654 @@
+
+
+
+
+
+
+
+
+
+			  X Video Extension
+			 Protocol Description
+
+			      Version 2
+
+			      25-JUL-91
+
+			     David Carver
+
+		    Digital Equipment Corporation
+		Workstation Engineering/Project Athena
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  Copyright 1991 by Digital Equipment Corporation, Maynard, Massachusetts,
+  and the Massachusetts Institute of Technology, Cambridge, Massachusetts.
+
+                        All Rights Reserved
+
+  Permission to use, copy, modify, and distribute this software and its
+  documentation for any purpose and without fee is hereby granted, provided
+  that the above copyright notice appear in all copies and that both that
+  copyright notice and this permission notice appear in supporting
+  documentation, and that the names of Digital or MIT not be used in
+  advertising or publicity pertaining to distribution of the software
+  without specific, written prior permission.
+
+  DIGITAL DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING
+  ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO EVENT SHALL
+  DIGITAL BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR
+  ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER
+  IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
+  OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+
+
+  Preface
+  -------
+
+    The following is an outline for an X video extension protocol.  It
+    is preliminary and subject to change.  My goal in writing this was
+    to fix some the shortcomings of existing overly simplistic
+    extensions while avoiding pitfalls in an overly complex extension.
+
+    Your feedback is desired, and since the major design directions
+    have been stable for some time, feel free to hammer on the details
+    of the protocol.
+
+    When you receive a revision of the document, refer to the changes
+    and issues sections to guide your review and analysis.
+
+
+  Acknowledgements
+  ---------------
+
+    The following people have made major contributions to the design of
+    the Xv protocol:
+
+      Branko Gerovac (DEC/Corporate Research)
+      Russ Sasnett (GTE/Project Athena)
+      Ralph Swick (DEC/Project Athena)
+
+    Many ideas and approaches in Xv were the product of discussions
+    with several groups, including
+
+      Project Athena's Visual Computing Group
+      The MIT X Consortium
+      The MIT Media Lab's Interactive Cinema Group
+
+
+  
+  Changes
+  -------
+
+    From version 1.3 to 2.0
+
+    -- Changed SetPortControl and GetPortControl to GetPortAttribute
+       and SetPortAttribute.
+
+    -- Changed QueryBestSize
+
+    -- Simplified SelectVideoNotify and SelectPortNotify requests.
+
+    -- Changed the way SetPortControl and GetPortControl works.
+
+    -- Added a QueryExtension request to return the version and
+       revision information of the extension.
+
+    -- Changed the name of the QueryVideo request to QueryAdaptors;
+       Removed the list of encodings from QueryVideo and added a
+       QueryEncodings request.
+
+    -- Added a PortNotify event that notifies interested clients that
+       a port control has been changed.
+
+    -- Added SelectPortNotify request to select for PortNotify events.
+
+    -- The XvInterruped reason has been replaced by two new reasons:
+       one for when video is preempted by another video request and
+       one for when video is terminated because of hard transmission
+       or reception errors.
+
+    -- Changed the wording of the QueryBestSize request.  Added issue
+       about whether or not returned sizes should maintain the
+       requested aspect ratio.
+
+
+
+  Introduction
+  ------------
+
+    Video technology is moving very quickly.  Standards for processing
+    high resolution video are currently a hot topic of discussion
+    internationally, and it will soon be possible to process video
+    entirely within the digital domain.  The Xv extension, however,
+    does not attempt to address issues of digital video.  Its purpose
+    is to provide a mechanism for support of current and near term
+    interactive video technology.
+
+    It is somewhat ironic that Xv contains nothing particularly
+    innovative.  It takes a minimalistic approach, and without a doubt
+    it could have been defined years ago, and with several revisions.
+    So, the life expectancy of Xv is not long.  Nevertheless, it may
+    undergo further revision and experimentation that will help our
+    progress towards digital video systems.
+
+    One premise of the Xv extension is that the X server is not alone.
+    A separate video server is often used to manage other aspects of
+    video processing, though the partition between what the X server
+    does and what a video server does is a matter of great debate.
+
+
+  Model
+  -----
+
+    This extension models video monitor capabilities in the X Window
+    System.  Some advanced monitors support the simultaneous display
+    of multiple video signals (into separate windows), and that is
+    represented here through the ability to display video from
+    multiple video input adaptors into X drawables.
+
+    Some monitors support multiple video encodings (mostly for
+    internationalization purposes) either through switches or
+    automatic detection, thus each video adaptor specifies the set of
+    encodings it supports.
+
+    The requests to display video from an adaptor into a drawable are
+    modeled after the core PutImage request, though extended to
+    support scaling and source clipping.
+
+    Video output is also supported and is symmetric with the video
+    input function, though fewer GC components are used.
+
+
+  Mechanism
+  ---------
+
+    The Xv extension does the following:
+
+      --  lists available video adaptors
+      --  identifies the number of ports each adaptor supports
+      --  describes what drawable formats each adaptor supports
+      --  describes what video encodings each adaptor supports
+      --  displays video from a port to a drawable
+      --  captures video from a drawable to a port
+      --  grabs and ungrabs ports
+      --  sets and gets port attributes
+      --  delivers event notification
+
+
+
+  Adaptors
+  --------
+
+    A display may have multiple video input and output adaptors.  An
+    adaptor may support multiple simultaneously active ports, and in
+    some cases the number of ports has no fixed limit.
+
+    An input port receives encoded video data and converts it to a
+    stream of data used to update a drawable.  An output port samples
+    data from a drawable and produces a stream of encoded video data.
+
+    The ADAPTORINFO structure is used to describe a video adaptor.
+
+    ADAPTORINFO:
+  	[base-id: PORT
+         num-ports: CARD16
+         type: SETofADAPTORTYPE
+         formats: LISTofFORMAT
+         name: STRING]
+
+    ADAPTORTYPE: {Input, Output}
+
+    FORMAT:
+  	[depth: CARD8
+  	 visual: VISUALID]
+
+    The base-id field specifies the XID of the first port of the
+    adaptor.  The `num-ports' field specifies how many ports the
+    adaptor supports.  The ports of the adaptor have XIDs in the range
+    [base-id..base-id + num-ports - 1]
+
+    The type attribute determines if the adaptor can process video
+    input, output, or input and output.  The if the adaptor can
+    process input then Input is asserted, if the adaptor can process
+    output then Output is asserted.
+
+    The drawable depths and visual types supported by the adaptor are
+    listed in `formats'.  Note: that when video is being processed for
+    pixmaps the visual format is taken to be the visual of the first
+    pair that matches the depth of the pixmap.
+
+    The name field contains an a vendor specific string that
+    identifies the adaptor.
+
+    It should be noted that the existence of separate adaptors doesn't
+    necessarily imply that simultaneous operation is supported.
+
+
+
+  Errors
+  ------
+
+    Port
+
+    A Port error is returned if any request names a PORT that does not
+    exist.
+
+
+    Encoding
+
+    An Encoding error is returned if any request names an ENCODINGID
+    that does not exist.
+
+
+
+
+  Query Requests
+  -------------------
+
+    QueryExtension
+    ==>
+      version: CARD16
+      revision: CARD16
+
+    The QueryExtension request returns the extension version and
+    revision numbers.
+
+
+    QueryAdaptors
+      win: WINDOW
+    ==>
+      adaptors: LISTofADAPTORINFO
+
+    The QueryAdaptors request returns the video adaptor information for
+    the screen of the specified window.
+
+    Errors: {Window}
+
+
+    QueryEncodings
+      port: PORT
+    ==>
+      encodings: LISTofENCODINGINFO
+
+    The QueryEncodings request returns the list of encodings supported
+    by the port adaptor.  Use the SetPortAttribute request to set
+    which encoding a port is to process.  The ENCODINGINFO record
+    describes an encoding:
+
+    ENCODINGINFO:
+  	[encoding: ENCODINGID
+  	 name: STRING
+  	 width, height: CARD16
+  	 rate: FRACTION]
+
+    The `encoding' field identifies an encoding supported by a port.
+    Its value is unique for a screen.  Width and height specify the
+    size of the video image and rate specifies the rate at which
+    fields of image information are encoded.
+
+    An encoding is identified by a string that names the encoding.
+    Encoding naming conventions need to be established (i.e.,
+    something along the lines of font naming, but simpler)
+
+    FRACTION
+          [numerator, denominator: INT32]
+
+    The FRACTION structure is used to specify a fractional number.
+
+    Errors: {Port}
+
+
+
+  Put Video Requests
+  ------------------
+
+    PutVideo
+      port: PORT
+      drawable: DRAWABLE
+      gc: GCONTEXT
+      vid-x, vid-y: INT16
+      vid-w, vid-h: CARD16
+      drw-x, drw-y: INT16
+      drw-w, drw-h: CARD16
+
+    The PutVideo request writes video into a drawable.  The position
+    and size of the source rectangle is specified by vid-x, vid-y,
+    vid-w, and vid-h.  The position and size of the destination
+    rectangle is specified by drw-x, drw-y, drw-w, drw-h.
+
+    Video data is clipped to the bounds of the video encoding, scaled
+    to the requested drawable region size (or the closest size
+    supported), and clipped to the bounds of the drawable.
+
+    If video is successfully initiated, a VideoNotify event with
+    detail Started is generated for the drawable.  If the port is
+    already in use, its video is preempted, and if the new drawable is
+    different than the old, a VideoNotify event with detail Preempted
+    is generated for the old drawable.  If the port is grabbed by
+    another client, this request is ignored, and a VideoNotify event
+    with detail Busy is generated for the drawable.  If the port is
+    not receiving a valid video signal or if the video signal is
+    interrupted while video is active a VideoNotify event with detail
+    HardError is generated for the drawable.
+
+    GC components: subwindow-mode, clip-x-origin, clip-y-origin, clip-mask.
+
+    Errors: {Match, Value, GContext, Port, Alloc}
+
+
+    PutStill
+      port: PORT
+      drawable: DRAWABLE
+      gc: GCONTEXT
+      vid-x, vid-y: INT16
+      vid-w, vid-h: CARD16
+      drw-x, drw-y: INT16
+      drw-w, drw-h: CARD16
+
+    The PutStill request writes a single frame of video into a
+    drawable.  The position and size of the source rectangle is
+    specified by vid-x, vid-y, vid-w, and vid-h.  The position and
+    size of the destination rectangle is specified by drw-x, drw-y,
+    drw-w, drw-h.
+
+    Video data is clipped to the bounds of the video encoding, scaled
+    to the requested drawable region size (or the closest size
+    supported) and clipped to the bounds of the drawable.
+
+    If the port is grabbed by another client, this request is ignored,
+    and a VideoNotify event with detail Busy is generated for the
+    drawable.  If the port is not receiving a valid video signal a
+    VideoNotify event with detail HardError is generated for the
+    drawable.
+
+    GC components: subwindow-mode, clip-x-origin, clip-y-origin, clip-mask.
+
+    Errors: {Match, Value, GContext, Port, Alloc}
+
+  
+
+  Get Video Requests
+  ------------------
+
+    GetVideo
+      port: PORT
+      drawable: DRAWABLE
+      gc: GCONTEXT
+      vid-x, vid-y: INT16
+      vid-w, vid-h: CARD16
+      drw-x, drw-y: INT16
+      drw-w, drw-h: CARD16
+
+    The GetVideo request outputs video from a drawable.  The position
+    and size of the destination rectangle is specified by vid-x,
+    vid-y, vid-w, and vid-h.  The position and size of the source
+    rectangle is specified by drw-x, drw-y, drw-w, and drw-h.
+
+    Drawable data is clipped to the bounds of the drawable, scaled to
+    the requested video region size (or the closest size supported)
+    and clipped to the bounds of the video encoding.  The contents of
+    any region not updated with drawable data is undefined.
+
+    If video is successfully initiated, a VideoNotify event with
+    detail Started is generated for the drawable.  If the port is
+    already in use, its video is preempted, and if the new drawable is
+    different than the old, a VideoNotify event with detail Preempted
+    is generated for the old drawable.  If the port is grabbed by
+    another client, this request is ignored, and a VideoNotify event
+    with detail Busy is generated for the drawable.
+
+    GC components: subwindow-mode, clip-x-origin, clip-y-origin,
+    clip-mask.
+
+    Errors: {Match, Value, GContext, Port, Alloc}
+
+
+    GetStill
+      port: PORT
+      drawable: DRAWABLE
+      gc: GCONTEXT
+      vid-x, vid-y: INT16
+      vid-w, vid-h: CARD16
+      drw-x, drw-y: INT16
+      drw-w, drw-h: CARD16
+
+    The GetStill request outputs video from a drawable.  The position
+    and size of the destination rectangle is specified by vid-x,
+    vid-y, vid-w, and vid-h.  The position and size of the source
+    rectangle is specified by drw-x, drw-y, drw-w, and drw-h.
+
+    Drawable data is clipped to the bounds of the drawable, scaled to
+    the requested video region size (or the closest size supported)
+    and clipped to the bounds of the video encoding.  The contents of
+    any region not updated with drawable data is undefined.
+
+    If the still is successfully captured a VideoNotify event with
+    detail Still is generated for the drawable.  If the port is
+    grabbed by another client, this request is ignored, and a
+    VideoNotify event with detail Busy is generated for the drawable.
+
+    GC components: subwindow-mode, clip-x-origin, clip-y-origin,
+    clip-mask.
+
+    Errors: {Match, Value, GContext, Port, Alloc}
+
+
+  
+
+  Grab Requests
+  -------------
+
+    GrabPort
+      port: PORT
+      timestamp: {TIMESTAMP, CurrentTime}
+    ==>
+      status: {Success, AlreadyGrabbed, InvalidTime}
+
+    The GrabPort request grabs a port.  While a port is grabbed, only
+    video requests from the grabbing client are permitted.
+
+    If timestamp specifies a time older than the current port time, a
+    status of InvalidTime is returned.  If the port is already grabbed
+    by another client, a status of AlreadyGrabbed is returned.
+    Otherwise a status of Success is returned. The port time is
+    updated when the following requests are processed: GrabPort,
+    UngrabPort, PutVideo, PutStill, GetVideo, GetStill
+
+    If the port is actively processing video for another client, the
+    video is preempted, and an VideoNotify event with detail Preempted
+    is generated for its drawable.
+
+    Errors: {Port}
+
+
+    UngrabPort
+      port: PORT
+      timestamp: {TIMESTAMP, CurrentTime}
+
+    The UngrabPort request ungrabs a port.  If timestamp specifies a
+    time before the last connection request time of this port, the
+    request is ignored.
+
+    Errors: {Port}
+
+
+
+  Other Requests
+  --------------
+
+    StopVideo
+      port: PORT
+      drawable: DRAWABLE
+
+    The StopVideo request stops active video for the specified port
+    and drawable.  If the port isn't processing video, or if it is
+    processing video in a different drawable, the request is ignored.
+    When video is stopped a VideoNotify event with detail Stopped is
+    generated for the associated drawable.
+
+    Errors: {Drawable, Port}
+
+
+    SelectVideoNotify
+      drawable: DRAWABLE
+      onoff: BOOL
+
+    The SelectVideoNotify request enables or disables VideoNotify
+    event delivery to the requesting client.  VideoNotify events are
+    generated when video starts and stops.
+
+    Errors: {Drawable}
+
+
+    SelectPortNotify
+      port: PORT
+      onoff: BOOL
+
+    The SelectPortNotify request enables or disables PortNotify event
+    delivery to the requesting client.  PortNotify events are
+    generated when port attributes are changed using SetPortAttribute.
+
+    Errors: {Port}
+
+
+    QueryBestSize
+      port: PORT
+      motion: BOOL
+      vid-w, vid-h: CARD16
+      drw-w, drw-h: CARD16
+    ==>
+      actual-width, actual-height: CARD16
+
+    The QueryBestSize request returns, for the given source size and
+    desired destination size, the closest destination size that the
+    port adaptor supports.  The returned size will be equal
+    or smaller than the requested size if one is supported.  If motion
+    is True then the requested size is intended for use with full
+    motion video.  If motion is False, the requested size is intended
+    for use with stills only.
+
+    The returned size is also chosen to maintain the requested aspect ratio
+    if possible.
+
+    Errors: {Port}
+
+
+
+    SetPortAttribute
+      port: PORT
+      attribute: ATOM
+      value: INT32
+
+    The SetPortAttribute request sets the value of a port attribute.
+    The port attribute is identified by the attribute atom.  The
+    following strings are guaranteed to generate valid atoms using the
+    InternAtom request.
+
+    String                Type
+    -----------------------------------------------------------------
+
+    "XV_ENCODING"         ENCODINGID
+    "XV_HUE"	          [-1000..1000]
+    "XV_SATURATION"       [-1000..1000]
+    "XV_BRIGHTNESS"       [-1000..1000]
+    "XV_CONTRAST"         [-1000..1000]
+
+
+    If the given attribute doesn't match an attribute supported by the
+    port adaptor a Match error is generated.  The supplied encoding
+    must be one of the encodings listed for the adaptor, otherwise an
+    Encoding error is generated.
+
+    If the adaptor doesn't support the exact hue, saturation,
+    brightness, and contrast levels supplied, the closest levels
+    supported are assumed.  The GetPortAttribute request can be used
+    to query the resulting levels.
+
+    When a SetPortAttribute request is processed a PortNotify event is
+    generated for all clients that have requested port change
+    notification using SelectPortNotify.
+
+    Errors: {Port, Match, Value}
+
+
+    GetPortAttribute
+      port: PORT
+      attribute: ATOM
+    ==>
+      value: INT32
+
+
+    The GetPortAttribute request returns the current value of the
+    attribute identified by the given atom.  If the given atom
+    doesn't match an attribute supported by the adaptor a Match
+    error is generated.
+
+    Errors: {Port, Match}
+
+
+
+  Events
+  ------
+
+    VideoNotify
+      drawable: DRAWABLE
+      port: PORT
+      reason: REASON
+      time: TIMESTAMP
+
+    REASON: {Started, Still, Stopped, Busy, Preempted, HardError}
+
+    A VideoNotify event is generated when video activity is started,
+    stopped, or unable to proceed in a drawable.
+
+    A Started reason is generated when video starts in a drawable.
+
+    A Stopped reason is generated when video is stopped in a
+    drawable upon request.
+
+    A Busy reason is generated when a put or get request cannot
+    proceed because the port is grabbed by another client.
+
+    A Preempted reason is generated when video is stopped by a
+    conflicting request.
+
+    A HardError reason is generated when the video port cannot
+    initiate or continue processing a video request because of an
+    underlying transmission or reception error.
+
+
+    PortNotify
+      port: PORT
+      attribute: ATOM
+      value: INT32
+      time: TIMESTAMP
+
+    The PortNotify event is generated when a SetPortAttribute request
+    is processed.  The event is delivered to all clients that have
+    performed a SelectPortNotify request for the port.  The event
+    contains the atom identifying the attribute that changed, and the
+    new value of that attribute.

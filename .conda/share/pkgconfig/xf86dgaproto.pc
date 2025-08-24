@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: XF86DGAProto
+Description: XF86DGA extension headers
+Version: 2.1
+Cflags: -I${includedir}

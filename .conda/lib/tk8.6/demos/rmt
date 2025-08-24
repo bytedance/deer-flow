@@ -1,0 +1,210 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# rmt --
+# This script implements a simple remote-control mechanism for
+# Tk applications.  It allows you to select an application and
+# then type commands to that application.
+
+package require Tk
+
+wm title . "Tk Remote Controller"
+wm iconname . "Tk Remote"
+wm minsize . 1 1
+
+# The global variable below keeps track of the remote application
+# that we're sending to.  If it's an empty string then we execute
+# the commands locally.
+
+set app "local"
+
+# The global variable below keeps track of whether we're in the
+# middle of executing a command entered via the text.
+
+set executing 0
+
+# The global variable below keeps track of the last command executed,
+# so it can be re-executed in response to !! commands.
+
+set lastCommand ""
+
+# Create menu bar.  Arrange to recreate all the information in the
+# applications sub-menu whenever it is cascaded to.
+
+. configure -menu [menu .menu]
+menu .menu.file
+menu .menu.file.apps  -postcommand fillAppsMenu
+.menu add cascade  -label "File"  -underline 0  -menu .menu.file
+.menu.file add cascade  -label "Select Application"  -underline 0 \
+	-menu .menu.file.apps
+.menu.file add command  -label "Quit"  -command "destroy ."  -underline 0
+
+# Create text window and scrollbar.
+
+text .t -yscrollcommand ".s set" -setgrid true
+scrollbar .s -command ".t yview"
+grid .t .s -sticky nsew
+grid rowconfigure . 0 -weight 1
+grid columnconfigure . 0 -weight 1
+
+# Create a binding to forward commands to the target application,
+# plus modify many of the built-in bindings so that only information
+# in the current command can be deleted (can still set the cursor
+# earlier in the text and select and insert;  just can't delete).
+
+bindtags .t {.t Text . all}
+bind .t <Return> {
+    .t mark set insert {end - 1c}
+    .t insert insert \n
+    invoke
+    break
+}
+bind .t <Delete> {
+    catch {.t tag remove sel sel.first promptEnd}
+    if {[.t tag nextrange sel 1.0 end] eq ""} {
+	if {[.t compare insert < promptEnd]} {
+	    break
+	}
+    }
+}
+bind .t <BackSpace> {
+    catch {.t tag remove sel sel.first promptEnd}
+    if {[.t tag nextrange sel 1.0 end] eq ""} {
+	if {[.t compare insert <= promptEnd]} {
+	    break
+	}
+    }
+}
+bind .t <Control-d> {
+    if {[.t compare insert < promptEnd]} {
+	break
+    }
+}
+bind .t <Control-k> {
+    if {[.t compare insert < promptEnd]} {
+	.t mark set insert promptEnd
+    }
+}
+bind .t <Control-t> {
+    if {[.t compare insert < promptEnd]} {
+	break
+    }
+}
+bind .t <Meta-d> {
+    if {[.t compare insert < promptEnd]} {
+	break
+    }
+}
+bind .t <Meta-BackSpace> {
+    if {[.t compare insert <= promptEnd]} {
+	break
+    }
+}
+bind .t <Control-h> {
+    if {[.t compare insert <= promptEnd]} {
+	break
+    }
+}
+### This next bit *isn't* nice - DKF ###
+auto_load tk::TextInsert
+proc tk::TextInsert {w s} {
+    if {$s eq ""} {
+	return
+    }
+    catch {
+	if {
+	    [$w compare sel.first <= insert] && [$w compare sel.last >= insert]
+	} then {
+	    $w tag remove sel sel.first promptEnd
+	    $w delete sel.first sel.last
+	}
+    }
+    $w insert insert $s
+    $w see insert
+}
+
+.t configure -font {Courier 12}
+.t tag configure bold -font {Courier 12 bold}
+
+# The procedure below is used to print out a prompt at the
+# insertion point (which should be at the beginning of a line
+# right now).
+
+proc prompt {} {
+    global app
+    .t insert insert "$app: "
+    .t mark set promptEnd {insert}
+    .t mark gravity promptEnd left
+    .t tag add bold {promptEnd linestart} promptEnd
+}
+
+# The procedure below executes a command (it takes everything on the
+# current line after the prompt and either sends it to the remote
+# application or executes it locally, depending on "app".
+
+proc invoke {} {
+    global app executing lastCommand
+    set cmd [.t get promptEnd insert]
+    incr executing 1
+    if {[info complete $cmd]} {
+	if {$cmd eq "!!\n"} {
+	    set cmd $lastCommand
+	} else {
+	    set lastCommand $cmd
+	}
+	if {$app eq "local"} {
+	    set result [catch [list uplevel #0 $cmd] msg]
+	} else {
+	    set result [catch [list send $app $cmd] msg]
+	}
+	if {$result != 0} {
+	    .t insert insert "Error: $msg\n"
+	} elseif {$msg ne ""} {
+	    .t insert insert $msg\n
+	}
+	prompt
+	.t mark set promptEnd insert
+    }
+    incr executing -1
+    .t yview -pickplace insert
+}
+
+# The following procedure is invoked to change the application that
+# we're talking to.  It also updates the prompt for the current
+# command, unless we're in the middle of executing a command from
+# the text item (in which case a new prompt is about to be output
+# so there's no need to change the old one).
+
+proc newApp appName {
+    global app executing
+    set app $appName
+    if {!$executing} {
+	.t mark gravity promptEnd right
+	.t delete "promptEnd linestart" promptEnd
+	.t insert promptEnd "$appName: "
+	.t tag add bold "promptEnd linestart" promptEnd
+	.t mark gravity promptEnd left
+    }
+    return
+}
+
+# The procedure below will fill in the applications sub-menu with a list
+# of all the applications that currently exist.
+
+proc fillAppsMenu {} {
+    set m .menu.file.apps
+    catch {$m delete 0 last}
+    foreach i [lsort [winfo interps]] {
+	$m add command -label $i -command [list newApp $i]
+    }
+    $m add command -label local -command {newApp local}
+}
+
+set app [winfo name .]
+prompt
+focus .t
+
+# Local Variables:
+# mode: tcl
+# End:

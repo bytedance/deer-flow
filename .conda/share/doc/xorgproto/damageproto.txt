@@ -1,0 +1,222 @@
+			The DAMAGE Extension
+			Protocol Version 1.1
+			 Document Revision 1
+			     2007-01-08
+			     
+			    Keith Packard
+			  keithp@keithp.com
+
+			     Eric Anholt
+			   eric@anholt.net
+		     Open Source Technology Center
+			  Intel Corporation
+1. Introduction
+
+Monitoring the regions affected by rendering has wide-spread use, from
+VNC-like systems scraping the screen to screen magnifying applications
+designed to aid users with limited visual acuity.  The DAMAGE extension is
+designed to make such applications reasonably efficient in the face of
+server-client latency.
+
+2. Acknowledgements
+
+As usual, the author had significant input from many people, in particular:
+
+ +	Havoc Pennington who designed and implemented a Damage extension
+ 	last year which was then lost to the mists of time.
+			    
+ +	Bill Haneman whose work on accessibility in the Gnome environment
+ 	is legendary.
+
+ +	Jim Gettys who found a way to avoid streaming damage rectangles
+ 	to the client in many cases.
+
+ +	Owen Taylor who suggested that streaming damage rectangles may
+ 	be warranted in some cases after all.
+
+3.  Damage Model
+
+We call changes made to pixel contents of windows and pixmaps 'damage'
+throughout this extension.  Another notion of 'damage' are drawable regions
+which are in need of redisplay to repair the effects of window manipulation
+or other data loss.  This extension doesn't deal with this second notion at
+all; suggestions on a better term which isn't easily conflated with existing
+notions are eagerly solicited.
+
+Damage accumulates as drawing occurs in the drawable.  Each drawing operation
+'damages' one or more rectangular areas within the drawable.  The rectangles
+are guaranteed to include the set of pixels modified by each operation, but
+may include significantly more than just those pixels.  The desire is for
+the damage to strike a balance between the number of rectangles reported and
+the extraneous area included.  A reasonable goal is for each primitive
+object drawn (line, string, rectangle) to be represented as a single
+rectangle and for the damage area of the operation to be the union of these
+rectangles.
+
+The DAMAGE extension allows applications to either receive the raw
+rectangles as a stream of events, or to have them partially processed within
+the X server to reduce the amount of data transmitted as well as reduce the
+processing latency once the repaint operation has started.
+
+Damage to a window reflects both drawing within the window itself as well as
+drawing within any inferior window that affects pixels seen by
+IncludeInferiors rendering operations.  To reduce the computational
+complexity of this, the DAMAGE extension allows the server to monitor all
+rendering operations within the physical target pixel storage that fall
+within the bounds of the window.  In a system with a single frame buffer
+holding all windows, this means that damage will accumulate for all
+rendering operations that lie within the visible part of the window.
+
+The precise reason for this architecture is to enable the Composite
+extension which provides multiple pixel storage areas for the screen
+contents.
+
+3.1 Additions in the 1.1 version of the protocol
+
+Damage is automatically computed by the X Server for X rendering operations,
+but direct rendering extensions have allowed clients to perform rendering
+outside of the control of the X Server.  The 1.1 version of the protocol
+added a request to allow direct rendering clients to report damage to a
+drawable.  Some direct rendering clients, due to architectural limitations,
+always perform rendering to the root window, even in when it should be
+performed to the backing pixmap in the Composite case.  To provide
+less-incorrect rendering in this cases, the direct rendering client should
+translate its damage region to screen coordinates and report the damage against
+the root window rather than the drawable.
+
+4. Data types
+
+The "Damage" object holds any accumulated damage region and reflects the
+relationship between the drawable selected for damage notification and the
+drawable for which damage is tracked.
+
+5. Errors
+
+Damage
+	A value for a DAMAGE argument does not name a defined DAMAGE.
+
+6. Types
+
+	DAMAGE		32-bit value (top three bits guaranteed to be zero)
+	
+	DamageReportLevel		{ DamageReportRawRectangles,
+					  DamageReportDeltaRectangles,
+					  DamageReportBoundingBox,
+					  DamageReportNonEmpty }
+
+	    DamageReportRawRectangles
+
+		Delivers DamageNotify events each time the screen
+		is modified with rectangular bounds that circumscribe
+		the damaged area.  No attempt to compress out overlapping
+		rectangles is made.
+
+	    DamageReportDeltaRectangles
+
+		Delivers DamageNotify events each time damage occurs
+		which is not included in the damage region.  The
+		reported rectangles include only the changes to that
+		area, not the raw damage data.
+
+	    DamageReportBoundingBox
+
+		Delivers DamageNotify events each time the bounding
+		box enclosing the damage region increases in size.
+		The reported rectangle encloses the entire damage region,
+		not just the changes to that size.
+
+	    DamageReportNonEmpty
+
+		Delivers a single DamageNotify event each time the
+		damage rectangle changes from empty to non-empty, and
+		also whenever the result of a DamageSubtract request
+		results in a non-empty region.
+
+7. Events
+
+DamageNotify
+
+	level:				DamageReportLevel
+	drawable:			Drawable
+	damage:				DAMAGE
+	more:				Bool
+	timestamp:			Timestamp
+	area:				Rectangle
+	drawable-geometry:		Rectangle
+
+	'more' indicates whether there are subsequent damage events
+	being delivered immediately as part of a larger damage region
+
+8. Extension Initialization
+
+The client must negotiate the version of the extension before executing
+extension requests.  Otherwise, the server will return BadRequest for any
+operations other than QueryVersion.
+
+QueryVersion
+
+		client-major-version:		CARD32
+		client-minor-version:		CARD32
+
+		->
+
+		major-version:			CARD32
+		minor-version:			CARD32
+
+	The client sends the highest supported version to the server and
+	the server sends the highest version it supports, but no higher than
+	the requested version.  Major versions changes can introduce
+	incompatibilities in existing functionality, minor version
+	changes introduce only backward compatible changes.  It is
+	the clients responsibility to ensure that the server supports
+	a version which is compatible with its expectations.  Servers
+	are encouraged to support multiple versions of the extension.
+
+9. Enable Monitoring
+
+DamageCreate
+
+		damage:				DAMAGE
+		drawable:			Drawable
+		level:				DamageReportLevel
+		
+	Creates a damage object to monitor changes to Drawable
+
+DamageDestroy
+		damage:				DAMAGE
+
+	Destroys damage.
+
+DamageSubtract
+
+		damage:				DAMAGE
+		repair:				Region or None
+		parts:				Region or None
+
+	Synchronously modifies the regions in the following manner:
+
+	    If repair is None:
+
+		1)	if parts is not None, parts = damage
+		2)	damage = <empty>
+		
+	    Otherwise:
+	
+		1)	tmp = damage INTERSECT repair
+		2)	damage = damage - tmp
+		3)	if parts is not None, parts = tmp
+		4)	Generate DamageNotify for remaining damage areas
+
+DamageAdd
+
+		drawable:			Drawable
+		region:				Region
+
+	Reports damage of the region within the given drawable.  This may be
+	used by direct rendering clients to report damage that the server would
+	otherwise be unaware of.  The damage region is relative to the origin
+	of the drawable.
+
+	Damage posted in this way will appear in DamageNotify events as normal,
+	and also in server internal damage tracking (for shadow framebuffer
+	updates, pixmap damage, and other uses).

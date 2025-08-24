@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: Xdmcp
+Description: X Display Manager Control Protocol library
+Version: 1.1.5
+Requires: xproto
+Cflags: -I${includedir}
+Libs: -L${libdir} -lXdmcp

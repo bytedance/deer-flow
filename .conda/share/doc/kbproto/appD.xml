@@ -1,0 +1,2096 @@
+<appendix id='protocol_encoding'>
+<title>Protocol Encoding</title>
+
+<sect1 id='Syntactic_Conventions'>
+<title>Syntactic Conventions</title>
+
+<para>
+This document uses the same syntactic conventions as the encoding of the core X
+protocol, with the following additions:
+</para>
+
+<para>
+A LISTofITEMs contains zero or more items of variable type and size. The encode
+form for a LISTofITEMs is:
+</para>
+
+<literallayout class='monospaced'>
+v     LISTofITEMs           NAME
+
+      TYPE                  MASK-EXPRESSION
+      value1                corresponding field(s)
+      ...
+      valuen                corresponding field(s)
+</literallayout>
+
+<para>
+The MASK-EXPRESSION is an expression using C-style boolean operators and fields
+of the request which specifies the bitmask used to determine whether or not a
+member of the LISTofITEMs is present. If present, TYPE specifies the
+interpretation of the resulting bitmask and the values are listed using the
+symbolic names of the members of the set. If TYPE is blank, the values are
+numeric constants.
+</para>
+
+
+<para>
+It is possible for a single bit in the MASK-EXPRESSION to control more than one
+ITEM — if the bit is set, all listed ITEMs are present. It is also possible
+for multiple bits in the MASK-EXPRESSION to control a single ITEM — if any of
+the bits associated with an ITEM are set, it is present in the LISTofITEMs.
+</para>
+
+
+<para>
+The size of a LISTofITEMS is derived from the items that are present in the
+list, so it is always given as a variable in the request description, and the
+request is followed by a section of the form:
+</para>
+
+<literallayout class='monospaced'>
+ITEMs
+encode-form
+...
+encode-form
+</literallayout>
+
+<para>
+listing an encode-form for each ITEM. The NAME in each encode-form keys to the
+fields listed as corresponding to each bit in the MASK-EXPRESSION. Items are
+not necessarily the same size, and the size specified in the encoding form is
+the size that the item occupies if it is present.
+</para>
+
+
+<para>
+Some types are of variable size. The encode-form for a list of items of a
+single type but variable size is:
+</para>
+
+<literallayout class='monospaced'>
+S0+..Ss     LISTofTYPE     name
+</literallayout>
+
+<para>
+Which indicates that the list has <emphasis>
+s</emphasis>
+ elements of variable size and that the size of the list is the sum of the
+sizes of all of the elements that make up the list. The notation Sn refers to
+the size of the <emphasis>
+n</emphasis>
+th element of the list and the notation S* refers to the size of the list as a
+whole.
+</para>
+
+
+<para>
+The definition of a type of variable size includes an expression which
+specifies the size. The size is specified as a constant plus a variable
+expression; the constant specifies the size of the fields that are always
+present and the variables which make up the variable expression are defined in
+the constant portion of the structure. For example, the following definition
+specifies a counted string with a two-byte length field preceding the string:
+</para>
+
+
+<literallayout class='monospaced'>
+TYPE             2+n+p
+2     n          length
+n     STRING8    string
+p                unused,p=pad(n)
+</literallayout>
+
+<para>
+Some fields are optional. The size of an optional field has the form:
+"[<emphasis>
+expr</emphasis>
+]" where expr specifies the size of the field if it is present. An explanation
+of the conditions under which the field is present follows the name in the
+encode form:
+</para>
+
+<literallayout class='monospaced'>
+1       BOOL          more
+3                     unused
+[4]     CARD32        optData, if more==TRUE
+</literallayout>
+
+<para>
+This portion of the structure is four bytes long if more is FALSE or eight
+bytes long if more is TRUE. This notation can also be used in size expressions;
+for example, the size of the previous structure is written as "4+[4]" bytes.
+</para>
+
+
+</sect1>
+<sect1 id='appD::Common_Types'>
+<title>Common Types</title>
+<literallayout class='monospaced'>
+SETofKB_EVENTTYPE
+     #x0001                  XkbNewKeyboardNotify
+     #x0002                  XkbMapNotify
+     #x0004                  XkbStateNotify
+     #x0008                  XkbControlsNotify
+     #x0010                  XkbIndicatorStateNotify
+     #x0020                  XkbIndicatorMapNotify
+     #x0040                  XkbNamesNotify
+     #x0080                  XkbCompatMapNotify
+     #x0100                  XkbBellNotify
+     #x0200                  XkbActionMessage
+     #x0400                  XkbAccessXNotify
+     #x0800                  XkbExtensionDeviceNotify
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_NKNDETAIL
+     #x01                    XkbNKN_Keycodes
+     #x02                    XkbNKN_Geometry
+     #x04                    XkbNKN_DeviceID
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_AXNDETAIL
+     #x01                    XkbAXN_SKPress
+     #x02                    XkbAXN_SKAccept
+     #x04                    XkbAXN_SKReject
+     #x08                    XkbAXN_SKRelease
+     #x10                    XkbAXN_BKAccept
+     #x20                    XkbAXN_BKReject
+     #x40                    XkbAXN_AXKWarning
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_MAPPART
+     #x0001                  XkbKeyTypes
+     #x0002                  XkbKeySyms
+     #x0004                  XkbModifierMap
+     #x0008                  XkbExplicitComponents
+     #x0010                  XkbKeyActions
+     #x0020                  XkbKeyBehaviors
+     #x0040                  XkbVirtualMods
+     #x0080                  XkbVirtualModMap
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_STATEPART
+     #x0001                  XkbModifierState
+     #x0002                  XkbModifierBase
+     #x0004                  XkbModifierLatch
+     #x0008                  XkbModifierLock
+     #x0010                  XkbGroupState
+     #x0020                  XkbGroupBase
+     #x0040                  XkbGroupLatch
+     #x0080                  XkbGroupLock
+     #x0100                  XkbCompatState
+     #x0200                  XkbGrabMods
+     #x0400                  XkbCompatGrabMods
+     #x0800                  XkbLookupMods
+     #x1000                  XkbCompatLookupMods
+     #x2000                  XkbPointerButtons
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_BOOLCTRL
+     #x00000001                  XkbRepeatKeys
+     #x00000002                  XkbSlowKeys
+     #x00000004                  XkbBounceKeys
+     #x00000008                  XkbStickyKeys
+     #x00000010                  XkbMouseKeys
+     #x00000020                  XkbMouseKeysAccel
+     #x00000040                  XkbAccessXKeys
+     #x00000080                  XkbAccessXTimeoutMask
+     #x00000100                  XkbAccessXFeedbackMask
+     #x00000200                  XkbAudibleBellMask
+     #x00000400                  XkbOverlay1Mask
+     #x00000800                  XkbOverlay2Mask
+     #x00001000                  XkbIgnoreGroupLockMask
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_CONTROL
+     Encodings are the same as for SETofKB_BOOLCTRL, with the addition of:
+     #x080000000                  XkbGroupsWrap
+     #x100000000                  XkbInternalMods
+     #x200000000                  XkbIgnoreLockMods
+     #x400000000                  XkbPerKeyRepeat
+     #x800000000                  XkbControlsEnabled
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_AXFBOPT
+     #x0001                  XkbAX_SKPressFB
+     #x0002                  XkbAX_SKAcceptFB
+     #x0004                  XkbAX_FeatureFB
+     #x0008                  XkbAX_SlowWarnFB
+     #x0010                  XkbAX_IndicatorFB
+     #x0020                  XkbAX_StickyKeysFB
+     #x0100                  XkbAX_SKReleaseFB
+     #x0200                  XkbAX_SKRejectFB
+     #x0400                  XkbAX_BKRejectFB
+     #x0800                  XkbAX_DumbBell
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_AXSKOPT
+     #x0040                  XkbAX_TwoKeys
+     #x0080                  XkbAX_LatchToLock
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_AXOPTION
+     Encoding same as the bitwise union of :
+     SETofKB_AXFBOPT
+     SETofKB_AXSKOPT
+</literallayout>
+
+<literallayout class='monospaced'>KB_DEVICESPEC
+     0..255     input extension device id
+     #x100      XkbUseCoreKbd
+     #x200      XkbUseCorePtr
+</literallayout>
+
+<literallayout class='monospaced'>KB_LEDCLASSRESULT
+     0     KbdFeedbackClass
+     4     LedFeedbackClass
+</literallayout>
+
+<literallayout class='monospaced'>KB_LEDCLASSSPEC
+     Encoding same as KB_LEDCLASSRESULT, with the addition of:
+     #x0300     XkbDfltXIClass
+     #x0500     XkbAllXIClasses
+</literallayout>
+
+<literallayout class='monospaced'>KB_BELLCLASSRESULT
+     0     KbdFeedbackClass
+     5     BellFeedbackClass
+</literallayout>
+
+<literallayout class='monospaced'>KB_BELLCLASSSPEC
+     Encoding same as KB_BELLCLASSRESULT, with the addition of:
+     #x0300     XkbDfltXIClass
+</literallayout>
+
+<literallayout class='monospaced'>KB_IDSPEC
+     0..255     input extension feedback id
+     #x0400     XkbDfltXIId
+</literallayout>
+
+<literallayout class='monospaced'>KB_IDRESULT
+     Encoding same as KB_IDSPEC, with the addition of:
+     #xff00     XkbXINone
+</literallayout>
+
+<literallayout class='monospaced'>KB_MULTIIDSPEC
+     encodings same as KB_IDSPEC, with the addition of:
+     #x0500     XkbAllXIIds
+</literallayout>
+
+<literallayout class='monospaced'>KB_GROUP
+     0     XkbGroup1
+     1     XkbGroup2
+     2     XkbGroup3
+     3     XkbGroup4
+</literallayout>
+
+<literallayout class='monospaced'>KB_GROUPS
+     Encoding same as KB_GROUP, with the addition of:
+     254     XkbAnyGroup
+     255     XkbAllGroups
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_GROUP
+     #x01     XkbGroup1
+     #x02     XkbGroup2
+     #x04     XkbGroup3
+     #x08     XkbGroup4
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_GROUPS
+     Encoding same as SETofKB_GROUP, with the addition of:
+     #x80     XkbAnyGroup
+</literallayout>
+
+<literallayout class='monospaced'>KB_GROUPSWRAP
+     #x00     XkbWrapIntoRange
+     #x40     XkbClampIntoRange
+     #x80     XkbRedirectIntoRange
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_VMODSHIGH
+     #x80     virtual modifier 15
+     #x40     virtual modifier 14
+     #x20     virtual modifier 13
+     #x10     virtual modifier 12
+     #x08     virtual modifier 11
+     #x04     virtual modifier 10
+     #x02     virtual modifier 9
+     #x01     virtual modifier 8
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_VMODSLOW
+     #x80     virtual modifier 7
+     #x40     virtual modifier 6
+     #x20     virtual modifier 5
+     #x10     virtual modifier 4
+     #x08     virtual modifier 3
+     #x04     virtual modifier 2
+     #x02     virtual modifier 1
+     #x01     virtual modifier 0
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_VMOD
+     #x8000     virtual modifier 15
+     #x4000     virtual modifier 14
+     #x2000     virtual modifier 13
+     #x1000     virtual modifier 12
+     #x0800     virtual modifier 11
+     #x0400     virtual modifier 10
+     #x0200     virtual modifier 9
+     #x0100     virtual modifier 8
+     #x0080     virtual modifier 7
+     #x0040     virtual modifier 6
+     #x0020     virtual modifier 5
+     #x0010     virtual modifier 4
+     #x0008     virtual modifier 3
+     #x0004     virtual modifier 2
+     #x0002     virtual modifier 1
+     #x0001     virtual modifier 0
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_EXPLICIT
+     #x80     XkbExplicitVModMap
+     #x40     XkbExplicitBehavior
+     #x20     XkbExplicitAutoRepeat
+     #x10     XkbExplicitInterpret
+     #x08     XkbExplicitKeyType4
+     #x04     XkbExplicitKeyType3
+     #x02     XkbExplicitKeyType2
+     #x01     XkbExplicitKeyType1
+</literallayout>
+
+<literallayout class='monospaced'>KB_SYMINTERPMATCH
+     #x80     XkbSI_LevelOneOnly
+     #x7f     operation, one of the following:
+          0 XkbSI_NoneOf
+          1 XkbSI_AnyOfOrNone
+          2 XkbSI_AnyOf
+          3 XkbSI_AllOf
+          4 XkbSI_Exactly
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_IMFLAG
+     #x80     XkbIM_NoExplicit
+     #x40     XkbIM_NoAutomatic
+     #x20     XkbIM_LEDDrivesKB
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_IMMODSWHICH
+     #x10     XkbIM_UseCompat
+     #x08     XkbIM_UseEffective
+     #x04     XkbIM_UseLocked
+     #x02     XkbIM_UseLatched
+     #x01     XkbIM_UseBase
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_IMGROUPSWHICH
+     #x10     XkbIM_UseCompat
+     #x08     XkbIM_UseEffective
+     #x04     XkbIM_UseLocked
+     #x02     XkbIM_UseLatched
+     #x01     XkbIM_UseBase
+</literallayout>
+
+<literallayout class='monospaced'>KB_INDICATORMAP
+1     SETofKB_IMFLAGS          flags
+1     SETofKB_IMGROUPSWHICH          whichGroups
+1     SETofKB_GROUP          groups
+1     SETofKB_IMMODSWHICH          whichMods
+1     SETofKEYMASK          mods
+1     SETofKEYMASK          realMods
+2     SETofKB_VMOD          vmods
+4     SETofKB_BOOLCTRL          ctrls
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_CMDETAIL
+     #x01     XkbSymInterp
+     #x02     XkbGroupCompat
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_NAMEDETAIL
+     #x0001     XkbKeycodesName
+     #x0002     XkbGeometryName
+     #x0004     XkbSymbolsName
+     #x0008     XkbPhysSymbolsName
+     #x0010     XkbTypesName
+     #x0020     XkbCompatName
+     #x0040     XkbKeyTypeNames
+     #x0080     XkbKTLevelNames
+     #x0100     XkbIndicatorNames
+     #x0200     XkbKeyNames
+     #x0400     XkbKeyAliases
+     #x0800     XkbVirtualModNames
+     #x1000     XkbGroupNames
+     #x2000     XkbRGNames
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_GBNDETAIL
+     #x01     XkbGBN_Types
+     #x02     XkbGBN_CompatMap
+     #x04     XkbGBN_ClientSymbols
+     #x08     XkbGBN_ServerSymbols
+     #x10     XkbGBN_IndicatorMaps
+     #x20     XkbGBN_KeyNames
+     #x40     XkbGBN_Geometry
+     #x80     XkbGBN_OtherNames
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_XIEXTDEVFEATURE
+     #x02     XkbXI_ButtonActions
+     #x04     XkbXI_IndicatorNames
+     #x08     XkbXI_IndicatorMaps
+     #x10     XkbXI_IndicatorState
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_XIFEATURE
+     Encoding same as SETofKB_XIEXTDEVFEATURE, with the addition of:
+     #x01     XkbXI_Keyboards
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_XIDETAIL
+     Encoding same as SETofKB_XIFEATURE, with the addition of:
+     #x8000     XkbXI_UnsupportedFeature
+</literallayout>
+
+<literallayout class='monospaced'>SETofKB_PERCLIENTFLAG
+     #x01     XkbDetectableAutorepeat
+     #x02     XkbGrabsUseXKBState
+     #x04     XkbAutoResetControls
+     #x08     XkbLookupStateWhenGrabbed
+     #x10     XkbSendEventUsesXKBState
+</literallayout>
+
+<literallayout class='monospaced'>KB_MODDEF
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          realMods
+2     SETofVMOD          vmods
+</literallayout>
+
+<literallayout class='monospaced'>KB_COUNTED_STRING8
+1     l          length
+l     STRING8          string
+</literallayout>
+
+<literallayout class='monospaced'>KB_COUNTED_STRING16
+2     l          length
+l     STRING8          string
+</literallayout>
+
+<literallayout class='monospaced'>KB_COUNTED_STRING16
+p               unused,p=pad(2+l)
+</literallayout>
+
+</sect1>
+<sect1 id='appD::Errors'>
+<title>Errors</title>
+
+<literallayout class='monospaced'>1     0          Error
+2     ??          code
+2     CARD16          sequence
+4     CARD32          error value
+     most significant 8 bits of error value have the meaning:
+     0xff     XkbErrBadDevice
+     0xfe     XkbErrBadClass
+     0xfd     XkbErrBadId
+     the least significant 8 bits of the error value contain the device id,
+class, or feedback
+     id which failed.
+2     CARD16          minor opcode
+1     CARD8          major opcode
+21               unused
+</literallayout>
+
+</sect1>
+<sect1 id='appD::Key_Actions'>
+<title>Key Actions</title>
+
+<literallayout class='monospaced'>1     0          type
+7               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     1          type
+1     BITMASK          flags
+     #x01     XkbSA_ClearLocks
+     #x02     XkbSA_LatchToLock
+     #x04     XkbSA_UseModMapMods
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          real modifiers
+1     SETofKB_VMODSHIGH          virtual modifiers high
+1     SETofKB_VMODSLOW          virtual modifiers low
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     2          type
+1     BITMASK          flags
+     #x01     XkbSA_ClearLocks
+     #x02     XkbSA_LatchToLock
+     #x04     XkbSA_UseModMapMods
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          real modifiers
+1     SETofKB_VMODSHIGH          virtual modifiers high
+1     SETofKB_VMODSLOW          virtual modifiers low
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     3          type
+1     BITMASK          flags
+     #x01     XkbSA_LockNoLock
+     #x02     XkbSA_LockNoUnlock
+     #x04     XkbSA_UseModMapMods
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          real modifiers
+1     SETofKB_VMODSHIGH          virtual modifiers high
+1     SETofKB_VMODSLOW          virtual modifiers low
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     4          type
+1     BITMASK          flags
+     #x01     XkbSA_ClearLocks
+     #x02     XkbSA_LatchToLock
+     #x04     XkbSA_GroupAbsolute
+1     INT8          group
+5               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     5          type
+1     BITMASK          flags
+     #x01     XkbSA_ClearLocks
+     #x02     XkbSA_LatchToLock
+     #x04     XkbSA_GroupAbsolute
+1     INT8          group
+5               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     6          type
+1     BITMASK          flags
+     #x01     XkbSA_LockNoLock
+     #x02     XkbSA_LockNoUnlock
+     #x04     XkbSA_GroupAbsolute
+1     INT8          group
+5               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     7          type
+1     BITMASK          flags
+     #x01     XkbSA_NoAcceleration
+     #x02     XkbSA_MoveAbsoluteX
+     #x04     XkbSA_MoveAbsoluteY
+1     INT8          x high
+1     CARD8          x low
+1     INT8          y high
+1     CARD8          y low
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     8          type
+1     BITMASK          flags
+1     CARD8          count
+1     CARD8          button
+4               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     9          type
+1     BITMASK          flags
+1               unused
+1     CARD8          button
+4               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     10          type
+1     BITMASK          flags
+     #x04     XkbSA_DfltBtnAbsolute
+1     BITMASK          affect
+     #x01     XkbSA_AffectDfltBtn
+1     INT8          value
+4               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     11          type
+1     BITMASK          flags
+     #x01     XkbSA_LockNoLock
+     #x02     XkbSA_LockNoUnlock
+     #x04     XkbSA_UseModMapMods (if SA_ISODfltIsGroup is 0)
+     #x04     XkbSA_GroupAbsolute (if SA_ISODfltIsGroup is 1)
+     #x80     XkbSA_ISODfltIsGroup
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          real modifiers
+1     INT8          group
+1     BITMASK          affect
+     #x08     XkbSA_ISONoAffectCtrls
+     #x10     XkbSA_ISONoAffectPtr
+     #x20     XkbSA_ISONoAffectGroup
+     #x40     XkbSA_ISONoAffectMods
+1     SETofKB_VMODSHIGH          virtual modifiers high
+1     SETofKB_VMODSLOW          virtual modifiers low
+</literallayout>
+
+<literallayout class='monospaced'>1     12          type
+7               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     13          type
+1     BITMASK          flags
+     #x01     XkbSA_SwitchApplication
+     #x04     XkbSA_SwitchAbsolute
+1     INT8          new screen
+5               unused (must be 0)
+</literallayout>
+
+<literallayout class='monospaced'>1     14          type
+3               unused (must be 0)
+1     BITMASK          boolean controls high
+     #x01     XkbAccessXFeedbackMask
+     #x02     XkbAudibleBellMask
+     #x04     XkbOverlay1Mask
+     #x08     XkbOverlay2Mask
+     #x10     XkbIgnoreGroupLockMask
+1     BITMASK          boolean controls low
+     #x01     XkbRepeatKeys
+     #x02     XkbSlowKeys
+     #x04     XkbBounceKeys
+     #x08     XkbStickyKeys
+     #x10     XkbMouseKeys
+     #x20     XkbMouseKeysAccel
+     #x40     XkbAccessXKeys
+     #x80     XkbAccessXTimeoutMask
+2          unused (must be 0)
+</literallayout>
+
+<literallayout class='monospaced'>1     15          type
+3               unused (must be 0)
+1     BITMASK          boolean controls high
+     #x01     XkbAccessXFeedbackMask
+     #x02     XkbAudibleBellMask
+     #x04     XkbOverlay1Mask
+     #x08     XkbOverlay2Mask
+     #x10     XkbIgnoreGroupLockMask
+1     BITMASK          boolean controls low
+     #x01     XkbRepeatKeys
+     #x02     XkbSlowKeys
+     #x04     XkbBounceKeys
+     #x08     XkbStickyKeys
+     #x10     XkbMouseKeys
+     #x20     XkbMouseKeysAccel
+     #x40     XkbAccessXKeys
+     #x80     XkbAccessXTimeoutMask
+</literallayout>
+
+<literallayout class='monospaced'>1     16          type
+2               unused (must be 0)
+</literallayout>
+
+<literallayout class='monospaced'>1     16          type
+1     BITMASK          flags
+     #x01          XkbSA_MessageOnPress
+     #x02          XkbSA_MessageOnRelease
+     #x04          XkbSA_MessageGenKeyEvent
+6     STRING          message
+</literallayout>
+
+<literallayout class='monospaced'>1     17          type
+1     KEYCODE          new key
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          real modifiers
+1     SETofKB_VMODSHIGH          virtual modifiers mask high
+1     SETofKB_VMODSLOW          virtual modifiers mask low
+1     SETofKB_VMODSHIGH          virtual modifiers high
+1     SETofKB_VMODSLOW          virtual modifiers low
+</literallayout>
+
+<literallayout class='monospaced'>1     18          type
+1     0          flags
+1     CARD8          count
+1     CARD8          button
+1     CARD8          device
+3               unused (must be 0)
+</literallayout>
+
+<literallayout class='monospaced'>1     19          type
+1     BITMASK          flags
+     #x01          XkbSA_LockNoLock
+     #x02          XkbSA_LockNoUnlock
+1               unused
+1     CARD8          button
+1     CARD8          device
+</literallayout>
+
+<literallayout class='monospaced'>1     20          type
+1     CARD8          device
+1     KB_SA_VALWHAT          valuator 1 what
+     #x00          XkbSA_IgnoreVal
+     #x01          XkbSA_SetValMin
+     #x02          XkbSA_SetValCenter
+     #x03          XkbSA_SetValMax
+     #x04          XkbSA_SetValRelative
+     #x05          XkbSA_SetValAbsolute
+1     CARD8          valuator 1 index
+1     CARD8          valuator 1 value
+1     KB_SA_VALWHAT          valuator 2 what
+     Encodings as for "valuator 1 what" above
+1     CARD8          valuator 2 index
+1     CARD8          valuator 2 value
+</literallayout>
+
+</sect1>
+<sect1 id='Key_Behaviors'>
+<title>Key Behaviors</title>
+
+<literallayout class='monospaced'>1     #x00          type
+1               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     #x01          type
+1               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     #x02          type
+1     0..31          group
+</literallayout>
+
+<literallayout class='monospaced'>1     #x03          type
+1     KEYCODE          key
+</literallayout>
+
+<literallayout class='monospaced'>1     #x04          type
+1     CARD8          key
+</literallayout>
+
+<literallayout class='monospaced'>1     #x81          type
+1               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     #x82          type
+1     0..31          group
+</literallayout>
+
+<literallayout class='monospaced'>1     #x83          type
+1     KEYCODE          key
+</literallayout>
+
+<literallayout class='monospaced'>1     #x84          type
+1     KEYCODE          key
+</literallayout>
+
+</sect1>
+<sect1 id='appD::Requests'>
+<title>Requests</title>
+
+<literallayout class='monospaced'>1     ??          opcode
+1     0          xkb-opcode
+2     2          request-length
+2     CARD16          wantedMajor
+2     CARD16          wantedMinor
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     BOOL          supported
+2     CARD16          sequence number
+4     0           reply length
+2     1          serverMajor
+2     0          serverMinor
+20               unused
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     1          xkb-opcode
+2     4+(V+p)/4          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_EVENTTYPE          affectWhich
+2     SETofKB_EVENTTYPE          clear
+2     SETofKB_EVENTTYPE          selectAll
+2     SETofKB_MAPDETAILS          affectMap
+2     SETofKB_MAPDETAILS          map
+V     LISTofITEMs          details
+     SETofKB_EVENTTYPE
+(affectWhich&amp;(~clear)&amp;(~selectAll))
+     XkbNewKeyboardNotify     affectNewKeyboard, newKeyboardDetails
+     XkbStateNotify     affectState, stateDetails
+     XkbControlsNotify     affectCtrls, ctrlDetails
+     XkbIndicatorStateNotify     affectIndicatorState, indicatorStateDetails
+     XkbIndicatorMapNotify     affectIndicatorMap, indicatorMapDetails
+     XkbNamesNotify     affectNames, namesDetails
+     XkbCompatMapNotify     affectCompat, compatDetails
+     XkbBellNotify     affectBell, bellDetails
+     XkbActionMessage     affectMsgDetails, msgDetails
+     XkbExtensionDeviceNotify     affectExtDev, extdevDetails
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+p          unused, p=pad(V)
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+2     SETofKB_NKNDETAIL          affectNewKeyboard
+2     SETofKB_NKNDETAIL          newKeyboardDetails
+2     SETofKB_STATEPART          affectState
+2     SETofKB_STATEPART          stateDetails
+4     SETofKB_CONTROL          affectCtrls
+4     SETofKB_CONTROL          ctrlDetails
+4     SETofKB_INDICATOR          affectIndicatorState
+4     SETofKB_INDICATOR          indicatorStateDetails
+4     SETofKB_INDICATOR          affectIndicatorMaps
+4     SETofKB_INDICATOR          indicatorMapDetails
+2     SETofKB_NAME_DETAIL          affectNames
+2     SETofKB_NAME_DETAIL          namesDetails
+1     SETofKB_CMDETAIL          affectCompat
+1     SETofKB_CMDETAIL          compatDetails
+1     SETofKB_BELLDETAIL          affectBell
+1     SETofKB_BELLDETAIL          bellDetails
+1     SETofKB_MSGDETAIL          affectMsgDetails
+1     SETofKB_MSGDETAIL          msgDetails
+2     SETofKB_AXNDETAIL          affectAccessX
+2     SETofKB_AXNDETAIL          accessXDetails
+2     SETofKB_XIDETAIL          affectExtDev
+2     SETofKB_XIDETAIL          extdevDetails
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     3          xkb-opcode
+2     7          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     KB_BELLCLASSSPEC          bellClass
+2     KB_IDSPEC          bellID
+1     INT8          percent
+1     BOOL          forceSound
+1     BOOL          eventOnly
+1               unused
+2     INT16          pitch
+2     INT16          duration
+2               unused
+4     ATOM          name
+4     WINDOW          window
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          opcode
+1     4          xkb-opcode
+2     2          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     0          length
+1     SETofKEYMASK          mods
+1     SETofKEYMASK          baseMods
+1     SETofKEYMASK          latchedMods
+1     SETofKEYMASK          lockedMods
+1     KP_GROUP          group
+1     KP_GROUP          lockedGroup
+2     INT16          baseGroup
+2     INT16          latchedGroup
+1     SETofKEYMASK          compatState
+1     SETofKEYMASK          grabMods
+1     SETofKEYMASK          compatGrabMods
+1     SETofKEYMASK          lookupMods
+1     SETofKEYMASK          compatLookupMods
+1               unused
+2     SETofBUTMASK          ptrBtnState
+6               unused
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     5          xkb-opcode
+2     4          request-length
+2     KB_DEVICESPEC           deviceSpec
+1     SETofKEYMASK          affectModLocks
+1     SETofKEYMASK          modLocks
+1     BOOL          lockGroup
+1     KB_GROUP          groupLock
+1     SETofKEYMASK          affectModLatches
+1     SETofKEYMASK          modLatches
+1               unused
+1     BOOL          latchGroup
+2     INT16          groupLatch
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          opcode
+1     6          xkb-opcode
+2     2          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     15          length
+1     CARD8          mouseKeysDfltBtn
+1     CARD8          numGroups
+1     CARD8          groupsWrap
+1     SETofKEYMASK          internalMods.mask
+1     SETofKEYMASK          ignoreLockMods.mask
+1     SETofKEYMASK          internalMods.realMods
+1     SETofKEYMASK          ignoreLockMods.realMods
+1               unused
+2     SETofKB_VMOD          internalMods.vmods
+2     SETofKB_VMOD          ignoreLockMods.vmods
+2     CARD16          repeatDelay
+2     CARD16          repeatInterval
+2     CARD16          slowKeysDelay
+2     CARD16          debounceDelay
+2     CARD16          mouseKeysDelay
+2     CARD16          mouseKeysInterval
+2     CARD16          mouseKeysTimeToMax
+2     CARD16          mouseKeysMaxSpeed
+2     INT16          mouseKeysCurve
+2     SETofKB_AXOPTION          accessXOptions
+2     CARD16          accessXTimeout
+2     SETofKB_AXOPTION          accessXTimeoutOptionsMask
+2     SETofKB_AXOPTION          accessXTimeoutOptionValues
+2               unused
+4     SETofKB_BOOLCTRL          accessXTimeoutMask
+4     SETofKB_BOOLCTRL          accessXTimeoutValues
+4     SETofKB_BOOLCTRL          enabledControls
+32     LISTofCARD8          perKeyRepeat
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     7          xkb-opcode
+2     25          request-length
+2     KB_DEVICESPEC           deviceSpec
+1     SETofKEYMASK          affectInternalRealMods
+1     SETofKEYMASK          internalRealMods
+1     SETofKEYMASK          affectIgnoreLockRealMods
+1     SETofKEYMASK          ignoreLockRealMods
+2     SETofKB_VMOD          affectInternalVirtualMods
+2     SETofKB_VMOD          internalVirtualMods
+2     SETofKB_VMOD          affectIgnoreLockVirtualMods
+2     SETofKB_VMOD          ignoreLockVirtualMods
+1     CARD8          mouseKeysDfltBtn
+1     CARD8          groupsWrap
+2     SETofKB_AXOPTION          accessXOptions
+2               unused
+4     SETofKB_BOOLCTRL          affectEnabledControls
+4     SETofKB_BOOLCTRL          enabledControls
+4     SETofKB_CONTROL          changeControls
+2     CARD16          repeatDelay
+2     CARD16          repeatInterval
+2     CARD16          slowKeysDelay
+2     CARD16          debounceDelay
+2     CARD16          mouseKeysDelay
+2     CARD16          mouseKeysInterval
+2     CARD16          mouseKeysTimeToMax
+2     CARD16          mouseKeysMaxSpeed
+2     INT16          mouseKeysCurve
+2     CARD16          accessXTimeout
+4     SETofKB_BOOLCTRL          accessXTimeoutMask
+4     SETofKB_BOOLCTRL          accessXTimeoutValues
+2     SETofKB_AXOPTION          accessXTimeoutOptionsMask
+2     SETofKB_AXOPTION          accessXTimeoutOptionsValues
+32     LISTofCARD8          perKeyRepeat
+</literallayout>
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     8          xkb-opcode
+2     7          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_MAPPART          full
+2     SETofKB_MAPPART          partial
+1     CARD8          firstType
+1     CARD8          nTypes
+1     KEYCODE          firstKeySym
+1     CARD8          nKeySyms
+1     KEYCODE          firstKeyAction
+1     CARD8          nKeyActions
+1     KEYCODE          firstKeyBehavior
+1     CARD8          nKeyBehaviors
+2     SETofKB_VMOD          virtualMods
+1     KEYCODE          firstKeyExplicit
+1     CARD8          nKeyExplicit
+1     KEYCODE          firstModMapKey
+1     CARD8          nModMapKeys
+1     KEYCODE          firstVModMapKey
+1     CARD8          nVModMapKeys
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     2+(I/4)          length
+2               unused
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+2     SETofKB_MAPPART          present
+1     CARD8          firstType
+1     t          nTypes
+1     CARD8          totalTypes
+1     KEYCODE          firstKeySym
+2     S          totalSyms
+1     s          nKeySyms
+1     KEYCODE          firstKeyAction
+2     A          totalActions
+1     a          nKeyActions
+1     KEYCODE          firstKeyBehavior
+1     b          nKeyBehaviors
+1     B          totalKeyBehaviors
+1     KEYCODE          firstKeyExplicit
+1     e          nKeyExplicit
+1     E          totalKeyExplicit
+1     KEYCODE          firstModMapKey
+1     m          nModMapKeys
+1     M          totalModMapKeys
+1     KEYCODE          firstVModMapKey
+1     0          nVModMapKeys
+1     V          totalVModMapKeys
+1               unused
+2     SETofKB_VMOD          virtualMods (has v bits set to 1)
+I     LISTofITEMs          map
+     SETofKB_MAPPART               (present)
+     XkbKeyTypes     typesRtrn
+     XkbKeySyms     symsRtrn
+     XkbKeyActions     actsRtrn.count, actsRtrn.acts
+     XkbKeyBehaviors     behaviorsRtrn
+     XkbVirtualMods     vmodsRtrn
+     XkbExplicitComponents     explicitRtrn
+     XkbModifierMap     modmapRtrn
+     XkbVirtualModMap     vmodMapRtrn
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+T1+..Tt     LISTofKB_KEYTYPE          typesRtrn
+8s+4S     LISTofKB_KEYSYMMAP          symsRtrn
+a     LISTofCARD8          actsRtrn.count
+p               unused,p=pad(a)
+8A     LISTofKB_ACTION          actsRtrn.acts
+4B     LISTofKB_SETBEHAVIOR          behaviorsRtrn
+v     LISTofSETofKEYMASK          vmodsRtrn
+p               unused, p=pad(v)
+2E     LISTofKB_SETEXPLICIT          explicitRtrn
+p               unused,p=pad(2E)
+2M     LISTofKB_KEYMODMAP          modmapRtrn
+p               unused, p=pad(2M)
+4V     LISTofKB_KEYVMODMAP          vmodMapRtrn
+</literallayout>
+
+<literallayout class='monospaced'>KB_KEYTYPE     8+8m+[4m]
+1     SETofKEYMASK          mods.mask
+1     SETofKEYMASK          mods.mods
+2     SETofKB_VMOD          mods.vmods
+1     CARD8          numLevels
+1     m          nMapEntries
+1     BOOL          hasPreserve
+1               unused
+8m     LISTofKB_KTMAPENTRY          map
+[4m]     LISTofKB_MODDEF          preserve
+</literallayout>
+
+<literallayout class='monospaced'>KB_KTMAPENTRY
+1     BOOL          active
+1     SETofKEYMASK          mods.mask
+1     CARD8          level
+1     SETofKEYMASK          mods.mods
+2     SETofKB_VMOD          mods.vmods
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>KB_KEYSYMMAP     8+4n
+4     LISTofCARD8          ktIndex
+1     CARD8          groupInfo
+1     CARD8          width
+2     n          nSyms
+4n     LISTofKEYSYM          syms
+</literallayout>
+
+<literallayout class='monospaced'>KB_SETBEHAVIOR
+1     KEYCODE          keycode
+2     KB_BEHAVIOR          behavior
+1               unused
+</literallayout>
+
+<literallayout class='monospaced'>KB_SETEXPLICIT
+1     KEYCODE          keycode
+1     SETofKB_EXPLICIT          explicit
+</literallayout>
+
+<literallayout class='monospaced'>KB_KEYMODMAP
+1     KEYCODE          keycode
+1     SETofKB_KEYMASK          mods
+</literallayout>
+
+<literallayout class='monospaced'>KB_KEYVMODMAP
+1     KEYCODE          keycode
+1               unused
+2     SETofKB_VMOD          vmods
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     9          xkb-opcode
+2     9+(I/4)          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_MAPPART          present
+2     SETofKB_SETMAPFLAGS          flags
+     #0001     SetMapResizeTypes
+     #0002     SetMapRecomputeActions
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+1     CARD8          firstType
+1     t          nTypes
+1     KEYCODE          firstKeySym
+1     s          nKeySyms
+2     S          totalSyms
+1     KEYCODE          firstKeyAction
+1     a          nKeyActions
+2     A          totalActions
+1     KEYCODE          firstKeyBehavior
+1     b          nKeyBehaviors
+1     B          totalKeyBehaviors
+1     KEYCODE          firstKeyExplicit
+1     e          nKeyExplicit
+1     E          totalKeyExplicit
+1     KEYCODE          firstModMapKey
+1     m          nModMapKeys
+1     M          totalModMapKeys
+1     KEYCODE          firstVModMapKey
+1     v          nVModMapKeys
+1     V          totalVModMapKeys
+2     SETofKB_VMOD          virtualMods (has n bits set to 1)
+I     LISTofITEMs          values
+     SETofKB_MAPPART          (present)
+     XkbKeyTypes     types
+     XkbKeySymbols     syms
+     XkbKeyActions     actions.count,actions.actions
+     XkbKeyBehaviors     behaviors
+     XkbVirtualMods     vmods
+     XkbExplicitComponents     explicit
+     XkbModifierMap     modmap
+     XkbVirtualModMap     vmodmap
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+T0+..Tt     LISTofKB_SETKEYTYPE          types
+8s+4S     LISTofKB_KEYSYMMAP          syms
+a     LISTofCARD8          actions.count
+p               unused,p=pad(a)
+8A     LISTofKB_ACTION          actions.actions
+4B     LISTofKB_SETBEHAVIOR          behaviors
+v     LISTofSETofKEYMASK          vmods
+p               unused, p=pad(v)
+2E     LISTofKB_SETEXPLICIT          explicit
+p               unused,p=pad(2E)
+2M     LISTofKB_KEYMODMAP          modmap
+P               unused, p=pad(2M)
+4V     LISTofKB_KEYVMODMAP          vmodmap
+</literallayout>
+
+<literallayout class='monospaced'>KB_SETKEYTYPE     8+4m+[4m]
+1     SETofKEYMASK          mask
+1     SETofKEYMASK          realMods
+2     SETofKB_VMOD          virtualMods
+1     CARD8          numLevels
+1     m          nMapEntries
+1     BOOL          preserve
+1               unused
+4m     LISTofKB_KTSETMAPENTRY          entries
+[4m]     LISTofKB_MODDEF          preserveEntries (if preserve==TRUE)
+</literallayout>
+
+<literallayout class='monospaced'>KB_KTSETMAPENTRY
+1     CARD8          level
+1     SETofKEYMASK          realMods
+2     SETofKB_VMOD          virtualMods
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     10          xkb-opcode
+2     3          request-length
+2     KB_DEVICESPEC           deviceSpec
+1     SETofKB_GROUP          groups
+1     BOOL          getAllSI
+2     CARD16          firstSI
+2     CARD16          nSI
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     (16n+4g)/4          length
+1     SETofKB_GROUP          groupsRtrn (has g bits set to 1)
+1               unused
+2     CARD16          firstSIRtrn
+2     n          nSIRtrn
+2     CARD16          nTotalSI
+16               unused
+16n     LISTofKB_SYMINTERPRET          siRtrn
+4g     LISTofKB_MODDEF          groupRtrn
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     11          xkb-opcode
+2     4+(16n+4g)          request-length
+2     KB_DEVICESPEC           deviceSpec
+1               unused
+1     BOOL          recomputeActions
+1     BOOL          truncateSI
+1     SETofKB_GROUP          groups (has g bits set to 1)
+2     CARD16          firstSI
+2     n          nSI
+2               unused
+16n     LISTofKB_SYMINTERPRET          si
+4g     LISTofKB_MODDEF          groupMaps
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          opcode
+1     12          xkb-opcode
+2     2          request-length
+2     KB_DEVICESPEC           deviceSpec
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     0          length
+4     SETofKB_INDICATOR          state
+20               unused
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     13          xkb-opcode
+2     3          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+4     SETofKB_INDICATOR          which
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     12n/4          length
+4     SETofKB_INDICATOR          which (has n bits set to 1)
+4     SETofKB_INDICATOR          realIndicators
+1     n          nIndicators
+15               unused
+12n     LISTofKB_INDICATORMAP          maps
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     14          xkb-opcode
+2     3+3n          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+4     SETofKB_INDICATOR          which (has n bits set to 1)
+12n     LISTofKB_INDICATORMAP          maps
+</literallayout>
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     15          xkb-opcode
+2     4          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     KB_LEDCLASSSPEC          ledClass
+2     KB_IDSPEC          ledID
+2               unused
+4     ATOM          indicator
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     0          length
+4     ATOM          indicator
+1     BOOL          found
+1     BOOL          on
+1     BOOL          realIndicator
+1     KB_INDICATOR          ndx
+1     SETofKB_IMFLAGS          map.flags
+1     SETofKB_IMGROUPSWHICH          map.whichGroups
+1     SETofKB_GROUPS          map.groups
+1     SETofKB_IMMODSWHICH          map.whichMods
+1     SETofKEYMASK          map.mods
+1     SETofKEYMASK          map.realMods
+2     SETofKB_VMOD          map.vmods
+4     SETofKB_BOOLCTRL          map.ctrls
+1     BOOL          supported
+3               unused
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     16          xkb-opcode
+2     8          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     KB_LEDCLASSSPEC          ledClass
+2     KB_IDSPEC          ledID
+2               unused
+4     ATOM          indicator
+1     BOOL          setState
+1     BOOL          on
+1     BOOL          setMap
+1     BOOL          createMap
+1               unused
+1     SETofKB_IMFLAGS          map.flags
+1     SETofKB_IMGROUPSWHICH          map.whichGroups
+1     SETofKB_GROUP          map.groups
+1     SETofKB_IMMODSWHICH          map.whichMods
+1     SETofKEYMASK          map.realMods
+2     SETofKB_VMOD          map.vmods
+4     SETofKB_BOOLCTRL          map.ctrls
+</literallayout>
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     17          xkb-opcode
+2     3          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+4     SETofKB_NAMEDETAIL          which
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     V/4          length
+4     SETofKB_NAMEDETAIL          which
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+1     t          nTypes
+1     SETofKB_GROUP          groupNames (has g bits set to 1)
+2     SETofKB_VMOD          virtualMods (has v bits set to 1)
+1     KEYCODE          firstKey
+1     k          nKeys
+4     SETofKB_INDICATOR          indicators (has i bits set to 1)
+1     r          nRadioGroups
+1     a          nKeyAliases
+2     l          nKTLevels
+4               unused
+V     LISTofITEMs          valueList
+     SETofKB_NAMEDETAIL          (which)
+     XkbKeycodesName     keycodesName
+     XkbGeometryName     geometryName
+     XkbSymbolsName     symbolsName
+     XkbPhySymbolsName     physSymbolsName
+     XkbTypesName     typesName
+     XkbCompatName     compatName
+     XkbKeyTypeNames     typeNames
+     XkbKTLevelNames     nLevelsPerType, ktLevelNames
+     XkbIndicatorNames     indicatorNames
+     XkbVirtualModNames     virtualModNames
+     XkbGroupNames     groupNames
+     XkbKeyNames     keyNames
+     XkbKeyAliases     keyAliases
+     XkbRGNames     radioGroupNames
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+4     ATOM          keycodesName
+4     ATOM          geometryName
+4     ATOM          symbolsName
+4     ATOM          physSymbolsName
+4     ATOM          typesName
+4     ATOM          compatName
+4t     LISTofATOM          typeNames
+l     LISTofCARD8          nLevelsPerType, sum of all elements=L
+p               unused, p=pad(l)
+4L     LISTofATOM          ktLevelNames
+4i     LISTofATOM          indicatorNames
+4v     LISTofATOM          virtualModNames
+4g     LISTofATOM          groupNames
+4k     LISTofKB_KEYNAME          keyNames
+8a     LISTofKB_KEYALIAS          keyAliases
+4r     LISTofATOM          radioGroupNames
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     18          xkb-opcode
+2     7+(V/4)          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_VMOD          virtualMods
+4     SETofKB_NAMEDETAIL          which
+1     CARD8          firstType
+1     t          nTypes
+1     CARD8          firstKTLevel
+1     l          nKTLevels
+4     SETofKB_INDICATOR          indicators (has i bits set to 1)
+1     SETofKB_GROUP          groupNames (has g bits set to 1)
+1     r          nRadioGroups
+1     KEYCODE          firstKey
+1     k          nKeys
+1     a          nKeyAliases
+1               unused
+2     L          totalKTLevelNames
+V     LISTofITEMs          values
+     SETofKB_NAMEDETAIL          (which)
+     XkbKeycodesName     keycodesName
+     XkbGeometryName     geometryName
+     XkbSymbolsName     symbolsName
+     XkbPhySymbolsName     physSymbolsName
+     XkbTypesName     typesName
+     XkbCompatName     compatName
+     XkbKeyTypeNames     typeNames
+     XkbKTLevelNames     nLevelsPerType, ktLevelNames
+     XkbIndicatorNames     indicatorNames
+     XkbVirtualModNames     virtualModNames
+     XkbGroupNames     groupNames
+     XkbKeyNames     keyNames
+     XkbKeyAliases     keyAliases
+     XkbRGNames     radioGroupNames
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+4     ATOM          keycodesName
+4     ATOM          geometryName
+4     ATOM          symbolsName
+4     ATOM          physSymbolsName
+4     ATOM          typesName
+4     ATOM          compatName
+4t     LISTofATOM          typeNames
+l     LISTofCARD8          nLevelsPerType
+p               unused, p=pad(l)
+4L     LISTofATOM          ktLevelNames
+4i     LISTofATOM          indicatorNames
+4v     LISTofATOM          virtualModNames
+4g     LISTofATOM          groupNames
+4k     LISTofKB_KEYNAME          keyNames
+8a     LISTofKB_KEYALIAS          keyAliases
+4r     LISTofATOM          radioGroupNames
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     19          xkb-opcode
+2     3          request-length
+2     KB_DEVICESPEC           deviceSpec
+2               unused
+4     ATOM          name
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     (f+8p+C*+H*+S*+D*+A*)/4          length
+4     ATOM          name
+1     BOOL          found
+1               unused
+2     CARD16          widthMM
+2     CARD16          heightMM
+2     p          nProperties
+2     c          nColors
+2     h          nShapes
+2     s          nSections
+2     d          nDoodads
+2     a          nKeyAliases
+1     CARD8          baseColorNdx
+1     CARD8          labelColorNdx
+f     KB_COUNTED_STRING16          labelFont
+8p     LISTofKB_PROPERTY          properties
+C0+..Cc     LISTofKB_COUNTED_STRING16          colors
+H0+..Hh     LISTofKB_SHAPE          shapes
+S0+..Ss     LISTofKB_SECTION          sections
+D0+..Dd     LISTofKB_DOODAD          doodads
+A0+..Aa     LISTofKB_KEYALIAS          keyAliases
+</literallayout>
+
+<literallayout class='monospaced'>KB_PROPERTY     4+n+v
+2     n          nameLength
+n     STRING8          name
+2     v          valueLength
+v     STRING8          value
+</literallayout>
+
+<literallayout class='monospaced'>KB_SHAPE     8+O*
+4     ATOM          name
+1     o          nOutlines
+1     CARD8          primaryNdx
+1     CARD8          approxNdx
+1               unused
+O0+..Oo     LISTofKB_OUTLINE          outlines
+</literallayout>
+
+<literallayout class='monospaced'>KB_OUTLINE     4+4p
+1     p          nPoints
+1     CARD8          cornerRadius
+2               unused
+4p     LISTofKB_POINT          points
+</literallayout>
+
+<literallayout class='monospaced'>KB_POINT
+2     INT16          x
+2     INT16          y
+</literallayout>
+
+<literallayout class='monospaced'>KB_SECTION     20+R*+D*+O*
+4     ATOM          name
+2     INT16          top
+2     INT16          left
+2     CARD16          width
+2     CARD16          height
+2     INT16          angle
+1     CARD8          priority
+1     r          nRows
+1     d          nDoodads
+1     o          nOverlays
+2               unused
+R0+..Rr     LISTofKB_ROW          rows
+D0+..Dd     LISTofKB_DOODAD          doodads
+O0+..Oo     LISTofKB_OVERLAY          overlays
+</literallayout>
+
+<literallayout class='monospaced'>KB_ROW     8+8k
+2     INT16          top
+2     INT16          left
+1     k          nKeys
+1     BOOL          vertical
+2               unused
+8k     LISTofKB_KEY          keys
+</literallayout>
+
+<literallayout class='monospaced'>KB_KEY
+4     STRING8          name
+2     INT16          gap
+1     CARD8          shapeNdx
+1     CARD8          colorNdx
+</literallayout>
+
+<literallayout class='monospaced'>KB_OVERLAY     8+R*
+4     ATOM          name
+1     r          nRows
+3               unused
+R0+..Rr     LISTofKB_OVERLAYROW          rows
+</literallayout>
+
+<literallayout class='monospaced'>KB_OVERLAYROW     4+8k
+1     CARD8          rowUnder
+1     k          nKeys
+2               unused
+8k     LISTofKB_OVERLAYKEY          keys
+</literallayout>
+
+<literallayout class='monospaced'>KB_OVERLAYKEY
+4     STRING8          over
+4     STRING8          under
+</literallayout>
+
+<literallayout class='monospaced'>KB_SHAPEDOODAD
+4     ATOM          name
+1     CARD8          type
+</literallayout>
+
+<literallayout class='monospaced'>KB_SHAPEDOODAD
+     #1     XkbOutlineDoodad
+     #2     XkbSolidDoodad
+1     CARD8          priority
+2     INT16          top
+2     INT16          left
+2     INT16          angle
+1     CARD8          colorNdx
+1     CARD8          shapeNdx
+6               unused
+</literallayout>
+
+<literallayout class='monospaced'>KB_TEXTDOODAD     20+t+f
+4     ATOM          name
+1     CARD8          type
+     #3     XkbTextDoodad
+1     CARD8          priority
+2     INT16          top
+2     INT16          left
+2     INT16          angle
+2     CARD16          width
+2     CARD16          height
+1     CARD8          colorNdx
+3               unused
+t     KB_COUNTED_STRING16          text
+f     KB_COUNTED_STRING16          font
+</literallayout>
+
+<literallayout class='monospaced'>KB_INDICATORDOODAD
+4     ATOM          name
+1     CARD8          type
+     #4     XkbIndicatorDoodad
+1     CARD8          priority
+2     INT16          top
+2     INT16          left
+2     INT16          angle
+1     CARD8          shapeNdx
+1     CARD8          onColorNdx
+1     CARD8          offColorNdx
+5               unused
+</literallayout>
+
+<literallayout class='monospaced'>KB_LOGODOODAD     20+n
+4     ATOM          name
+1     CARD8          type
+     #5     XkbLogoDoodad
+1     CARD8          priority
+2     INT16          top
+2     INT16          left
+2     INT16          angle
+1     CARD8          colorNdx
+1     CARD8          shapeNdx
+6               unused
+n     KB_COUNTED_STRING16          logoName
+</literallayout>
+
+<literallayout class='monospaced'>KB_DOODAD:
+     KB_SHAPEDOODAD, or KB_TEXTDOODAD, or
+     KB_INDICATORDOODAD, or KB_LOGODOODAD
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     20          xkb-opcode
+2     7+(f+8p+C*+H*+S*+D*+A*)/4          request-length
+2     KB_DEVICESPEC           deviceSpec
+1     h          nShapes
+1     s          nSections
+4     ATOM          name
+2     CARD16          widthMM
+2     CARD16          heightMM
+2     p          nProperties
+2     c          nColors
+2     d          nDoodads
+2     a          nKeyAliases
+1     CARD8          baseColorNdx
+1     CARD8          labelColorNdx
+2               unused
+f     KB_COUNTED_STRING16          labelFont
+8p     LISTofKB_PROPERTY          properties
+C0+..Cc     LISTofKB_COUNTED_STRING16          colors
+H0+..Hh     LISTofKB_SHAPE          shapes
+S0+..Ss     LISTofKB_SECTION          sections
+D0+..Dd     LISTofKB_DOODAD          doodads
+A0+..Aa     LISTofKB_KEYALIAS          keyAliases
+</literallayout>
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     21          xkb-opcode
+2     7          request-length
+2     KB_DEVICESPEC          deviceSpec
+2               unused
+4     SETofKB_PERCLIENTFLAG          change
+4     SETofKB_PERCLIENTFLAG          value
+4     SETofKB_BOOLCTRL          ctrlsToChange
+4     SETofKB_BOOLCTRL          autoCtrls
+4     SETofKB_BOOLCTRL          autoCtrlValues
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     0          length
+4     SETofKB_PERCLIENTFLAG          supported
+4     SETofKB_PERCLIENTFLAG          value
+4     SETofKB_BOOLCTRL          autoCtrls
+4     SETofKB_BOOLCTRL          autoCtrlValues
+8               unused
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     22          xkb-opcode
+2     2+(6+m+k+t+c+s+g+p)/4          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     CARD16          maxNames
+1     m          keymapsSpecLen
+m     STRING          keymapsSpec
+1     k          keycodesSpecLen
+k     STRING          keycodesSpec
+1     t          typesSpecLen
+t     STRING          typesSpec
+1     c          compatMapSpecLen
+c     STRING          compatMapSpec
+1     s          symbolsSpecLen
+s     STRING          symbolsSpec
+1     g          geometrySpecLen
+g     STRING          geometrySpec
+p               unused,p=pad(6+m+k+t+c+s+g)
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     (M*+K*+T*+C*+S*+G*+p)/4          length
+2     m          nKeymaps
+2     k          nKeycodes
+2     t          nTypes
+2     c          nCompatMaps
+2     s          nSymbols
+2     g          nGeometries
+2     CARD16          extra
+10               unused
+M0+..Mm     LISTofKB_LISTING          keymaps
+K0+..Kk     LISTofKB_LISTING          keycodes
+T0+..Tt     LISTofKB_LISTING          types
+C0+..Cc     LISTofKB_LISTING          compatMaps
+S0+..Ss     LISTofKB_LISTING          symbols
+G0+..Gg     LISTofKB_LISTING          geometries
+p               unused,p=pad(M*+K*+T*+C*+S*+G*)
+</literallayout>
+
+<literallayout class='monospaced'>KB_LISTING     4+n+p
+2     CARD16          flags
+2     n          length
+n     STRING8          string
+p               unused,p=pad(n) to a 2-byte boundary
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     23          xkb-opcode
+2     3+(6+m+k+t+c+s+g+p)/4          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_GBNDETAILMASK          need
+2     SETofKB_GBNDETAILMASK          want
+1     BOOL          load
+1               unused
+1     m          keymapsSpecLen
+m     STRING8          keymapsSpec
+1     k          keycodesSpecLen
+k     STRING8          keycodesSpec
+1     t          typesSpecLen
+t     STRING8          typesSpec
+1     c          compatMapSpecLen
+c     STRING8          compatMapSpec
+1     s          symbolsSpecLen
+s     STRING8          symbolsSpec
+1     g          geometrySpecLen
+g     STRING8          geometrySpec
+p               unused,p=pad(6+m+k+t+c+s+g)
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     V/4          length
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+1     BOOL          loaded
+1     BOOL          newKeyboard
+2     SETofKB_GBNDETAILMASK          found
+2     SETofKB_GBNDETAILMASK          reported
+16               unused
+V     LISTofITEMs          replies
+     SETofKB_GBNDETAILMASK          (reported)
+     XkbGBN_Types     map
+     XkbGBN_CompatMap     compat
+     XkbGBN_ClientSymbols     map
+     XkbGBN_ServerSymbols     map
+     XkbGBN_IndicatorMap     indicators
+     XkbGBN_KeyNames     names
+     XkbGBN_OtherNames     names
+     XkbGBN_Geometry     geometry
+</literallayout>
+
+<literallayout class='monospaced'>ITEMs
+M     XkbGetMap reply          map
+C     XkbGetCompatMap reply          compat
+I     XkbGetIndicatorMap reply          indicators
+N     XkbGetNames reply          names
+G     XkbGetGeometry reply          geometry
+</literallayout>
+
+
+<literallayout class='monospaced'>1     CARD8          opcode
+1     24          xkb-opcode
+2     4          request-length
+2     KB_DEVICESPEC           deviceSpec
+2     SETofKB_DEVFEATURE          wanted
+1     BOOL          allButtons
+1     CARD8          firstButton
+1     CARD8          nButtons
+1               unused
+2     KB_LEDCLASSSPEC          ledClass
+2     KB_IDSPEC          ledID
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1     CARD8          deviceID
+2     CARD16          sequence number
+4     (2+n+p+8b+L*)/4          length
+2     SETofKB_DEVFEATURE          present
+2     SETofKB_FEATURE          supported
+2     SETofKB_FEATURE          unsupported
+2     l          nDeviceLedFBs
+1     CARD8          firstBtnWanted
+1     CARD8          nBtnsWanted
+1     CARD8          firstBtnRtrn
+1     b          nBtnsRtrn
+1     CARD8          totalBtns
+1     BOOL          hasOwnState
+2     SETofKB_IDRESULT          dfltKbdFB
+2     SETofKB_IDRESULT          dfltLedFB
+2               unused
+4     ATOM          devType
+2     n          nameLen
+n     STRING8          name
+p               unused,p=pad(2+n)
+8b     LISTofKB_ACTION          btnActions
+L0+..Ll     LISTofKB_DEVICELEDINFO          leds
+</literallayout>
+
+<literallayout class='monospaced'>KB_DEVICELEDINFO     20+4n+12m
+2     KB_LEDCLASSSPEC          ledClass
+2     KB_IDSPEC          ledID
+4     SETofKB_INDICATOR          namesPresent (has n bits set to 1)
+4     SETofKB_INDICATOR          mapsPresent (has m bits set to 1)
+4     SETofKB_INDICATOR          physIndicators
+4     SETofKB_INDICATOR          state
+4n     LISTofATOM          names
+12m     LISTofKB_INDICATORMAP          maps
+</literallayout>
+
+
+<literallayout class='monospaced'>1     ??          opcode
+1     25          xkb-opcode
+2     3+(8b+L*)/4          request-length
+2     KB_DEVICESPEC           deviceSpec
+1     CARD8          firstBtn
+1     b          nBtns
+2     SETofKB_DEVFEATURE          change
+2     l          nDeviceLedFBs
+8b     LISTofKB_ACTION          btnActions
+L0+..Ll     LISTofKB_DEVICELEDINFO          leds
+     Encoding of KB_DEVICELEDINFO is as for XkbGetDeviceInfo
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          opcode
+1     101          xkb-opcode
+2     6+(n+p)/4          request-length
+2     n          msgLength
+2               unused
+4     CARD32          affectFlags
+4     CARD32          flags
+4     CARD32          affectCtrls
+4     CARD32          ctrls
+n     STRING8          message
+p               unused, p=pad(n)
+</literallayout>
+
+<literallayout class='monospaced'>1     1          Reply
+1               unused
+2     CARD16          sequence number
+4     0          length
+4     CARD32          currentFlags
+4     CARD32          currentCtrls
+4     CARD32          supportedFlags
+4     CARD32          supportedCtrls
+8               unused
+</literallayout>
+
+
+</sect1>
+<sect1 id='appD::Events'>
+<title>Events</title>
+
+<literallayout class='monospaced'>1     ??          code
+1     0          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     CARD8          oldDeviceID
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+1     KEYCODE          oldMinKeyCode
+1     KEYCODE          oldMaxKeyCode
+1     CARD8          requestMajor
+1     CARD8          requestMinor
+2     SETofKB_NKNDETAIL          changed
+14               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     1          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     SETofBUTMASK          ptrBtnActions
+2     SETofKB_MAPPART          changed
+1     KEYCODE          minKeyCode
+1     KEYCODE          maxKeyCode
+1     CARD8          firstType
+1     CARD8          nTypes
+1     KEYCODE          firstKeySym
+1     CARD8          nKeySyms
+1     KEYCODE          firstKeyAct
+1     CARD8          nKeyActs
+1     KEYCODE          firstKeyBehavior
+1     CARD8          nKeyBehavior
+1     KEYCODE          firstKeyExplicit
+1     CARD8          nKeyExplicit
+1     KEYCODE          firstModMapKey
+1     CARD8          nModMapKeys
+1     KEYCODE          firstVModMapKey
+1     CARD8          nVModMapKeys
+2     SETofKB_VMOD          virtualMods
+2               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     2          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     SETofKEYMASK          mods
+1     SETofKEYMASK          baseMods
+1     SETofKEYMASK          latchedMods
+1     SETofKEYMASK          lockedMods
+1     KB_GROUP          group
+2     INT16          baseGroup
+2     INT16          latchedGroup
+1     KB_GROUP          lockedGroup
+1     SETofKEYMASK          compatState
+1     SETofKEYMASK          grabMods
+1     SETofKEYMASK          compatGrabMods
+1     SETofKEYMASK          lookupMods
+1     SETofKEYMASK          compatLookupMods
+2     SETofBUTMASK          ptrBtnState
+2     SETofKB_STATEPART          changed
+1     KEYCODE          keycode
+1     CARD8          eventType
+1     CARD8          requestMajor
+1     CARD8          requestMinor
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     3          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     CARD8          numGroups
+2               unused
+4     SETofKB_CONTROL          changedControls
+4     SETofKB_BOOLCTRL          enabledControls
+4     SETofKB_BOOLCTRL          enabledControlChanges
+1     KEYCODE          keycode
+1     CARD8          eventType
+1     CARD8          requestMajor
+1     CARD8          requestMinor
+4               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     4          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+3               unused
+4     SETofKB_INDICATOR          state
+4     SETofKB_INDICATOR          stateChanged
+12               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     5          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+3               unused
+4     SETofKB_INDICATOR          state
+4     SETofKB_INDICATOR          mapChanged
+12               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     6          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1               unused
+2     SETofKB_NAMEDETAIL          changed
+1     CARD8          firstType
+1     CARD8          nTypes
+1     CARD8          firstLevelName
+1     CARD8          nLevelNames
+1               unused
+1     CARD8          nRadioGroups
+1     CARD8          nKeyAliases
+1     SETofKB_GROUP          changedGroupNames
+2     SETofKB_VMOD          changedVirtualMods
+1     KEYCODE          firstKey
+1     CARD8          nKeys
+4     SETofKB_INDICATOR          changedIndicators
+4               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     7          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     SETofKB_GROUP          changedGroups
+2     CARD16          firstSI
+2     CARD16          nSI
+2     CARD16          nTotalSI
+16               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     8          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     KB_BELLCLASSRESULT          bellClass
+1     CARD8          bellID
+1     CARD8          percent
+2     CARD16          pitch
+2     CARD16          duration
+4     ATOM          name
+4     WINDOW          window
+1     BOOL          eventOnly
+7               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     9          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     KEYCODE          keycode
+1     BOOL          press
+1     BOOL          keyEventFollows
+1     SETofKEYMASK          mods
+1     KB_GROUP          group
+8     STRING8          message
+10               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     10          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1     KEYCODE          keycode
+2     SETofKB_AXNDETAIL          detail
+2     CARD16          slowKeysDelay
+2     CARD16          debounceDelay
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+16               unused
+</literallayout>
+
+<literallayout class='monospaced'>1     ??          code
+1     11          xkb code
+2     CARD16          sequence number
+4     TIMESTAMP          time
+1     CARD8          deviceID
+1               unused
+2     SETofKB_XIDETAIL          reason
+2     KB_LEDCLASSRESULT          ledClass
+2     CARD8          ledID
+4     SETofKB_INDICATOR          ledsDefined
+4     SETofKB_INDICATOR          ledState
+1     CARD8          firstButton
+1     CARD8          nButtons
+2     SETofKB_XIFEATURE          supported
+2     SETofKB_XIFEATURE          unsupported
+2               unused
+</literallayout>
+
+</sect1>
+</appendix>

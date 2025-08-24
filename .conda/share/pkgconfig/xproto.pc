@@ -1,0 +1,8 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+includex11dir=${prefix}/include/X11
+ 
+Name: Xproto
+Description: Xproto headers
+Version: 7.0.33
+Cflags: -I${includedir}

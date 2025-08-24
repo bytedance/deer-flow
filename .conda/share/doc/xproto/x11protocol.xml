@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+
+<book id="x11protocol">
+
+<bookinfo>
+   <title>X Window System Protocol</title>
+   <subtitle>X Consortium Standard</subtitle>
+   <author>
+     <firstname>Robert</firstname>
+     <othername>W.</othername>
+     <surname>Scheifler</surname>
+     <affiliation><orgname>X Consortium, Inc.</orgname></affiliation>
+   </author>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 1.0</releaseinfo>
+   <copyright><year>1986</year><year>1987</year><year>1988</year><year>1994</year><year>2004</year>
+      <holder>The Open Group</holder>
+   </copyright>
+
+<legalnotice>
+
+<para>
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+</para>
+<para>
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+</para>
+<para>
+THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+OPEN GROUP BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+</para>
+<para>
+Except as contained in this notice, the name of the Open Group shall not be
+used in advertising or otherwise to promote the sale, use or other dealings
+in this Software without prior written authorization from the Open Group.
+</para>
+<para>X Window System is a trademark of The Open Group.</para>
+</legalnotice>
+</bookinfo>
+
+<xi:include xmlns:xi="http://www.w3.org/2001/XInclude"  href="sect1-9.xml"
+    xpointer="xpointer(/part/*)"/>
+<xi:include xmlns:xi="http://www.w3.org/2001/XInclude"  href="keysyms.xml"/>
+<xi:include xmlns:xi="http://www.w3.org/2001/XInclude"  href="encoding.xml"/>
+<xi:include xmlns:xi="http://www.w3.org/2001/XInclude"  href="glossary.xml"/>
+<index id="index" />
+</book>
+

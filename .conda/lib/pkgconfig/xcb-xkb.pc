@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB XKB
+Description: XCB Keyboard Extension (EXPERIMENTAL)
+Version: 1.17.0
+Requires.private: xcb
+Libs: -L${libdir} -lxcb-xkb
+Cflags: -I${includedir}

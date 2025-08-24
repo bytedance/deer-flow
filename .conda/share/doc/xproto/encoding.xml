@@ -1,0 +1,3268 @@
+<appendix id="protocol_encoding">
+<title>Protocol Encoding</title>
+<!--
+     The sections in this appendix correspond to their
+     number counterparts in the protocol document.
+-->
+<sect1 id='Syntactic_Conventions_b'>
+<title>Syntactic Conventions</title>
+
+<para>
+All numbers are in decimal,
+unless prefixed with #x, in which case they are in hexadecimal (base 16).
+</para>
+
+<para>
+The general syntax used to describe requests, replies, errors, events, and
+compound types is:
+</para>
+
+<literallayout class="monospaced">
+   <emphasis role='bold'>NameofThing</emphasis>
+   encode-form
+   ...
+   encode-form
+</literallayout>
+
+<para>
+Each encode-form describes a single component.
+</para>
+<para>
+For components described in the protocol as:
+</para>
+<literallayout class="monospaced">
+   name: TYPE
+</literallayout>
+
+<para>
+the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+   N     TYPE     name
+</literallayout>
+
+<para>
+N is the number of bytes occupied in the data stream,
+and TYPE is the interpretation of those bytes.
+For example,
+</para>
+
+<literallayout class="monospaced">
+   depth: CARD8
+</literallayout>
+
+<para>
+becomes:
+</para>
+
+<literallayout class="monospaced">
+   1     CARD8     depth
+</literallayout>
+
+<para>
+For components with a static numeric value the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+   N     value     name
+</literallayout>
+
+<para>
+The value is always interpreted as an N-byte unsigned integer.
+For example,
+the first two bytes of a
+<emphasis role='bold'>Window</emphasis>
+error are always zero (indicating an
+error in general) and three (indicating the
+<emphasis role='bold'>Window</emphasis>
+error in particular):
+</para>
+
+<literallayout class="monospaced">
+   1      0      Error
+   1      3      code
+</literallayout>
+
+<para>
+For components described in the protocol as:
+</para>
+
+<para>
+name:
+{ <emphasis role='bold'>Name1</emphasis>,...,
+<emphasis role='bold'>NameI</emphasis>}
+</para>
+
+<para>
+the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+   N          name
+        value1 Name1
+        ...
+        valueI NameI
+</literallayout>
+
+<para>
+The value is always interpreted as an N-byte unsigned integer.
+Note that the size of N is sometimes larger than that strictly required
+to encode the values.
+For example:
+</para>
+
+<para>
+class:
+{ <emphasis role='bold'>InputOutput</emphasis>,
+<emphasis role='bold'>InputOnly</emphasis>,
+<emphasis role='bold'>CopyFromParent</emphasis> }
+</para>
+
+<para>
+becomes:
+</para>
+
+<literallayout class="monospaced">
+2               class
+     0     CopyFromParent
+     1     InputOutput
+     2     InputOnly
+</literallayout>
+
+<para>
+For components described in the protocol as:
+</para>
+
+<para>
+NAME: TYPE or
+<emphasis role='bold'>Alternative1 ...or</emphasis>
+<emphasis role='bold'>AlternativeI</emphasis>
+</para>
+
+<para>
+the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+N     TYPE               NAME
+     value1     Alternative1
+     ...
+     valueI     AlternativeI
+</literallayout>
+
+<para>
+The alternative values are guaranteed not to conflict with the encoding
+of TYPE.
+For example:
+</para>
+
+<para>
+destination: WINDOW or
+<emphasis role='bold'>PointerWindow</emphasis>
+or
+<emphasis role='bold'>InputFocus</emphasis>
+</para>
+
+<para>
+becomes:
+</para>
+
+<literallayout class="monospaced">
+4     WINDOW          destination
+     0     PointerWindow
+     1     InputFocus
+</literallayout>
+
+<para>
+For components described in the protocol as:
+</para>
+
+<literallayout class="monospaced">
+   value-mask: BITMASK
+</literallayout>
+
+<para>
+the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+N     BITMASK               value-mask
+     mask1     mask-name1
+     ...
+     maskI     mask-nameI
+</literallayout>
+
+<para>
+The individual bits in the mask are specified and named,
+and N is 2 or 4.
+The most-significant bit in a BITMASK is reserved for use in defining
+chained (multiword) bitmasks, as extensions augment existing core requests.
+The precise interpretation of this bit is not yet defined here,
+although a probable mechanism is that a 1-bit indicates that another N bytes
+of bitmask follows, with bits within the overall mask still interpreted
+from least-significant to most-significant with an N-byte unit,
+with N-byte units
+interpreted in stream order, and with the overall mask being byte-swapped
+in individual N-byte units.
+</para>
+
+<para>
+For LISTofVALUE encodings, the request is followed by a section of the form:
+</para>
+
+<literallayout class="monospaced">
+   VALUEs
+   encode-form
+   ...
+   encode-form
+</literallayout>
+
+<para>
+listing an encode-form for each VALUE.
+The NAME in each encode-form keys to the corresponding BITMASK bit.
+The encoding of a VALUE always occupies four bytes,
+but the number of bytes specified in the encoding-form indicates how
+many of the least-significant bytes are actually used;
+the remaining bytes are unused and their values do not matter.
+</para>
+
+<para>
+In various cases, the number of bytes occupied by a component will be
+specified
+by a lowercase single-letter variable name instead of a specific numeric
+value, and often some other component will have its value specified as a
+simple numeric expression involving these variables.
+Components specified with such expressions are always interpreted
+as unsigned integers.
+The scope of such variables is always just the enclosing request, reply,
+error, event, or compound type structure.
+For example:
+</para>
+
+<literallayout class="monospaced">
+2      3+n                  request length
+4n     LISTofPOINT          points
+</literallayout>
+
+<para>
+For unused bytes (the values of the bytes are undefined and do no matter),
+the encode-form is:
+</para>
+
+<literallayout class="monospaced">
+   N               unused
+</literallayout>
+
+<para>
+<!-- .LP -->
+If the number of unused bytes is variable, the encode-form typically is:
+</para>
+
+<literallayout class="monospaced">
+   p               unused, p=pad(E)
+</literallayout>
+
+<para>
+where E is some expression,
+<phrase id="encoding:pad">
+<indexterm zone="encoding:pad" significance="preferred"><primary>Padding</primary></indexterm>
+and pad(E) is the number of bytes needed to round E up to a multiple of four.
+</phrase>
+</para>
+
+<literallayout class="monospaced">
+   pad(E) = (4 - (E mod 4)) mod 4
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Common_Types'>
+<title>Common Types</title>
+<indexterm zone="Encoding::Common_Types"><primary>Types</primary><secondary>encoding</secondary></indexterm>
+
+<variablelist>
+  <varlistentry>
+    <term>LISTofFOO</term>
+    <listitem>
+      <para>
+In this document the LISTof notation strictly means some number of repetitions
+of the FOO encoding;
+the actual length of the list is encoded elsewhere.
+      </para>
+    </listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>SETofFOO</term>
+    <listitem>
+      <para>
+A set is always represented by a bitmask, with a 1-bit indicating presence in
+the set.
+      </para>
+    </listitem>
+  </varlistentry>
+</variablelist>
+
+<informaltable frame='none'>
+  <tgroup cols='1' align='left' colsep='0' rowsep='0'>
+  <colspec colname='c1' colwidth='1.0*'/>
+  <tbody>
+    <row>
+      <entry>
+BITMASK: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+WINDOW: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+PIXMAP: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+CURSOR: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+FONT: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+GCONTEXT: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+COLORMAP: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+DRAWABLE: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+FONTABLE: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+ATOM: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+VISUALID: CARD32
+      </entry>
+    </row>
+    <row>
+      <entry>
+BYTE: 8-bit value
+      </entry>
+    </row>
+    <row>
+      <entry>
+INT8: 8-bit signed integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+INT16: 16-bit signed integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+INT32: 32-bit signed integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+CARD8: 8-bit unsigned integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+CARD16: 16-bit unsigned integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+CARD32: 32-bit unsigned integer
+      </entry>
+    </row>
+    <row>
+      <entry>
+TIMESTAMP: CARD32
+      </entry>
+    </row>
+  </tbody>
+  </tgroup>
+</informaltable>
+
+
+<literallayout class="monospaced">
+BITGRAVITY
+     0     Forget
+     1     NorthWest
+     2     North
+     3     NorthEast
+     4     West
+     5     Center
+     6     East
+     7     SouthWest
+     8     South
+     9     SouthEast
+     10     Static
+
+WINGRAVITY
+     0     Unmap
+     1     NorthWest
+     2     North
+     3     NorthEast
+     4     West
+     5     Center
+     6     East
+     7     SouthWest
+     8     South
+     9     SouthEast
+     10     Static
+
+BOOL
+     0     False
+     1     True
+
+SETofEVENT
+     #x00000001     KeyPress
+     #x00000002     KeyRelease
+     #x00000004     ButtonPress
+     #x00000008     ButtonRelease
+     #x00000010     EnterWindow
+     #x00000020     LeaveWindow
+     #x00000040     PointerMotion
+     #x00000080     PointerMotionHint
+     #x00000100     Button1Motion
+     #x00000200     Button2Motion
+     #x00000400     Button3Motion
+     #x00000800     Button4Motion
+     #x00001000     Button5Motion
+     #x00002000     ButtonMotion
+     #x00004000     KeymapState
+     #x00008000     Exposure
+     #x00010000     VisibilityChange
+     #x00020000     StructureNotify
+     #x00040000     ResizeRedirect
+     #x00080000     SubstructureNotify
+     #x00100000     SubstructureRedirect
+     #x00200000     FocusChange
+     #x00400000     PropertyChange
+     #x00800000     ColormapChange
+     #x01000000     OwnerGrabButton
+     #xFE000000     unused but must be zero
+
+SETofPOINTEREVENT
+     encodings are the same as for SETofEVENT, except with
+     #xFFFF8003     unused but must be zero
+
+SETofDEVICEEVENT
+     encodings are the same as for SETofEVENT, except with
+     #xFFFFC0B0     unused but must be zero
+
+KEYSYM: CARD32
+KEYCODE: CARD8
+BUTTON: CARD8
+
+SETofKEYBUTMASK
+     #x0001     Shift
+     #x0002     Lock
+     #x0004     Control
+     #x0008     Mod1
+     #x0010     Mod2
+     #x0020     Mod3
+     #x0040     Mod4
+     #x0080     Mod5
+     #x0100     Button1
+     #x0200     Button2
+     #x0400     Button3
+     #x0800     Button4
+     #x1000     Button5
+     #xE000     unused but must be zero
+
+SETofKEYMASK
+     encodings are the same as for SETofKEYBUTMASK, except with
+     #xFF00          unused but must be zero
+STRING8: LISTofCARD8
+STRING16: LISTofCHAR2B
+
+CHAR2B
+     1     CARD8     byte1
+     1     CARD8     byte2
+
+POINT
+     2     INT16     x
+     2     INT16     y
+
+RECTANGLE
+     2     INT16     x
+     2     INT16     y
+     2     CARD16    width
+     2     CARD16    height
+
+ARC
+     2     INT16     x
+     2     INT16     y
+     2     CARD16    width
+     2     CARD16    height
+     2     INT16     angle1
+     2     INT16     angle2
+
+HOST
+     1                         family
+           0         Internet
+           1         DECnet
+           2         Chaos
+           5         ServerInterpreted
+           6         InternetV6
+     1                         unused
+     2      n                  length of address
+     n      LISTofBYTE         address
+     p                         unused, p=pad(n)
+
+STR
+     1      n                  length of name in bytes
+     n      STRING8            name
+
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Errors'>
+<title>Errors</title>
+<indexterm zone="Encoding::Errors"><primary>Error report</primary><secondary>encoding</secondary></indexterm>
+
+<literallayout class="monospaced">
+<emphasis role='bold'>Request</emphasis>
+     1     0                               Error
+     1     1                               code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Value</emphasis>
+     1     0                               Error
+     1     2                               code
+     2     CARD16                          sequence number
+     4     &lt;32-bits&gt;                 bad value
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Window</emphasis>
+     1     0                               Error
+     1     3                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Pixmap</emphasis>
+     1     0                               Error
+     1     4                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Atom</emphasis>
+     1     0                               Error
+     1     5                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad atom id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Cursor</emphasis>
+     1     0                               Error
+     1     6                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Font</emphasis>
+     1     0                               Error
+     1     7                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Match</emphasis>
+     1     0                               Error
+     1     8                               code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Drawable</emphasis>
+     1     0                               Error
+     1     9                               code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Access</emphasis>
+     1     0                               Error
+     1     10                              code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Alloc</emphasis>
+     1     0                               Error
+     1     11                              code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Colormap</emphasis>
+     1     0                               Error
+     1     12                              code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>GContext</emphasis>
+     1     0                               Error
+     1     13                              code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>IDChoice</emphasis>
+     1     0                               Error
+     1     14                              code
+     2     CARD16                          sequence number
+     4     CARD32                          bad resource id
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Name</emphasis>
+     1     0                               Error
+     1     15                              code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Length</emphasis>
+     1     0                               Error
+     1     16                              code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+
+<emphasis role='bold'>Implementation</emphasis>
+     1     0                               Error
+     1     17                              code
+     2     CARD16                          sequence number
+     4                                     unused
+     2     CARD16                          minor opcode
+     1     CARD8                           major opcode
+     21                                    unused
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Keyboards'>
+<title>Keyboards</title>
+
+<para>
+KEYCODE values are always greater than 7 (and less than 256).
+</para>
+
+<para>
+KEYSYM values with the bit #x10000000 set are reserved as vendor-specific.
+</para>
+
+<para>
+The names and encodings of the standard KEYSYM values are contained in
+<link linkend="keysym_encoding">Appendix A, Keysym Encoding</link>.
+</para>
+</sect1>
+
+<sect1 id='Encoding::Pointers'>
+<title>Pointers</title>
+
+<para>
+BUTTON values are numbered starting with one.
+</para>
+
+</sect1>
+<sect1 id='Encoding::Predefined_Atoms'>
+<title>Predefined Atoms</title>
+<indexterm zone="Encoding::Predefined_Atoms"><primary>Atom</primary><secondary>predefined</secondary></indexterm>
+
+<literallayout class="monospaced">
+PRIMARY           1      WM_NORMAL_HINTS     40
+SECONDARY         2      WM_SIZE_HINTS       41
+ARC               3      WM_ZOOM_HINTS       42
+ATOM              4      MIN_SPACE           43
+BITMAP            5      NORM_SPACE          44
+CARDINAL          6      MAX_SPACE           45
+COLORMAP          7      END_SPACE           46
+CURSOR            8      SUPERSCRIPT_X       47
+CUT_BUFFER0       9      SUPERSCRIPT_Y       48
+CUT_BUFFER1       10     SUBSCRIPT_X         49
+CUT_BUFFER2       11     SUBSCRIPT_Y         50
+CUT_BUFFER3       12     UNDERLINE_POSITION  51
+CUT_BUFFER4       13     UNDERLINE_THICKNESS 52
+CUT_BUFFER5       14     STRIKEOUT_ASCENT    53
+CUT_BUFFER6       15     STRIKEOUT_DESCENT   54
+CUT_BUFFER7       16     ITALIC_ANGLE        55
+DRAWABLE          17     X_HEIGHT            56
+FONT              18     QUAD_WIDTH          57
+INTEGER           19     WEIGHT              58
+PIXMAP            20     POINT_SIZE          59
+POINT             21     RESOLUTION          60
+RECTANGLE         22     COPYRIGHT           61
+RESOURCE_MANAGER  23     NOTICE              62
+RGB_COLOR_MAP     24     FONT_NAME           63
+RGB_BEST_MAP      25     FAMILY_NAME         64
+RGB_BLUE_MAP      26     FULL_NAME           65
+RGB_DEFAULT_MAP   27     CAP_HEIGHT          66
+RGB_GRAY_MAP      28     WM_CLASS            67
+RGB_GREEN_MAP     29     WM_TRANSIENT_FOR    68
+RGB_RED_MAP       30
+STRING            31
+VISUALID          32
+WINDOW            33
+WM_COMMAND        34
+WM_HINTS          35
+WM_CLIENT_MACHINE 36
+WM_ICON_NAME      37
+WM_ICON_SIZE      38
+WM_NAME           39
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Connection_Setup'>
+<title>Connection Setup</title>
+
+<para>
+For TCP connections,
+displays on a given host are numbered starting from 0,
+and the server for display N listens and accepts connections on port 6000 + N.
+For DECnet connections,
+displays on a given host are numbered starting from 0,
+and the server for display N listens and accepts connections on the object
+name obtained by concatenating "X$X" with the decimal representation of N,
+for example, X$X0 and X$X1.
+</para>
+
+<para>
+Information sent by the client at connection setup:
+</para>
+
+<literallayout class="monospaced">
+     1                       byte-order
+          #x42     MSB first
+          #x6C     LSB first
+     1                       unused
+     2     CARD16            protocol-major-version
+     2     CARD16            protocol-minor-version
+     2     n                 length of authorization-protocol-name
+     2     d                 length of authorization-protocol-data
+     2                       unused
+     n     STRING8           authorization-protocol-name
+     p                       unused, p=pad(n)
+     d     STRING8           authorization-protocol-data
+     q                       unused, q=pad(d)
+</literallayout>
+
+<para>
+Except where explicitly noted in the protocol,
+all 16-bit and 32-bit quantities sent by the client must be transmitted
+with the specified byte order,
+and all 16-bit and 32-bit quantities returned by the server will be transmitted
+with this byte order.
+</para>
+
+<para>
+Information received by the client if the connection is refused:
+</para>
+
+<literallayout class="monospaced">
+     1     0                 Failed
+     1     n                 length of reason in bytes
+     2     CARD16            protocol-major-version
+     2     CARD16            protocol-minor-version
+     2     (n+p)/4           length in 4-byte units of "additional data"
+     n     STRING8           reason
+     p                       unused, p=pad(n)
+</literallayout>
+
+<para>
+Information received by the client if further authentication is required:
+</para>
+
+<literallayout class="monospaced">
+     1     2                 Authenticate
+     5                       unused
+     2     (n+p)/4           length in 4-byte units of "additional data"
+     n     STRING8           reason
+     p                       unused, p=pad(n)
+</literallayout>
+
+<para>
+Information received by the client if the connection is accepted:
+</para>
+
+<literallayout class="monospaced">
+     1     1                               Success
+     1                                     unused
+     2     CARD16                          protocol-major-version
+     2     CARD16                          protocol-minor-version
+     2     8+2n+(v+p+m)/4                  length in 4-byte units of
+                                           "additional data"
+     4     CARD32                          release-number
+     4     CARD32                          resource-id-base
+     4     CARD32                          resource-id-mask
+     4     CARD32                          motion-buffer-size
+     2     v                               length of vendor
+     2     CARD16                          maximum-request-length
+     1     CARD8                           number of SCREENs in roots
+     1     n                               number for FORMATs in
+                                           pixmap-formats
+     1                                     image-byte-order
+          0     LSBFirst
+          1     MSBFirst
+     1                                     bitmap-format-bit-order
+          0     LeastSignificant
+          1     MostSignificant
+     1     CARD8                           bitmap-format-scanline-unit
+     1     CARD8                           bitmap-format-scanline-pad
+     1     KEYCODE                         min-keycode
+     1     KEYCODE                         max-keycode
+     4                                     unused
+     v     STRING8                         vendor
+     p                                     unused, p=pad(v)
+     8n     LISTofFORMAT                   pixmap-formats
+     m     LISTofSCREEN                    roots (m is always a multiple of 4)
+</literallayout>
+
+<literallayout class="monospaced">
+FORMAT
+     1     CARD8                           depth
+     1     CARD8                           bits-per-pixel
+     1     CARD8                           scanline-pad
+     5                                     unused
+</literallayout>
+
+<literallayout class="monospaced">
+SCREEN
+     4     WINDOW                          root
+     4     COLORMAP                        default-colormap
+     4     CARD32                          white-pixel
+     4     CARD32                          black-pixel
+     4     SETofEVENT                      current-input-masks
+     2     CARD16                          width-in-pixels
+     2     CARD16                          height-in-pixels
+     2     CARD16                          width-in-millimeters
+     2     CARD16                          height-in-millimeters
+     2     CARD16                          min-installed-maps
+     2     CARD16                          max-installed-maps
+     4     VISUALID                        root-visual
+     1                                     backing-stores
+          0     Never
+          1     WhenMapped
+          2     Always
+     1     BOOL                            save-unders
+     1     CARD8                           root-depth
+     1     CARD8                           number of DEPTHs in allowed-depths
+     n     LISTofDEPTH                     allowed-depths (n is always a
+                                           multiple of 4)
+</literallayout>
+
+<literallayout class="monospaced">
+DEPTH
+     1     CARD8                           depth
+     1                                     unused
+     2     n                               number of VISUALTYPES in visuals
+     4                                     unused
+     24n     LISTofVISUALTYPE              visuals
+</literallayout>
+
+<literallayout class="monospaced">
+VISUALTYPE
+     4     VISUALID                        visual-id
+     1                                     class
+          0     StaticGray
+          1     GrayScale
+          2     StaticColor
+          3     PseudoColor
+          4     TrueColor
+          5     DirectColor
+     1     CARD8                           bits-per-rgb-value
+     2     CARD16                          colormap-entries
+     4     CARD32                          red-mask
+     4     CARD32                          green-mask
+     4     CARD32                          blue-mask
+     4                                     unused
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Requests'>
+<title>Requests</title>
+<indexterm zone="Encoding::Requests"><primary>Request</primary><secondary>encoding</secondary></indexterm>
+
+<literallayout class="monospaced">
+<link linkend="requests:CreateWindow"><emphasis role='bold'>CreateWindow</emphasis></link>
+     1     1                               opcode
+     1     CARD8                           depth
+     2     8+n                             request length
+     4     WINDOW                          wid
+     4     WINDOW                          parent
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     2                                     class
+          0     CopyFromParent
+          1     InputOutput
+          2     InputOnly
+     4     VISUALID                        visual
+          0     CopyFromParent
+     4     BITMASK                         value-mask (has n bits set to 1)
+          #x00000001     background-pixmap
+          #x00000002     background-pixel
+          #x00000004     border-pixmap
+          #x00000008     border-pixel
+          #x00000010     bit-gravity
+          #x00000020     win-gravity
+          #x00000040     backing-store
+          #x00000080     backing-planes
+          #x00000100     backing-pixel
+          #x00000200     override-redirect
+          #x00000400     save-under
+          #x00000800     event-mask
+          #x00001000     do-not-propagate-mask
+          #x00002000     colormap
+          #x00004000     cursor
+     4n     LISTofVALUE                    value-list
+
+  VALUEs
+     4     PIXMAP                          background-pixmap
+          0     None
+          1     ParentRelative
+     4     CARD32                          background-pixel
+     4     PIXMAP                          border-pixmap
+          0     CopyFromParent
+     4     CARD32                          border-pixel
+     1     BITGRAVITY                      bit-gravity
+     1     WINGRAVITY                      win-gravity
+     1                                     backing-store
+          0     NotUseful
+          1     WhenMapped
+          2     Always
+     4     CARD32                          backing-planes
+     4     CARD32                          backing-pixel
+     1     BOOL                            override-redirect
+     1     BOOL                            save-under
+     4     SETofEVENT                      event-mask
+     4     SETofDEVICEEVENT                do-not-propagate-mask
+     4     COLORMAP                        colormap
+          0     CopyFromParent
+     4     CURSOR                          cursor
+          0     None
+
+<link linkend="requests:ChangeWindowAttributes"><emphasis role='bold'>ChangeWindowAttributes</emphasis></link>
+     1     2                               opcode
+     1                                     unused
+     2     3+n                             request length
+     4     WINDOW                          window
+     4     BITMASK                         value-mask (has n bits set to 1)
+          encodings are the same as for CreateWindow
+     4n     LISTofVALUE                    value-list
+          encodings are the same as for CreateWindow
+
+<link linkend="requests:GetWindowAttributes"><emphasis role='bold'>GetWindowAttributes</emphasis></link>
+     1     3                               opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+▶
+     1     1                               Reply
+     1                                     backing-store
+          0     NotUseful
+          1     WhenMapped
+          2     Always
+     2     CARD16                          sequence number
+     4     3                               reply length
+     4     VISUALID                        visual
+     2                                     class
+          1     InputOutput
+          2     InputOnly
+     1     BITGRAVITY                      bit-gravity
+     1     WINGRAVITY                      win-gravity
+     4     CARD32                          backing-planes
+     4     CARD32                          backing-pixel
+     1     BOOL                            save-under
+     1     BOOL                            map-is-installed
+     1                                     map-state
+          0     Unmapped
+          1     Unviewable
+          2     Viewable
+     1     BOOL                            override-redirect
+     4     COLORMAP                        colormap
+          0     None
+     4     SETofEVENT                      all-event-masks
+     4     SETofEVENT                      your-event-mask
+     2     SETofDEVICEEVENT                do-not-propagate-mask
+     2                                     unused
+
+<link linkend="requests:DestroyWindow"><emphasis role='bold'>DestroyWindow</emphasis></link>
+     1     4                               opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:DestroySubwindows"><emphasis role='bold'>DestroySubwindows</emphasis></link>
+     1     5                               opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:ChangeSaveSet"><emphasis role='bold'>ChangeSaveSet</emphasis></link>
+     1     6                               opcode
+     1                                     mode
+          0     Insert
+          1     Delete
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:ReparentWindow"><emphasis role='bold'>ReparentWindow</emphasis></link>
+     1     7                               opcode
+     1                                     unused
+     2     4                               request length
+     4     WINDOW                          window
+     4     WINDOW                          parent
+     2     INT16                           x
+     2     INT16                           y
+
+<link linkend="requests:MapWindow"><emphasis role='bold'>MapWindow</emphasis></link>
+     1     8                               opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:MapSubwindows"><emphasis role='bold'>MapSubwindows</emphasis></link>
+     1     9                               opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:UnmapWindow"><emphasis role='bold'>UnmapWindow</emphasis></link>
+     1     10                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:UnmapSubwindows"><emphasis role='bold'>UnmapSubwindows</emphasis></link>
+     1     11                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:ConfigureWindow"><emphasis role='bold'>ConfigureWindow</emphasis></link>
+     1     12                              opcode
+     1                                     unused
+     2     3+n                             request length
+     4     WINDOW                          window
+     2     BITMASK                         value-mask (has n bits set to 1)
+          #x0001     x
+          #x0002     y
+          #x0004     width
+          #x0008     height
+          #x0010     border-width
+          #x0020     sibling
+          #x0040     stack-mode
+     2               unused
+     4n     LISTofVALUE                    value-list
+
+  VALUEs
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     4     WINDOW                          sibling
+     1                                     stack-mode
+          0     Above
+          1     Below
+          2     TopIf
+          3     BottomIf
+          4     Opposite
+
+<link linkend="requests:CirculateWindow"><emphasis role='bold'>CirculateWindow</emphasis></link>
+     1     13                              opcode
+     1                                     direction
+          0     RaiseLowest
+          1     LowerHighest
+     2     2                               request length
+     4     WINDOW                          window
+
+<link linkend="requests:GetGeometry"><emphasis role='bold'>GetGeometry</emphasis></link>
+     1     14                              opcode
+     1                                     unused
+     2     2                               request length
+     4     DRAWABLE                        drawable
+
+▶
+     1     1                               Reply
+     1     CARD8                           depth
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     WINDOW                          root
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     10                                    unused
+
+<link linkend="requests:QueryTree"><emphasis role='bold'>QueryTree</emphasis></link>
+     1     15                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     n                               reply length
+     4     WINDOW                          root
+     4     WINDOW                          parent
+          0     None
+     2     n                               number of WINDOWs in children
+     14                                    unused
+     4n     LISTofWINDOW                   children
+
+<link linkend="requests:InternAtom"><emphasis role='bold'>InternAtom</emphasis></link>
+     1     16                              opcode
+     1     BOOL                            only-if-exists
+     2     2+(n+p)/4                       request length
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     ATOM                            atom
+           0     None
+     20                                    unused
+
+<link linkend="requests:GetAtomName"><emphasis role='bold'>GetAtomName</emphasis></link>
+     1     17                              opcode
+     1                                     unused
+     2     2                               request length
+     4     ATOM                            atom
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     2     n                               length of name
+     22                                    unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ChangeProperty"><emphasis role='bold'>ChangeProperty</emphasis></link>
+     1     18                              opcode
+     1                                     mode
+          0     Replace
+          1     Prepend
+          2     Append
+     2     6+(n+p)/4                       request length
+     4     WINDOW                          window
+     4     ATOM                            property
+     4     ATOM                            type
+     1     CARD8                           format
+     3                                     unused
+     4     CARD32                          length of data in format units
+                    (= n for format = 8)
+                    (= n/2 for format = 16)
+                    (= n/4 for format = 32)
+     n     LISTofBYTE                      data
+                    (n is a multiple of 2 for format = 16)
+                    (n is a multiple of 4 for format = 32)
+     p                                     unused, p=pad(n)
+
+
+<link linkend="requests:DeleteProperty"><emphasis role='bold'>DeleteProperty</emphasis></link>
+     1     19                              opcode
+     1                                     unused
+     2     3                               request length
+     4     WINDOW                          window
+     4     ATOM                            property
+
+<link linkend="requests:GetProperty"><emphasis role='bold'>GetProperty</emphasis></link>
+     1     20                              opcode
+     1     BOOL                            delete
+     2     6                               request length
+     4     WINDOW                          window
+     4     ATOM                            property
+     4     ATOM                            type
+          0     AnyPropertyType
+     4     CARD32                          long-offset
+     4     CARD32                          long-length
+
+▶
+     1     1                               Reply
+     1     CARD8                           format
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     4     ATOM                            type
+          0     None
+     4     CARD32                          bytes-after
+     4     CARD32                          length of value in format units
+                    (= 0 for format = 0)
+                    (= n for format = 8)
+                    (= n/2 for format = 16)
+                    (= n/4 for format = 32)
+     12                                    unused
+     n     LISTofBYTE                      value
+                    (n is zero for format = 0)
+                    (n is a multiple of 2 for format = 16)
+                    (n is a multiple of 4 for format = 32)
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ListProperties"><emphasis role='bold'>ListProperties</emphasis></link>
+     1     21                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     n                               reply length
+     2     n                               number of ATOMs in atoms
+     22                                    unused
+     4n     LISTofATOM                     atoms
+
+<link linkend="requests:SetSelectionOwner"><emphasis role='bold'>SetSelectionOwner</emphasis></link>
+     1     22                              opcode
+     1                                     unused
+     2     4                               request length
+     4     WINDOW                          owner
+          0     None
+     4     ATOM                            selection
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:GetSelectionOwner"><emphasis role='bold'>GetSelectionOwner</emphasis></link>
+     1     23                              opcode
+     1                                     unused
+     2     2                               request length
+     4     ATOM                            selection
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     WINDOW                          owner
+          0     None
+     20                                    unused
+
+<link linkend="requests:ConvertSelection"><emphasis role='bold'>ConvertSelection</emphasis></link>
+     1     24                              opcode
+     1                                     unused
+     2     6                               request length
+     4     WINDOW                          requestor
+     4     ATOM                            selection
+     4     ATOM                            target
+     4     ATOM                            property
+          0     None
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:SendEvent"><emphasis role='bold'>SendEvent</emphasis></link>
+     1     25                              opcode
+     1     BOOL                            propagate
+     2     11                              requestlength
+     4     WINDOW                          destination
+          0     PointerWindow
+          1     InputFocus
+     4     SETofEVENT                      event-mask
+     32                                    event
+          standard event format (see <link linkend='Events'>the Events section</link>)
+
+<link linkend="requests:GrabPointer"><emphasis role='bold'>GrabPointer</emphasis></link>
+     1     26                              opcode
+     1     BOOL                            owner-events
+     2     6                               request length
+     4     WINDOW                          grab-window
+     2     SETofPOINTEREVENT               event-mask
+     1                                     pointer-mode
+          0     Synchronous
+          1     Asynchronous
+     1                                     keyboard-mode
+          0     Synchronous
+          1     Asynchronous
+     4     WINDOW                          confine-to
+          0     None
+     4     CURSOR                          cursor
+          0     None
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+▶
+     1     1                               Reply
+     1                                     status
+          0     Success
+          1     AlreadyGrabbed
+          2     InvalidTime
+          3     NotViewable
+          4     Frozen
+     2     CARD16                          sequence number
+     4     0                               reply length
+     24                                    unused
+
+<link linkend="requests:UngrabPointer"><emphasis role='bold'>UngrabPointer</emphasis></link>
+     1     27                              opcode
+     1                                     unused
+     2     2                               request length
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:GrabButton"><emphasis role='bold'>GrabButton</emphasis></link>
+     1     28                              opcode
+     1     BOOL                            owner-events
+     2     6                               request length
+     4     WINDOW                          grab-window
+     2     SETofPOINTEREVENT               event-mask
+     1                                     pointer-mode
+          0     Synchronous
+          1     Asynchronous
+     1                                     keyboard-mode
+          0     Synchronous
+          1     Asynchronous
+     4     WINDOW                          confine-to
+          0     None
+     4     CURSOR                          cursor
+          0     None
+     1     BUTTON                          button
+          0     AnyButton
+     1                                     unused
+     2     SETofKEYMASK                    modifiers
+          #x8000                           AnyModifier
+
+<link linkend="requests:UngrabButton"><emphasis role='bold'>UngrabButton</emphasis></link>
+     1     29                              opcode
+     1     BUTTON                          button
+          0     AnyButton
+     2     3                               request length
+     4     WINDOW                          grab-window
+     2     SETofKEYMASK                    modifiers
+          #x8000                           AnyModifier
+     2                                     unused
+
+<link linkend="requests:ChangeActivePointerGrab"><emphasis role='bold'>ChangeActivePointerGrab</emphasis></link>
+     1     30                              opcode
+     1                                     unused
+     2     4                               request length
+     4     CURSOR                          cursor
+          0     None
+     4     TIMESTAMP                       time
+          0     CurrentTime
+     2     SETofPOINTEREVENT               event-mask
+     2                                     unused
+
+<link linkend="requests:GrabKeyboard"><emphasis role='bold'>GrabKeyboard</emphasis></link>
+     1     31                              opcode
+     1     BOOL                            owner-events
+     2     4                               request length
+     4     WINDOW                          grab-window
+     4     TIMESTAMP                       time
+          0     CurrentTime
+     1                                     pointer-mode
+          0     Synchronous
+          1     Asynchronous
+     1                                     keyboard-mode
+          0     Synchronous
+          1     Asynchronous
+     2                                     unused
+
+▶
+     1     1                               Reply
+     1                                     status
+          0     Success
+          1     AlreadyGrabbed
+          2     InvalidTime
+          3     NotViewable
+          4     Frozen
+     2     CARD16                          sequence number
+     4     0                               reply length
+     24                                    unused
+
+<link linkend="requests:UngrabKeyboard"><emphasis role='bold'>UngrabKeyboard</emphasis></link>
+     1     32                              opcode
+     1                                     unused
+     2     2                               request length
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:GrabKey"><emphasis role='bold'>GrabKey</emphasis></link>
+     1     33                              opcode
+     1     BOOL                            owner-events
+     2     4                               request length
+     4     WINDOW                          grab-window
+     2     SETofKEYMASK                    modifiers
+          #x8000     AnyModifier
+     1     KEYCODE                         key
+          0     AnyKey
+     1                                     pointer-mode
+          0     Synchronous
+          1     Asynchronous
+     1                                     keyboard-mode
+          0     Synchronous
+          1     Asynchronous
+     3                                     unused
+
+<link linkend="requests:UngrabKey"><emphasis role='bold'>UngrabKey</emphasis></link>
+     1     34                              opcode
+     1     KEYCODE                         key
+          0     AnyKey
+     2     3                               request length
+     4     WINDOW                          grab-window
+     2     SETofKEYMASK                    modifiers
+          #x8000     AnyModifier
+     2                                     unused
+
+<link linkend="requests:AllowEvents"><emphasis role='bold'>AllowEvents</emphasis></link>
+     1     35                              opcode
+     1                                     mode
+          0     AsyncPointer
+          1     SyncPointer
+          2     ReplayPointer
+          3     AsyncKeyboard
+          4     SyncKeyboard
+          5     ReplayKeyboard
+          6     AsyncBoth
+          7     SyncBoth
+     2     2                               request length
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:GrabServer"><emphasis role='bold'>GrabServer</emphasis></link>
+     1     36                              opcode
+     1                                     unused
+     2     1                               request length
+
+<link linkend="requests:UngrabServer"><emphasis role='bold'>UngrabServer</emphasis></link>
+     1     37                              opcode
+     1                                     unused
+     2     1                               request length
+
+<link linkend="requests:QueryPointer"><emphasis role='bold'>QueryPointer</emphasis></link>
+     1     38                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+▶
+     1     1                               Reply
+     1     BOOL                            same-screen
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     WINDOW                          root
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           win-x
+     2     INT16                           win-y
+     2     SETofKEYBUTMASK                 mask
+     6                                     unused
+
+<link linkend="requests:GetMotionEvents"><emphasis role='bold'>GetMotionEvents</emphasis></link>
+     1     39                              opcode
+     1                                     unused
+     2     4                               request length
+     4     WINDOW                          window
+     4     TIMESTAMP                       start
+          0     CurrentTime
+     4     TIMESTAMP                       stop
+          0     CurrentTime
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     2n                              reply length
+     4     n                               number of TIMECOORDs in events
+     20                                    unused
+     8n     LISTofTIMECOORD                events
+
+  TIMECOORD
+     4     TIMESTAMP                       time
+     2     INT16                           x
+     2     INT16                           y
+
+<link linkend="requests:TranslateCoordinates"><emphasis role='bold'>TranslateCoordinates</emphasis></link>
+     1     40                              opcode
+     1                                     unused
+     2     4                               request length
+     4     WINDOW                          src-window
+     4     WINDOW                          dst-window
+     2     INT16                           src-x
+     2     INT16                           src-y
+▶
+     1     1                               Reply
+     1     BOOL                            same-screen
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     WINDOW                          child
+          0     None
+     2     INT16                           dst-x
+     2     INT16                           dst-y
+     16                                    unused
+
+<link linkend="requests:WarpPointer"><emphasis role='bold'>WarpPointer</emphasis></link>
+     1     41                              opcode
+     1                                     unused
+     2     6                               request length
+     4     WINDOW                          src-window
+          0     None
+     4     WINDOW                          dst-window
+          0     None
+     2     INT16                           src-x
+     2     INT16                           src-y
+     2     CARD16                          src-width
+     2     CARD16                          src-height
+     2     INT16                           dst-x
+     2     INT16                           dst-y
+
+<link linkend="requests:SetInputFocus"><emphasis role='bold'>SetInputFocus</emphasis></link>
+     1     42                              opcode
+     1                                     revert-to
+          0     None
+          1     PointerRoot
+          2     Parent
+     2     3                               request length
+     4     WINDOW                          focus
+          0     None
+          1     PointerRoot
+     4     TIMESTAMP                       time
+          0     CurrentTime
+
+<link linkend="requests:GetInputFocus"><emphasis role='bold'>GetInputFocus</emphasis></link>
+     1     43                              opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     revert-to
+          0     None
+          1     PointerRoot
+          2     Parent
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     WINDOW                          focus
+          0     None
+          1     PointerRoot
+     20                                    unused
+
+<link linkend="requests:QueryKeymap"><emphasis role='bold'>QueryKeymap</emphasis></link>
+     1     44                              opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     2                               reply length
+     32     LISTofCARD8                    keys
+
+<link linkend="requests:OpenFont"><emphasis role='bold'>OpenFont</emphasis></link>
+     1     45                              opcode
+     1                                     unused
+     2     3+(n+p)/4                       request length
+     4     FONT                            fid
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:CloseFont"><emphasis role='bold'>CloseFont</emphasis></link>
+     1     46                              opcode
+     1                                     unused
+     2     2                               request length
+     4     FONT                            font
+
+<link linkend="requests:QueryFont"><emphasis role='bold'>QueryFont</emphasis></link>
+     1     47                              opcode
+     1                                     unused
+     2     2                               request length
+     4     FONTABLE                        font
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     7+2n+3m                         reply length
+     12     CHARINFO                       min-bounds
+     4                                     unused
+     12     CHARINFO                       max-bounds
+     4                                     unused
+     2     CARD16                          min-char-or-byte2
+     2     CARD16                          max-char-or-byte2
+     2     CARD16                          default-char
+     2     n                               number of FONTPROPs in properties
+     1                                     draw-direction
+          0     LeftToRight
+          1     RightToLeft
+     1     CARD8                           min-byte1
+     1     CARD8                           max-byte1
+     1     BOOL                            all-chars-exist
+     2     INT16                           font-ascent
+     2     INT16                           font-descent
+     4     m                               number of CHARINFOs in char-infos
+     8n     LISTofFONTPROP                 properties
+     12m     LISTofCHARINFO                char-infos
+
+  FONTPROP
+     4     ATOM                            name
+     4     &lt;32-bits&gt;                 value
+
+  CHARINFO
+     2     INT16                           left-side-bearing
+     2     INT16                           right-side-bearing
+     2     INT16                           character-width
+     2     INT16                           ascent
+     2     INT16                           descent
+     2     CARD16                          attributes
+
+<link linkend="requests:QueryTextExtents"><emphasis role='bold'>QueryTextExtents</emphasis></link>
+     1     48                              opcode
+     1     BOOL                            odd length, True if p = 2
+     2     2+(2n+p)/4                      request length
+     4     FONTABLE                        font
+     2n     STRING16                       string
+     p                                     unused, p=pad(2n)
+
+▶
+     1     1                               Reply
+     1                                     draw-direction
+          0     LeftToRight
+          1     RightToLeft
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     INT16                           font-ascent
+     2     INT16                           font-descent
+     2     INT16                           overall-ascent
+     2     INT16                           overall-descent
+     4     INT32                           overall-width
+     4     INT32                           overall-left
+     4     INT32                           overall-right
+     4                                     unused
+
+<link linkend="requests:ListFonts"><emphasis role='bold'>ListFonts</emphasis></link>
+     1     49                              opcode
+     1                                     unused
+     2     2+(n+p)/4                       request length
+     2     CARD16                          max-names
+     2     n                               length of pattern
+     n     STRING8                         pattern
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     2     CARD16                          number of STRs in names
+     22                                    unused
+     n     LISTofSTR                       names
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ListFontsWithInfo"><emphasis role='bold'>ListFontsWithInfo</emphasis></link>
+     1     50                              opcode
+     1                                     unused
+     2     2+(n+p)/4                       request length
+     2     CARD16                          max-names
+     2     n                               length of pattern
+     n     STRING8                         pattern
+     p                                     unused, p=pad(n)
+
+▶ (except for last in series)
+     1     1                               Reply
+     1     n                               length of name in bytes
+     2     CARD16                          sequence number
+     4     7+2m+(n+p)/4                    reply length
+     12     CHARINFO                       min-bounds
+     4                                     unused
+     12     CHARINFO                       max-bounds
+     4                                     unused
+     2     CARD16                          min-char-or-byte2
+     2     CARD16                          max-char-or-byte2
+     2     CARD16                          default-char
+     2     m                               number of FONTPROPs in properties
+     1                                     draw-direction
+          0     LeftToRight
+          1     RightToLeft
+     1     CARD8                           min-byte1
+     1     CARD8                           max-byte1
+     1     BOOL                            all-chars-exist
+     2     INT16                           font-ascent
+     2     INT16                           font-descent
+     4     CARD32                          replies-hint
+     8m     LISTofFONTPROP                 properties
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+  FONTPROP
+     encodings are the same as for QueryFont
+
+  CHARINFO
+     encodings are the same as for QueryFont
+
+▶ (last in series)
+     1     1                               Reply
+     1     0                               last-reply indicator
+     2     CARD16                          sequence number
+     4     7                               reply length
+     52                                    unused
+
+<link linkend="requests:SetFontPath"><emphasis role='bold'>SetFontPath</emphasis></link>
+     1     51                              opcode
+     1                                     unused
+     2     2+(n+p)/4                       request length
+     2     CARD16                          number of STRs in path
+     2                                     unused
+     n     LISTofSTR                       path
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:GetFontPath"><emphasis role='bold'>GetFontPath</emphasis></link>
+     1     52                              opcode
+     1                                     unused
+     2     1                               request list
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     2     CARD16                          number of STRs in path
+     22                                    unused
+     n     LISTofSTR                       path
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:CreatePixmap"><emphasis role='bold'>CreatePixmap</emphasis></link>
+     1     53                              opcode
+     1     CARD8                           depth
+     2     4                               request length
+     4     PIXMAP                          pid
+     4     DRAWABLE                        drawable
+     2     CARD16                          width
+     2     CARD16                          height
+
+<link linkend="requests:FreePixmap"><emphasis role='bold'>FreePixmap</emphasis></link>
+     1     54                              opcode
+     1                                     unused
+     2     2                               request length
+     4     PIXMAP                          pixmap
+
+<link linkend="requests:CreateGC"><emphasis role='bold'>CreateGC</emphasis></link>
+     1     55                              opcode
+     1                                     unused
+     2     4+n                             request length
+     4     GCONTEXT                        cid
+     4     DRAWABLE                        drawable
+     4     BITMASK                         value-mask (has n bits set to 1)
+          #x00000001     function
+          #x00000002     plane-mask
+          #x00000004     foreground
+          #x00000008     background
+          #x00000010     line-width
+          #x00000020     line-style
+          #x00000040     cap-style
+          #x00000080     join-style
+          #x00000100     fill-style
+          #x00000200     fill-rule
+          #x00000400     tile
+          #x00000800     stipple
+          #x00001000     tile-stipple-x-origin
+          #x00002000     tile-stipple-y-origin
+          #x00004000     font
+          #x00008000     subwindow-mode
+          #x00010000     graphics-exposures
+          #x00020000     clip-x-origin
+          #x00040000     clip-y-origin
+          #x00080000     clip-mask
+          #x00100000     dash-offset
+          #x00200000     dashes
+          #x00400000     arc-mode
+     4n     LISTofVALUE                    value-list
+
+  VALUEs
+     1                                     function
+           0     Clear
+           1     And
+           2     AndReverse
+           3     Copy
+           4     AndInverted
+           5     NoOp
+           6     Xor
+           7     Or
+           8     Nor
+           9     Equiv
+          10     Invert
+          11     OrReverse
+          12     CopyInverted
+          13     OrInverted
+          14     Nand
+          15     Set
+     4     CARD32                          plane-mask
+     4     CARD32                          foreground
+     4     CARD32                          background
+     2     CARD16                          line-width
+     1                                     line-style
+          0     Solid
+          1     OnOffDash
+          2     DoubleDash
+     1                                     cap-style
+          0     NotLast
+          1     Butt
+          2     Round
+          3     Projecting
+     1                                     join-style
+          0     Miter
+          1     Round
+          2     Bevel
+     1                                     fill-style
+          0     Solid
+          1     Tiled
+          2     Stippled
+          3     OpaqueStippled
+     1                                     fill-rule
+          0     EvenOdd
+          1     Winding
+     4     PIXMAP                          tile
+     4     PIXMAP                          stipple
+     2     INT16                           tile-stipple-x-origin
+     2     INT16                           tile-stipple-y-origin
+     4     FONT                            font
+     1                                     subwindow-mode
+          0     ClipByChildren
+          1     IncludeInferiors
+     1     BOOL                            graphics-exposures
+     2     INT16                           clip-x-origin
+     2     INT16                           clip-y-origin
+     4     PIXMAP                          clip-mask
+          0     None
+     2     CARD16                          dash-offset
+     1     CARD8                           dashes
+     1                                     arc-mode
+          0     Chord
+          1     PieSlice
+
+<link linkend="requests:ChangeGC"><emphasis role='bold'>ChangeGC</emphasis></link>
+     1     56                              opcode
+     1                                     unused
+     2     3+n                             request length
+     4     GCONTEXT                        gc
+     4     BITMASK                         value-mask (has n bits set to 1)
+          encodings are the same as for CreateGC
+     4n     LISTofVALUE                    value-list
+          encodings are the same as for CreateGC
+
+<link linkend="requests:CopyGC"><emphasis role='bold'>CopyGC</emphasis></link>
+     1     57                              opcode
+     1                                     unused
+     2     4                               request length
+     4     GCONTEXT                        src-gc
+     4     GCONTEXT                        dst-gc
+     4     BITMASK                         value-mask
+          encodings are the same as for CreateGC
+
+<link linkend="requests:SetDashes"><emphasis role='bold'>SetDashes</emphasis></link>
+     1     58                              opcode
+     1                                     unused
+     2     3+(n+p)/4                       request length
+     4     GCONTEXT                        gc
+     2     CARD16                          dash-offset
+     2     n                               length of dashes
+     n     LISTofCARD8                     dashes
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:SetClipRectangles"><emphasis role='bold'>SetClipRectangles</emphasis></link>
+     1     59                              opcode
+     1                                     ordering
+          0     UnSorted
+          1     YSorted
+          2     YXSorted
+          3     YXBanded
+     2     3+2n                            request length
+     4     GCONTEXT                        gc
+     2     INT16                           clip-x-origin
+     2     INT16                           clip-y-origin
+     8n     LISTofRECTANGLE                rectangles
+
+<link linkend="requests:FreeGC"><emphasis role='bold'>FreeGC</emphasis></link>
+     1     60                              opcode
+     1                                     unused
+     2     2                               request length
+     4     GCONTEXT                        gc
+
+<link linkend="requests:ClearArea"><emphasis role='bold'>ClearArea</emphasis></link>
+     1     61                              opcode
+     1     BOOL                            exposures
+     2     4                               request length
+     4     WINDOW                          window
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+
+<link linkend="requests:CopyArea"><emphasis role='bold'>CopyArea</emphasis></link>
+     1     62                              opcode
+     1                                     unused
+     2     7                               request length
+     4     DRAWABLE                        src-drawable
+     4     DRAWABLE                        dst-drawable
+     4     GCONTEXT                        gc
+     2     INT16                           src-x
+     2     INT16                           src-y
+     2     INT16                           dst-x
+     2     INT16                           dst-y
+     2     CARD16                          width
+     2     CARD16                          height
+
+<link linkend="requests:CopyPlane"><emphasis role='bold'>CopyPlane</emphasis></link>
+     1     63                              opcode
+     1                                     unused
+     2     8                               request length
+     4     DRAWABLE                        src-drawable
+     4     DRAWABLE                        dst-drawable
+     4     GCONTEXT                        gc
+     2     INT16                           src-x
+     2     INT16                           src-y
+     2     INT16                           dst-x
+     2     INT16                           dst-y
+     2     CARD16                          width
+     2     CARD16                          height
+     4     CARD32                          bit-plane
+
+<link linkend="requests:PolyPoint"><emphasis role='bold'>PolyPoint</emphasis></link>
+     1     64                              opcode
+     1                                     coordinate-mode
+          0     Origin
+          1     Previous
+     2     3+n                             request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     4n     LISTofPOINT                    points
+
+<link linkend="requests:PolyLine"><emphasis role='bold'>PolyLine</emphasis></link>
+     1     65                              opcode
+     1                                     coordinate-mode
+          0     Origin
+          1     Previous
+     2     3+n                             request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     4n     LISTofPOINT                    points
+
+<link linkend="requests:PolySegment"><emphasis role='bold'>PolySegment</emphasis></link>
+     1     66                              opcode
+     1                                     unused
+     2     3+2n                            request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     8n     LISTofSEGMENT                  segments
+
+  SEGMENT
+     2     INT16                           x1
+     2     INT16                           y1
+     2     INT16                           x2
+     2     INT16                           y2
+
+<link linkend="requests:PolyRectangle"><emphasis role='bold'>PolyRectangle</emphasis></link>
+     1     67                              opcode
+     1                                     unused
+     2     3+2n                            request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     8n     LISTofRECTANGLE                rectangles
+
+<link linkend="requests:PolyArc"><emphasis role='bold'>PolyArc</emphasis></link>
+     1     68                              opcode
+     1                                     unused
+     2     3+3n                            request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     12n     LISTofARC                     arcs
+
+<link linkend="requests:FillPoly"><emphasis role='bold'>FillPoly</emphasis></link>
+     1     69                              opcode
+     1                                     unused
+     2     4+n                             request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     1                                     shape
+          0     Complex
+          1     Nonconvex
+          2     Convex
+     1                                     coordinate-mode
+          0     Origin
+          1     Previous
+     2                                     unused
+     4n     LISTofPOINT                    points
+
+<link linkend="requests:PolyFillRectangle"><emphasis role='bold'>PolyFillRectangle</emphasis></link>
+     1     70                              opcode
+     1                                     unused
+     2     3+2n                            request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     8n     LISTofRECTANGLE                rectangles
+
+<link linkend="requests:PolyFillArc"><emphasis role='bold'>PolyFillArc</emphasis></link>
+     1     71                              opcode
+     1                                     unused
+     2     3+3n                            request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     12n     LISTofARC                     arcs
+
+<link linkend="requests:PutImage"><emphasis role='bold'>PutImage</emphasis></link>
+     1     72                              opcode
+     1                                     format
+          0     Bitmap
+          1     XYPixmap
+          2     ZPixmap
+     2     6+(n+p)/4                       request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     2     CARD16                          width
+     2     CARD16                          height
+     2     INT16                           dst-x
+     2     INT16                           dst-y
+     1     CARD8                           left-pad
+     1     CARD8                           depth
+     2                                     unused
+     n     LISTofBYTE                      data
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:GetImage"><emphasis role='bold'>GetImage</emphasis></link>
+     1     73                              opcode
+     1                                     format
+          1     XYPixmap
+          2     ZPixmap
+     2     5                               request length
+     4     DRAWABLE                        drawable
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     4     CARD32                          plane-mask
+
+▶
+     1     1                               Reply
+     1     CARD8                           depth
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     4     VISUALID                        visual
+          0     None
+     20                                    unused
+     n     LISTofBYTE                      data
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:PolyText8"><emphasis role='bold'>PolyText8</emphasis></link>
+     1     74                              opcode
+     1                                     unused
+     2     4+(n+p)/4                       request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     2     INT16                           x
+     2     INT16                           y
+     n     LISTofTEXTITEM8                 items
+     p                                     unused, p=pad(n)  (p is always 0
+                                           or 1)
+
+  TEXTITEM8
+     1     m                               length of string (cannot be 255)
+     1     INT8                            delta
+     m     STRING8                         string
+  or
+     1     255                             font-shift indicator
+     1                                     font byte 3 (most-significant)
+     1                                     font byte 2
+     1                                     font byte 1
+     1                                     font byte 0 (least-significant)
+
+<link linkend="requests:PolyText16"><emphasis role='bold'>PolyText16</emphasis></link>
+     1     75                              opcode
+     1                                     unused
+     2     4+(n+p)/4                       request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     2     INT16                           x
+     2     INT16                           y
+     n     LISTofTEXTITEM16                items
+     p                                     unused, p=pad(n)  (p must be 0 or
+                                           1)
+
+  TEXTITEM16
+     1     m                               number of CHAR2Bs in string
+                                           (cannot be 255)
+     1     INT8                            delta
+     2m     STRING16                       string
+  or
+     1     255                             font-shift indicator
+     1                                     font byte 3 (most-significant)
+     1                                     font byte 2
+     1                                     font byte 1
+     1                                     font byte 0 (least-significant)
+
+<link linkend="requests:ImageText8"><emphasis role='bold'>ImageText8</emphasis></link>
+     1     76                              opcode
+     1     n                               length of string
+     2     4+(n+p)/4                       request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     2     INT16                           x
+     2     INT16                           y
+     n     STRING8                         string
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ImageText16"><emphasis role='bold'>ImageText16</emphasis></link>
+     1     77                              opcode
+     1     n                               number of CHAR2Bs in string
+     2     4+(2n+p)/4                      request length
+     4     DRAWABLE                        drawable
+     4     GCONTEXT                        gc
+     2     INT16                           x
+     2     INT16                           y
+     2n     STRING16                       string
+     p                                     unused, p=pad(2n)
+
+<link linkend="requests:CreateColormap"><emphasis role='bold'>CreateColormap</emphasis></link>
+     1     78                              opcode
+     1                                     alloc
+          0     None
+          1     All
+     2     4                               request length
+     4     COLORMAP                        mid
+     4     WINDOW                          window
+     4     VISUALID                        visual
+
+<link linkend="requests:FreeColormap"><emphasis role='bold'>FreeColormap</emphasis></link>
+     1     79                              opcode
+     1                                     unused
+     2     2                               request length
+     4     COLORMAP                        cmap
+
+<link linkend="requests:CopyColormapAndFree"><emphasis role='bold'>CopyColormapAndFree</emphasis></link>
+     1     80                              opcode
+     1                                     unused
+     2     3                               request length
+     4     COLORMAP                        mid
+     4     COLORMAP                        src-cmap
+
+<link linkend="requests:InstallColormap"><emphasis role='bold'>InstallColormap</emphasis></link>
+     1     81                              opcode
+     1                                     unused
+     2     2                               request length
+     4     COLORMAP                        cmap
+
+<link linkend="requests:UninstallColormap"><emphasis role='bold'>UninstallColormap</emphasis></link>
+     1     82                              opcode
+     1                                     unused
+     2     2                               request length
+     4     COLORMAP                        cmap
+
+<link linkend="requests:ListInstalledColormaps"><emphasis role='bold'>ListInstalledColormaps</emphasis></link>
+     1     83                              opcode
+     1                                     unused
+     2     2                               request length
+     4     WINDOW                          window
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     n                               reply length
+     2     n                               number of COLORMAPs in cmaps
+     22                                    unused
+     4n     LISTofCOLORMAP                 cmaps
+
+<link linkend="requests:AllocColor"><emphasis role='bold'>AllocColor</emphasis></link>
+     1     84                              opcode
+     1                                     unused
+     2     4                               request length
+     4     COLORMAP                        cmap
+     2     CARD16                          red
+     2     CARD16                          green
+     2     CARD16                          blue
+     2                                     unused
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     CARD16                          red
+     2     CARD16                          green
+     2     CARD16                          blue
+     2                                     unused
+     4     CARD32                          pixel
+     12                                    unused
+
+<link linkend="requests:AllocNamedColor"><emphasis role='bold'>AllocNamedColor</emphasis></link>
+     1     85                              opcode
+     1                                     unused
+     2     3+(n+p)/4                       request length
+     4     COLORMAP                        cmap
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     4     CARD32                          pixel
+     2     CARD16                          exact-red
+     2     CARD16                          exact-green
+     2     CARD16                          exact-blue
+     2     CARD16                          visual-red
+     2     CARD16                          visual-green
+     2     CARD16                          visual-blue
+     8                                     unused
+
+<link linkend="requests:AllocColorCells"><emphasis role='bold'>AllocColorCells</emphasis></link>
+     1     86                              opcode
+     1     BOOL                            contiguous
+     2     3                               request length
+     4     COLORMAP                        cmap
+     2     CARD16                          colors
+     2     CARD16                          planes
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     n+m                             reply length
+     2     n                               number of CARD32s in pixels
+     2     m                               number of CARD32s in masks
+     20                                    unused
+     4n     LISTofCARD32                   pixels
+     4m     LISTofCARD32                   masks
+
+<link linkend="requests:AllocColorPlanes"><emphasis role='bold'>AllocColorPlanes</emphasis></link>
+     1     87                              opcode
+     1     BOOL                            contiguous
+     2     4                               request length
+     4     COLORMAP                        cmap
+     2     CARD16                          colors
+     2     CARD16                          reds
+     2     CARD16                          greens
+     2     CARD16                          blues
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     n                               reply length
+     2     n                               number of CARD32s in pixels
+     2                                     unused
+     4     CARD32                          red-mask
+     4     CARD32                          green-mask
+     4     CARD32                          blue-mask
+     8                                     unused
+     4n     LISTofCARD32                   pixels
+
+<link linkend="requests:FreeColors"><emphasis role='bold'>FreeColors</emphasis></link>
+     1     88                              opcode
+     1                                     unused
+     2     3+n                             request length
+     4     COLORMAP                        cmap
+     4     CARD32                          plane-mask
+     4n     LISTofCARD32                   pixels
+
+<link linkend="requests:StoreColors"><emphasis role='bold'>StoreColors</emphasis></link>
+     1     89                              opcode
+     1                                     unused
+     2     2+3n                            request length
+     4     COLORMAP                        cmap
+     12n     LISTofCOLORITEM               items
+
+  COLORITEM
+     4     CARD32                          pixel
+     2     CARD16                          red
+     2     CARD16                          green
+     2     CARD16                          blue
+     1                                     do-red, do-green, do-blue
+          #x01     do-red (1 is True, 0 is False)
+          #x02     do-green (1 is True, 0 is False)
+          #x04     do-blue (1 is True, 0 is False)
+          #xF8     unused
+     1                                     unused
+
+<link linkend="requests:StoreNamedColor"><emphasis role='bold'>StoreNamedColor</emphasis></link>
+     1     90                              opcode
+     1                                     do-red, do-green, do-blue
+          #x01     do-red (1 is True, 0 is False)
+          #x02     do-green (1 is True, 0 is False)
+          #x04     do-blue (1 is True, 0 is False)
+          #xF8     unused
+     2     4+(n+p)/4                       request length
+     4     COLORMAP                        cmap
+     4     CARD32                          pixel
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:QueryColors"><emphasis role='bold'>QueryColors</emphasis></link>
+     1     91                              opcode
+     1                                     unused
+     2     2+n                             request length
+     4     COLORMAP                        cmap
+     4n     LISTofCARD32                   pixels
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     2n                              reply length
+     2     n                               number of RGBs in colors
+     22                                    unused
+     8n     LISTofRGB                      colors
+
+  RGB
+     2     CARD16                          red
+     2     CARD16                          green
+     2     CARD16                          blue
+     2                                     unused
+
+<link linkend="requests:LookupColor"><emphasis role='bold'>LookupColor</emphasis></link>
+     1     92                              opcode
+     1                                     unused
+     2     3+(n+p)/4                       request length
+     4     COLORMAP                        cmap
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     CARD16                          exact-red
+     2     CARD16                          exact-green
+     2     CARD16                          exact-blue
+     2     CARD16                          visual-red
+     2     CARD16                          visual-green
+     2     CARD16                          visual-blue
+     12                                    unused
+
+<link linkend="requests:CreateCursor"><emphasis role='bold'>CreateCursor</emphasis></link>
+     1     93                              opcode
+     1                                     unused
+     2     8                               request length
+     4     CURSOR                          cid
+     4     PIXMAP                          source
+     4     PIXMAP                          mask
+          0     None
+     2     CARD16                          fore-red
+     2     CARD16                          fore-green
+     2     CARD16                          fore-blue
+     2     CARD16                          back-red
+     2     CARD16                          back-green
+     2     CARD16                          back-blue
+     2     CARD16                          x
+     2     CARD16                          y
+
+<link linkend="requests:CreateGlyphCursor"><emphasis role='bold'>CreateGlyphCursor</emphasis></link>
+     1     94                              opcode
+     1                                     unused
+     2     8                               request length
+     4     CURSOR                          cid
+     4     FONT                            source-font
+     4     FONT                            mask-font
+          0     None
+     2     CARD16                          source-char
+     2     CARD16                          mask-char
+     2     CARD16                          fore-red
+     2     CARD16                          fore-green
+     2     CARD16                          fore-blue
+     2     CARD16                          back-red
+     2     CARD16                          back-green
+     2     CARD16                          back-blue
+
+<link linkend="requests:FreeCursor"><emphasis role='bold'>FreeCursor</emphasis></link>
+     1     95                              opcode
+     1                                     unused
+     2     2                               request length
+     4     CURSOR                          cursor
+
+<link linkend="requests:RecolorCursor"><emphasis role='bold'>RecolorCursor</emphasis></link>
+     1     96                              opcode
+     1                                     unused
+     2     5                               request length
+     4     CURSOR                          cursor
+     2     CARD16                          fore-red
+     2     CARD16                          fore-green
+     2     CARD16                          fore-blue
+     2     CARD16                          back-red
+     2     CARD16                          back-green
+     2     CARD16                          back-blue
+
+<link linkend="requests:QueryBestSize"><emphasis role='bold'>QueryBestSize</emphasis></link>
+     1     97                              opcode
+     1                                     class
+          0     Cursor
+          1     Tile
+          2     Stipple
+     2     3                               request length
+     4     DRAWABLE                        drawable
+     2     CARD16                          width
+     2     CARD16                          height
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     CARD16                          width
+     2     CARD16                          height
+     20                                    unused
+
+<link linkend="requests:QueryExtension"><emphasis role='bold'>QueryExtension</emphasis></link>
+     1     98                              opcode
+     1                                     unused
+     2     2+(n+p)/4                       request length
+     2     n                               length of name
+     2                                     unused
+     n     STRING8                         name
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     1     BOOL                            present
+     1     CARD8                           major-opcode
+     1     CARD8                           first-event
+     1     CARD8                           first-error
+     20                                    unused
+
+<link linkend="requests:ListExtensions"><emphasis role='bold'>ListExtensions</emphasis></link>
+     1     99                              opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1     CARD8                           number of STRs in names
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     24                                    unused
+     n     LISTofSTR                       names
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ChangeKeyboardMapping"><emphasis role='bold'>ChangeKeyboardMapping</emphasis></link>
+     1     100                             opcode
+     1     n                               keycode-count
+     2     2+nm                            request length
+     1     KEYCODE                         first-keycode
+     1     m                               keysyms-per-keycode
+     2                                     unused
+     4nm     LISTofKEYSYM                  keysyms
+
+<link linkend="requests:GetKeyboardMapping"><emphasis role='bold'>GetKeyboardMapping</emphasis></link>
+     1     101                             opcode
+     1                                     unused
+     2     2                               request length
+     1     KEYCODE                         first-keycode
+     1     m                               count
+     2                                     unused
+
+▶
+     1     1                               Reply
+     1     n                               keysyms-per-keycode
+     2     CARD16                          sequence number
+     4     nm                              reply length (m = count field
+                                           from the request)
+     24                                    unused
+     4nm     LISTofKEYSYM                  keysyms
+
+<link linkend="requests:ChangeKeyboardControl"><emphasis role='bold'>ChangeKeyboardControl</emphasis></link>
+     1     102                             opcode
+     1                                     unused
+     2     2+n                             request length
+     4     BITMASK                         value-mask (has n bits set to 1)
+          #x0001     key-click-percent
+          #x0002     bell-percent
+          #x0004     bell-pitch
+          #x0008     bell-duration
+          #x0010     led
+          #x0020     led-mode
+          #x0040     key
+          #x0080     auto-repeat-mode
+     4n     LISTofVALUE                    value-list
+
+  VALUEs
+     1     INT8                            key-click-percent
+     1     INT8                            bell-percent
+     2     INT16                           bell-pitch
+     2     INT16                           bell-duration
+     1     CARD8                           led
+     1                                     led-mode
+          0     Off
+          1     On
+     1     KEYCODE                         key
+     1                                     auto-repeat-mode
+          0     Off
+          1     On
+          2     Default
+
+<link linkend="requests:GetKeyboardControl"><emphasis role='bold'>GetKeyboardControl</emphasis></link>
+     1     103                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     global-auto-repeat
+          0     Off
+          1     On
+     2     CARD16                          sequence number
+     4     5                               reply length
+     4     CARD32                          led-mask
+     1     CARD8                           key-click-percent
+     1     CARD8                           bell-percent
+     2     CARD16                          bell-pitch
+     2     CARD16                          bell-duration
+     2                                     unused
+     32     LISTofCARD8                    auto-repeats
+
+<link linkend="requests:Bell"><emphasis role='bold'>Bell</emphasis></link>
+     1     104                             opcode
+     1     INT8                            percent
+     2     1                               request length
+
+<link linkend="requests:ChangePointerControl"><emphasis role='bold'>ChangePointerControl</emphasis></link>
+     1     105                             opcode
+     1                                     unused
+     2     3                               request length
+     2     INT16                           acceleration-numerator
+     2     INT16                           acceleration-denominator
+     2     INT16                           threshold
+     1     BOOL                            do-acceleration
+     1     BOOL                            do-threshold
+
+<link linkend="requests:GetPointerControl"><emphasis role='bold'>GetPointerControl</emphasis></link>
+     1     106                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     CARD16                          acceleration-numerator
+     2     CARD16                          acceleration-denominator
+     2     CARD16                          threshold
+     18                                    unused
+
+<link linkend="requests:SetScreenSaver"><emphasis role='bold'>SetScreenSaver</emphasis></link>
+     1     107                             opcode
+     1                                     unused
+     2     3                               request length
+     2     INT16                           timeout
+     2     INT16                           interval
+     1                                     prefer-blanking
+          0     No
+          1     Yes
+          2     Default
+     1                                     allow-exposures
+          0     No
+          1     Yes
+          2     Default
+     2                                     unused
+
+<link linkend="requests:GetScreenSaver"><emphasis role='bold'>GetScreenSaver</emphasis></link>
+     1     108                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     unused
+     2     CARD16                          sequence number
+     4     0                               reply length
+     2     CARD16                          timeout
+     2     CARD16                          interval
+     1                                     prefer-blanking
+          0     No
+          1     Yes
+     1                                     allow-exposures
+          0     No
+          1     Yes
+     18                                    unused
+
+<link linkend="requests:ChangeHosts"><emphasis role='bold'>ChangeHosts</emphasis></link>
+     1     109                             opcode
+     1                                     mode
+          0     Insert
+          1     Delete
+     2     2+(n+p)/4                       request length
+     1                                     family
+          0     Internet
+          1     DECnet
+          2     Chaos
+     1                                     unused
+     2     n                               length of address
+     n     LISTofCARD8                     address
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:ListHosts"><emphasis role='bold'>ListHosts</emphasis></link>
+     1     110                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1                                     mode
+          0     Disabled
+          1     Enabled
+     2     CARD16                          sequence number
+     4     n/4                             reply length
+     2     CARD16                          number of HOSTs in hosts
+     22                                    unused
+     n     LISTofHOST                      hosts (n always a multiple of 4)
+
+<link linkend="requests:SetAccessControl"><emphasis role='bold'>SetAccessControl</emphasis></link>
+     1     111                             opcode
+     1                                     mode
+          0     Disable
+          1     Enable
+     2     1                               request length
+
+<link linkend="requests:SetCloseDownMode"><emphasis role='bold'>SetCloseDownMode</emphasis></link>
+     1     112                             opcode
+     1                                     mode
+          0     Destroy
+          1     RetainPermanent
+          2     RetainTemporary
+     2     1                               request length
+
+<link linkend="requests:KillClient"><emphasis role='bold'>KillClient</emphasis></link>
+     1     113                             opcode
+     1                                     unused
+     2     2                               request length
+     4     CARD32                          resource
+          0     AllTemporary
+
+<link linkend="requests:RotateProperties"><emphasis role='bold'>RotateProperties</emphasis></link>
+     1     114                             opcode
+     1                                     unused
+     2     3+n                             request length
+     4     WINDOW                          window
+     2     n                               number of properties
+     2     INT16                           delta
+     4n    LISTofATOM                      properties
+
+<link linkend="requests:ForceScreenSaver"><emphasis role='bold'>ForceScreenSaver</emphasis></link>
+     1     115                             opcode
+     1                                     mode
+          0     Reset
+          1     Activate
+     2     1                               request length
+
+<link linkend="requests:SetPointerMapping"><emphasis role='bold'>SetPointerMapping</emphasis></link>
+     1     116                             opcode
+     1     n                               length of map
+     2     1+(n+p)/4                       request length
+     n     LISTofCARD8                     map
+     p                                     unused, p=pad(n)
+
+▶
+     1     1                               Reply
+     1                                     status
+          0     Success
+          1     Busy
+     2     CARD16                          sequence number
+     4     0                               reply length
+     24                                    unused
+
+<link linkend="requests:GetPointerMapping"><emphasis role='bold'>GetPointerMapping</emphasis></link>
+     1     117                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1     n                               length of map
+     2     CARD16                          sequence number
+     4     (n+p)/4                         reply length
+     24                                    unused
+     n     LISTofCARD8                     map
+     p                                     unused, p=pad(n)
+
+<link linkend="requests:SetModifierMapping"><emphasis role='bold'>SetModifierMapping</emphasis></link>
+     1     118                             opcode
+     1     n                               keycodes-per-modifier
+     2     1+2n                            request length
+     8n    LISTofKEYCODE                   keycodes
+
+▶
+     1     1                               Reply
+     1                                     status
+          0     Success
+          1     Busy
+          2     Failed
+     2     CARD16                          sequence number
+     4     0                               reply length
+     24                                    unused
+
+<link linkend="requests:GetModifierMapping"><emphasis role='bold'>GetModifierMapping</emphasis></link>
+     1     119                             opcode
+     1                                     unused
+     2     1                               request length
+
+▶
+     1     1                               Reply
+     1     n                               keycodes-per-modifier
+     2     CARD16                          sequence number
+     4     2n                              reply length
+     24                                    unused
+     8n     LISTofKEYCODE                  keycodes
+
+<link linkend="requests:NoOperation"><emphasis role='bold'>NoOperation</emphasis></link>
+     1     127                             opcode
+     1                                     unused
+     2     1+n                             request length
+     4n                                    unused
+</literallayout>
+</sect1>
+
+<sect1 id='Encoding::Events'>
+<title>Events</title>
+<indexterm zone="Encoding::Events"><primary>Event</primary><secondary>encoding</secondary></indexterm>
+
+<literallayout class="monospaced">
+<link linkend="events:KeyPress"><emphasis role='bold'>KeyPress</emphasis></link>
+     1     2                               code
+     1     KEYCODE                         detail
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1     BOOL                            same-screen
+     1                                     unused
+
+<link linkend="events:KeyRelease"><emphasis role='bold'>KeyRelease</emphasis></link>
+     1     3                               code
+     1     KEYCODE                         detail
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1     BOOL                            same-screen
+     1                                     unused
+
+<link linkend="events:ButtonPress"><emphasis role='bold'>ButtonPress</emphasis></link>
+     1     4                               code
+     1     BUTTON                          detail
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1     BOOL                            same-screen
+     1                                     unused
+
+<link linkend="events:ButtonRelease"><emphasis role='bold'>ButtonRelease</emphasis></link>
+     1     5                               code
+     1     BUTTON                          detail
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1     BOOL                            same-screen
+     1                                     unused
+
+<link linkend="events:MotionNotify"><emphasis role='bold'>MotionNotify</emphasis></link>
+     1     6                               code
+     1                                     detail
+          0     Normal
+          1     Hint
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+           0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1     BOOL                            same-screen
+     1                                     unused
+
+<link linkend="events:EnterNotify"><emphasis role='bold'>EnterNotify</emphasis></link>
+     1     7                               code
+     1                                     detail
+          0     Ancestor
+          1     Virtual
+          2     Inferior
+          3     Nonlinear
+          4     NonlinearVirtual
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1                                     mode
+          0     Normal
+          1     Grab
+          2     Ungrab
+     1                                     same-screen, focus
+          #x01     focus (1 is True, 0 is False)
+          #x02     same-screen (1 is True, 0 is False)
+          #xFC     unused
+
+<link linkend="events:LeaveNotify"><emphasis role='bold'>LeaveNotify</emphasis></link>
+     1     8                               code
+     1                                     detail
+          0     Ancestor
+          1     Virtual
+          2     Inferior
+          3     Nonlinear
+          4     NonlinearVirtual
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          root
+     4     WINDOW                          event
+     4     WINDOW                          child
+          0     None
+     2     INT16                           root-x
+     2     INT16                           root-y
+     2     INT16                           event-x
+     2     INT16                           event-y
+     2     SETofKEYBUTMASK                 state
+     1                                     mode
+          0     Normal
+          1     Grab
+          2     Ungrab
+     1                                     same-screen, focus
+          #x01     focus (1 is True, 0 is False)
+          #x02     same-screen (1 is True, 0 is False)
+          #xFC     unused
+
+<link linkend="events:FocusIn"><emphasis role='bold'>FocusIn</emphasis></link>
+     1     9                               code
+     1                                     detail
+          0     Ancestor
+          1     Virtual
+          2     Inferior
+          3     Nonlinear
+          4     NonlinearVirtual
+          5     Pointer
+          6     PointerRoot
+          7     None
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     1                                     mode
+          0     Normal
+          1     Grab
+          2     Ungrab
+          3     WhileGrabbed
+     23                                    unused
+
+<link linkend="events:FocusOut"><emphasis role='bold'>FocusOut</emphasis></link>
+     1     10                              code
+     1                                     detail
+          0     Ancestor
+          1     Virtual
+          2     Inferior
+          3     Nonlinear
+          4     NonlinearVirtual
+          5     Pointer
+          6     PointerRoot
+          7     None
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     1                                     mode
+          0     Normal
+          1     Grab
+          2     Ungrab
+          3     WhileGrabbed
+     23                                    unused
+
+<link linkend="events:KeymapNotify"><emphasis role='bold'>KeymapNotify</emphasis></link>
+     1     11                              code
+     31    LISTofCARD8                     keys (byte for keycodes 0-7 is
+                                           omitted)
+
+<link linkend="events:Expose"><emphasis role='bold'>Expose</emphasis></link>
+     1     12                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     2     CARD16                          x
+     2     CARD16                          y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          count
+     14                                    unused
+
+<link linkend="events:GraphicsExposure"><emphasis role='bold'>GraphicsExposure</emphasis></link>
+     1     13                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     DRAWABLE                        drawable
+     2     CARD16                          x
+     2     CARD16                          y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          minor-opcode
+     2     CARD16                          count
+     1     CARD8                           major-opcode
+     11                                    unused
+
+<link linkend="events:NoExposure"><emphasis role='bold'>NoExposure</emphasis></link>
+     1     14                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     DRAWABLE                        drawable
+     2     CARD16                          minor-opcode
+     1     CARD8                           major-opcode
+     21                                    unused
+
+<link linkend="events:VisibilityNotify"><emphasis role='bold'>VisibilityNotify</emphasis></link>
+     1     15                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     1                                     state
+          0     Unobscured
+          1     PartiallyObscured
+          2     FullyObscured
+     23                                    unused
+
+<link linkend="events:CreateNotify"><emphasis role='bold'>CreateNotify</emphasis></link>
+     1     16                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          parent
+     4     WINDOW                          window
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     1     BOOL                            override-redirect
+     9                                     unused
+
+<link linkend="events:DestroyNotify"><emphasis role='bold'>DestroyNotify</emphasis></link>
+     1     17                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     20                                    unused
+
+<link linkend="events:UnmapNotify"><emphasis role='bold'>UnmapNotify</emphasis></link>
+     1     18                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     1     BOOL                            from-configure
+     19                                    unused
+
+<link linkend="events:MapNotify"><emphasis role='bold'>MapNotify</emphasis></link>
+     1     19                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     1     BOOL                            override-redirect
+     19                                    unused
+
+<link linkend="events:MapRequest"><emphasis role='bold'>MapRequest</emphasis></link>
+     1     20                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          parent
+     4     WINDOW                          window
+     20                                    unused
+
+<link linkend="events:ReparentNotify"><emphasis role='bold'>ReparentNotify</emphasis></link>
+     1     21                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     4     WINDOW                          parent
+     2     INT16                           x
+     2     INT16                           y
+     1     BOOL                            override-redirect
+     11                                    unused
+
+<link linkend="events:ConfigureNotify"><emphasis role='bold'>ConfigureNotify</emphasis></link>
+     1     22                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     4     WINDOW                          above-sibling
+          0     None
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     1     BOOL                            override-redirect
+     5                                     unused
+
+<link linkend="events:ConfigureRequest"><emphasis role='bold'>ConfigureRequest</emphasis></link>
+     1     23                              code
+     1                                     stack-mode
+          0     Above
+          1     Below
+          2     TopIf
+          3     BottomIf
+          4     Opposite
+     2     CARD16                          sequence number
+     4     WINDOW                          parent
+     4     WINDOW                          window
+     4     WINDOW                          sibling
+          0     None
+     2     INT16                           x
+     2     INT16                           y
+     2     CARD16                          width
+     2     CARD16                          height
+     2     CARD16                          border-width
+     2     BITMASK                         value-mask
+          #x0001     x
+          #x0002     y
+          #x0004     width
+          #x0008     height
+          #x0010     border-width
+          #x0020     sibling
+          #x0040     stack-mode
+     4                                     unused
+
+<link linkend="events:GravityNotify"><emphasis role='bold'>GravityNotify</emphasis></link>
+     1     24                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     2     INT16                           x
+     2     INT16                           y
+     16                                    unused
+
+<link linkend="events:ResizeRequest"><emphasis role='bold'>ResizeRequest</emphasis></link>
+     1     25                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     2     CARD16                          width
+     2     CARD16                          height
+     20                                    unused
+
+<link linkend="events:CirculateNotify"><emphasis role='bold'>CirculateNotify</emphasis></link>
+     1     26                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          event
+     4     WINDOW                          window
+     4     WINDOW                          unused
+     1                                     place
+          0     Top
+          1     Bottom
+     15                                    unused
+
+<link linkend="events:CirculateRequest"><emphasis role='bold'>CirculateRequest</emphasis></link>
+     1     27                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          parent
+     4     WINDOW                          window
+     4                                     unused
+     1                                     place
+          0     Top
+          1     Bottom
+     15                                    unused
+
+<link linkend="events:PropertyNotify"><emphasis role='bold'>PropertyNotify</emphasis></link>
+     1     28                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     4     ATOM                            atom
+     4     TIMESTAMP                       time
+     1                                     state
+          0     NewValue
+          1     Deleted
+     15                                    unused
+
+<link linkend="events:SelectionClear"><emphasis role='bold'>SelectionClear</emphasis></link>
+     1     29                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+     4     WINDOW                          owner
+     4     ATOM                            selection
+     16                                    unused
+
+<link linkend="events:SelectionRequest"><emphasis role='bold'>SelectionRequest</emphasis></link>
+     1     30                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+          0     CurrentTime
+     4     WINDOW                          owner
+     4     WINDOW                          requestor
+     4     ATOM                            selection
+     4     ATOM                            target
+     4     ATOM                            property
+          0     None
+     4                                     unused
+
+<link linkend="events:SelectionNotify"><emphasis role='bold'>SelectionNotify</emphasis></link>
+     1     31                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     TIMESTAMP                       time
+          0     CurrentTime
+     4     WINDOW                          requestor
+     4     ATOM                            selection
+     4     ATOM                            target
+     4     ATOM                            property
+          0     None
+     8                                     unused
+
+<link linkend="events:ColormapNotify"><emphasis role='bold'>ColormapNotify</emphasis></link>
+     1     32                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     4     COLORMAP                        colormap
+          0     None
+     1     BOOL                            new
+     1                                     state
+          0     Uninstalled
+          1     Installed
+     18                                    unused
+
+<link linkend="events:ClientMessage"><emphasis role='bold'>ClientMessage</emphasis></link>
+     1     33                              code
+     1     CARD8                           format
+     2     CARD16                          sequence number
+     4     WINDOW                          window
+     4     ATOM                            type
+     20                                    data
+
+<link linkend="events:MappingNotify"><emphasis role='bold'>MappingNotify</emphasis></link>
+     1     34                              code
+     1                                     unused
+     2     CARD16                          sequence number
+     1                                     request
+          0     Modifier
+          1     Keyboard
+          2     Pointer
+     1     KEYCODE                         first-keycode
+     1     CARD8                           count
+     25                                    unused
+</literallayout>
+
+</sect1>
+</appendix>

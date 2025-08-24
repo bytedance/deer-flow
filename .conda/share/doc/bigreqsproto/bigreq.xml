@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+                   "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+
+<!-- lifted from troff+ms+XMan by doclifter -->
+<book id="bigreq">
+
+<bookinfo>
+   <title>Big Requests Extension</title>
+   <subtitle>X Consortium Standard</subtitle>
+   <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+   <releaseinfo>Version 2.0</releaseinfo>
+   <authorgroup>
+      <author>
+         <firstname>Bob</firstname><surname>Scheifler</surname>
+         <affiliation><orgname>X Consortium</orgname></affiliation>
+      </author>
+   </authorgroup>
+   <copyright><year>1993</year><year>1994</year><holder>X Consortium</holder></copyright>
+
+<legalnotice>
+<para>Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the &ldquo;Software&rdquo;), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:</para>
+
+<para>The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.</para>
+
+<para>THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE X CONSORTIUM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</para>
+
+<para>Except as contained in this notice, the name of the X Consortium shall not be used in advertising or otherwise to promote the sale, use or other dealings in this Software without prior written authorization from the X Consortium.</para>
+
+<para>X Window System is a trademark of The Open Group.</para>
+</legalnotice>
+
+</bookinfo>
+
+<chapter id='Overview'>
+<title>Overview</title>
+
+<para>This extension enables the use of protocol requests that exceed 262140 bytes in length.</para>
+
+<para>The core protocol restricts the maximum length of a protocol request to 262140 bytes, in that it uses a 16-bit length field specifying the number of 4-byte units in the request.  This is a problem in the core protocol when joining large numbers of lines (<symbol role='Pn'>PolyLine</symbol>) or arcs (<symbol role='Pn'>PolyArc</symbol>), since these requests cannot be broken up into smaller requests without disturbing the rendering of the join points.  It is also much more of a problem for protocol extensions, such as the PEX extension for 3D graphics and the XIE extension for imaging, that need to send long data lists in output commands.</para>
+
+<para>This extension defines a mechanism for extending the length field beyond 16 bits.  If the normal 16-bit length field of the protocol request is zero, then an additional 32-bit field containing the actual length (in 4-byte units) is inserted into the request, immediately following the 16-bit length field.</para>
+
+<para>For example, a normal <function>PolyLine</function> encoding is:</para>
+
+<informaltable id='PolyLine' frame='none'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='4' align='left' colsep='0' rowsep='0'>
+    <colspec colname='c1' colwidth='1.0*'/>
+    <colspec colname='c2' colwidth='3.0*'/>
+    <colspec colname='c3' colwidth='2.0*'/>
+    <colspec colname='c4' colwidth='11.0*'/>
+    <thead>
+      <row>
+        <entry namest="c1" nameend="c4"><function>PolyLine</function></entry>
+      </row>
+    </thead>
+    <tbody>
+      <row>
+        <entry>1</entry>
+        <entry>65</entry>
+        <entry></entry>
+        <entry>opcode</entry>
+      </row>
+      <row>
+        <entry>1</entry>
+        <entry></entry>
+        <entry></entry>
+        <entry>coordinate-mode</entry>
+      </row>
+      <row>
+        <entry></entry>
+        <entry>0</entry>
+        <entry>Origin</entry>
+        <entry></entry>
+      </row>
+      <row>
+        <entry></entry>
+        <entry>1</entry>
+        <entry>Previous</entry>
+        <entry></entry>
+      </row>
+      <row>
+        <entry>2</entry>
+        <entry>3+n</entry>
+        <entry></entry>
+        <entry></entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>DRAWABLE</entry>
+        <entry></entry>
+        <entry>drawable</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>GCONTEXT</entry>
+        <entry></entry>
+        <entry>gc</entry>
+      </row>
+      <row>
+        <entry>4n</entry>
+        <entry>LISTofPOINT</entry>
+        <entry></entry>
+        <entry>points</entry>
+      </row>
+     </tbody>
+  </tgroup>
+</informaltable>
+
+<para>An extended-length <function>PolyLine</function> encoding is:</para>
+
+<informaltable frame='none'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='4' align='left' colsep='0' rowsep='0'>
+    <colspec colname='c1' colwidth='1.0*'/>
+    <colspec colname='c2' colwidth='3.0*'/>
+    <colspec colname='c3' colwidth='2.0*'/>
+    <colspec colname='c4' colwidth='11.0*'/>
+    <thead>
+      <row>
+        <entry namest="c1" nameend="c4"><function>PolyLine</function></entry>
+      </row>
+    </thead>
+    <tbody>
+      <row>
+        <entry>1</entry>
+        <entry>65</entry>
+        <entry></entry>
+        <entry>opcode</entry>
+      </row>
+      <row>
+        <entry>1</entry>
+        <entry></entry>
+        <entry></entry>
+        <entry>coordinate-mode</entry>
+      </row>
+      <row>
+        <entry></entry>
+        <entry>0</entry>
+        <entry>Origin</entry>
+        <entry></entry>
+      </row>
+      <row>
+        <entry></entry>
+        <entry>1</entry>
+        <entry>Previous</entry>
+        <entry></entry>
+      </row>
+      <row>
+        <entry>2</entry>
+        <entry>0</entry>
+        <entry></entry>
+        <entry>extended length flag</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>4+n</entry>
+        <entry></entry>
+        <entry>request length</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>DRAWABLE</entry>
+        <entry></entry>
+        <entry>drawable</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>GCONTEXT</entry>
+        <entry></entry>
+        <entry>gc</entry>
+      </row>
+      <row>
+        <entry>4n</entry>
+        <entry>LISTofPOINT</entry>
+        <entry></entry>
+        <entry>points</entry>
+      </row>
+     </tbody>
+  </tgroup>
+</informaltable>
+
+<para>Extended-length protocol encodings, once enabled, can be used on all protocol requests, including all extensions.</para>
+</chapter>
+
+<chapter id='Requests'>
+<title>Requests</title>
+
+<para><function>BigReqEnable</function></para>
+
+<para>   =&gt;</para>
+
+<para><emphasis remap='I'>maximum-request-length</emphasis>: CARD32</para>
+
+<para>This request enables extended-length protocol requests for the requesting client.  It also returns the maximum length of a request, in 4-byte units, that can be used in extended-length protocol requests.  This value will always be greater than the maximum-request-length returned in the connection setup information.</para>
+</chapter>
+
+<chapter id='Events_and_Errors'>
+<title>Events and Errors</title>
+
+<para>No new events or errors are defined by this extension.</para>
+</chapter>
+
+<chapter id='Encoding'>
+<title>Encoding</title>
+
+<para>Please refer to the X11 Protocol Encoding document as this document uses conventions established there.</para>
+
+<para>The name of this extension is &ldquo;BIG-REQUESTS&rdquo;.</para>
+
+<informaltable frame='none'>
+  <?dbfo keep-together="always" ?>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+    <colspec colname='c1' colwidth='1.0*'/>
+    <colspec colname='c2' colwidth='2.0*'/>
+    <colspec colname='c3' colwidth='15.0*'/>
+    <thead>
+      <row>
+        <entry namest="c1" nameend="c3">BigReqEnable</entry>
+      </row>
+    </thead>
+    <tbody>
+      <row>
+        <entry>1</entry>
+        <entry>Card8</entry>
+        <entry>opcode</entry>
+      </row>
+      <row>
+        <entry>1</entry>
+        <entry>0</entry>
+        <entry>bigreq opcode</entry>
+      </row>
+      <row>
+        <entry>2</entry>
+        <entry>1</entry>
+        <entry>request length</entry>
+      </row>
+     </tbody>
+  </tgroup>
+  <tgroup cols='3' align='left' colsep='0' rowsep='0'>
+    <colspec colname='c1' colwidth='1.0*'/>
+    <colspec colname='c2' colwidth='2.0*'/>
+    <colspec colname='c3' colwidth='15.0*'/>
+    <thead>
+      <row>
+        <entry namest="c1" nameend="c3">=&gt;</entry>
+      </row>
+    </thead>
+    <tbody>
+      <row>
+        <entry>1</entry>
+        <entry>1</entry>
+        <entry>Reply</entry>
+      </row>
+      <row>
+        <entry>1</entry>
+        <entry></entry>
+        <entry>unused</entry>
+      </row>
+      <row>
+        <entry>2</entry>
+        <entry>CARD16</entry>
+        <entry>sequence number</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>0</entry>
+        <entry>length</entry>
+      </row>
+      <row>
+        <entry>4</entry>
+        <entry>CARD32</entry>
+        <entry>maximum-request-length</entry>
+      </row>
+      <row>
+        <entry>20</entry>
+        <entry></entry>
+        <entry>unused</entry>
+      </row>
+     </tbody>
+  </tgroup>
+</informaltable>
+
+</chapter>
+
+<chapter id='C_Language_Binding'>
+<title>C language binding</title>
+
+<para>It is desirable for core Xlib, and other extensions, to use this extension internally when necessary.  It is also desirable to make the use of this extension as transparent as possible to the X client.  For example, if enabling of the extension were delayed until the first time it was needed, an application that used
+<olink targetdoc='libX11' targetptr='XNextRequest'><function>XNextRequest</function></olink>
+to determine the sequence number of a request would no longer get the correct sequence number.  As such,
+<olink targetdoc='libX11' targetptr='XOpenDisplay'><function>XOpenDisplay</function></olink>
+will determine if the extension is supported by the server and, if it is, enable extended-length encodings.</para>
+
+<para>The core Xlib functions
+<olink targetdoc='libX11' targetptr='XDrawLines'><function>XDrawLines</function></olink>,
+<olink targetdoc='libX11' targetptr='XDrawArcs'><function>XDrawArcs</function></olink>,
+<olink targetdoc='libX11' targetptr='XFillPolygon'><function>XFillPolygon</function></olink>,
+<olink targetdoc='libX11' targetptr='XChangeProperty'><function>XChangeProperty</function></olink>,
+<olink targetdoc='libX11' targetptr='XSetClipRectangles'><function>XSetClipRectangles</function></olink>, and
+<olink targetdoc='libX11' targetptr='XSetRegion'><function>XSetRegion</function></olink>.
+are required to use extended-length encodings when necessary, if supported by the server.  Use of extended-length encodings in other core Xlib functions
+(<olink targetdoc='libX11' targetptr='XDrawPoints'><function>XDrawPoints</function></olink>,
+<olink targetdoc='libX11' targetptr='XDrawRectangles'><function>XDrawRectangles</function></olink>,
+<olink targetdoc='libX11' targetptr='XDrawSegments'><function>XDrawSegments</function></olink>.
+<olink targetdoc='libX11' targetptr='XFillArcs'><function>XFillArcs</function></olink>,
+<olink targetdoc='libX11' targetptr='XFillRectangles'><function>XFillRectangles</function></olink>,
+<olink targetdoc='libX11' targetptr='XPutImage'><function>XPutImage</function></olink>
+is permitted but not required; an Xlib implementation may choose to split the data across multiple smaller requests instead.</para>
+
+<para>To permit clients to know what the maximum-request-length for extended-length encodings is, the following function is added to Xlib:
+
+<funcsynopsis id='XExtendedMaxRequestSize'>
+<funcprototype>
+  <funcdef>long <function>XExtendedMaxRequestSize</function></funcdef>
+    <paramdef>Display <parameter> *display</parameter></paramdef>
+</funcprototype>
+</funcsynopsis>
+
+Returns zero (0) if the specified display does not support this extension, otherwise returns the maximum-request-length (in 4-byte units) supported by the server through the extended-length encoding.</para>
+</chapter>
+
+<chapter id='Acknowledgements'>
+<title>Acknowledgements</title>
+
+<para>Clive Feather (IXI) originated the extended-length encoding used in this extension proposal.</para>
+</chapter>
+</book>

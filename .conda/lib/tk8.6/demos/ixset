@@ -1,0 +1,328 @@
+#!/bin/sh
+# the next line restarts using wish \
+exec wish8.6 "$0" ${1+"$@"}
+
+# ixset --
+# A nice interface to "xset" to change X server settings
+#
+# History :
+#   91/11/23 : pda@masi.ibp.fr, jt@ratp.fr : design
+#   92/08/01 : pda@masi.ibp.fr : cleaning
+
+package require Tk
+
+#
+# Button actions
+#
+
+proc quit {} {
+    destroy .
+}
+
+proc ok {} {
+    writesettings
+    quit
+}
+
+proc cancel {} {
+    readsettings
+    dispsettings
+    .buttons.apply configure -state disabled
+    .buttons.cancel configure -state disabled
+}
+
+proc apply {} {
+    writesettings
+    .buttons.apply configure -state disabled
+    .buttons.cancel configure -state disabled
+}
+
+#
+# Read current settings
+#
+
+proc readsettings {} {
+    global kbdrep ;	set kbdrep	"on"
+    global kbdcli ;	set kbdcli	0
+    global bellvol ;	set bellvol	100
+    global bellpit ;	set bellpit	440
+    global belldur ;	set belldur	100
+    global mouseacc ;	set mouseacc	"3/1"
+    global mousethr ;	set mousethr	4
+    global screenbla ;	set screenbla	"blank"
+    global screentim ;	set screentim	600
+    global screencyc ;	set screencyc	600
+
+    set xfd [open "|xset q" r]
+    while {[gets $xfd line] >= 0} {
+	switch -- [lindex $line 0] {
+	    auto {
+		set rpt [lindex $line 1]
+		if {$rpt eq "repeat:"} {
+		    set kbdrep [lindex $line 2]
+		    set kbdcli [lindex $line 6]
+		}
+	    }
+	    bell {
+		set bellvol [lindex $line 2]
+		set bellpit [lindex $line 5]
+		set belldur [lindex $line 8]
+	    }
+	    acceleration: {
+		set mouseacc [lindex $line 1]
+		set mousethr [lindex $line 3]
+	    }
+	    prefer {
+		set bla [lindex $line 2]
+		set screenbla [expr {$bla eq "yes" ? "blank" : "noblank"}]
+	    }
+	    timeout: {
+		set screentim [lindex $line 1]
+		set screencyc [lindex $line 3]
+	    }
+	}
+    }
+    close $xfd
+
+    # puts stdout [format "Key REPEAT = %s\n" $kbdrep]
+    # puts stdout [format "Key CLICK  = %s\n" $kbdcli]
+    # puts stdout [format "Bell VOLUME = %s\n" $bellvol]
+    # puts stdout [format "Bell PITCH = %s\n" $bellpit]
+    # puts stdout [format "Bell DURATION = %s\n" $belldur]
+    # puts stdout [format "Mouse ACCELERATION = %s\n" $mouseacc]
+    # puts stdout [format "Mouse THRESHOLD = %s\n" $mousethr]
+    # puts stdout [format "Screen BLANCK = %s\n" $screenbla]
+    # puts stdout [format "Screen TIMEOUT = %s\n" $screentim]
+    # puts stdout [format "Screen CYCLE = %s\n" $screencyc]
+}
+
+
+#
+# Write settings into the X server
+#
+
+proc writesettings {} {
+    global kbdrep kbdcli  bellvol bellpit belldur
+    global mouseacc mousethr  screenbla screentim screencyc
+
+    set bellvol		[.bell.vol get]
+    set bellpit		[.bell.val.pit.entry get]
+    set belldur		[.bell.val.dur.entry get]
+
+    if {$kbdrep eq "on"} {
+	set kbdcli	[.kbd.val.cli get]
+    } else {
+	set kbdcli	"off"
+    }
+
+    set mouseacc	[.mouse.hor.acc.entry get]
+    set mousethr	[.mouse.hor.thr.entry get]
+
+    set screentim	[.screen.tim.entry get]
+    set screencyc	[.screen.cyc.entry get]
+
+    exec xset \
+	b $bellvol $bellpit $belldur \
+	c $kbdcli \
+	r $kbdrep \
+	m $mouseacc $mousethr \
+	s $screentim $screencyc \
+	s $screenbla
+}
+
+
+#
+# Sends all settings to the window
+#
+
+proc dispsettings {} {
+    global kbdrep kbdcli  bellvol bellpit belldur
+    global mouseacc mousethr  screenbla screentim screencyc
+
+    .bell.vol set $bellvol
+    .bell.val.pit.entry delete 0 end
+    .bell.val.pit.entry insert 0 $bellpit
+    .bell.val.dur.entry delete 0 end
+    .bell.val.dur.entry insert 0 $belldur
+
+    .kbd.val.onoff [expr {$kbdrep eq "on" ? "select" : "deselect"}]
+    .kbd.val.cli set $kbdcli
+
+    .mouse.hor.acc.entry delete 0 end
+    .mouse.hor.acc.entry insert 0 $mouseacc
+    .mouse.hor.thr.entry delete 0 end
+    .mouse.hor.thr.entry insert 0 $mousethr
+
+    .screen.blank [expr {$screenbla eq "blank" ? "select" : "deselect"}]
+    .screen.pat   [expr {$screenbla ne "blank" ? "select" : "deselect"}]
+    .screen.tim.entry delete 0 end
+    .screen.tim.entry insert 0 $screentim
+    .screen.cyc.entry delete 0 end
+    .screen.cyc.entry insert 0 $screencyc
+}
+
+
+#
+# Create all windows, and pack them
+#
+
+proc labelentry {path text length {range {}}} {
+    frame $path
+    label $path.label -text $text
+    if {[llength $range]} {
+	spinbox $path.entry -width $length -relief sunken \
+		-from [lindex $range 0] -to [lindex $range 1]
+    } else {
+	entry $path.entry -width $length -relief sunken
+    }
+    pack $path.label -side left
+    pack $path.entry -side right -expand y -fill x
+}
+
+proc createwindows {} {
+    #
+    # Buttons
+    #
+
+    frame .buttons
+    button .buttons.ok	   -default active -command ok     -text "Ok"
+    button .buttons.apply  -default normal -command apply  -text "Apply" \
+	    -state disabled
+    button .buttons.cancel -default normal -command cancel -text "Cancel" \
+	    -state disabled
+    button .buttons.quit   -default normal -command quit   -text "Quit"
+
+    pack .buttons.ok .buttons.apply .buttons.cancel .buttons.quit \
+	    -side left -expand yes -pady 5
+
+    bind . <Return> {.buttons.ok   flash; .buttons.ok   invoke}
+    bind . <Escape> {.buttons.quit flash; .buttons.quit invoke}
+    bind . <Button-1> {
+	if {![string match .buttons* %W]} {
+	    .buttons.apply  configure -state normal
+	    .buttons.cancel configure -state normal
+	}
+    }
+    bind . <Key> {
+	if {![string match .buttons* %W]} {
+	    switch -glob %K {
+		Return - Escape - Tab - *Shift* {}
+		default {
+		    .buttons.apply  configure -state normal
+		    .buttons.cancel configure -state normal
+		}
+	    }
+	}
+    }
+
+    #
+    # Bell settings
+    #
+
+    labelframe .bell -text "Bell Settings" -padx 1.5m -pady 1.5m
+    scale .bell.vol \
+	    -from 0 -to 100 -length 200 -tickinterval 20 \
+	    -label "Volume (%)" -orient horizontal
+
+    frame .bell.val
+    labelentry .bell.val.pit "Pitch (Hz)"    6 {25 20000}
+    labelentry .bell.val.dur "Duration (ms)" 6 {1 10000}
+    pack .bell.val.pit -side left -padx 5
+    pack .bell.val.dur -side right -padx 5
+    pack .bell.vol .bell.val -side top -expand yes
+
+    #
+    # Keyboard settings
+    #
+
+    labelframe .kbd -text "Keyboard Repeat Settings" -padx 1.5m -pady 1.5m
+
+    frame .kbd.val
+    checkbutton .kbd.val.onoff \
+	    -text "On" \
+	    -onvalue "on" -offvalue "off" -variable kbdrep \
+	    -relief flat
+    scale .kbd.val.cli \
+	    -from 0 -to 100 -length 200 -tickinterval 20 \
+	    -label "Click Volume (%)" -orient horizontal
+    pack .kbd.val.onoff -side left -fill x -expand yes -padx {0 1m}
+    pack .kbd.val.cli -side left -expand yes -fill x -padx {1m 0}
+
+    pack .kbd.val -side top -expand yes -pady 2 -fill x
+
+    #
+    # Mouse settings
+    #
+
+    labelframe .mouse -text "Mouse Settings" -padx 1.5m -pady 1.5m
+
+    frame .mouse.hor
+    labelentry .mouse.hor.acc "Acceleration" 5
+    labelentry .mouse.hor.thr "Threshold (pixels)" 3 {1 2000}
+
+    pack .mouse.hor.acc -side left -padx {0 1m}
+    pack .mouse.hor.thr -side right -padx {1m 0}
+
+    pack .mouse.hor -side top -expand yes
+
+    #
+    # Screen Saver settings
+    #
+
+    labelframe .screen -text "Screen-saver Settings" -padx 1.5m -pady 1.5m
+
+    radiobutton .screen.blank \
+	    -variable screenblank -text "Blank" -relief flat \
+	    -value "blank" -variable screenbla -anchor w
+    radiobutton .screen.pat \
+	    -variable screenblank -text "Pattern" -relief flat \
+	    -value "noblank" -variable screenbla -anchor w
+    labelentry .screen.tim "Timeout (s)" 5 {1 100000}
+    labelentry .screen.cyc "Cycle (s)" 5 {1 100000}
+
+    grid .screen.blank .screen.tim -sticky e
+    grid .screen.pat   .screen.cyc -sticky e
+    grid configure .screen.blank .screen.pat -sticky ew
+
+    #
+    # Main window
+    #
+
+    pack .buttons -side top -fill both
+    pack .bell .kbd .mouse .screen -side top -fill both -expand yes \
+	    -padx 1m -pady 1m
+
+    #
+    # Let the user resize our window
+    #
+    wm minsize . 10 10
+}
+
+##############################################################################
+# Main program
+
+#
+# Listen what "xset" tells us...
+#
+
+readsettings
+
+#
+# Create all windows
+#
+
+createwindows
+
+#
+# Write xset parameters
+#
+
+dispsettings
+
+#
+# Now, wait for user actions...
+#
+
+# Local Variables:
+# mode: tcl
+# End:

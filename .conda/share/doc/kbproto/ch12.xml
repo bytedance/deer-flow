@@ -1,0 +1,1024 @@
+
+<chapter id='Interactions_Between_XKB_and_the_Core_Protocol'>
+<title>Interactions Between XKB and the Core Protocol</title>
+
+<para>
+In addition to providing a number of new requests, XKB replaces or extends
+existing core protocol requests and events. Some aspects of the this extension,
+such as the ability to lock any key or modifier, are visible even to clients
+that are unaware of the XKB extension. Other capabilities, such as control of
+keysym selection on a per-key basis, are available only to XKB-aware clients.
+</para>
+
+
+<para>
+Though they do not have access to some advanced extension capabilities, the XKB
+extension includes compatibility mechanisms to ensure that non-XKB clients
+behave as expected and operate at least as well with an XKB-capable server as
+they do today.
+</para>
+
+
+<para>
+There are a few significant areas in which XKB state and mapping differences
+might be visible to XKB-unaware clients:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The core protocol uses a modifier to choose between two keyboard
+groups, while this extension provides explicit support for multiple groups.
+  </para>
+</listitem>
+<listitem>
+  <para>The order of the symbols associated with any given key by XKB might not
+match the ordering demanded by the core protocol.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+To minimize problems that might result from these differences, XKB includes
+ways to specify the correspondence between core protocol and XKB modifiers and
+symbols.
+</para>
+
+
+<para>
+This section describes the differences between the core X protocol’s notion
+of a keyboard mapping and XKB and explains the ways they can interact.
+</para>
+
+<sect1 id='Group_Compatibility_Map'>
+<title>Group Compatibility Map</title>
+
+<para>
+As described in <link linkend='Keyboard_State'>Keyboard
+State</link>, the current keyboard group is reported to XKB-aware clients in
+bits 13-14 of the state field of many core protocol events. XKB-unaware clients
+cannot interpret those bits, but they might use a keyboard modifier to
+implement support for a single keyboard group. To ensure that pre-XKB clients
+continue to work when XKB is present, XKB makes it possible to map an XKB state
+field, which includes both keyboard group and modifier state into a pre-XKB
+state field which contains only modifiers.
+</para>
+
+
+<para>
+A keyboard description includes one <emphasis>
+group compatibility map</emphasis>
+ per keyboard group (four in all). Each such map is a modifier definition (i.e.
+specifies both real and virtual modifiers) which specifies the modifiers to be
+set in the compatibility states when the corresponding keyboard group is
+active. Here are a few examples to illustrate the application of the group
+compatibility map:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='6' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='2.0*'/>
+<colspec colname='c3' colwidth='1.5*'/>
+<colspec colname='c4' colwidth='2.2*'/>
+<colspec colname='c5' colwidth='1.5*'/>
+<colspec colname='c6' colwidth='2.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Group</entry>
+    <entry>GroupCompat Map</entry>
+    <entry>Effective Modifiers</entry>
+    <entry> State for XKB Clients</entry>
+    <entry>Compatibility Modifiers</entry>
+    <entry>State for non-XKB Clients</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>1</entry>
+    <entry>Group1=None</entry>
+    <entry>Shift</entry>
+    <entry>x00xxxxx00000001</entry>
+    <entry>Shift</entry>
+    <entry>xxxxxxxx00000001</entry>
+  </row>
+  <row>
+    <entry>2</entry>
+    <entry>Group2=Mod3</entry>
+    <entry>None</entry>
+    <entry>x01xxxxx00000000</entry>
+    <entry>Mod3</entry>
+    <entry>xxxxxxxx00100000</entry>
+  </row>
+  <row>
+    <entry>3</entry>
+    <entry>Group3=Mod2</entry>
+    <entry>Shift</entry>
+    <entry>x10xxxxx00000001</entry>
+    <entry>Shift+Mod2</entry>
+    <entry>xxxxxxxx00010001</entry>
+  </row>
+  <row>
+    <entry>4</entry>
+    <entry>Group4=None</entry>
+    <entry>Control</entry>
+    <entry>x11xxxxx00000100</entry>
+    <entry>Control</entry>
+    <entry>xxxxxxxx00000100</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Note that non-XKB clients (i.e. clients that are linked with a version of the X
+library that does not support XKB) cannot detect the fact that <emphasis>
+Group4</emphasis>
+ is active in this example because the group compatibility map for <emphasis>
+Group4</emphasis>
+ does not specify any modifiers.
+</para>
+
+
+<sect2 id='Setting_a_Passive_Grab_for_an_XKB_State'>
+<title>Setting a Passive Grab for an XKB State</title>
+
+<para>
+The fact that the <emphasis>
+state</emphasis>
+ field of an event might look different when XKB is present can cause problems
+with passive grabs. Existing clients specify the modifiers they wish to grab
+using the rules defined by the core protocol, which use a normal modifier to
+indicate keyboard group. If we used an XKB state field, the high bits of the
+state field would be non-zero whenever the keyboard was in any group other than
+<emphasis>
+Group1</emphasis>
+, and none of the passive grabs set by clients could ever be triggered.
+</para>
+
+
+<para>
+To avoid this behavior, the X server normally uses the compatibility grab state
+to decide whether or not to activate a passive grab, even for XKB-aware
+clients. The group compatibility map attempts to encode the keyboard group in
+one or more modifiers of the compatibility state, so existing clients continue
+to work exactly the way they do today. By default, there is no way to directly
+specify a keyboard group in a <emphasis>
+Grabbed</emphasis>
+ or <emphasis>
+GrabButton</emphasis>
+ request, but groups can be specified indirectly by correctly adjusting the
+group compatibility map.
+</para>
+
+
+<para>
+Clients that wish to specify an XKB keyboard state, including a separate
+keyboard group, can set the <emphasis>
+GrabsUseXKBState</emphasis>
+ per-client flag which indicates that all subsequent key and button grabs from
+the requesting clients are specified using an XKB state.
+</para>
+
+
+<para>
+Whether the XKB or core state should be used to trigger a grab is determined by
+the setting of the <emphasis>
+GrabsUseXKBState</emphasis>
+ flag for the requesting client at the time the key or button is grabbed. There
+is no way to change the state to be used for a grab that is already registered
+or for grabs that are set by some other client.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='Changing_the_Keyboard_Mapping_Using_the_Core_Protocol'>
+<title>Changing the Keyboard Mapping Using the Core Protocol</title>
+
+<para>
+An XKB keyboard description includes a lot of information that is not present
+in the core protocol description of a keyboard. Whenever a client remaps the
+keyboard using core protocol requests, XKB examines the map to determine likely
+default values for the components that cannot be specified using the core
+protocol.
+</para>
+
+
+<para>
+Some aspects of this automatic mapping are configurable, and make it fairly
+easy to take advantage of many XKB features using existing tools like <emphasis>
+xmodmap</emphasis>
+, but much of the process of mapping a core keyboard description into an XKB
+description is designed to preserve compatible behavior for pre-XKB clients and
+cannot be redefined by the user. Clients or users that want behavior that
+cannot be described using this mapping should use XKB functions directly.
+</para>
+
+
+<sect2 id='Explicit_Keyboard_Mapping_Components'>
+<title>Explicit Keyboard Mapping Components</title>
+
+<para>
+This automatic remapping might accidentally replace definitions that were
+explicitly requested by an application, so the XKB keyboard description defines
+a set of <emphasis>
+explicit components</emphasis>
+ for each key; any components that are listed in the explicit components for a
+key are not changed by the automatic keyboard mapping. The explicit components
+field for a key can contain any combination of the following values:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Bit in Explicit Mask</entry>
+    <entry>Protects Against</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>ExplicitKeyType1</entry>
+    <entry>Automatic determination of the key type associated with <emphasis>
+Group1</emphasis>
+ (see <link linkend='Assigning_Types_To_Groups_of_Symbols_for_a_Key'>Assigning Types To Groups of
+Symbols for a Key</link>)</entry>
+  </row>
+  <row>
+    <entry>ExplicitKeyType2</entry>
+    <entry>Automatic determination of the key type associated with <emphasis>
+Group2 </emphasis>
+(see <link linkend='Assigning_Types_To_Groups_of_Symbols_for_a_Key'>Assigning Types To Groups of
+Symbols for a Key</link>)</entry>
+  </row>
+  <row>
+    <entry>ExplicitKeyType3</entry>
+    <entry>Automatic determination of the key type associated with <emphasis>
+Group3 </emphasis>
+(see <link linkend='Assigning_Types_To_Groups_of_Symbols_for_a_Key'>Assigning Types To Groups of
+Symbols for a Key</link>).</entry>
+  </row>
+  <row>
+    <entry>ExplicitKeyType4</entry>
+    <entry>Automatic determination of the key type associated with <emphasis>
+Group4 </emphasis>
+(see <link linkend='Assigning_Types_To_Groups_of_Symbols_for_a_Key'>Assigning Types To Groups of
+Symbols for a Key</link>).</entry>
+  </row>
+  <row>
+    <entry>ExplicitInterpret</entry>
+    <entry>Application of any of the fields of a symbol interpretation to the
+key in question (see <link linkend='Assigning_Actions_To_Keys'>Assigning
+Actions To Keys</link>).</entry>
+  </row>
+  <row>
+    <entry>ExplicitAutoRepeat</entry>
+    <entry>Automatic determination of autorepeat status for the key, as
+specified in a symbol interpretation (see <link linkend='Assigning_Actions_To_Keys'>Assigning Actions To
+Keys</link>).</entry>
+  </row>
+  <row>
+    <entry>ExplicitBehavior</entry>
+    <entry>Automatic assignment of the <emphasis>
+KB_Lock</emphasis>
+ behavior to the key, if the <emphasis>
+LockingKey</emphasis>
+ flag is set in a symbol interpretation (see <link linkend='Assigning_Actions_To_Keys'>Assigning Actions To
+Keys</link>).</entry>
+  </row>
+  <row>
+    <entry>ExplicitVModMap</entry>
+    <entry>Automatic determination of the virtual modifier map for the key
+based on the actions assigned to the key and the symbol interpretations which
+match the key (see <link linkend='Assigning_Actions_To_Keys'>Assigning
+Actions To Keys</link>).</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect2>
+<sect2 id='Assigning_Symbols_To_Groups'>
+<title>Assigning Symbols To Groups</title>
+
+<para>
+The first step in applying the changes specified by a core protocol <emphasis>
+ChangeKeyboardMapping</emphasis>
+ request to the XKB description of a keyboard is to determine the number of
+groups that are defined for the key and the width of each group. The XKB
+extension does not change key types in response to core protocol <emphasis>
+SetModifierMapping</emphasis>
+ requests, but it does choose key actions as described in <link linkend='Assigning_Actions_To_Keys'>Assigning Actions To Keys</link>.
+</para>
+
+
+<para>
+Determining the number of symbols required for each group is straightforward.
+If the key type for some group is not protected by the corresponding <emphasis>
+ExplicitKeyType</emphasis>
+ component, that group has two symbols. If any of the explicit components for
+the key include <emphasis>
+ExplicitKeyType3</emphasis>
+ or <emphasis>
+ExplicitKeyType4</emphasis>
+, the width of the key type currently assigned to that group determines the
+number of symbols required for the group in the core protocol keyboard
+description. The explicit type components for <emphasis>
+Group1</emphasis>
+ and <emphasis>
+Group2</emphasis>
+ behave similarly, but for compatibility reasons the first two groups must have
+at least two symbols in the core protocol symbol mapping. Even if an explicit
+type assigned to either of the first two keyboard groups has fewer than two
+symbols, XKB requires two symbols for it in the core keyboard description.
+</para>
+
+
+<para>
+If the core protocol request contains fewer symbols than XKB needs, XKB adds
+trailing <emphasis>
+NoSymbol</emphasis>
+ keysyms to the request to pad it to the required length. If the core protocol
+request includes more symbols than it needs, XKB truncates the list of keysyms
+to the appropriate length.
+</para>
+
+
+<para>
+Finally, XKB divides the symbols from the (possibly padded or truncated) list
+of symbols specified by the core protocol request among the four keyboard
+groups. In most cases, the symbols for each group are taken from the core
+protocol definition in sequence (i.e. the first pair of symbols is assigned to
+<emphasis>
+Group1</emphasis>
+, the second pair of symbols is assigned to <emphasis>
+Group2</emphasis>
+, and so forth). If either <emphasis>
+Group1</emphasis>
+ or <emphasis>
+Group2</emphasis>
+ has an explicitly defined key type with a width other than two, it gets a
+little more complicated.
+</para>
+
+
+<sect3 id='Assigning_Symbols_to_Groups_One_and_Two_with_Explicitly_Defined_Key_Types'>
+<title>Assigning Symbols to Groups One and Two with Explicitly Defined Key Types</title>
+
+<para>
+The server assigns the first four symbols from the expanded or truncated map to
+the symbol positions <emphasis>G1L1</emphasis> , <emphasis>G1L2</emphasis>,
+<emphasis>G2L1</emphasis> and <emphasis>G2L2</emphasis>, respectively. If the key
+type assigned to <emphasis>Group1</emphasis> reports more than two shift levels,
+the fifth and following symbols contain
+the extra keysyms for <emphasis>
+Group2</emphasis>
+. If the key type assigned to <emphasis>
+Group2</emphasis>
+ reports more than two shift levels, the extra symbols follow the symbols (if
+any) for <emphasis>
+Group1</emphasis>
+ in the core protocol list of symbols. Symbols for <emphasis>
+Group3</emphasis>
+ and <emphasis>
+Group4</emphasis>
+ are contiguous and follow the extra symbols, if any, for <emphasis>
+Group1</emphasis>
+ and <emphasis>
+Group2</emphasis>
+.
+</para>
+
+
+<para>
+For example, consider a key with a key type that returns three shift levels
+bound to each group. The symbols bound to the core protocol are assigned in
+sequence to the symbol positions:
+</para>
+
+<literallayout class='monospaced'>
+<emphasis>G1L1</emphasis>, <emphasis>G1L2</emphasis>, <emphasis>G2L1</emphasis>, <emphasis>G2L2</emphasis>, <emphasis>G1L3</emphasis>, <emphasis>G2L3</emphasis>, <emphasis>G3L1</emphasis>, <emphasis>G3L2</emphasis>, <emphasis>G3L3</emphasis>, <emphasis>G4L1</emphasis>, <emphasis>G4L2</emphasis>, and <emphasis>G4L3</emphasis>
+</literallayout>
+
+<para>
+For a key with a width one key type on group one, a width two key type on group
+two and a width three key type on group three, the symbols bound to the key by
+the core protocol are assigned to the following key positions:
+</para>
+
+<literallayout class='monospaced'>
+<emphasis>G1L1</emphasis>, (<emphasis>G1L2</emphasis>), <emphasis>G2L1</emphasis>, <emphasis>G2L2</emphasis>, <emphasis>G3L1</emphasis>, <emphasis>G3L2</emphasis>, <emphasis>G3L3</emphasis>
+</literallayout>
+
+<para>
+Note that the second and fourth symbols (positions <emphasis>
+G1L2 and G2L2</emphasis>
+) can never be generated if the key type associated with the group yields only
+one symbol. XKB accepts and ignores them in order to maintain compatibility
+with the core protocol.
+</para>
+
+
+</sect3>
+</sect2>
+<sect2 id='Assigning_Types_To_Groups_of_Symbols_for_a_Key'>
+<title>Assigning Types To Groups of Symbols for a Key</title>
+
+<para>
+Once the symbols specified by <emphasis>
+ChangeKeyboardMapping</emphasis>
+ have been assigned to the four keyboard groups for a key, the X server assigns
+a key type to each group on the key from a canonical list of key types. The
+first four key types in any keyboard map are reserved for these standard key
+types:
+</para>
+
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='2' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Key Type Name</entry>
+    <entry>Standard Definition</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry><emphasis>
+ONE_LEVEL</emphasis>
+</entry>
+    <entry>Describes keys that have exactly one symbol per group. Most special
+or function keys (such as <emphasis>
+Return</emphasis>
+) are <emphasis>
+ONE_LEVEL</emphasis>
+ keys. Any combination of modifiers yields level <emphasis>
+0</emphasis>
+. Index <emphasis>
+0</emphasis>
+ in any key symbol map specifies key type <emphasis>
+ONE_LEVEL</emphasis>
+.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+TWO_LEVEL</emphasis>
+</entry>
+    <entry>Describes non-keypad and non-alphabetic keys that have exactly two
+symbols per group. By default, the <emphasis>
+TWO_LEVEL</emphasis>
+ type yields column <emphasis>
+1</emphasis>
+ if the Shift modifier is set, column <emphasis>
+0</emphasis>
+ otherwise. Index <emphasis>
+1</emphasis>
+ in any key symbol map specifies key type <emphasis>
+TWO_LEVEL</emphasis>
+.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+ALPHABETIC</emphasis>
+</entry>
+    <entry>Describes alphabetic keys that have exactly two symbols per group.
+The default definition of the <emphasis>
+ALPHABETIC</emphasis>
+ type provides shift-cancels-caps behavior as described in <link linkend='Key_Types'>Key Types</link>. Index <emphasis>
+2</emphasis>
+ in any key symbol map specifies key type <emphasis>
+ALPHABETIC</emphasis>
+.</entry>
+  </row>
+  <row>
+    <entry><emphasis>
+KEYPAD</emphasis>
+</entry>
+    <entry>Describes numeric keypad keys with two symbols per group. Yields
+column <emphasis>
+1</emphasis>
+ if either of the <emphasis>
+Shift</emphasis>
+ modifier or the real modifier bound to the virtual modifier named <emphasis>
+NumLock</emphasis>
+ are set. Yields column <emphasis>
+0</emphasis>
+ if neither or both modifiers are set. Index <emphasis>
+3</emphasis>
+ in any key symbol map specifies key type <emphasis>
+KEYPAD</emphasis>
+.</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+<para>
+Users or applications may change these key types to get different default
+behavior (to make shift cancel caps lock, for example) but they must always
+have the specified number of symbols per group.
+</para>
+
+
+<para>
+Before assigning key types to groups, the X server expands any alphanumeric
+symbol definitions as follows:
+</para>
+
+
+<para>
+If the second symbol of either group is <emphasis>
+NoSymbol</emphasis>
+ and the first symbol of that group is an alphabetic keysym for which both
+lowercase and uppercase forms are defined, the X server treats the key as if
+the first element of the group were the lowercase form of the symbol and the
+second element were the uppercase form of the symbol. For the purposes of this
+expansion, XKB ignores the locale and uses the capitalization rules defined in
+<link linkend="default_symbol_transformations">Default Symbol Transformations</link>.
+</para>
+
+
+<para>
+For each keyboard group that does not have an explicit type definition, XKB
+chooses a key type from the canonical key types. If the second symbol assigned
+to a group is <emphasis>
+NoSymbol</emphasis>
+ (after alphabetic expansion), the server assigns key type <emphasis>
+ONE_LEVEL</emphasis>
+. If the group contains the lowercase and uppercase forms of a single glyph
+(after alphanumeric expansion), the server assigns key type <emphasis>
+ALPHABETIC</emphasis>
+. If either of the symbols in a group is a numeric keypad keysym (<emphasis>
+KP_*</emphasis>
+), the server assigns key type <emphasis>
+KEYPAD</emphasis>
+. Otherwise, it assigns key type <emphasis>
+TWO_LEVEL</emphasis>
+.
+</para>
+
+
+<para>
+Finally, XKB determines the number of groups of symbols that are actually
+defined for the key. Trailing empty groups (i.e. groups that have <emphasis>
+NoSymbol</emphasis>
+ in all symbol positions) are ignored.
+</para>
+
+
+<para>
+There are two last special cases for compatibility with the core protocol: If,
+after trailing empty groups are excluded, all of the groups of symbols bound to
+the key have identical type and symbol bindings, XKB assigns only one group to
+the key. If <emphasis>
+Group2</emphasis>
+ is empty and either of <emphasis>
+Group3</emphasis>
+ or <emphasis>
+Group4</emphasis>
+ are not, and if neither <emphasis>
+Group1</emphasis>
+ nor <emphasis>
+Group2</emphasis>
+ have explicit key types, XKB copies the symbols and key type from <emphasis>
+Group1</emphasis>
+ into <emphasis>
+Group2</emphasis>
+.
+</para>
+
+
+</sect2>
+<sect2 id='Assigning_Actions_To_Keys'>
+<title>Assigning Actions To Keys</title>
+
+<para>
+Once symbols have been divided into groups and key types chosen for the keys
+affected by a <emphasis>
+ChangeKeyboardMapping</emphasis>
+ request, XKB examines the symbols and modifier mapping for each changed key
+and assigns server actions where appropriate. XKB also automatically assigns
+server actions to changed keys if the client issues a core protocol <emphasis>
+SetModifierMapping</emphasis>
+ request, and does so optionally in response to <emphasis>
+XkbSetMap</emphasis>
+ and <emphasis>
+XkbSetCompatMap</emphasis>
+ requests.
+</para>
+
+
+<para>
+The compatibility map includes a list of <emphasis>
+symbol interpretations</emphasis>
+, which XKB compares to each symbol associated with any changed keys in turn,
+unless the <emphasis>
+ExplicitInterp</emphasis>
+ component is set for a key. Setting the <emphasis>
+ExplicitInterp</emphasis>
+ component prevents the application of symbol interpretations to that key.
+</para>
+
+
+<para>
+If the modifiers and keysym specified in a symbol interpretation match the
+modifier mapping and a symbol bound to a changed key that is not protected by
+<emphasis>
+ExplicitInterp</emphasis>
+, the server applies the symbol interpretation to the symbol position. The
+server considers all symbol interpretations which specify an explicit keysym
+before considering any that do not. The server uses the first interpretation
+which matches the given combination of keysym and modifier mapping; other
+matching interpretations are ignored.
+</para>
+
+
+<para>
+XKB uses four of the fields of a symbol interpretation to decide if it matches
+one of the symbols bound to some changed key:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The <emphasis>
+symbol</emphasis>
+ field is a keysym which matches if it has the value <emphasis>
+NoSymbol</emphasis>
+ or is identical to the symbol in question.
+  </para>
+</listitem>
+<listitem>
+  <para>The modifiers specified in the <emphasis>
+mods</emphasis>
+ field are compared to the modifiers affected by the key in question as
+indicated by <emphasis>
+match</emphasis>
+.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+match</emphasis>
+ field can specify any of the comparisons: <emphasis>
+NoneOf</emphasis>
+, <emphasis>
+AnyOfOrNone</emphasis>
+, <emphasis>
+AnyOf</emphasis>
+, <emphasis>
+AllOf</emphasis>
+ or <emphasis>
+Exactly</emphasis>
+.
+  </para>
+</listitem>
+<listitem>
+  <para>The <emphasis>
+levelOneOnly</emphasis>
+ setting, indicates that the interpretation in question should only use the
+modifiers bound to this key by the modifier mapping if the symbol that matches
+in level one of its group. Otherwise, if the symbol being considered is not in
+shift level one of its group, the server behaves as if the modifier map for the
+key were empty. Note that it is still possible for such an interpretation to
+apply to a symbol in a shift level other than one if it matches a key without
+modifiers; the <emphasis>
+levelOneOnly</emphasis>
+ flag only controls the way that matches are determined and that the key
+modifiers are applied when an interpretation does match.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+Applying a symbol interpretation can affect several aspects of the XKB
+definition of the key symbol mapping to which it is applied:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The <emphasis>
+action</emphasis>
+ specified in the symbol interpretation is bound to the symbol position; any
+key event which yields that symbol will also activate the new action.
+  </para>
+</listitem>
+<listitem>
+  <para>If the matching symbol is in position G1L1, the autorepeat behavior of
+the key is set from the <emphasis>
+autorepeat</emphasis>
+ field of the symbol interpretation. The <emphasis>
+ExplicitAutoRepeat</emphasis>
+ component protects the autorepeat status of a key from symbol interpretation
+initiated changes.
+  </para>
+</listitem>
+<listitem>
+  <para>If the symbol interpretation specifies an associated virtual modifier,
+that virtual modifier is added to the virtual modifier map for the key. The
+<emphasis>
+ExplicitVModMap</emphasis>
+ component guards the virtual modifier map for a key from automatic changes. If
+the <emphasis>
+levelOneOnly</emphasis>
+ flag is set for the interpretation, and the symbol in question is not in
+position G1L1, the virtual modifier map is not updated.
+  </para>
+</listitem>
+<listitem>
+  <para>If the matching symbol is in position G1L1, and the <emphasis>
+locking key</emphasis>
+ field is set in the symbol interpretation, the behavior of the key is changed
+to <emphasis>
+KB_Lock</emphasis>
+ (see <link linkend='Key_Behavior'>Key Behavior</link>). The
+<emphasis>
+ExplicitBehavior</emphasis>
+ component prevents this change.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+If no interpretations match a given symbol or key, the server uses: <emphasis>
+SA_NoAction</emphasis>
+, autorepeat enabled, non-locking key. with no virtual modifiers.
+</para>
+
+
+<para>
+If all of the actions computed for a key are <emphasis>
+SA_NoAction</emphasis>
+, the server assigns an length zero list of actions to the key.
+</para>
+
+
+<para>
+If the core protocol modifier mapping is changed, the server regenerates
+actions for the affected keys. The <emphasis>
+XkbSetMap</emphasis>
+ and <emphasis>
+XkbSetCompatMap</emphasis>
+ requests can also cause actions for some or all keyboard keys to be recomputed.
+</para>
+
+
+</sect2>
+<sect2 id='Updating_Everything_Else'>
+<title>Updating Everything Else</title>
+
+<para>
+Changes to the symbols or modifier mapping can affect the bindings of virtual
+modifiers. If any virtual modifiers change, XKB updates all of its data
+structures to reflect the change. Applying virtual modifier changes to the
+keyboard mapping night result in changes to types, the group compatibility map,
+indicator maps, internal modifiers or ignore locks modifiers.
+</para>
+
+
+</sect2>
+</sect1>
+<sect1 id='Effects_of_XKB_on_Core_Protocol_Events'>
+<title>Effects of XKB on Core Protocol Events</title>
+
+<para>
+After applying server actions which modify the base, latched or locked modifier
+or group state of the keyboard, the X server recomputes the effective group and
+state. Several components of the keyboard state are reported to XKB-aware
+clients depending on context (see <link linkend='Keyboard_State'>
+Keyboard State</link> for a detailed description of each of the keyboard state
+components):
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>The effective modifier state is reported in <emphasis>
+XkbStateNotify</emphasis>
+ events and in response to <emphasis>
+XkbGetState</emphasis>
+ requests.
+  </para>
+</listitem>
+<listitem>
+  <para>The symbol lookup state is reported to XKB-aware clients in the state
+field of core protocol and input extension key press and release events that do
+not activate passive grabs. Unless the <emphasis>
+LookupStateWhenGrabbed</emphasis>
+ per-client flag is set, the lookup state is only reported in these events when
+no grabs are active.
+  </para>
+</listitem>
+<listitem>
+  <para>The grab state is reported to XKB-aware clients in the state field of
+all core protocol events that report keyboard state, except <emphasis>
+KeyPress</emphasis>
+ and <emphasis>
+KeyRelease</emphasis>
+ events that do not activate passive grabs.
+  </para>
+</listitem>
+<listitem>
+  <para>The effective group is the sum of the base, latched and locked keyboard
+groups. An out of range effective group is wrapped or truncated into range
+according to the setting of the <emphasis>
+groupsWrap</emphasis>
+ flag for the keyboard.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+The server reports compatibility states to any clients that have not issued a
+successful <emphasis>
+XkbUseExtension</emphasis>
+ request. The server computes the compatibility symbol lookup state and the
+compatibility effective grab state by applying the compatibility modifier map
+to the corresponding computed XKB states.
+</para>
+
+
+<para>
+The compatibility symbol lookup state is reported to non-XKB clients whenever
+an XKB-aware client would receive the XKB lookup state. The compatibility grab
+state is reported to XKB-unaware clients whenever an XKB client would receive
+the XKB grab state.
+</para>
+
+
+<para>
+If the <emphasis>
+GrabsUseXKBState</emphasis>
+ per-client option is not set, even XKB-aware clients receive the compatibility
+grab state in events that trigger or terminate passive grabs. If this flag is
+not set, XKB clients also receive the compatibility grab or lookup state
+whenever any keyboard grab is active.
+</para>
+
+
+<para>
+If the <emphasis>
+LookupStateWhenGrabbed</emphasis>
+ per-client option is set, clients receive either the XKB or compatibility
+lookup state when the keyboard is grabbed, otherwise they receive either the
+XKB or compatibility grab state. All non-XKB clients receive the compatibility
+form of the appropriate state component; the form that is sent to an XKB-aware
+client depends on the setting of the <emphasis>
+GrabsUseXKBState</emphasis>
+ option for that client.
+</para>
+
+
+</sect1>
+<sect1 id='Effect_of_XKB_on_Core_Protocol_Requests'>
+<title>Effect of XKB on Core Protocol Requests</title>
+
+<para>
+Whenever a client updates the keyboard mapping using a core protocol request,
+the server saves the requested core protocol keyboard mapping and reports it to
+any clients that issue <emphasis>
+GetKeyboardMapping</emphasis>
+ or <emphasis>
+GetModifierMapping</emphasis>
+ requests. Whenever a client updates the keyboard mapping using XKB requests,
+the server discards the affected portion of the stored core keyboard
+description and regenerates it based on the XKB description of the keyboard.
+</para>
+
+
+<para>
+The symbols associated with the XKB keyboard description appear in the order:
+</para>
+
+<literallayout class='monospaced'>
+G1L1 G1L2 G2L1 G2L2 G1L3-n G2L3-n G3L* G4L*
+</literallayout>
+
+<para>
+If the type associated with <emphasis>
+Group1</emphasis>
+ is width one, the second symbol is <emphasis>
+NoSymbol</emphasis>
+; if the type associated with <emphasis>
+Group2</emphasis>
+ is width one, the fourth symbol is <emphasis>
+NoSymbol</emphasis>
+.
+</para>
+
+
+<para>
+If a key has only one group but the keyboard has several, the symbols for
+<emphasis>
+Group1</emphasis>
+ are repeated for each group. For example, given a keyboard with three groups
+and a key with one group that contains the symbols { <emphasis>
+a A</emphasis>
+ }, the core protocol description would contain the six symbols: { <emphasis>
+a</emphasis>
+ <emphasis>
+A</emphasis>
+ <emphasis>
+a</emphasis>
+ <emphasis>
+A</emphasis>
+ <emphasis>
+a</emphasis>
+ <emphasis>
+A</emphasis>
+ }. As a slightly more complicated example, an XKB key which had a single width
+three group with the symbols { <emphasis>
+a</emphasis>
+ <emphasis>
+b</emphasis>
+ <emphasis>
+c</emphasis>
+ } would show up in the generated core protocol keyboard description with the
+symbols { <emphasis>
+a</emphasis>
+ <emphasis>
+b</emphasis>
+ <emphasis>
+a</emphasis>
+ <emphasis>
+b</emphasis>
+ <emphasis>
+c</emphasis>
+ <emphasis>
+c</emphasis>
+ <emphasis>
+a</emphasis>
+ <emphasis>
+b</emphasis>
+ <emphasis>
+c</emphasis>
+ } for a keyboard with three groups.
+</para>
+
+
+<para>
+The generated modifier mapping for a key contains all of the modifiers affected
+by all of the actions associated with the key plus all of the modifiers
+associated with any virtual modifiers bound to the key by the virtual modifier
+mapping. If any of the actions associated with a key affect any component of
+the keyboard group, any modifiers specified in any entry of the group
+compatibility map (see <link linkend='Group_Compatibility_Map'>Group
+Compatibility Map</link>) are reported in the modifier mask. The <emphasis>
+SA_ISOLock</emphasis>
+ action can theoretically affect any modifier, but the modifier map of an
+<emphasis>
+SA_ISOLock</emphasis>
+ key contains only the modifiers or group state that it sets by default.
+</para>
+
+
+<para>
+The server notifies interested clients of keyboard map changes in one of two
+ways. It sends <emphasis>
+XkbMapNotify</emphasis>
+ to clients that have explicitly selected them and core protocol <emphasis>
+MappingNotify</emphasis>
+ events to clients that have not. Once a client requests <emphasis>
+XkbMapNotify</emphasis>
+ events, the server stops sending it <emphasis>
+MappingNotify</emphasis>
+ events to inform it of keyboard changes.
+</para>
+
+
+</sect1>
+<sect1 id='Sending_Events_to_Clients'>
+<title>Sending Events to Clients</title>
+
+<para>
+XKB normally assumes that events sent to clients using the core protocol
+<emphasis>
+SendEvent</emphasis>
+ request contain a core protocol state, if applicable. If the client which will
+receive the event is not XKB-capable, XKB attempts to convert the core state to
+an XKB state as follows: if any of the modifiers bound to <emphasis>
+Group2</emphasis>
+ in the group compatibility map are set in the event state, XKB clears them in
+the resulting event but sets the effective group in the event state to
+<emphasis>
+Group2</emphasis>
+.
+</para>
+
+
+<para>
+If the <emphasis>
+PCF_SendEventUsesXKBState</emphasis>
+ per-client flag is set at the time of the SendEvent request, XKB instead
+assumes that the event reported in the event is an XKB state. If the receiving
+client is not XKB-aware, the extension converts the XKB state (which contains
+the effective state in bits 13-14) to a core state by applying the group
+compatibility map just as it would for actual key events.
+</para>
+
+</sect1>
+</chapter>

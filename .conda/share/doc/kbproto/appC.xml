@@ -1,0 +1,715 @@
+<appendix id='new_keysyms'>
+<title>New KeySyms</title>
+
+<sect1 id='New_KeySyms'>
+<title>New KeySyms</title>
+<sect2 id='KeySyms_Used_by_the_ISO9995_Standard'>
+<title>KeySyms Used by the ISO9995 Standard</title>
+<informaltable frame='topbot'>
+<?dbfo keep-together="auto" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Byte 3</entry>
+    <entry>Byte 4</entry>
+    <entry>Character</entry>
+    <entry>Name</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>254</entry>
+    <entry>1</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LOCK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>2</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LATCHING LEVEL TWO SHIFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>3</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LEVEL THREE SHIFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>4</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LATCHING LEVEL THREE SHIFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>5</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LEVEL THREE SHIFT LOCK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>6</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LATCHING GROUP SHIFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>7</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO GROUP SHIFT LOCK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>8</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO NEXT GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>9</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LOCK NEXT GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>10</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO PREVIOUS GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>11</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LOCK PREVIOUS GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>12</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO FIRST GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>13</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LOCK FIRST GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>14</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LAST GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>15</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO LOCK LAST GROUP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>32</entry>
+    <entry>&#x0020;</entry>
+    <entry>LEFT TAB</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>33</entry>
+    <entry>&#x0020;</entry>
+    <entry>MOVE LINE UP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>34</entry>
+    <entry>&#x0020;</entry>
+    <entry>MOVE LINE DOWN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>35</entry>
+    <entry>&#x0020;</entry>
+    <entry>PARTIAL LINE UP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>36</entry>
+    <entry>&#x0020;</entry>
+    <entry>PARTIAL LINE DOWN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>37</entry>
+    <entry>&#x0020;</entry>
+    <entry>PARTIAL SPACE LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>38</entry>
+    <entry>&#x0020;</entry>
+    <entry>PARTIAL SPACE RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>39</entry>
+    <entry>&#x0020;</entry>
+    <entry>SET MARGIN LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>40</entry>
+    <entry>&#x0020;</entry>
+    <entry>SET MARGIN RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>41</entry>
+    <entry>&#x0020;</entry>
+    <entry>RELEASE MARGIN LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>42</entry>
+    <entry>&#x0020;</entry>
+    <entry>RELEASE MARGIN RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>43</entry>
+    <entry>&#x0020;</entry>
+    <entry>RELEASE MARGIN LEFT AND RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>44</entry>
+    <entry>&#x0020;</entry>
+    <entry>FAST CURSOR LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>45</entry>
+    <entry>&#x0020;</entry>
+    <entry>FAST CURSOR RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>46</entry>
+    <entry>&#x0020;</entry>
+    <entry>FAST CURSOR UP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>47</entry>
+    <entry>&#x0020;</entry>
+    <entry>FAST CURSOR DOWN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>48</entry>
+    <entry>&#x0020;</entry>
+    <entry>CONTINUOUS UNDERLINE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>49</entry>
+    <entry>&#x0020;</entry>
+    <entry>DISCONTINUOUS UNDERLINE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>50</entry>
+    <entry>&#x0020;</entry>
+    <entry>EMPHASIZE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>51</entry>
+    <entry>&#x0020;</entry>
+    <entry>CENTER OBJECT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>52</entry>
+    <entry>&#x0020;</entry>
+    <entry>ISO_ENTER</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect2>
+<sect2 id='KeySyms_Used_to_Control_The_Core_Pointer'>
+<title>KeySyms Used to Control The Core Pointer</title>
+<informaltable frame='topbot'>
+<?dbfo keep-together="auto" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Byte 3</entry>
+    <entry>Byte 4</entry>
+    <entry>Character</entry>
+    <entry>Name</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>254</entry>
+    <entry>224</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>225</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>226</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER UP</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>227</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER DOWN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>228</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER UP AND LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>229</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER UP AND RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>230</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER DOWN AND LEFT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>231</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER DOWN AND RIGHT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>232</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEFAULT POINTER BUTTON</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>233</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON ONE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>234</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON TWO</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>235</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON THREE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>236</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON FOUR</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>237</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON FIVE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>238</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEFAULT POINTER BUTTON DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>239</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON ONE DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>240</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON TWO DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>241</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON THREE DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>242</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON FOUR DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>243</entry>
+    <entry>&#x0020;</entry>
+    <entry>POINTER BUTTON FIVE DOUBLE CLICK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>244</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG DEFAULT POINTER BUTTON</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>245</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG POINTER BUTTON ONE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>246</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG POINTER BUTTON TWO</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>247</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG POINTER BUTTON THREE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>248</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG POINTER BUTTON FOUR</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>249</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE POINTER FROM KEYBOARD</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>250</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE KEYBOARD POINTER ACCEL</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>251</entry>
+    <entry>&#x0020;</entry>
+    <entry>SET DEFAULT POINTER BUTTON NEXT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>252</entry>
+    <entry>&#x0020;</entry>
+    <entry>SET DEFAULT POINTER BUTTON PREVIOUS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>253</entry>
+    <entry>&#x0020;</entry>
+    <entry>DRAG POINTER BUTTON FIVE</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect2>
+<sect2 id='KeySyms_Used_to_Change_Keyboard_Controls'>
+<title>KeySyms Used to Change Keyboard Controls</title>
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Byte 3</entry>
+    <entry>Byte 4</entry>
+    <entry>Character</entry>
+    <entry>Name</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>254</entry>
+    <entry>112</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE ACCESSX KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>113</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE ACCESSX FEEDBACK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>114</entry>
+    <entry>&#x0020;</entry>
+    <entry>TOGGLE REPEAT KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>115</entry>
+    <entry>&#x0020;</entry>
+    <entry>TOGGLE SLOW KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>116</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE BOUNCE KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>117</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE STICKY KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>118</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE MOUSE KEYS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>119</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE MOUSE KEYS ACCELERATION</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>120</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE OVERLAY1</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>121</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE OVERLAY2</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>122</entry>
+    <entry>&#x0020;</entry>
+    <entry>ENABLE AUDIBLE BELL</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect2>
+<sect2 id='KeySyms_Used_To_Control_The_Server'>
+<title>KeySyms Used To Control The Server</title>
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Byte</entry>
+    <entry>Byte</entry>
+    <entry>Character</entry>
+    <entry>Name</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>254</entry>
+    <entry>208</entry>
+    <entry>&#x0020;</entry>
+    <entry>FIRST SCREEN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>209</entry>
+    <entry>&#x0020;</entry>
+    <entry>PREVIOUS SCREEN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>210</entry>
+    <entry>&#x0020;</entry>
+    <entry>NEXT SCREEN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>211</entry>
+    <entry>&#x0020;</entry>
+    <entry>LAST SCREEN</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>212</entry>
+    <entry>&#x0020;</entry>
+    <entry>TERMINATE SERVER</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+
+</sect2>
+<sect2 id='KeySyms_for_Non_Spacing_Diacritical_Keys'>
+<title>KeySyms for Non-Spacing Diacritical Keys</title>
+<informaltable frame='topbot'>
+<?dbfo keep-together="always" ?>
+<tgroup cols='4' align='left' colsep='0' rowsep='0'>
+<colspec colname='c1' colwidth='1.0*'/>
+<colspec colname='c2' colwidth='1.0*'/>
+<colspec colname='c3' colwidth='1.0*'/>
+<colspec colname='c4' colwidth='3.0*'/>
+<thead>
+  <row rowsep='1'>
+    <entry>Byte</entry>
+    <entry>Byte</entry>
+    <entry>Character</entry>
+    <entry>Name</entry>
+  </row>
+</thead>
+<tbody>
+  <row>
+    <entry>254</entry>
+    <entry>80</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD GRAVE ACCENT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>81</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD ACUTE ACCENT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>82</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD CIRCUMFLEX</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>83</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD TILDE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>84</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD MACRON</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>85</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD BREVE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>86</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD DOT ABOVE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>87</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD DIAERESIS</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>88</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD RING ABOVE</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>89</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD DOUBLE ACUTE ACCENT</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>90</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD CARON</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>91</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD CEDILLA</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>92</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD OGONEK</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>93</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD IOTA</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>94</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD VOICED SOUND</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>95</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD SEMI VOICED SOUND</entry>
+  </row>
+  <row>
+    <entry>254</entry>
+    <entry>96</entry>
+    <entry>&#x0020;</entry>
+    <entry>DEAD DOT BELOW</entry>
+  </row>
+</tbody>
+</tgroup>
+</informaltable>
+</sect2>
+</sect1>
+</appendix>

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+"http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd"
+[
+<!ENTITY % defs SYSTEM "defs.ent"> %defs;
+]>
+<book>
+  <bookinfo>
+    <title>X Generic Event Extension</title>
+    <author>
+      <firstname>Peter</firstname>
+      <surname>Hutterer</surname>
+      <email>peter.hutterer@who-t.net</email>
+    </author>
+    <releaseinfo>X Version 11, Release &fullrelvers;</releaseinfo>
+    <releaseinfo>Version 1.0</releaseinfo>
+    <copyright><year>2007</year><holder>Peter Hutterer</holder></copyright>
+
+    <legalnotice>
+    <para>
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+    </para>
+
+    <para>
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+    </para>
+
+    <para>
+    THE SOFTWARE IS PROVIDED &ldquo;AS IS&rdquo;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+    </para>
+    </legalnotice>
+
+  </bookinfo>
+
+  <chapter>
+    <title>Introduction</title>
+
+    <para>X was designed to provide 64 event opcodes for all extensions. These
+    events are limited to 32 bytes.</para>
+
+    <para>The Generic Event Extension provides a template event for extensions
+    to re-use a single event opcode. GE only provide headers and the most
+    basic functionality, leaving the extensions to interpret the events in
+    their specific context.</para>
+
+    <para>GenericEvents may be longer than 32 bytes. If so, the number of 4
+    byte units following the initial 32 bytes must be specified in the length
+    field of the event.</para>
+  </chapter>
+
+  <chapter>
+    <title>Extension Initialization</title>
+
+    <para>The name of this extension is "Generic Event Extension"</para>
+
+    <programlisting>GEQueryVersion
+    client-major-version: CARD16
+    client-minor-version: CARD16
+==&gt;
+    major-version:        CARD16
+    minor-version:        CARD16</programlisting>
+
+    <para>The client sends the highest supported version to the server and the
+    server sends the highest version it supports, but no higher than the
+    requested version. Major versions changes can introduce incompatibilities
+    in existing functionality, minor version changes introduce only backward
+    compatible changes. It is the clients responsibility to ensure that the
+    server supports a version which is compatible with its
+    expectations.</para>
+
+    <para>As of version 1.0, no other requests are provided by this extension.
+    </para>
+  </chapter>
+
+  <chapter>
+    <title>Events</title>
+
+    <para>GE defines a single event, to be used by all extensions. The event's
+    structure is similar to a reply. This is a core protocol event, ID 35, and
+    is not itself an extension event.</para>
+
+    <programlisting>GenericEvent
+    type:           BYTE       always GenericEvent (35)
+    extension:      CARD8      extension offset
+    sequenceNumber: CARD16     low 16 bits of request seq. number
+    length:         CARD32     length
+    evtype:         CARD16     event type</programlisting>
+
+    <para>The field 'extension' is to be set to the major opcode of the
+    extension. The 'evtype' field is the actual opcode of the event. The
+    length field specifies the number of 4-byte blocks after the initial 32
+    bytes. If length is 0, the event is 32 bytes long.</para>
+  </chapter>
+
+  <chapter>
+    <title>Notes</title>
+
+    <para>Although the wire event is of arbitrary length, the actual size of
+    an XEvent is restricted to sizeof(XEvent) [96 bytes, see Xlib.h]. If an
+    extension converts a wire event to an XEvent &gt; 96 bytes, it will
+    overwrite the space allocated for the event. See struct _XSQEvent in
+    Xlibint.h for details.</para>
+
+    <para>Extensions need to malloc additional data and fill the XEvent
+    structure with pointers to the malloc'd data. The client then needs to
+    free the data, only the XEvent structure will be released by Xlib.</para>
+
+    <para>The server must not send GenericEvents longer than 32 bytes until it
+    has verified that the client is able to interpret these events. If a long
+    event is sent to a client unable to process GenericEvents, future
+    interpretation of replies and events by this client will fail.</para>
+  </chapter>
+</book>

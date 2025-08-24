@@ -1,0 +1,84 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" Korean translation for the xz-man
+.\" Seong-ho Cho <darkcircle.0426@gmail.com>, 2023, 2024.
+.\"
+.\" (Note that this file is not based on gzip's zgrep.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZGREP 1 2024\-02\-13 Tukaani "XZ 유틸리티"
+.SH 이름
+xzgrep \- 패턴을 활용하여 가능한 방식으로 압축한 파일의 내용을 검색합니다
+.
+.SH 요약
+\fBxzgrep\fP [\fI<옵션>...\fP] [\fI<패턴목록>\fP] [\fI<파일>...\fP]
+.br
+\fBxzegrep\fP \&...
+.br
+\fBxzfgrep\fP \&...
+.br
+\fBlzgrep\fP \&...
+.br
+\fBlzegrep\fP \&...
+.br
+\fBlzfgrep\fP \&...
+.
+.SH 설명
+\fBxzgrep\fP은 압축 해제한 파일의 내용에 \fBgrep\fP(1)을 실행합니다.  \fI<파일>\fP 형식은 파일 이름 확장으로
+결정합니다.  \fI<파일>\fP에서 지원하는 확장자는 \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1),
+\fBlzop\fP(1), \fBzstd\fP(1), \fBlz4\fP(1)로 압축 해제할 수 있는 파일의 확장자입니다. 다른 파일은 이미 압축을 해제한
+파일로 간주합니다.
+.PP
+지정한 \fI<파일>\fP이 없거나 \fI<파일>\fP 값이 \fB\-\fP이라면 표준 입력을 읽어들입니다.  표준 입력을
+읽어들일 때, \fBxz\fP(1) 방식으로 압축을 해제하는 파일만 지원합니다.  다른 파일은 이미 압축을 해제한 파일로 간주합니다.
+.PP
+대부분의 \fBgrep\fP(1)의 \fI<옵션>\fP을 지원합니다.  그러나 다음 옵션은 지원하지 않습니다:
+.IP "" 4
+\fB\-r\fP, \fB\-\-recursive\fP
+.IP "" 4
+\fB\-R\fP, \fB\-\-dereference\-recursive\fP
+.IP "" 4
+\fB\-d\fP, \fB\-\-directories=\fP\fIaction\fP
+.IP "" 4
+\fB\-Z\fP, \fB\-\-null\fP
+.IP "" 4
+\fB\-z\fP, \fB\-\-null\-data\fP
+.IP "" 4
+\fB\-\-include=\fP\fIglob\fP
+.IP "" 4
+\fB\-\-exclude=\fP\fIglob\fP
+.IP "" 4
+\fB\-\-exclude\-from=\fP\fIfile\fP
+.IP "" 4
+\fB\-\-exclude\-dir=\fP\fIglob\fP
+.PP
+\fBxzegrep\fP은 \fBxzgrep \-E\fP 명령의 별칭입니다.  \fBxzfgrep\fP은 \fBxzgrep \-F\fP 명령의 별칭입니다.
+.PP
+\fBlzgrep\fP, \fBlzegrep\fP, \fBlzfgrep\fP 명령은 LZMA 유틸리티 하위 호환용으로 제공합니다.
+.
+.SH "종료 상태"
+.TP 
+0
+최소한 하나 이상의 파일에서 하나 이상의 일치하는 결과를 찾았습니다.  오류가 없습니다.
+.TP 
+1
+어떤 입력 파일에서든 일치하는 내용이 없습니다.  오류가 없습니다.
+.TP 
+>1
+하나 이상의 오류가 나타납니다.  일치하는 항목을 찾아낼 지 여부는 알 수 없습니다.
+.
+.SH 환경
+.TP 
+\fBGREP\fP
+\fBGREP\fP 환경변수 값이 비어있지 않으면, \fBgrep\fP, \fBgrep \-E\fP, \fBgrep \-F\fP 명령 대신 활용합니다.
+.
+.SH "추가 참조"
+\fBgrep\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1),
+\fBlz4\fP(1), \fBzgrep\fP(1)

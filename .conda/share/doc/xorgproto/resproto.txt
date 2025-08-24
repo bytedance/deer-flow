@@ -1,0 +1,462 @@
+                           DRAFT FOR REVIEW
+                       The X Resource Extension
+                             Version 1.2
+                             Rami Ylimäki
+                        rami.ylimaki@vincit.fi
+
+                             ❧❧❧❧❧❧❧❧❧❧❧
+
+1. Introduction
+
+The protocol description of X Resource Extension version 1.1 has been
+either lost or has never been written. This specification documents
+version 1.0 based on reverse engineered library and server
+code. Version 1.1 has been accidentally released from the version
+control and while it doesn't have differences to version 1.0, this
+version is labeled 1.2 in order to remove the risk of confusion. In
+addition to the 1.0 description, this document introduces a new 1.2
+version of the extension.
+
+Version 1.2 is a minor release and therefore the changes are
+compatible with the previous version. Main enhancements over version
+1.0 are:
+
+- Client identification is now possible. For example, servers
+  supporting version 1.2 may report PID of local clients.
+
+- Size of any resource can be queried from the server. Servers may not
+  necessarily support size calculation for every resource. However,
+  clients have now at least the chance to let the server do resource
+  size estimation for them.
+
+                             ❧❧❧❧❧❧❧❧❧❧❧
+
+2. Notations used in this document
+
+Notation for data types and requests follows the guidelines set in
+sections 2-4 of X Window System Protocol standard.
+
+                             ❧❧❧❧❧❧❧❧❧❧❧
+
+3. Interoperability between version 1.1 and 1.2
+
+Version 1.2 only introduces two new requests. However, these requests
+could be seen as generalized versions of existing requests. Even
+though we aren't deprecating any old requests, libraries could
+implement some old requests using the new ones.
+
+The new XResQueryClientIds request could be used instead of
+XResQueryClients.
+
+The new XResQueryResourceBytes request could be used instead of
+XResQueryClientPixmapBytes.
+
+Using the old requests is still acceptable because we don't want to
+change the semantics of existing requests between version 1.1 and 1.2.
+
+                             ❧❧❧❧❧❧❧❧❧❧❧
+
+4. Data types
+
+4.1 Types in version 1.0
+
+CLIENTXIDRANGE [ resource_base: CARD32
+                 resource_mask: CARD32 ]
+
+This type is used for reply of XResQueryClients in version 1.1. It
+represents the range of resource allocated for a client and can be
+also used for client identification.
+
+resource_base
+    First resource ID reserved for a client. Used also to identify the
+    clients themselves.
+resource_mask
+    Mask that can be used to identify a client from some resource
+    ID. Just zero the bits indicated by this mask from any resource ID
+    to identify the client that owns the resource.
+
+CLIENTXID [ client: XID ]
+
+This type identifies a single client by a resource owned by that
+client or by the first resource ID allocated for the client
+(resource_base of CLIENTXIDRANGE). Whenever a resource ID is used, it
+is masked by resource_mask of CLIENTXIDRANGE to find out the client
+that owns the resource.
+
+CLIENTRESOURCETYPECOUNT [ resource_type: ATOM
+                          count:         CARD32 ]
+
+This type is used for reply of XResQueryClientResources in version
+1.1. It represents the number of certain type of resources that are
+owned by some client.
+
+resource_type
+    Atom specifying the type of a resource.
+count
+    Number of resources of the given type owned by a client.
+
+4.2 Types in version 1.2
+
+4.2.1 Types used by XResQueryClientIds
+
+CLIENTIDMASK { ClientXid = 0x1, LocalClientPid = 0x2 }
+
+A bitmask specifying a client identification method. Currently only
+the PID of local clients is supported in the form of
+LocalClientPid. ClientXid is provided for backward compatibility with
+version 1.0 so that the new 1.2 requests (XResQueryClientIds) can be
+used in place of the older ones (XResQueryClients).
+
+CLIENTIDSPEC [ client:	CLIENTXID or None
+               mask:	SETofCLIENTIDMASK or None ]
+
+A data structure for selecting client IDs.
+
+client
+    ID of a resource allocated for some client. Only the part
+    identifying a client is actually used. The resource_base of
+    CLIENTXIDRANGE can be used if the client doesn't own any
+    resources. However, any resource ID is accepted because that makes
+    identifying the owners of existing resources easy. The null
+    resource None can be used to select all clients.
+mask
+    Collection of identification methods that should be applied on the
+    client. The special value None can be used to apply all supported
+    identification methods.
+
+CLIENTIDVALUE [ spec:   CLIENTIDSPEC
+                length: CARD32
+                value:  LISTofCARD32 ]
+
+A data structure specifying a single client ID.
+
+spec
+    A unique identifier for a specific ID of some client. Wildcards
+    such as None and bitmask unions aren't allowed. The data structure
+    must always identify a single client and single ID type. However,
+    the client doesn't have to be specified as the resource_base of
+    CLIENTXIDRANGE and can be any resource owned by the client.
+length
+    Specifies the length of an ID in units of CARD32. The length
+    depends on the ID type. In version 1.2 the lengths are 0 for
+    ClientXid and 4 for LocalClientPid. The length of ClientXid is 0
+    because that is already stored in the spec field.
+value
+    Actual ID data. In version 1.2 this is missing for ClientXid and
+    consists of a single CARD32 for LocalClientPid.
+
+4.2.2 Types used by XResQueryResourceBytes
+
+To better understand how resources are related to each other, it's
+useful to introduce the concepts of main resource and cross
+reference. By main resource we just mean a normal resource that has a
+valid XID. By cross reference we mean a resource that is used by some
+other resource.
+
+The same resource may have both of these roles depending on the
+context. For example, there could be an ordinary pixmap resource. When
+we talk about this resource in isolation the term main resource is
+used. We call the exact same resource a cross reference when we are
+concentrating on some higher level resource, such as window or
+graphics context, that is using the lower level resource. Cross
+references may also be internal server resources that don't have a
+valid XID.
+
+RESOURCEIDSPEC [ resource: XID or None
+                 type:     ATOM or None/AnyPropertyType ]
+
+A data structure for selecting or identifying resources. The
+interpretation of fields changes depending on the context. The
+differences in interpretation are described below.
+
+resource
+    An XID of a resource. The null resource None can be used to select
+    all resources matching some type if the data structure is used in
+    XResQueryResourceBytes request. The null resource None can be used
+    to mark private server resources if the data structure is used in
+    a cross reference of XResQueryResourceBytes reply.
+type
+    An atom identifying the resource type. The null atom
+    None/AnyPropertyType can be used to select all resource types
+    matching some resource ID if the data structure is used in
+    XResQueryResourceBytes request.
+
+RESOURCESIZESPEC [ spec:      RESOURCEIDSPEC
+                   bytes:     CARD32
+                   ref_count: CARD32
+                   use_count: CARD32 ]
+
+A data structure specifying the size of a single resource.
+
+spec
+    Uniquely identifies a single resource. Wildcards such as None and
+    AnyPropertyType aren't allowed for main resources. In cross
+    references, None is used to mark internal server resources.
+bytes
+    Number of bytes allocated for the resource. The size of a resource
+    is never divided by a reference count. This is the number of bytes
+    released in server when there are no more references left to the
+    resource.
+ref_count
+    Number of total users of the resource. Typically the reference
+    count is 1 but for pixmaps and other resources used from different
+    contexts the count may be larger.
+use_count
+    Number of times the resource is used by some other resource. For
+    main resources this is typically 1, because a resource doesn't
+    usually use itself recursively. For cross references this is the
+    number of times the resource is used and is also 1 usually.
+
+RESOURCESIZEVALUE [ size:                 RESOURCESIZESPEC
+                    num_cross_references: CARD32
+                    cross_references:     LISTofRESOURCESIZESPEC ]
+
+A data structure specifying sizes of cross references to other
+resources in addition to the main resource size.
+
+size
+    Size of a main resource.
+num_cross_references
+    Number of cross references to other resources from the main
+    resource. Currently resources can only have pixmaps as cross
+    references but this can be extended to other types in the
+    future. For simple resources this field is therefore 0 and the
+    cross_references list is missing.
+cross_references:
+    Size specifications for cross references. Note that cross
+    references may contain resources that don't have a valid XID. For
+    example, a DRI2 drawable might have a cross reference to a private
+    pixmap that is used internally in the server only. These private
+    cross references are contained in this list also. This makes it
+    possible to emulate XResGetClientPixmapBytes with
+    XResGetResourceBytes.
+
+                             ❧❧❧❧❧❧❧❧❧❧❧
+
+5. Requests
+
+5.1 Requests in version 1.0
+
+┌───
+    XResQueryVersion
+    client_major: CARD8
+    client_minor: CARD8
+    ▶
+    server_major: CARD16
+    server_minor: CARD16
+└───
+
+The client sends the highest supported version to the server and the
+server sends the highest version it supports, but no higher than the
+requested version. Major version changes can introduce
+incompatibilities in existing functionality, minor version changes
+introduce only backward compatible changes. It is the client's
+responsibility to ensure that the server supports a version which is
+compatible with its expectations.
+
+client_major
+    Major X Resource Extension version supported by client.
+client_minor
+    Minor X Resource Extension version supported by client.
+server_major
+    Highest version supported by server that is compatible with
+    client.
+server_minor
+    Highest version supported by server that is compatible with
+    client.
+
+┌───
+    XResQueryClients
+    ▶
+    num_clients: CARD32
+    clients:     LISTofCLIENTXIDRANGE
+└───
+
+The request asks X server to return the list of all currently
+connected clients.
+
+num_clients
+    Number of currently connected clients.
+clients
+    List of XID ranges allocated for the connected clients.
+
+┌───
+    XResQueryClientResources
+    client:    CLIENTXID
+    ▶
+    num_types: CARD32
+    types:     LISTofCLIENTRESOURCETYPECOUNT
+
+    Errors:    Value
+└───
+
+This request can be used to ask the number of resources owned by a
+client. The server will return the counts of each type of resource.
+
+client
+    An XID in the resource range of a client. This identifies the
+    client and not some specific resource.
+num_types
+    Number of different resource types owned by the client.
+types
+    A list of counts for each resource type.
+
+A value error is generated if invalid resource or client XID is given
+in the request.
+
+┌───
+    XResQueryClientPixmapBytes
+    client:         CLIENTXID
+    ▶
+    bytes:          CARD32
+    bytes_overflow: CARD32
+
+    Errors:         Value
+└───
+
+This request is used to get the pixmap usage of some client. The
+returned number is a sum of memory usage of each pixmap that can be
+attributed to the given client. Ideally the server goes through all
+pixmaps and divides each pixmap size by the pixmap reference count to
+get a pixmap reference size. The reference size is then added to the
+returned sum if the client happens to be referencing that pixmap. In
+practice some pixmap references may be missed, because it would be too
+difficult to keep track of all pixmap references. However, the server
+will check the most important client resources that are using pixmaps
+and tries to estimate the pixmap usage as well as is possible. In
+other words, the server need only make a best-effort attempt to
+calculate resource source, so actual resource size may differ from
+that reported in practice.
+
+client
+    Identifies a client by an ID in its resource ID range.
+bytes:
+    Number of bytes attributed to pixmap references from the client
+    resources.
+bytes_overflow:
+    Higher order word for the bytes field in case the sum of pixmap
+    reference sizes doesn't fit in CARD32.
+
+A value error is generated if invalid resource or client XID is given
+in the request.
+
+5.2 Requests in version 1.2
+
+┌───
+    XResQueryClientIds
+    num_specs:    CARD32
+    client_specs: LISTofCLIENTIDSPEC
+    ▶
+    num_ids:      CARD32
+    client_ids:   LISTofCLIENTIDVALUE
+
+    Errors:       Value
+└───
+
+XResQueryClientIds can be used to identify a given set of clients with
+some identification method. The request sends a list of specifiers
+that select clients and identification methods to server. The server
+then tries to identify the chosen clients using the identification
+methods specified for each client. The server returns IDs for those
+clients that were successfully identified. It's not an error condition
+if some identification method couldn't be applied to a client. If the
+server is unable to identify some clients, they simply aren't included
+in the returned list.
+
+The request supports wildcards in the client specifications so that in
+the most general case all IDs of all clients can be queried with a
+single CLIENTIDSPEC.
+
+The CLIENTIDSPEC of request and CLIENTIDSPEC of CLIENTIDVALUE in reply
+usually match each other. For example, if a request selected a client
+by a resource ID owned by the client, then the client is identified by
+the same resource ID in the reply. This has been done so that it would
+be easy to identify an owner of some resource.
+
+However, the CLIENTIDSPEC of returned CLIENTIDVALUE never contains any
+wildcards. If the request used a wildcard to specify all clients in a
+single CLIENTIDSPEC, then the reply has expanded the wildcard and
+returns separate CLIENTIDVALUE records for each client. In this case
+wildcarded clients are identified by resource_base of CLIENTXIDRANGE.
+
+The LocalClientPid type of IDs are included in the reply list only if
+the client executing the request asked for it and was also a local
+client itself. It doesn't make sense for remote clients to ask PIDs of
+local clients.
+
+num_specs
+    Number of client ID specifications.
+client_specs
+    A list specifying identification methods for clients. Supports
+    multiple identification methods and clients in a single
+    specification. See CLIENTIDSPEC for details.
+num_ids
+    Number of IDs that were successfully determined. Can be different
+    from num_specs or even zero if the server didn't support any
+    identification methods for the given clients.
+client_ids
+    A list specifying ID information for successfully identified
+    clients. If wildcards were used in a single CLIENTIDSPEC of
+    client_specs, then multiple CLIENTIDVALUE records may be returned
+    for that CLIENTIDSPEC. See CLIENTIDVALUE for details.
+
+A Value error is returned if the request specifies an invalid client
+XID or invalid identification method type.
+
+┌───
+    XResQueryResourceBytes
+    client:         CLIENTXID or None
+    num_specs:      CARD32
+    resource_specs: LISTofRESOURCEIDSPEC
+    ▶
+    num_sizes:      CARD32
+    sizes:          LISTofRESOURCESIZEVALUE
+
+    Errors:         Atom, Value
+└───
+
+XResQueryResourceBytes can be used to ask the sizes of resources from
+X server. The request sends a list of specifiers that selects
+resources for size calculation. The server tries to calculate the
+sizes of chosen resources and returns an estimate for a resource only
+if the size could be determined. It's not an error condition if a size
+couldn't be calculated. In that case the resources simply aren't
+included in the returned list.
+
+The request supports wildcards so that in the most general case sizes
+of all resources of all clients can be queried with a single
+RESOURCEIDSPEC. However, the reply has all wildcards expanded and
+reports a size of a single resource in each RESOURCESIZEVALUE.
+
+client
+    An ID of a client can be given to limit the query to resources of
+    that client. Just like in CLIENTIDSPEC, any resource ID can be
+    given to identify a client and None can be used if the query
+    shouldn't be limited to a specific client. Note that in some cases
+    this field is redundant because resource_specs already fully
+    determines which resources are selected. If the client ID doesn't
+    match the owner of any resource in resource_specs, no sizes are
+    returned and no error is generated.
+num_specs
+    Number of resource specifications.
+resource_specs
+    A list of resource specifications. Each specification can either
+    uniquely identify a single resource or multiple resources if
+    wildcarding is used. See RESOURCEIDSPEC for details.
+num_sizes
+    Number of resources whose size could be determined. Can be
+    different from num_specs or even zero if the server didn't support
+    size calculation for the given resources.
+sizes
+    A list of resource sizes. Each resource size is linked to a unique
+    resource. Wildcards are never used in the returned size
+    records. For example, it's not possible to receive a single
+    RESOURCESIZEVALUE that would specify the size of all pixmaps if
+    the sizes of pixmap type resources were asked. Instead, a single
+    RESOURCESIZEVALUE would be returned for each pixmap in that case.
+
+An Atom error is returned if the request specifies an invalid resource
+type. A Value error is returned if the request specifies an invalid
+XID for a client or a resource.
+
+                             ❧❧❧❧❧❧❧❧❧❧❧

@@ -1,0 +1,95 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Authors: Lasse Collin
+.\"          Jia Tan
+.\"
+.\" Ukrainian translation for xz-man.
+.\" Yuri Chornoivan <yurchor@ukr.net>, 2019, 2022, 2023, 2024.
+.\"
+.\" (Note that this file is not based on gzip's zgrep.1.)
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH XZGREP 1 "13 лютого 2024 року" Tukaani "XZ Utils"
+.SH НАЗВА
+xzgrep — пошук взірців у ймовірно стиснених файлах
+.
+.SH "КОРОТКИЙ ОПИС"
+\fBxzgrep\fP [\fIпараметр...\fP] [\fIсписок_взірців\fP] [\fIфайл...\fP]
+.br
+\fBxzegrep\fP \&...
+.br
+\fBxzfgrep\fP \&...
+.br
+\fBlzgrep\fP \&...
+.br
+\fBlzegrep\fP \&...
+.br
+\fBlzfgrep\fP \&...
+.
+.SH ОПИС
+\fBxzgrep\fP викликає \fBgrep\fP(1) для розпакованих даних файлів. Формати
+\fIфайлів\fP визначатимуться з суфіксів назв файлів. Будь\-який \fIфайл\fP із
+суфіксом назви, підтримку якого передбачено у \fBxz\fP(1), \fBgzip\fP(1),
+\fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1) або \fBlz4\fP(1), буде розпаковано; усі
+інші файли вважатимуться нестисненими.
+.PP
+Якщо не вказано аргументу \fIфайли\fP або замість \fIфайл\fP вказано \fB\-\fP, дані
+буде прочитано зі стандартного джерела вхідних даних. При читанні зі
+стандартного джерела буде розпаковано лише файли, підтримку яких передбачено
+у \fBxz\fP(1). Інші файли вважатимуться такими, що вже перебувають у
+нестисненому форматі.
+.PP
+Передбачено підтримку більшості \fIпараметрів\fP \fBgrep\fP(1). Втім, підтримки
+цих параметрів не передбачено:
+.IP "" 4
+\fB\-r\fP, \fB\-\-recursive\fP
+.IP "" 4
+\fB\-R\fP, \fB\-\-dereference\-recursive\fP
+.IP "" 4
+\fB\-d\fP, \fB\-\-directories=\fP\fIдія\fP
+.IP "" 4
+\fB\-Z\fP, \fB\-\-null\fP
+.IP "" 4
+\fB\-z\fP, \fB\-\-null\-data\fP
+.IP "" 4
+\fB\-\-include=\fP\fIglob\fP
+.IP "" 4
+\fB\-\-exclude=\fP\fIglob\fP
+.IP "" 4
+\fB\-\-exclude\-from=\fP\fIфайл\fP
+.IP "" 4
+\fB\-\-exclude\-dir=\fP\fIglob\fP
+.PP
+\fBxzegrep\fP є альтернативним записом \fBxzgrep \-E\fP.  \fBxzfgrep\fP є
+альтернативним записом \fBxzgrep \-F\fP.
+.PP
+Працездатність команд \fBlzgrep\fP, \fBlzegrep\fP і \fBlzfgrep\fP забезпечено для
+зворотної сумісності із LZMA Utils.
+.
+.SH "СТАН ВИХОДУ"
+.TP 
+0
+В одному з файлів вхідних даних знайдено принаймні одну
+відповідність. Помилок не сталося.
+.TP 
+1
+У жодному з файлів вхідних даних не знайдено відповідника. Не сталося ніяких
+помилок.
+.TP 
+>1
+Сталася одна або декілька помилок. Невідомо, чи було знайдено відповідники
+критерію пошуку.
+.
+.SH СЕРЕДОВИЩЕ
+.TP 
+\fBGREP\fP
+Якщо для змінної середовища \fBGREP\fP встановлено непорожнє значення, його
+буде використано замість \fBgrep\fP(1), \fBgrep \-E\fP або \fBgrep \-F\fP.
+.
+.SH "ДИВ. ТАКОЖ"
+\fBgrep\fP(1), \fBxz\fP(1), \fBgzip\fP(1), \fBbzip2\fP(1), \fBlzop\fP(1), \fBzstd\fP(1),
+\fBlz4\fP(1), \fBzgrep\fP(1)

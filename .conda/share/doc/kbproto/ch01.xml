@@ -1,0 +1,101 @@
+<chapter id='Overview'>
+<title>Overview</title>
+<para>
+This extension provides a number of new capabilities and controls for
+text keyboards.
+</para>
+
+<para>
+The core X protocol specifies the ways that the <emphasis>
+Shift</emphasis>
+, <emphasis>
+Control</emphasis>
+ and <emphasis>
+Lock</emphasis>
+ modifiers and the modifiers bound to the <emphasis>
+Mode_switch</emphasis>
+ or <emphasis>
+Num_Lock</emphasis>
+ keysyms interact to generate keysyms and characters. The core protocol also
+allows users to specify that a key affects one or more modifiers. This behavior
+is simple and fairly flexible, but it has a number of limitations that make it
+difficult or impossible to properly support many common varieties of keyboard
+behavior. The limitations of core protocol support for keyboards include:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>Use of a single, uniform, four-symbol mapping for all keyboard keys
+makes it difficult to properly support keyboard overlays, PC-style break keys
+or keyboards that comply with ISO9995 or a host of other national and
+international standards.
+  </para>
+</listitem>
+<listitem>
+  <para>Use of a modifier to specify a second keyboard group has side-effects
+that wreak havoc with client grabs and X toolkit translations and limit us to
+two keyboard groups.
+  </para>
+</listitem>
+<listitem>
+  <para>Poorly specified locking key behavior requires X servers to look for a
+few "magic" keysyms to determine which keys should lock when pressed. This
+leads to incompatibilities between X servers with no way for clients to detect
+implementation differences.
+  </para>
+</listitem>
+<listitem>
+  <para>Poorly specified capitalization and control behavior requires
+modifications to X library source code to support new character sets or locales
+and can lead to incompatibilities between system-wide and X library
+capitalization behavior.
+  </para>
+</listitem>
+<listitem>
+  <para>Limited interactions between modifiers specified by the core protocol
+make many common keyboard behaviors difficult or impossible to implement. For
+example, there is no reliable way to indicate whether or not using shift should
+"cancel" the lock modifier.
+  </para>
+</listitem>
+<listitem>
+  <para>The lack of any explicit descriptions for indicators, most modifiers
+and other aspects of the keyboard appearance requires clients that wish to
+clearly describe the keyboard to a user to resort to a mishmash of prior
+knowledge and heuristics.
+  </para>
+</listitem>
+</itemizedlist>
+
+<para>
+This extension makes it possible to clearly and explicitly specify most aspects
+of keyboard behavior on a per-key basis. It adds the notion of a numeric
+keyboard group to the global keyboard state and provides mechanisms to more
+closely track the logical and physical state of the keyboard. For keyboard
+control clients, this extension provides descriptions and symbolic names for
+many aspects of keyboard appearance and behavior. It also includes a number of
+keyboard controls designed to make keyboards more accessible to people with
+movement impairments.
+</para>
+
+
+<para>
+The X Keyboard Extension essentially replaces the core protocol definition of a
+keyboard. The following sections describe the new capabilities of the extension
+and the effect of the extension on core protocol requests, events and errors.
+</para>
+
+<sect1 id='Conventions_and_Assumptions'>
+<title>Conventions and Assumptions</title>
+<para>
+This document uses the syntactic
+conventions, common types, and errors defined in sections two through four of
+the specification of the X Window System Protocol. This document assumes
+familiarity with the fundamental concepts of X, especially those related to the
+way that X handles keyboards. Readers who are not familiar with the meaning or
+use of keycodes, keysyms or modifiers should consult (at least) the first five
+chapters of the protocol specification of the X Window System before
+continuing.
+</para>
+</sect1>
+</chapter>

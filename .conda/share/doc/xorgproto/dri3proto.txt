@@ -1,0 +1,762 @@
+			  The DRI3 Extension
+			     Version 1.4
+			      2021-11-30
+
+			    Keith Packard
+			  keithp@keithp.com
+			  Intel Corporation
+
+			    Daniel Stone
+		       daniels@collabora.com
+			     Collabora
+
+
+1. Introduction
+
+The DRI3 extension provides mechanisms to translate between direct
+rendered buffers and X pixmaps. When combined with the Present extension,
+a complete direct rendering solution for hardware-accelerated devices
+such as GPUs is provided.
+
+The direct rendered buffers are passed across the protocol via
+standard POSIX file descriptor passing mechanisms. On Linux, these
+buffers are DMA-BUF objects.
+
+DRI3 also includes a mechanism to translate between Linux Futexes
+and X Sync extension Fences. This provides a synchronization mechanism
+which can be used to serialize access to shared render buffers.
+
+1.1. Acknowledgments
+
+Eric Anholt <eric@anholt.net>
+Dave Airlie <airlied@redhat.com>
+Kristian Høgsberg <krh@bitplanet.net>
+James Jones <jajones@nvidia.com>
+Arthur Huillet <arthur.huillet@free.fr>
+Louis-Francis Ratté-Boulianne <lfrb@collabora.com>
+Austin Shafer <ashafer@nvidia.com>
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+2. Data Types
+
+The DRI3 extension uses the RandR extension Provider data type to
+select among multiple GPUs on a single screen and the Sync extension
+fence object to provide graphics object synchronization.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+4. Errors
+
+DRI3 defines no errors.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+5. Events
+
+DRI3 defines no events.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+6. Protocol Types
+
+SYNCOBJ { XID }
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+7. Extension Initialization
+
+The name of this extension is "DRI3"
+
+┌───
+    DRI3QueryVersion
+	client-major-version:	CARD32
+	client-minor-version:	CARD32
+      ▶
+	major-version:		CARD32
+	minor-version:		CARD32
+└───
+
+	The client sends the highest supported version to the server
+	and the server sends the highest version it supports, but no
+	higher than the requested version. Major versions changes can
+	introduce incompatibilities in existing functionality, minor
+	version changes introduce only backward compatible changes.
+	It is the clients responsibility to ensure that the server
+	supports a version which is compatible with its expectations.
+
+	Backwards compatible changes included addition of new
+	requests.
+
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+8. Extension Requests
+
+┌───
+    DRI3Open
+	drawable: DRAWABLE
+	provider: PROVIDER
+      ▶
+	nfd: CARD8
+	device: FD
+└───
+	Errors: Drawable, Value, Match
+
+	This requests that the X server open the direct rendering
+	device associated with drawable and RandR provider. The
+	provider must support SourceOutput or SourceOffload.
+
+	The file descriptor for the device is returned in
+	'device'. 'nfd' will be set to one (this is strictly a
+	convenience for XCB which otherwise would need
+	request-specific information about how many file descriptors
+	were associated with this reply).
+
+┌───
+    DRI3PixmapFromBuffer
+	pixmap: PIXMAP
+	drawable: DRAWABLE
+	size: CARD32
+	width, height, stride: CARD16
+	depth, bpp: CARD8
+	buffer: FD
+└───
+	Errors: Alloc, Drawable, IDChoice, Value, Match
+
+	Creates a pixmap for the direct rendering object associated
+	with 'buffer' and the screen associated with 'drawable'.
+	Changes to pixmap will be visible in that direct rendered
+	object and changes to the direct rendered object will be
+	visible in the pixmap.
+
+	'size' specifies the total size of the buffer bytes. 'width',
+	'height' describe the geometry (in pixels) of the underlying
+	buffer. 'stride' specifies the number of bytes per scanline in
+	the buffer. The pixels within the buffer are not required to
+	be arranged in a simple linear fashion, but 'size' will be at
+	least 'height' * 'stride'.
+
+	Precisely how any additional information about the buffer is
+	shared is outside the scope of this extension.
+
+	If buffer cannot be used with the screen associated with
+	drawable, a Match error is returned.
+
+	If depth or bpp are not supported by the screen, a Value error
+	is returned.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3BufferFromPixmap
+	pixmap: PIXMAP
+      ▶
+	nfd: CARD8
+	size: CARD32
+	width, height, stride: CARD16
+	depth, bpp: CARD8
+	buffer: FD
+└───
+	Errors: Pixmap, Match
+
+	Pass back a direct rendering object associated with
+	pixmap. Changes to pixmap will be visible in that
+	direct rendered object and changes to the direct rendered
+	object will be visible in the pixmap.
+
+	'size' specifies the total size of the buffer bytes. 'width',
+	'height' describe the geometry (in pixels) of the underlying
+	buffer. 'stride' specifies the number of bytes per scanline in
+	the buffer. The pixels within the buffer are not required to
+	be arranged in a simple linear fashion, but 'size' will be at
+	least 'height' * 'stride'.
+
+	Precisely how any additional information about the buffer is
+	shared is outside the scope of this extension.
+
+	If buffer cannot be used with the screen associated with
+	drawable, a Match error is returned.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3FenceFromFD
+	drawable: DRAWABLE
+	fence: FENCE
+	initially-triggered: BOOL
+	fd: FD
+└───
+	Errors: IDchoice, Drawable
+
+	Creates a Sync extension Fence that provides the regular Sync
+	extension semantics along with a file descriptor that provides
+	a device-specific mechanism to manipulate the fence directly.
+	Details about the mechanism used with this file descriptor are
+	outside the scope of the DRI3 extension.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3FDFromFence
+	drawable: DRAWABLE
+	fence: FENCE
+      ▶
+	fd: FD
+└───
+	Errors: IDchoice, Drawable, Match
+
+	Given a Sync extension Fence that provides the regular Sync
+	extension semantics, returns a file descriptor that provides a
+	device-specific mechanism to manipulate the fence directly.
+	Details about the mechanism used with this file descriptor are
+	outside the scope of the DRI3 extension. 'drawable' must be
+	associated with a direct rendering device that 'fence' can
+	work with, otherwise a Match error results.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3GetSupportedModifiers
+	window: WINDOW
+	depth: CARD8
+	bpp: CARD8
+      ▶
+	num_window_modifiers: CARD32
+	num_screen_modifiers: CARD32
+	window_modifiers: ListOfCARD64
+	screen_modifiers: ListOfCARD64
+└───
+	Errors: Window, Match
+
+	Return supported DRM FourCC modifiers for the specified
+	'window'.
+
+	The first list of 'window_modifiers' contains a set of
+	modifiers which the server considers optimal for the window's
+	current configuration. Using these modifiers to allocate, even
+	if locally suboptimal to the client driver, may result in a
+	more optimal display pipeline, e.g. by avoiding composition.
+
+	The second list of 'screen_modifiers', is the total set of
+	modifiers which are acceptable for use on the Screen associated
+	with 'window'. This set of modifiers will not change over the
+	lifetime of the client. Using this set of modifiers to allocate
+	may not result in a globally optimal pipeline, if separate
+	'window_modifiers' are available.
+
+	It is expected that a client calling this request will obtain
+	the modifiers for a particular window, allocate buffers using
+	the preferred modifier set as described above, create a Pixmap
+	referring to the storage of those buffers using the
+	DRI3BuffersFromPixmap request, then make the content visible
+	in the storage of those buffers visible with a request such as
+	the Present extension's PresentPixmap.
+
+	The meaning of any modifier is canonically defined in
+	drm_fourcc.h.
+
+┌───
+    DRI3PixmapFromBuffers
+	pixmap: PIXMAP
+	window: WINDOW
+	num_buffers: CARD8
+	width, height: CARD16
+	stride0, offset0: CARD32
+	stride1, offset1: CARD32
+	stride2, offset2: CARD32
+	stride3, offset3: CARD32
+	depth, bpp: CARD8
+	modifier: CARD64
+	buffers: ListOfFD
+└───
+	Errors: Alloc, Window, IDChoice, Value, Match
+
+	Creates a pixmap for the direct rendering object associated
+	with 'buffers' and the screen associated with 'window'.
+	Changes to pixmap will be visible in that direct rendered
+	object and changes to the direct rendered object will be
+	visible in the pixmap. The pixmap will be available for
+	presentation to the window.
+
+	In contrast to PixmapFromBuffer, multiple buffers may be
+	combined to specify a single logical source for pixel
+	sampling: 'num_buffers' may be set from 1 (single buffer,
+	akin to PixmapFromBuffer) to 4. This is the number of file
+	descriptors which will be sent with this request; one per
+	buffer.
+
+	Modifiers allow explicit specification of non-linear sources,
+	such as tiled or compressed buffers. The combination of bpp,
+	depth, and modifier allows unambiguous declaration of the
+	buffer layout in a manner defined by the DRM tokens.
+
+	If 'modifier' is DRM_FORMAT_MOD_INVALID, the client does
+	not have information on the buffer layout. In this case, the
+	buffer may only have a single plane. The driver may make its
+	own inference through unspecified means to determine the exact
+	buffer layout, however this is neither required nor defined
+	by the specification, and is considered an implementation
+	detail of the particular driver.
+
+	'width' and 'height' describe the geometry (in pixels) of the
+	logical pixel-sample source.
+
+	'strideN' and 'offsetN' define the number of bytes per logical
+	scanline, and the distance in bytes from the beginning of the
+	buffer passed for that plane until the start of the sample
+	source for that plane, respectively for plane N. If the plane
+	is not used according to the format and modifier specification,
+	both values for that plane must be zero.
+
+	Precisely how any additional information about the buffer (such
+	as memory placement) is shared is outside the scope of this
+	extension.
+
+	If the buffer(s) cannot be used with the screen associated with
+	'window', a Match error is returned.
+
+	If the bpp, depth, and modifier combination is not supported by
+	the screen, a Value error is returned.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3BuffersFromPixmap
+	pixmap: PIXMAP
+      ▶
+	nfd: CARD8
+	width, height: CARD16
+	depth, bpp: CARD8
+	modifier: CARD64
+	strides: ListOfCARD32
+	offsets: ListOfCARD32
+	buffers: ListOfFD
+└───
+	Errors: Pixmap, Match
+
+	Returns direct rendering objects associated with 'pixmap'.
+	Changes to 'pixmap' will be visible in the direct rendered
+	objects and changes to the direct rendered objects will be
+	visible in 'pixmap' after flushing and synchronization.
+
+	'width' and 'height' describe the geometry (in pixels) of the
+	logical pixel-sample source from combining the direct rendering
+	objects.
+
+	See PixmapFromBuffers for more details on DRM modifiers usage.
+
+	'nfd' describes the number of buffers returned for the pixmap,
+	which must be combined together according to 'depth', 'bpp', and
+	'modifier'.
+
+	For each buffer, there is an entry in the 'strides',
+	'offsets', and 'buffers' list. 'buffer' contains a single file
+	descriptor referring to the buffer. 'stride' specifies the
+	number of bytes per logical scanline for this plane, and
+	'offset' specifies the distance in bytes from the beginning
+	of 'buffer' until the start of the sample source for that
+	plane.
+
+	Precisely how any additional information about the buffer is
+	shared is outside the scope of this extension.
+
+	If buffers cannot be exported from the the screen associated
+	with 'pixmap', a Match error is returned.
+
+	For information on synchronization of buffer access between
+	the client and the X server, please see section 12.
+
+┌───
+    DRI3SetDRMDeviceInUse
+	window: WINDOW
+	drmMajor: CARD32
+	drmMinor: CARD32
+└───
+	Errors: Window
+
+	This request provides a hint to the server about the device
+	in use by this window. This is used to provide
+	DRI3GetSupportedModifiers with a hint of what device to
+	return modifiers for in the window_modifiers return value.
+	Using this hint allows for device-specific modifiers to
+	be returned by DRI3GetSupportedModifiers, for example
+	when an application is renderoffloaded and eligible for
+	direct scanout.
+
+	This is only a hint, and may or may not be reflected in
+	the modifier list returned.
+
+	If the window specified was not found, a Window error will
+	be returned.
+
+
+┌───
+    DRI3ImportSyncobj
+	syncobj: SYNCOBJ
+	drawable: DRAWABLE
+	fd: FD
+└───
+	Errors: IDchoice, Drawable
+
+	Imports the DRM synchronization object bound to the given 'fd'.  This
+	may then be used to enable explicit synchronization with the
+	server-side direct rendering device associated with 'drawable'.
+
+	The provided syncobj must be a timeline syncobj.
+
+	If 'drawable' is not found, a Drawable error will be returned.
+
+
+┌───
+    DRI3FreeSyncobj
+	syncobj: SYNCOBJ
+└───
+	Errors: Value
+
+	Indicates that any resources associated with the given 'syncobj' should
+	be released by the server. The actual release may be deferred until any
+	pending operations that depend on the object have completed.
+
+	If 'syncobj' is not found, a Value error will be returned.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+9. Extension Events
+
+DRI3 defines no events.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+10. Extension Versioning
+
+The DRI3 extension is adapted from the DRI2 extension.
+
+	1.0: First published version
+
+	1.1: Cosmetic changes
+
+	1.2: Add GetSupportedModifiers,
+	     PixmapFromBuffers, and BuffersFromPixmap requests.
+
+	1.3: Add SetDRMDeviceInUse
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+
+11. Relationship with other extensions
+
+As an extension designed to support other extensions, there is
+naturally some interactions with other extensions.
+
+11.1 GLX
+
+GLX is both an application interface and an X extension. OpenGL
+applications using the GLX API will use the GLX extension, DRI3 and
+Present when doing direct rendering.
+
+11.2 Present
+
+The Present extension provides a way to synchronize the display of pixmap
+contents to the screen. When used in conjunction with DRI3, they
+provide a complete direct rendering solution for OpenGL or other APIs.
+
+11.3 DRI2
+
+DRI3 provides similar functionality to the DRI2Connect and
+DRI2GetBuffersWithFormat requests, however DRI3 uses file descriptors
+to refer to the direct rendering device and buffers.
+
+Present and DRI3 are designed in conjunction to replace DRI2
+
+11.2 XvMC / Xv
+
+It might be nice to be able to reference YUV formatted direct rendered
+objects from the X server.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+12. Synchronization
+
+Synchronization of access to buffers shared between processes is not
+currently explicitly controlled by this protocol.
+
+Without the use of additional extensions not defined by the DRI3
+protocol as of version 1.2, synchronization between multiple
+processes and contexts is considered to follow the implicit model.
+
+In this model, the driver is required to have a global view of
+access requests issued by all processes with a reference to the
+buffer, and control scheduling of all operations on that buffer,
+whether performed by the CPU or auxiliary hardware.
+
+The driver is responsible for enforcing a strict ordering to protect
+against write-after-read or read-after-write hazards, such that any
+reads requested by one process or context, are fulfilled before any
+writes requested by another process or context, as long as that read
+was definitively submitted before the write.
+
+A similar dependency exists for reads submitted after writes: the
+driver must ensure that the write is fully visible and coherent to
+the read request.
+
+As a purely illustrative example, if two processes share a buffer,
+where one process reads from a buffer using an OpenGL texture
+sampler and submits this work by calling 'glFlush', and the other
+process submits work to the driver to write to that buffer, the
+driver is responsible for ensuring that the results of the latter
+write are not visible to the texture sampler.
+
+The Sync fences provided by DRI3 control only this submission of
+work and ensuing global visibility of the requests, rather than the
+completion of the work within any hardware. To further the example
+above, a fence used to prevent any writes to the buffer before the
+sampler had completed access, the fence would be signaled when
+'glFlush' had been called, at which point the request has become
+globally visible to the driver's request-scheduling and
+synchronization mechanisms. The logical ordering of requests made
+by software has been preserved, and the driver then takes care
+to ensure that these requests are scheduled such they do not
+observe effects from requests made later in time.
+
+This presents a fully coherent in-order FIFO-like model across
+processes, where synchronzation is handled externally to the DRI3
+client with no explicit intervention.
+
+This restriction also applies for cross-device usage.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+Appendix A. Protocol Encoding
+
+Syntactic Conventions
+
+This document uses the same syntactic conventions as the core X
+protocol encoding document.
+
+
+A.1 Common Types
+
+None.
+
+A.2 Protocol Requests
+
+┌───
+    DRI3QueryVersion
+	1	CARD8			major opcode
+	1	0			DRI3 opcode
+	2	3			length
+	4	CARD32			major version
+	4	CARD32			minor version
+      ▶
+	1	1			Reply
+        1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	4	CARD32			major version
+        4	CARD32			minor version
+	16				unused	
+└───
+
+
+┌───
+    DRI3Open
+	1	CARD8			major opcode
+	1	1			DRI3 opcode
+	2	4			length
+	4	DRAWABLE		drawable
+	4	PROVIDER		provider
+      ▶	
+	1	1			Reply
+        1	1			nfd
+	2	CARD16			sequence number
+	4	0			reply length
+	24				unused
+
+	0	FD			device
+└───
+
+┌───
+    DRI3PixmapFromBuffer
+	1	CARD8			major opcode
+	1	2			DRI3 opcode
+	2	6			length
+	4	Pixmap			pixmap
+	4	Drawable		drawable
+	4	CARD32			size
+	2	CARD16			width
+	2	CARD16			height
+	2	CARD16			stride
+	1	CARD8			depth
+	1	CARD8			bpp
+
+	0	FD			buffer
+└───
+
+┌───
+    DRI3BufferFromPixmap
+	1	CARD8			major opcode
+	1	3			DRI3 opcode
+	2	2			length
+	4	Pixmap			pixmap
+      ▶	
+	1	1			Reply
+        1	1			nfd
+	2	CARD16			sequence number
+	4	0			reply length
+	4	CARD32			size
+	2	CARD16			width
+	2	CARD16			height
+	2	CARD16			stride
+	1	CARD8			depth
+	1	CARD8			bpp
+	12				unused
+
+	0	FD			buffer
+└───
+
+┌───
+    DRI3FenceFromFD
+	1	CARD8			major opcode
+	1	4			DRI3 opcode
+	2	4			length
+	4	Drawable		drawable
+	4	Fence			fence
+	1	BOOL			initially triggered
+	3				unused
+
+	0	FD			fence fd
+└───
+
+┌───
+    DRI3FDFromFence
+	1	CARD8			major opcode
+	1	5			DRI3 opcode
+	2	3			length
+	4	Drawable		drawable
+	4	Fence			fence
+      ▶	
+	1	1			Reply
+        1	1			nfd
+	2	CARD16			sequence number
+	4	0			reply length
+	24				unused
+
+	0	FD			fence fd
+└───
+
+┌───
+    DRI3GetSupportedModifiers
+	1	CARD8			major opcode
+	1	6			DRI3 opcode
+	2	3			length
+	4	Window			window
+	1	CARD8			depth
+	1	CARD8			bpp
+	2				unused
+      ▶
+	1	1			Reply
+        1	0			unused
+	2	CARD16			sequence number
+	4	CARD32			reply length
+	4	CARD32			num_window_modifiers
+	4	CARD32			num_screen_modifiers
+	16				unused
+
+	4	ListOfCARD64		window_modifiers[num_window_modifiers]
+	4	ListOfCARD64		screen_modifiers[num_screen_modifiers]
+└───
+
+┌───
+    DRI3PixmapFromBuffers
+	1	CARD8			major opcode
+	1	7			DRI3 opcode
+	2	8			length
+	4	Pixmap			pixmap
+	4	Window			window
+	1	CARD8			num_buffers
+	3				unused
+	2	CARD16			width
+	2	CARD16			height
+	4	CARD32			stride0
+	4	CARD32			offset0
+	4	CARD32			stride1
+	4	CARD32			offset1
+	4	CARD32			stride2
+	4	CARD32			offset2
+	4	CARD32			stride3
+	4	CARD32			offset3
+	1	CARD8			depth
+	1	CARD8			bpp
+	2				unused
+	8	CARD64			modifier
+
+	0	ListOfFD		buffers[num_buffers]
+└───
+
+┌───
+    DRI3BuffersFromPixmap
+	1	CARD8			major opcode
+	1	8			DRI3 opcode
+	2	2			length
+	4	Pixmap			pixmap
+      ▶
+	1	1			Reply
+        1	CARD8			nfd
+	2	CARD16			sequence number
+	4	CARD32			reply length
+	2	CARD16			width
+	2	CARD16			height
+	4	CARD8			unused
+	8	CARD64			modifier
+	1	CARD8			depth
+	1	CARD8			bpp
+	6				unused
+
+	0	ListOfFD		buffer[nfd]
+	4	ListOfCARD32		strides[nfd]
+	4	ListOfCARD32		offsets[nfd]
+└───
+
+┌───
+    DRI3SetDRMDeviceInUse
+	1	CARD8			major opcode
+	1	9			DRI3 opcode
+	2	4			length
+	4	Window			window
+	4	CARD32			drmMajor
+	4	CARD32			drmMinor
+└───
+
+┌───
+    DRI3ImportSyncobj
+	1	CARD8			major opcode
+	1	11			DRI3 opcode
+	2	3			length
+	4	SYNCOBJ			syncobj
+	4	Drawable		drawable
+	0	FD			syncobj fd
+└───
+
+┌───
+    DRI3FreeSyncobj
+	1	CARD8			major opcode
+	1	12			DRI3 opcode
+	2	2			length
+	4	SYNCOBJ			syncobj
+└───
+
+A.3 Protocol Events
+
+The DRI3 extension defines no events.
+
+A.4 Protocol Errors
+
+The DRI3 extension defines no errors.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄

@@ -1,0 +1,129 @@
+<appendix id='canonical_key_types'>
+<title>Canonical Key Types</title>
+
+<sect1 id='Canonical_Key_Types'>
+<title>Canonical Key Types</title>
+<sect2 id='The_ONE_LEVEL_Key_Type'>
+<title>The ONE_LEVEL Key Type</title>
+
+<para>
+The <emphasis>
+ONE_LEVEL</emphasis>
+ key type describes groups that have only one symbol. The default <emphasis>
+ONE_LEVEL</emphasis>
+ type has no map entries and does not pay attention to any modifiers.
+</para>
+
+</sect2>
+<sect2 id='The_TWO_LEVEL_Key_Type'>
+<title>The TWO_LEVEL Key Type</title>
+
+<para>
+The <emphasis>
+TWO_LEVEL</emphasis>
+ key type describes groups that have two symbols but are neither alphabetic nor
+numeric keypad keys. The default <emphasis>
+TWO_LEVEL</emphasis>
+ type uses only the <emphasis>
+Shift</emphasis>
+ modifier. It returns level two if <emphasis>
+Shift</emphasis>
+ is set, level one if it is not.
+</para>
+
+
+</sect2>
+<sect2 id='The_ALPHABETIC_Key_Type'>
+<title>The ALPHABETIC Key Type</title>
+
+<para>
+The <emphasis>
+ALPHABETIC</emphasis>
+ key type describes groups that consist of two symbols — the lowercase form
+of a symbol followed by the uppercase form of the same symbol. The default
+<emphasis>
+ALPHABETIC</emphasis>
+ type implements locale-sensitive "shift cancels caps lock" behavior using both
+the <emphasis>
+Shift</emphasis>
+ and <emphasis>
+Lock</emphasis>
+ modifiers as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If <emphasis>
+Shift</emphasis>
+ and <emphasis>
+Lock</emphasis>
+ are both set, the default <emphasis>
+ALPHABETIC</emphasis>
+ type yields level one.
+  </para>
+</listitem>
+<listitem>
+  <para>If <emphasis>
+Shift</emphasis>
+ alone is set, it yields level two.
+  </para>
+</listitem>
+<listitem>
+  <para>If <emphasis>
+Lock</emphasis>
+ alone is set, it yields level one but preserves the <emphasis>
+Lock</emphasis>
+ modifier.
+  </para>
+</listitem>
+<listitem>
+  <para>If neither <emphasis>
+Shift</emphasis>
+ nor <emphasis>
+Lock</emphasis>
+ are set, it yields level one.
+  </para>
+</listitem>
+</itemizedlist>
+
+</sect2>
+<sect2 id='The_KEYPAD_Key_Type'>
+<title>The KEYPAD Key Type</title>
+
+<para>
+The <emphasis>
+KEYPAD</emphasis>
+ key type describes that consist of two symbols, at least one of which is a
+numeric keypad symbol. The default <emphasis>
+KEYPAD</emphasis>
+ type implements "shift cancels numeric lock" behavior using the <emphasis>
+Shift</emphasis>
+ modifier and the real modifier bound to the virtual modifier named "NumLock"
+(the "NumLock" modifier) as follows:
+</para>
+
+<itemizedlist>
+<listitem>
+  <para>If <emphasis>
+Shift</emphasis>
+ and the "NumLock" modifier are both set, the default <emphasis>
+KEYPAD </emphasis>
+type yields level one.
+  </para>
+</listitem>
+<listitem>
+  <para>If either <emphasis>
+Shift</emphasis>
+ or the "NumLock" modifier alone are set, it yields level two.
+  </para>
+</listitem>
+<listitem>
+  <para>If neither <emphasis>
+Shift</emphasis>
+ nor the "NumLock" modifier are set, it yields level one.
+  </para>
+</listitem>
+</itemizedlist>
+</sect2>
+</sect1>
+</appendix>

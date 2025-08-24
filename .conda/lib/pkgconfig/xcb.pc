@@ -1,0 +1,13 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+xcbproto_version=1.17.0
+
+Name: XCB
+Description: X-protocol C Binding
+Version: 1.17.0
+Requires.private: xau >= 0.99.2 xdmcp
+Libs: -L${libdir} -lxcb
+Libs.private: 
+Cflags: -I${includedir}

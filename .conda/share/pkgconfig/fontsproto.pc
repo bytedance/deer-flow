@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: FontsProto
+Description: Fonts extension headers
+Version: 2.1.3
+Cflags: -I${includedir}

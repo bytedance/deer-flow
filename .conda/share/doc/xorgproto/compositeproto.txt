@@ -1,0 +1,305 @@
+		         Composite Extension
+			     Version 0.4
+			      2007-7-3
+			    Keith Packard
+			  keithp@keithp.com
+			    Deron Johnson
+     		        deron.johnson@sun.com
+
+1. Introduction
+
+Many user interface operations would benefit from having pixel contents of
+window hierarchies available without respect to sibling and antecedent
+clipping. In addition, placing control over the composition of these pixel
+contents into a final screen image in an external application will enable
+a flexible system for dynamic application content presentation.
+
+2. Acknowledgements
+
+This small extension has been brewing for several years, contributors to
+both early prototypes and the final design include:
+
+ +	Bill Haneman for motivating the ability to magnify occluded windows
+ 	with his work on accessibility
+
+ +	Carsten Haitzler for Enlightenment, the original eye-candy window
+ 	manager which demonstrated that clever hacks are an awfully
+	close substitute for changes in the underlying system.
+
+ +	Jim Gettys for key insights into the relationship between damage
+ 	events and per-window pixmap usage
+
+ +	Mike Harris and Owen Taylor for figuring out what to call it.
+
+ +	Deron Johnson for the Looking Glass implementation and
+ 	a prototype of the coordinate transformation mechanism.
+
+ +	Ryan Lortie for helping figure out reasonable parent clipping
+	semantics in the presence of manual redirected children.
+
+3. Architecture
+
+The composite extension provides three related mechanisms:
+
+ 1.	Per-hierarchy storage. The rendering of an entire hierarchy of windows
+ 	is redirected to off-screen storage. The pixels of that hierarchy
+	are available whenever it is viewable. Storage is automatically
+	reallocated when the top level window changes size. Contents beyond
+	the geometry of the top window are not preserved.
+
+ 2.	Automatic shadow update. When a hierarchy is rendered off-screen,
+ 	the X server provides an automatic mechanism for presenting those
+	contents within the parent window. The implementation is free to
+	make this update lag behind actual rendering operations by an
+	unspecified amount of time. This automatic update mechanism may
+	be disabled so that the parent window contents can be completely
+	determined by an external application.
+
+ 3.	External parent - child pointer coordinate transformation.
+ 	When a hierarchy is under manual compositing, the relationship
+	of coordinates within the parent to those in the child may
+	not be known within the X server. This mechanism provides
+	for redirection of these transformations through a client.
+
+Per-hierarchy storage may be created for individual windows or for all
+children of a window. Manual shadow update may be selected by only a single
+application for each window; manual update may also be selected on a
+per-window basis or for each child of a window. Detecting when to update
+may be done with the Damage extension.
+
+The off-screen storage includes the window contents, its borders and the
+contents of all descendants.
+
+3.1 NameWindowPixmap
+
+Version 0.2 of the protocol introduces a mechanism for associating an XID
+with the off-screen pixmap used to store these contents. This can be used
+to hold onto window contents after the window is unmapped (and hence animate
+it's disappearance), and also to access the border of the window, which is
+not reachable through the Window ID itself. A new pixmap is created each
+time the window is mapped or resized; as these events are nicely signalled
+with existing events, no additional notification is needed. The old pixmap
+will remain allocated as long as the Pixmap ID is left valid, it is
+important that the client use the FreePixmap request when it is done with
+the contents and to create a new name for the newly allocated pixmap.
+
+In automatic update mode, the X server is itself responsible for presenting
+the child window contents within the parent. It seems reasonable, then, for
+rendering to the parent window to be clipped so as not to interfere with any
+child window content. In an environment with a mixture of manual and
+automatic updating windows, rendering to the parent in the area nominally
+occupied by a manual update window should be able to affect parent pixel
+values in those areas, but such rendering should be clipped to automatic
+update windows, and presumably to other manual update windows managed by
+other applications. In any of these cases, it should be easy to ensure that
+rendering has no effect on any non-redirected windows.
+
+Instead of attempting to define new clipping modes for rendering, the
+Composite extension instead defines ClipByChildren rendering to the parent
+to exclude regions occupied by redirected windows (either automatic or
+manual). The CreateRegionFromBorderClip request can be used along with
+IncludeInferiors clipping modes to restrict manual shadow updates to the
+apporpriate region of the screen. Bracketing operations with
+GrabServer/UngrabServer will permit atomic sequences that can update the
+screen without artifact. As all of these operations are asynchronous,
+network latency should not adversely affect update latency.
+
+3.2 Composite Overlay Window
+
+Version 0.3 of the protocol adds the Composite Overlay Window, which
+provides compositing managers with a surface on which to draw without
+interference. This window is always above normal windows and is always
+below the screen saver window. It is an InputOutput window whose width
+and height are the screen dimensions. Its visual is the root visual
+and its border width is zero.  Attempts to redirect it using the
+composite extension are ignored.  This window does not appear in the
+reply of the QueryTree request. It is also an override redirect window.
+These last two features make it invisible to window managers and other X11
+clients. The only way to access the XID of this window is via the
+CompositeGetOverlayWindow request. Initially, the Composite Overlay
+Window is unmapped.
+
+CompositeGetOverlayWindow returns the XID of the Composite Overlay
+Window. If the window has not yet been mapped, it is mapped by this
+request. When all clients who have called this request have terminated
+their X11 connections the window is unmapped.
+
+Composite managers may render directly to the Composite Overlay
+Window, or they may reparent other windows to be children of this
+window and render to these. Multiple clients may render to the
+Composite Overlay Window, create child windows of it, reshape it, and
+redefine its input region, but the specific arbitration rules followed
+by these clients is not defined by this specification; these policies
+should be defined by the clients themselves.
+
+3.3 Clipping semantics redefined
+
+Version 0.4 of the protocol changes the semantics of clipping in the
+presence of manual redirect children. In version 0.3, a parent was always
+clipped to child windows, independent of the kind of redirection going on.
+With version 0.4, the parent is no longer clipped to child windows which are
+manually redirected. This means the parent can draw in the child region without using
+IncludeInferiors mode, and (perhaps more importantly), it will receive
+expose events in those regions caused by other actions. This new behaviour
+is not selectable.
+
+4. Errors
+
+The composite extension does not define any new errors.
+
+5. Types
+
+	UPDATETYPE	{ Automatic, Manual }
+
+	CompositeCoordinate
+		child:			Window
+		x, y:			CARD16
+
+7. Extension Initialization
+
+The client must negotiate the version of the extension before executing
+extension requests. Otherwise, the server will return BadRequest for any
+operations other than QueryVersion.
+
+    QueryVersion
+
+		client-major-version:		CARD32
+		client-minor-version:		CARD32
+
+		->
+
+		major-version:			CARD32
+		minor-version:			CARD32
+
+	The client sends the highest supported version to the server and
+	the server sends the highest version it supports, but no higher than
+	the requested version. Major versions changes can introduce
+	incompatibilities in existing functionality, minor version
+	changes introduce only backward compatible changes. It is
+	the client's responsibility to ensure that the server supports
+	a version which is compatible with its expectations. Servers
+	are encouraged to support multiple versions of the extension.
+
+8. Hierarchy Redirection
+
+    RedirectWindow
+
+		window:				Window
+		update:				UPDATETYPE
+
+		errors: Window, Access, Match
+
+	The hierarchy starting at 'window' is directed to off-screen
+	storage. 'update' specifies whether the contents are mirrored to 
+	the parent window automatically or not. Only one client may specify 
+	an update type of Manual, another attempt will result in an
+	Access error. When all clients enabling redirection terminate,
+	the redirection will automatically be disabled.
+
+	The root window may not be redirected. Doing so results in a Match
+	error.
+
+    RedirectSubwindows
+
+		window:				Window
+		update				UPDATETYPE
+
+		errors: Window, Access
+
+	Hierarchies starting at all current and future children of window
+	will be redirected as in RedirectWindow. If update is Manual,
+	then painting of the window background during window manipulation
+	and ClearArea requests is inhibited.
+
+    UnredirectWindow:
+
+		window:				Window
+		update:				UPDATETYPE
+
+		errors: Window, Value
+
+	Redirection of the specified window will be terminated. If
+	the specified window was not selected for redirection by the
+	current client, or if the update type does not match the
+	current client's previously requested update type, a 'Value'
+	error results.
+
+    UnredirectSubwindows:
+
+		window:				Window
+		update:				UPDATETYPE
+
+		errors: Window, Value
+
+	Redirection of all children of window will be terminated. If
+	the specified window was not selected for sub-redirection by the
+	current client, or if the update type does not match the
+	current client's previously requested update type, a 'Value'
+	error results.
+
+9. Clip lists
+
+    CreateRegionFromBorderClip
+
+		region:				Region
+		window:				Window
+
+		errors: Window, IDChoice
+
+	This request creates a region containing the "usual" border clip
+	value; that is the area of the window clipped against siblings and
+	the parent. This region can be used to restrict rendering to
+	suitable areas while updating only a single window. The region
+	is copied at the moment the request is executed; future changes
+	to the window hierarchy will not be reflected in this region.
+
+10. Associating a Pixmap ID with the off-screen storage (0.2 and later)
+
+    NameWindowPixmap
+
+		window:				Window
+		pixmap:				Pixmap
+
+		errors: Window, Match, IDChoice
+
+	This request makes 'pixmap' a reference to the off-screen storage
+	for 'window'. This pixmap will remain allocated until freed, even
+	if 'window' is unmapped, reconfigured or destroyed. However,
+	'window' will get a new pixmap allocated each time it is
+	mapped or resized, so this request will need to be reinvoked for
+	the client to continue to refer to the storage holding the current
+	window contents. Generates a 'Match' error if 'window' is not
+	redirected or is not visible.
+
+11. Composite Overlay Window (0.3 and later)
+
+    CompositeGetOverlayWindow
+
+	        window:				Window
+
+	        ->
+
+	        overlayWin:			Window
+
+    This request returns the XID of the Composite Overlay Window for 
+    the screen specified by the argument 'window'. This request 
+    indicates that the client wishes to use the Composite Overlay 
+    Window of this screen. If this Composite Overlay Window has not 
+    yet been mapped, it is mapped by this request.
+
+    The Composite Overlay Window for a particular screen will be 
+    unmapped when all clients who have invoked this request have 
+    also invoked CompositeReleaseOverlayWindow for that screen. Also,
+    CompositeReleaseOverlayWindow for a screen will be implicitly 
+    called when a client using the Composite Overlay Window on that 
+    screen terminates its X11 connection.
+
+
+    CompositeReleaseOverlayWindow
+
+		window:				Window
+
+    This request specifies that the client is no longer using the 
+    Composite Overlay Window on the screen specified by the 
+    argument 'window'. A screen's Composite Overlay Window is 
+    unmapped when there are no longer any clients using it.

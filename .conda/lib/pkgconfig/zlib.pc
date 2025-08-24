@@ -1,0 +1,13 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=/home/kie/code/deer-flow/.conda
+libdir=/home/kie/code/deer-flow/.conda/lib
+sharedlibdir=/home/kie/code/deer-flow/.conda/lib
+includedir=/home/kie/code/deer-flow/.conda/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.2.13
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -lz
+Cflags: -I${includedir}

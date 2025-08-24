@@ -1,0 +1,7 @@
+prefix=/home/kie/code/deer-flow/.conda
+includedir=${prefix}/include
+ 
+Name: KBProto
+Description: KB extension headers
+Version: 1.0.7
+Cflags: -I${includedir}

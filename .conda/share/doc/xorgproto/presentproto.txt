@@ -1,0 +1,931 @@
+			The Present Extension
+			     Version 1.4
+			      2023-06-13
+      
+			    Keith Packard
+			  keithp@keithp.com
+			  Intel Corporation
+
+1. Introduction
+
+The Present extension provides a way for applications to update their
+window contents from a pixmap in a well defined fashion, synchronizing
+with the display refresh and potentially using a more efficient
+mechanism than copying the contents of the source pixmap.
+
+1.1. Future Present extension versions
+
+This document includes speculation about future 'redirect' support
+within the Present extension. All such information is subject to
+change and is provided only as an aid to further Present development.
+
+1.2. Acknowledgments
+
+Eric Anholt <eric@anholt.net>
+Owen Taylor <otaylor@redhat.com>
+James Jones <jajones@nvidia.com>
+Louis-Francis Ratté-Boulianne <lfrb@collabora.com>
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+2. Data Types
+
+PRESENTEVENTID { XID }
+
+	Defines a unique event delivery target for Present
+	events. Multiple event IDs can be allocated to provide
+	multiple distinct event delivery contexts.
+
+PRESENTNOTIFY {
+	window: WINDOW
+	serial: CARD32
+	}
+
+	A list of these is passed to PresentPixmap; when the indicated
+	PresentPixmap completes, PresentCompletNotify events will be
+	delivered both to the PresentPixmap window/serial parameter as
+	well as each of the entries in the list of PRESENTNOTIFY parameter.
+
+PRESENTEVENTTYPE { PresentConfigureNotify,
+		   PresentCompleteNotify,
+		   PresentIdleNotify }
+
+PRESENTEVENTMASK { PresentConfigureNotifyMask,
+		   PresentCompleteNotifyMask,
+		   PresentIdleNotifyMask }
+
+PRESENTOPTION { PresentOptionAsync,
+                PresentOptionCopy,
+		PresentOptionUST,
+		PresentOptionSuboptimal,
+		PresentOptionAsyncMayTear }
+
+PRESENTCAPABILITY { PresentCapabilityAsync,
+		    PresentCapabilityFence,
+		    PresentCapabilityUST,
+		    PresentCapabilityAsyncMayTear,
+		    PresentCapabilitySyncobj }
+
+PRESENTCOMPLETEKIND { PresentCompleteKindPixmap,
+		      PresentCompleteKindMSCNotify }
+
+PRESENTCOMPLETEMODE { PresentCompleteModeCopy,
+		      PresentCompleteModeFlip,
+		      PresentCompleteModeSkip,
+		      PresentCompleteModeSuboptimalCopy }
+
+The Present extension also uses the Sync extension Fence data type to
+provide synchronization for pixmaps.
+
+2.1. Data Types proposed for a later Present extension version
+
+PRESENTEVENTTYPE { ...
+		   PresentRedirectNotify }
+
+PRESENTEVENTMASK { ...
+		   PresentSubredirectNotifyMask }
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+3. Errors
+
+EventID
+	A value for an EventID argument does not name a defined EventID
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+5. Events
+
+ConfigureNotify events inform clients about window configuration
+changes which can affect the allocation of window-related buffers.
+
+CompleteNotify events inform clients about the completion of a pending
+PresentPixmap request.
+
+IdleNotify events inform clients when pixmaps are available for re-use.
+
+5.1. Events proposed for a later Present extension version
+
+RedirectNotify events inform clients about other clients PresentPixmap
+requests.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+6. Extension Initialization
+
+The name of this extension is "Present"
+
+┌───
+    PresentQueryVersion
+	client-major-version:	CARD32
+	client-minor-version:	CARD32
+      ▶
+	major-version:		CARD32
+	minor-version:		CARD32
+└───
+
+	The client sends the highest supported version to the server
+	and the server sends the highest version it supports, but no
+	higher than the requested version. Major versions changes can
+	introduce incompatibilities in existing functionality, minor
+	version changes introduce only backward compatible changes.
+	It is the clients responsibility to ensure that the server
+	supports a version which is compatible with its expectations.
+
+	Backwards compatible changes include addition of new
+	requests.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+7. Extension Requests
+
+┌───
+    PresentPixmap
+	window: WINDOW
+	pixmap: PIXMAP
+	serial: CARD32
+	valid-area: REGION or None
+	update-area: REGION or None
+	x-off, y-off: INT16
+	target-crtc: CRTC or None
+	wait-fence: FENCE
+	idle-fence: FENCE
+	options: SETofPRESENTOPTION
+	target-msc: CARD64
+	divisor: CARD64
+	remainder: CARD64
+	notifies: LISTofPRESENTNOTIFY
+└───
+	Errors: Window, Pixmap, Match
+
+	Provides new content for the specified window, to be made
+	visible at the specified time (defined by 'target-msc', 'divisor'
+	and 'remainder'). If the depth of 'pixmap' and 'window' do not
+	match, a Match error will be generated.
+
+	'serial' is an arbitrary client-specified value which will
+	be returned in the associated PresentCompleteNotify event so
+	that the client can associate the event and request.
+
+	'valid-area' defines the portion of 'pixmap' which contains
+	valid window contents, or None if the pixmap contains valid
+	contents for the whole window.
+
+	'update-area' defines the subset of the window to be updated,
+	or None if the whole window is to be updated.
+
+	PresentPixmap may use any region of 'pixmap' which contains
+	'update-area' and which is contained by 'valid-area'. In other
+	words, areas inside 'update-area' will be presented from
+	'pixmap', areas outside 'valid-area' will not be presented
+	from 'pixmap' and areas inside 'valid-area' but outside
+	'update-area' may or may not be presented at the discretion of
+	the X server.
+
+	'x-off' and 'y-off' define the location in the window where
+	the 0,0 location of the pixmap will be presented. valid-area
+	and update-area are relative to the pixmap.
+
+	PresentPixmap will block until 'wait-fence' is triggered.
+	
+	When the X server has finished using 'pixmap' for this
+	operation, it will send a PresentIdleNotify event and arrange
+	for any 'idle-fence' to be triggered. This may be at any time
+	following the PresentPixmap request -- the contents may be
+	immediately copied to another buffer, copied just in time for
+	the vblank interrupt or the pixmap may be used directly for
+	display (in which case it will be busy until some future
+	PresentPixmap operation).
+
+	If 'idle-fence' is not None, then the client guarantees to the
+	X server that it will wait for that fence to be signalled
+	before it uses the pixmap again. If 'idle-fence' is None, then
+	the X server must arrange for the pixmap to be re-usable by
+	the client as soon as the PresentIdleNotify event has been
+	received. Note that if PresentCapabilityFence is set for the
+	associated CRTC, then clients should use fences to improve
+	overall system performance. If PresentCapabilityFence is not
+	set, then using fences offers no benefit, but also no cost.
+
+	If 'target-msc' is greater than the current msc for 'window',
+	the presentation will occur at (or after) the 'target-msc'
+	field. Otherwise, the presentation will occur after the next
+	field where msc % 'divisor' == 'remainder'.
+	
+	If 'target-crtc' is None, then the X server will choose a
+	suitable CRTC for synchronization.
+	
+	If 'options' contains PresentOptionAsync, and the 'target-msc'
+	is less than or equal to the current msc for 'window', then
+	the operation will be performed as soon as possible, not
+	necessarily waiting for the next vertical blank interval. If
+	the target-crtc does not support PresentCapabilityAsyncMayTear,
+	this may result in tearing.
+
+	If the target-crtc supports PresentCapabilityAsyncMayTear,
+	'options' contains PresentOptionAsyncMayTear, and the 'target-msc'
+	is less than or equal to the current msc for 'window', then
+	the operation will be performed as soon as possible, not
+	necessarily waiting for the next vertical blank interval, and
+	possibly resulting in tearing.
+
+	If 'options' contains PresentOptionCopy, then 'pixmap' will be
+	idle, and 'idle-fence' triggered as soon as the operation occurs.
+
+	If 'options' contains PresentOptionUST, then target-msc,
+	divisor and remainder will all be interpreted as UST values
+	instead of MSC values and the frame update will be scheduled
+	for the specified UST time, If the target-crtc supports
+	PresentCapabilityUST, then the swap time will be as close to
+	the target time as the driver can manage. Otherwise, the
+	server will take the target UST time and convert it to a
+	suitable target MSC value.
+
+	If 'options' contains PresentOptionSuboptimal, then the
+	PresentCompleteNotify event can have mode
+	PresentCompleteModeSuboptimalCopy as the client supports it.
+
+	After the presentation occurs, a PresentCompleteNotify event
+	with kind PresentCompleteKindPixmap will be generated, both to
+	'window' as well as all members of 'notifies'.
+
+	If 'window' is destroyed before the presentation occurs, then
+	the presentation action will not be completed.
+
+	PresentPixmap holds a reference to 'pixmap' until the
+	presentation occurs, so 'pixmap' may be immediately freed
+	after the request executes, even if that is before the
+	presentation occurs.
+
+	If 'idle-fence' is destroyed before the presentation occurs,
+	then idle-fence will not be signaled but the presentation will
+	occur normally.
+
+	If 'wait-fence' is destroyed before it becomes triggered, then
+	the presentation operation will no longer wait for it and will
+	occur when the other conditions are satisfied.
+
+┌───
+    PresentNotifyMSC
+	window: WINDOW
+	serial: CARD32
+	target-msc: CARD64
+	divisor: CARD64
+	remainder: CARD64
+└───
+	Errors: Window
+
+	Delivers a PresentCompleteNotifyEvent with kind
+	PresentCompleteKindNotifyMSC after the time specified by
+	'target-msc', 'divisor' and 'remainder'.
+
+	'serial' is an arbitrary client-specified value which will be
+	returned in the event so that the client can associate the
+	event and request.
+
+	If 'target-msc' is greater than the current msc for 'window',
+	the event will be delivered at (or after) the 'target-msc'
+	field. Otherwise, the event delivery will occur after the next
+	field where msc % 'divisor' == 'remainder'.
+	
+	If 'window' is destroyed before the event is delivered, then
+	the event delivery will not be completed.
+
+┌───
+    PresentSelectInput
+	event-id: PRESENTEVENTID
+	window: WINDOW
+	eventMask: SETofPRESENTEVENT
+└───
+	Errors: Window, Value, Match, IDchoice, Access
+
+	Selects the set of Present events to be delivered for the
+	specified window and event context. PresentSelectInput can
+	create, modify, or delete event contexts. An event context is
+	associated with a specific window; using an existing event
+	context with a different window generates a Match error.
+
+	If eventContext specifies an existing event context, then if
+	eventMask is empty, PresentSelectInput deletes the specified
+	context, otherwise the specified event context is changed to
+	select a different set of events.
+
+	If eventContext is an unused XID, then if eventMask is empty
+	no operation is performed. Otherwise, a new event context is
+	created selecting the specified events.
+
+┌───
+    PresentQueryCapabilities
+	target:			CRTC or WINDOW
+      ▶
+	capabilities:		SETofPRESENTCAPABILITY
+└───
+	Errors: Window, CRTC
+
+	Returns the supported capabilities for the target CRTC.  If
+	'target' is a CRTC, then it is used as the target CRTC.  If
+	'target' is a WINDOW, then the target CRTC is selected by the
+	X server from among the CRTCs on the screen specified by the window.
+
+	PresentCapabilityAsyncMayTear means that the target device may be
+	able to flip the scanout buffer mid-frame instead of waiting for
+	a vertical blank interval. The precise latency between the flip
+	request and the actual scanout transition is not defined by this
+	specification, but is intended to be no more than a few
+	scanlines.
+
+	If PresentCapabilityAsyncMayTear is not supported,
+	PresentCapabilityAsync means the same as
+	PresentCapabilityAsyncMayTear described above.
+
+	If PresentCapabilityAsyncMayTear is supported,
+	PresentCapabilityAsync means that even if there is already a flip
+	pending in the target device, it may be possible to replace that
+	flip before the next vertical blank interval. The scanout buffer
+	does not change mid-frame though, i.e. there is no tearing.
+
+	PresentCapabilityFence means that the target device can take
+	advantage of SyncFences in the Present operations to improve
+	GPU throughput. The driver must operate correctly in the
+	absence of fences, but may have reduced performance. Using
+	fences for drivers not advertising this capability should have
+	no performance impact.
+
+	PresentCapabilityUST means that the target device can scanout
+	the image at an arbitrary UST time value, and is not driven by
+	a periodic scanout timer. Applications specifying UST times
+	for PresentPixmap can expect that their image will appear to
+	the user within a short amount of time from that specified in
+	the request. The precise accuracy of the scanout time is not
+	defined by the extension, but is expected to be on the order
+	of milliseconds or less.
+
+	PresentCapabilitySyncobj means that the target device supports
+	explicit synchronization using timeline DRM synchronization
+	objects. See the PresentPixmapSynced request for details.
+
+┌───
+    PresentPixmapSynced
+	window: WINDOW
+	pixmap: PIXMAP
+	serial: CARD32
+	valid-area: REGION or None
+	update-area: REGION or None
+	x-off, y-off: INT16
+	target-crtc: CRTC or None
+	acquire-syncobj: SYNCOBJ or None
+	release-syncobj: SYNCOBJ or None
+	acquire-point: CARD64
+	release-point: CARD64
+	options: SETofPRESENTOPTION
+	target-msc: CARD64
+	divisor: CARD64
+	remainder: CARD64
+	notifies: LISTofPRESENTNOTIFY
+└───
+	Errors: Window, Pixmap, Match, Value
+
+	Identical to the PresentPixmap request, except that instead of the
+	'wait-fence' and 'idle-fence' arguments it accepts mandatory
+	'acquire-syncobj' and 'release-syncobj' arguments, along with
+	corresponding acquire and release points, to be used for explicit
+	timeline-based GPU synchronization. The 'acquire-point' and
+	'release-point' are assumed to correspond to timeline points on the
+	respective DRM syncobjs.
+
+	The contents of the Pixmap will not be accessed by the server until the
+	'acquire-point' on the acquire timeline has been signaled by the
+	client. The fence need not be submitted at the time the
+	PresentPixmapSynced request is issued.
+
+	Once the 'release-point' on the release timeline has been signaled, the
+	client may assume that no further GPU or CPU access to the Pixmap by
+	the server will occur as part of the originating PresentPixmapSynced
+	request.  Note that this is a stronger guarantee than what is provided
+	by the 'idle-fence' argument of the PresentPixmap request or the
+	delivery of a PresentIdleNotify event, as those do not necessarily
+	imply that the Pixmap is idle on the GPU.
+
+	The server may wait for the acquire point and signal the release point
+	itself, as will typically happen if the request is executed by copying
+	the Pixmap's contents. Alternatively, it may forward the timelines,
+	acquire, and release points to an output sink directly, provided that
+	sink also supports explicit synchronization using DRM syncobjs.
+
+	The server may signal the release point without waiting for the acquire
+	point if the Pixmap's contents are never accessed while servicing the
+	request. This may happen, for example, if a request is discarded due to
+	it being fully occluded by a later request.
+
+	Beware that, if multiple Pixmaps are presented using the same release
+	timeline, the server makes no guarantees on the order in which the
+	release points will be signaled. Of particular concern is that, if the
+	later of the two release points is signaled before the earlier one, it
+	may appear to the client as though the Pixmap with the earlier release
+	point has been released before the server has finished its access to
+	it. Therefore, in general, clients are strongly advised to avoid using
+	the same release timeline with different Pixmaps.
+
+	If the server does not support PresentCapabilitySyncobj, a Value error
+	is generated.
+
+	If either 'acquire-syncobj' or 'release-syncobj' are None or do not
+	refer to previously imported syncobjs, a Value error is generated.
+
+	If 'acquire-point' or 'release-point' is zero, a Value error is
+	generated.
+
+	If 'acquire-syncobj' is equal to 'release-syncobj' and 'acquire-point'
+	is greater than or equal to 'release-point', a Value error is
+	generated.
+
+
+7.1 Requests proposed for a later Present extension version
+
+	These are not part of the standard and represent future plans
+	for the Present extension.
+
+┌───
+    PresentSelectInput
+    ...
+└───
+	...
+
+	Specifying PresentSubredirectNotify Mask causes PresentPixmap
+	requests on any child of 'window' from other clients to
+	generate PresentRedirectNotify events to 'window' instead of
+	actually performing the operation. However, only one client at
+	a time can select for PresentRedirect on a window. An attempt
+	to violate this restriction results in an Access error.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄ 
+
+8. Extension Events
+
+┌───
+    PresentConfigureNotify
+	type: CARD8			XGE event type (35)
+	extension: CARD8		Present extension request number
+	sequence-number: CARD16
+	length: CARD32			2
+	evtype: CARD16			Present_ConfigureNotify
+	eventID: PRESENTEVENTID
+	window: WINDOW
+	x: INT16
+	y: INT16
+	width: CARD16
+	height: CARD16
+	off_x: INT16
+	off_y: INT16
+	pixmap_width: CARD16
+	pixmap_height: CARD16
+	pixmap_flags: CARD32
+└───
+
+	PresentConfigureNotify events are sent when the window
+	configuration changes if PresentSelectInput has requested
+	it. PresentConfigureNotify events are XGE events and so do not
+	have a unique event type.
+
+	'x' and 'y' are the parent-relative location of 'window'. 
+
+┌───
+    PresentCompleteNotify
+	type: CARD8			XGE event type (35)
+	extension: CARD8		Present extension request number
+	sequence-number: CARD16
+	length: CARD32			2
+	evtype: PRESENTEVENTTYPE	PresentCompleteNotify
+	eventID: PRESENTEVENTID
+	window: WINDOW
+	kind: PRESENTCOMPLETEKIND
+	mode: PRESENTCOMPLETEMODE
+	serial: CARD32
+	ust: CARD64
+	msc: CARD64
+└───
+
+	CompleteNotify events are delivered when a PresentPixmap or
+	PresentNotifyMSC operation has completed.
+
+	'kind' is PresentCompleteKindPixmap when generated by a
+	PresentPixmap operation completion or
+	PresentCompleteKindNotifyMsc when generated by a
+	PresentNotifyMSC operation completion.
+
+	'mode' is PresentCompleteModeCopy when the source pixmap
+	contents are taken from the pixmap and the pixmap is idle
+	immediately after the presentation completes. 'mode' is
+	PresentCompleteModeSuboptimalCopy when the source pixmap
+	contents are copied but it would be possible to flip the
+	pixmap if the buffer format/modifier was different (options
+	given to PresentPixmap must contain PresentOptionSuboptimal).
+	'mode' is PresentCompleteModeFlip when the pixmap remains in-use
+	even after the presentation completes. It will become idle no
+	later than when the next PresentPixmap operation targeting the
+	same window by any client completes. If the presentation
+	operation was skipped because some later operation made it
+	irrelevant, then 'mode' will be PresentCompleteModeSkip.
+
+	'serial' is the value provided in the generating PresentPixmap
+	request.
+
+	'msc' and 'ust' indicate the frame count and system time when
+	the presentation actually occurred.
+
+┌───
+    PresentIdleNotify
+	type: CARD8			XGE event type (35)
+	extension: CARD8		Present extension request number
+	sequence-number: CARD16
+	length: CARD32			0
+	evtype: PRESENTEVENTTYPE	PresentIdleNotify
+	eventID: PRESENTEVENTID
+	window: WINDOW
+	serial: CARD32
+	pixmap: PIXMAP
+	idle-fence: FENCE
+└───
+
+	IdleNotify events are delivered when a pixmap used in a
+	PresentPixmap operation may be re-used by the client.
+
+	'window' is the window from the PresentPixmap to which this
+	event is delivered.
+
+	'serial' is the value provided in the associated PresentPixmap
+	request.
+
+	'pixmap' is the pixmap which is ready for re-use.
+
+	'idle-fence' is the fence which was provided in the
+	originating PresentPixmap request and is used to synchronize
+	rendering between the client and the X server's use of the
+	buffer. If not None, then the client must wait for the fence
+	to be signaled before using the pixmap.
+
+8.1. Extension Events proposed for a later Present extension version
+
+┌───
+    PresentRedirectNotify
+	type: CARD8			XGE event type (35)
+	extension: CARD8		Present extension request number
+	sequence-number: CARD16
+	length: CARD32			17 + 2 n
+	evtype: CARD16			Present_RedirectNotify
+	update-window: BOOL
+
+	eventID: PRESENTEVENTID
+	event-window: WINDOW
+	window: WINDOW
+	pixmap: PIXMAP
+	serial: CARD32
+
+	valid-area: REGION
+	update-area: REGION
+	valid-rect: RECTANGLE
+	update-rect: RECTANGLE
+	x-off, y-off: INT16
+	target-crtc: CRTC
+	wait-fence: FENCE
+	idle-fence: FENCE
+	options: SETofPRESENTOPTION
+	target-msc: CARD64
+	divisor: CARD64
+	remainder: CARD64
+	notifies: LISTofPRESENTNOTIFY
+└───
+
+	RedirectNotify events are delivered when the client has
+	selected for SubredirectNotify the parent of the target
+	window. All of the values provided to the PresentPixmap
+	request are provided. If the client simply passes these
+	parameters back to the X server, the effect will be as if the
+	original client executed the request.
+
+	If 'update-window' is TRUE, then there are clients who have
+	requested composite automatic redirect on the window and who
+	presumably expect the window buffer to eventually contain
+	the application provided contents. The compositing manager
+	should at least occasionally update the window buffer with
+	suitable contents. The precise update interval is left to the
+	discretion of the client receiving this event.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+9. Extension Versioning
+
+	1.0: First published version
+
+	1.2: Added PresentCompleteModeSuboptimalCopy flag and
+	     PresentOptionSuboptimal option
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+
+10. Relationship with other extensions
+
+As an extension designed to support other extensions, there is
+naturally some interactions with other extensions.
+
+10.1 GLX
+
+GLX is both an application interface and an X extension. OpenGL
+applications using the GLX API will use the GLX extension and may use
+the Present extension to display application contents.
+
+10.2 DRI3
+
+The DRI3 extension provides a way to share direct rendered pixel data
+with the X server as X pixmaps. When used in conjunction with Present,
+they provide a complete direct rendering solution for OpenGL or other
+APIs.
+
+10.3 DRI2
+
+Present provides similar functionality to the DRI2SwapBuffers and
+requests, however Present uses X pixmaps to refer to the new window
+contents instead of the DRI2 buffer attachments.
+
+Present and DRI3 are designed in conjunction to replace DRI2.
+
+10.4 XvMC / Xv
+
+It might be nice to be able to use YUV formatted objects as Present
+sources.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄
+
+Appendix A. Protocol Encoding
+
+Syntactic Conventions
+
+This document uses the same syntactic conventions as the core X
+protocol encoding document.
+
+
+A.1 Common Types
+┌───
+    PresentEventType
+	0	PresentConfigureNotify
+	1	PresentCompleteNotify
+	2	PresentIdleNotify
+└───
+
+┌───
+    PresentEventMask
+	1	PresentConfigureNotifyMask
+	2	PresentCompleteNotifyMask
+	4	PresentIdleNotifyMask
+└───
+
+┌───
+    PresentOption
+	1	PresentOptionAsync
+	2	PresentOptionCopy;
+	4	PresentOptionUST
+	8	PresentOptionSuboptimal
+	16	PresentOptionAsyncMayTear
+└───
+
+┌───
+    PresentCapability
+	1	PresentCapabilityAsync
+	2	PresentCapabilityFence
+	4	PresentCapabilityUST
+	8	PresentCapabilityAsyncMayTear
+└───
+
+┌───
+    PresentCompleteKind
+	0	PresentCompleteKindPixmap
+	1	PresentCompleteKindMSCNotify
+└───
+
+┌───
+    PresentCompleteMode
+	0	PresentCompleteModeCopy
+	1	PresentCompleteModeFlip
+	2	PresentCompleteModeSkip
+	3	PresentCompleteModeSuboptimalCopy
+└───
+
+┌───
+    PresentNotify
+	4	Window			window
+	4	CARD32			serial
+└───
+
+A.1.1 Common Types proposed for a later Present extension version
+
+┌───
+    PresentEventType
+	...
+	3	PresentRedirectNotify
+└───
+
+┌───
+    PresentEventMask
+	...
+	8	PresentSubredirectNotifyMask
+└───
+
+A.2 Protocol Requests
+
+┌───
+    PresentQueryVersion
+	1	CARD8			major opcode
+	1	0			Present opcode
+	2	3			length
+	4	CARD32			major version
+	4	CARD32			minor version
+      ▶
+	1	1			Reply
+        1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	4	CARD32			major version
+        4	CARD32			minor version
+	16				unused	
+└───
+
+┌───
+    PresentPixmap
+	1	CARD8			major opcode
+	1	1			Present opcode
+	2	18+2n			length
+	4	Window			window
+	4	Pixmap			pixmap
+	4	CARD32			serial
+	4	Region			valid-area
+	4	Region			update-area
+	2	INT16			x-off
+	2	INT16			y-off
+	4	CRTC			target-crtc
+	4	SyncFence		wait-fence
+	4	SyncFence		idle-fence
+	4	CARD32			options
+	4				unused
+	8	CARD64			target-msc
+	8	CARD64			divisor
+	8	CARD64			remainder
+	8n	LISTofPresentNotify	notifies
+└───
+
+┌───
+    PresentNotifyMSC
+	1	CARD8			major opcode
+	1	2			Present opcode
+	2	10			length
+	4	Window			window
+	4	CARD32			serial
+	4				unused
+	8	CARD64			target-msc
+	8	CARD64			divisor
+	8	CARD64			remainder
+└───
+
+┌───
+    PresentSelectInput
+	1	CARD8			major opcode
+	1	3			Present opcode
+	2	4			length
+	4	EventID			event-id
+	4	Window			window
+	4	SETofPRESENTEVENTMASK	event-mask
+└───
+
+┌───
+    PresentQueryCapabilities
+	1	CARD8			major opcode
+	1	4			Present opcode
+	2	2			length
+	4	CRTC or Window		target
+      ▶
+	1	1			Reply
+        1				unused
+	2	CARD16			sequence number
+	4	0			reply length
+	4	SETofPRESENTCAPABILITY	capabilities
+└───
+
+┌───
+    PresentPixmapSynced
+	1	CARD8			major opcode
+	1	5			Present opcode
+	2	22+2n			length
+	4	Window			window
+	4	Pixmap			pixmap
+	4	CARD32			serial
+	4	Region			valid-area
+	4	Region			update-area
+	2	INT16			x-off
+	2	INT16			y-off
+	4	CRTC			target-crtc
+	4	SYNCOBJ			acquire-syncobj
+	4	SYNCOBJ			release-syncobj
+	8	CARD64			acquire-point
+	8	CARD64			release-point
+	4	CARD32			options
+	4				unused
+	8	CARD64			target-msc
+	8	CARD64			divisor
+	8	CARD64			remainder
+	8n	LISTofPresentNotify	notifies
+└───
+
+A.3 Protocol Events
+
+┌───
+    PresentConfigureNotify
+	1	35			XGE
+	1	CARD8			Present extension opcode
+	2	CARD16			sequence number
+	4	2			length
+	2	0			PresentConfigureNotify
+	2				unused
+	4	CARD32			event id
+	4	Window			window
+	2	INT16			x
+	2	INT16			y
+	2	CARD16			width
+	2	CARD16			height
+	2	INT16			off x
+	2	INT16			off y
+
+	2	CARD16			pixmap width
+	2	CARD16			pixmap height
+	4	CARD32			pixmap flags
+└───
+
+┌───
+    PresentCompleteNotify
+	1	35			XGE
+	1	CARD8			Present extension opcode
+	2	CARD16			sequence number
+	4	2			length
+	2	1			PresentCompleteNotify
+	1	CARD8			kind
+	1	CARD8			mode
+	4	CARD32			event id
+	4	Window			window
+	4	CARD32			serial
+	8	CARD64			ust
+
+	8	CARD64			msc
+└───
+
+┌───
+    PresentIdleNotify
+	1	35			XGE
+	1	CARD8			Present extension opcode
+	2	CARD16			sequence number
+	4	0			length
+	2	2			PresentIdleNotify
+	2				unused
+	4	CARD32			event id
+	4	Window			window
+	4	CARD32			serial
+	4	Pixmap			pixmap
+	4	SyncFence		idle-fence
+└───
+
+A.3.1 Protocol Events proposed for later Present extension version
+
+┌───
+    PresentRedirectNotify
+	1	35			XGE
+	1	CARD8			Present extension opcode
+	2	CARD16			sequence number
+	4	18+2n			length
+	2	3			PresentRedirectNotify
+	1	BOOL			update-window
+	1				unused
+	4	CARD32			event id
+	4	Window			event-window
+	4	Window			window
+	4	Pixmap			pixmap
+	4	CARD32			serial
+
+	4	Region			valid-area
+	4	Region			update-area
+	8	Rectangle		valid-rect
+	8	Rectangle		update-rect
+	2	INT16			x-off
+	2	INT16			y-off
+	4	CRTC			target-crtc
+	4	SyncFence		wait-fence
+	4	SyncFence		idle-fence
+	4	CARD32			options
+	4				unused
+	8	CARD64			target-msc
+	8	CARD64			divisor
+	8	CARD64			remainder
+	8n	LISTofPRESENTNOTIFY	notifies
+└───
+
+A.4 Protocol Errors
+
+The Present extension defines no errors.
+
+			     ❄ ❄ ❄  ❄  ❄ ❄ ❄

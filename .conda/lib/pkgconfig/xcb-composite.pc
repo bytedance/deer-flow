@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB Composite
+Description: XCB Composite Extension
+Version: 1.17.0
+Requires.private: xcb xcb-xfixes
+Libs: -L${libdir} -lxcb-composite
+Cflags: -I${includedir}

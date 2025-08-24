@@ -1,0 +1,46 @@
+.\" SPDX-License-Identifier: 0BSD
+.\"
+.\" Author: Lasse Collin
+.\"
+.\" German translation for xz-man.
+.\" Mario Blättermann <mario.blaettermann@gmail.com>, 2015, 2019-2020, 2022-2024.
+.\"
+.\"*******************************************************************
+.\"
+.\" This file was generated with po4a. Translate the source file.
+.\"
+.\"*******************************************************************
+.TH LZMAINFO 1 "30. Juni 2013" Tukaani XZ\-Dienstprogramme
+.SH BEZEICHNUNG
+lzmainfo \- im .lzma\-Dateikopf enthaltene Informationen anzeigen
+.SH ÜBERSICHT
+\fBlzmainfo\fP [\fB\-\-help\fP] [\fB\-\-version\fP] [\fIDatei …\fP]
+.SH BESCHREIBUNG
+\fBlzmainfo\fP zeigt die im \fB.lzma\fP\-Dateikopf enthaltenen Informationen an. Es
+liest die ersten 13 Bytes aus der angegebenen \fIDatei\fP, dekodiert den
+Dateikopf und gibt das Ergebnis in die Standardausgabe in einem
+menschenlesbaren Format aus. Falls keine \fIDatei\fPen angegeben werden oder
+die \fIDatei\fP als \fB\-\fP übergeben wird, dann wird aus der Standardeingabe
+gelesen.
+.PP
+In der Regel sind die unkomprimierte Größe der Daten und die Größe des
+Wörterbuchs am bedeutsamsten. Die unkomprimierte Größe kann nur dann
+angezeigt werden, wenn die Datei im \fB.lzma\fP\-Format kein Datenstrom ist. Die
+Größe des für die Dekompression nötigen Speichers beträgt einige Dutzend
+Kilobyte zuzüglich der Größe des Inhaltsverzeichnisses.
+.PP
+\fBlzmainfo\fP ist in den XZ\-Dienstprogrammen hauptsächlich zur Kompatibilität
+zu den LZMA\-Dienstprogrammen enthalten.
+.SH EXIT\-STATUS
+.TP 
+\fB0\fP
+Alles ist in Ordnung.
+.TP 
+\fB1\fP
+Ein Fehler ist aufgetreten.
+.SH FEHLER
+\fBlzmainfo\fP verwendet \fBMB\fP, während das korrekte Suffix \fBMiB\fP (2^20 Bytes)
+wäre. Damit wird die Kompatibilität zu den LZMA\-Dienstprogrammen
+gewährleistet.
+.SH "SIEHE AUCH"
+\fBxz\fP(1)

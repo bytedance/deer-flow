@@ -1,0 +1,11 @@
+prefix=/home/kie/code/deer-flow/.conda
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: XCB XTEST
+Description: XCB XTEST Extension
+Version: 1.17.0
+Requires.private: xcb
+Libs: -L${libdir} -lxcb-xtest
+Cflags: -I${includedir}

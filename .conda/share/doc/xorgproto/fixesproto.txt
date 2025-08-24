@@ -1,0 +1,734 @@
+                        The XFIXES Extension
+			    Version 6.1
+			 Document Revision 1
+			     2010-11-15
+			    Keith Packard
+			  keithp@keithp.com
+
+1. Introduction
+
+X applications have often needed to work around various shortcomings in the
+core X window system.  This extension is designed to provide the minimal
+server-side support necessary to eliminate problems caused by these
+workarounds.
+
+2. Acknowledgements
+
+This extension is a direct result of requests made by application
+developers, in particular,
+
+ +	Owen Taylor for describing the issues raised with the XEMBED
+ 	mechanisms and SaveSet processing and his initial extension
+	to handle this issue, and for pointer barriers
+
+ +	Bill Haneman for the design for cursor image tracking.
+
+ +	Havoc Pennington 
+
+ +	Fredrik Höglund for cursor names
+
+ +	Deron Johnson for cursor visibility
+
+3. Basic Premise
+
+Requests in this extension may seem to wander all over the map of X server
+capabilities, but they are tied by a simple rule -- resolving issues raised
+by application interaction with core protocol mechanisms that cannot be
+adequately worked around on the client side of the wire.
+
+4. Extension initialization
+
+The client must negotiate the version of the extension before executing
+extension requests.  Behavior of the server is undefined otherwise.
+
+QueryVersion
+
+	client-major-version:		CARD32
+	client-minor-version:		CARD32
+
+	->
+
+	major-version:			CARD32
+	minor-version:			CARD32
+
+	The client sends the highest supported version to the server and
+	the server sends the highest version it supports, but no higher than
+	the requested version.  Major versions changes can introduce
+	new requests, minor version changes introduce only adjustments to
+	existing requests or backward compatible changes.  It is
+	the clients responsibility to ensure that the server supports
+	a version which is compatible with its expectations.
+
+************* XFIXES VERSION 1 OR BETTER ***********
+
+5. Save Set processing changes
+
+Embedding one application within another provides a way of unifying
+disparate documents and views within a single framework.  From the X
+protocol perspective, this appears similar to nested window managers; the
+embedding application "manages" the embedded windows much as a window
+manager does for top-level windows.  To protect the embedded application
+from embedding application failure, it is reasonable to use the core SaveSet
+mechanism so that embedding application failure causes embedded windows to
+be preserved instead of destroyed.
+
+The core save set mechanism defines the target for each save set member
+window as the nearest enclosing window not owned by the terminating client.
+For embedding applications, this nearest window is usually the window
+manager frame.  The problem here is that the window manager will not
+generally expect to receive and correctly manage new windows appearing within
+that window by the save set mechanism, and will instead destroy the frame
+window in response to the client window destruction.  This causes the
+embedded window to be destroyed.
+
+An easy fix for this problem is to change the target of the save set member
+to a window which won't be affected by the underlying window destruction.
+XFIXES chooses the root window as the target.
+
+Having embedded windows suddenly appear at the top level can confuse users,
+so XFIXES also lets the client select whether the window should end up
+unmapped after the save set processing instead of unconditionally making
+them be mapped.
+
+5.1 Requests
+
+ChangeSaveSet
+
+		window:				Window
+		mode:				{ Insert, Delete }
+		target:				{ Nearest, Root }
+		map:				{ Map, Unmap }
+
+	ChangeSaveSet is an extension of the core protocol ChangeSaveSet
+	request.  As in that request, mode specifies whether the indicated
+	window is inserted or deleted from the save-set.  Target specifies
+	whether the window is reparented to the nearest non-client window as
+	in the core protocol, or reparented to the root window.  Map
+	specifies whether the window is mapped as in the core protocol or
+	unmapped.
+
+6. Selection Tracking
+
+Applications wishing to monitor the contents of current selections must
+poll for selection changes.  XFIXES improves this by providing an event
+delivered whenever the selection ownership changes.
+
+6.1 Types
+
+	SELECTIONEVENT			{ SetSelectionOwner,
+					  SelectionWindowDestroy,
+					  SelectionClientClose }
+
+6.1 Events
+
+SelectionNotify
+
+	subtype:			SELECTIONEVENT
+	window:				Window
+	owner:				Window
+	selection:			Atom
+	timestamp:			Timestamp
+	selection-timestamp:		Timestamp
+
+6.2 Requests
+
+SelectSelectionInput
+
+		window:				Window
+		selection:			Atom
+		event-mask:			SETofSELECTIONEVENT
+
+	Selects for events to be delivered to window when various causes of
+	ownership of selection occur.  Subtype indicates the cause of the
+	selection ownership change.  Owner is set to the current selection
+	owner, or None.  Timestamp indicates the time the event was
+	generated while selection-timestamp indicates the timestamp used to
+	own the selection.
+
+7. Cursor Image Monitoring
+
+Mirroring the screen contents is easily done with the core protocol or VNC
+addons, except for the current cursor image.  There is no way using the core
+protocol to discover which cursor image is currently displayed.  The
+cursor image often contains significant semantic content about the user
+interface.  XFIXES provides a simple mechanism to discover when the cursor
+image changes and to fetch the current cursor image.
+
+As the current cursor may or may not have any XID associated with it, there
+is no stable name available.  Instead, XFIXES returns only the image of the
+current cursor and provides a way to identify cursor images to avoid
+refetching the image each time it changes to a previously seen cursor.
+
+7.1 Types
+	CURSOREVENT			{ DisplayCursor }
+
+7.2 Events
+
+CursorNotify
+
+	subtype:		CURSOREVENT
+	window:			Window
+	cursor-serial:		CARD32
+	timestamp:		Timestamp
+	name:			Atom		(Version 2 only)
+
+7.3 Requests
+
+SelectCursorInput
+
+		window:			Window
+		event-mask:		SETofCURSOREVENT
+
+	This request directs cursor change events to the named window.
+	Events will be delivered irrespective of the screen on which they
+	occur.  Subtype indicates the cause of the cursor image change
+	(there is only one subtype at present).  Cursor-serial is a number
+	assigned to the cursor image which identifies the image.  Cursors
+	with different serial numbers may have different images.  Timestamp
+	is the time of the cursor change.
+
+	Servers supporting the X Input Extension Version 2.0 or higher only
+	notify the clients of cursor change events for the ClientPointer, not
+	of any other master pointer (see Section 4.4. in the XI2 protocol
+	specification).
+
+GetCursorImage
+
+		->
+
+		x:			INT16
+		y:			INT16
+		width:			CARD16
+		height:			CARD16
+		x-hot:			CARD16
+		y-hot:			CARD16
+		cursor-serial:		CARD32
+		cursor-image:		LISTofCARD32
+
+	GetCursorImage returns the image of the current cursor.  X and y are
+	the current cursor position.  Width and height are the size of the
+	cursor image.  X-hot and y-hot mark the hotspot within the cursor
+	image.  Cursor-serial provides the number assigned to this cursor
+	image, this same serial number will be reported in a CursorNotify
+	event if this cursor image is redisplayed in the future.
+
+	The cursor image itself is returned as a single image at 32 bits per
+	pixel with 8 bits of alpha in the most significant 8 bits of the
+	pixel followed by 8 bits each of red, green and finally 8 bits of
+	blue in the least significant 8 bits.  The color components are
+	pre-multiplied with the alpha component.
+	
+************* XFIXES VERSION 2 OR BETTER ***********
+
+8. Region Objects
+
+The core protocol doesn't expose regions as a primitive object and this
+makes many operations more complicated than they really need to be.  Adding
+region objects simplifies expose handling, the Shape extension and other
+operations. These operations are also designed to support a separate
+extension, the X Damage Extension.
+
+8.1 Types
+
+	Region:				XID
+	WINDOW_REGION_KIND:		{ Bounding, Clip }
+	
+8.2 Errors
+
+	Region				The specified region is invalid
+
+8.3 Requests
+
+CreateRegion
+
+		region:				REGION
+		rects:				LISTofRECTANGLE
+
+	Creates a region initialized to the specified list of rectangles.
+	The rectangles may be specified in any order, their union becomes
+	the region.  The core protocol allows applications to specify an
+	order for the rectangles, but it turns out to be just as hard to
+	verify the rectangles are actually in that order as it is to simply
+	ignore the ordering information and union them together.  Hence,
+	this request dispenses with the ordering information.
+
+	Errors: IDChoice
+
+CreateRegionFromBitmap
+
+		region:				REGION
+		bitmap:				PIXMAP
+
+	Creates a region initialized to the set of 'one' pixels in bitmap
+	(which must be depth 1, else Match error).
+
+	Errors: Pixmap, IDChoice, Match
+
+CreateRegionFromWindow
+
+		window:				Window
+		kind:				WINDOW_REGION_KIND
+		region:				Region
+
+	Creates a region initialized to the specified window region.  See the
+	Shape extension for the definition of Bounding and Clip regions.
+
+	Errors: Window, IDChoice, Value
+
+CreateRegionFromGC
+
+		gc:				GContext
+		region:				Region
+
+	Creates a region initialized from the clip list of the specified
+	GContext.
+
+	Errors: GContext, IDChoice
+
+CreateRegionFromPicture
+
+		picture:			Picture
+		region:				Region
+
+
+	Creates a region initialized from the clip list of the specified
+	Picture.
+
+	Errors: Picture, IDChoice
+
+DestroyRegion
+
+		region:				Region
+
+	Destroys the specified region.
+
+	Errors: Region
+
+SetRegion
+
+		region:				Region
+		rects:				LISTofRECTANGLE
+
+	This replaces the current contents of region with the region formed
+	by the union of rects.
+
+CopyRegion
+		source:				Region
+		destination:			Region
+
+	This replaces the contents of destination with the contents of 
+	source.
+
+UnionRegion
+IntersectRegion
+SubtractRegion
+
+		source1:			Region
+		source2:			Region
+		destination:			Region
+	
+	Combines source1 and source2, placing the result in destination.
+	Destination may be the same as either source1 or source2.
+
+	Errors: Region, Value
+	
+InvertRegion
+
+		source:				Region
+		bounds:				RECTANGLE
+		destination:			Region
+	
+	The source region is subtracted from the region specified by
+	bounds.  The result is placed in destination, replacing its contents.
+
+	Errors: Region
+	
+TranslateRegion
+
+		region:				Region
+		dx, dy:				INT16
+
+	The region is translated by dx, dy in place.
+
+	Errors: Region
+
+RegionExtents
+
+		source:				Region
+		destination:			Region
+
+	The extents of the source region are placed in the destination
+
+FetchRegion
+
+		region:				Region
+		->
+		extents:			RECTANGLE
+		rectangles:			LISTofRECTANGLE
+
+	The region is returned as a list of rectangles in YX-banded order.
+
+	Errors: Region
+
+SetGCClipRegion
+
+		gc:				GCONTEXT
+		clip-x-origin, clip-y-origin:	INT16
+		region:				Region or None
+
+	This request changes clip-mask in gc to the specified region and
+	sets the clip origin.  Output will be clipped to remain contained
+	within the region.  The clip origin is interpreted relative to the
+	origin of whatever destination drawable is specified in a graphics
+	request.  The region is interpreted relative to the clip origin.
+	Future changes to region have no effect on the gc clip-mask.
+
+	Errors: GContext, Region
+
+SetWindowShapeRegion
+
+		dest:				Window
+		destKind:			SHAPE_KIND
+		xOff, yOff:			INT16
+		region:				Region or None
+
+	This request sets the specified (by destKind) Shape extension region
+	of the window to region, offset by xOff and yOff.   Future changes to
+	region have no effect on the window shape.
+
+	Errors: Window, Value, Region
+
+SetPictureClipRegion
+
+		picture:			Picture
+		clip-x-origin, clip-y-origin:	INT16
+		region:				Region or None
+
+	This request changes clip-mask in picture to the specified region
+	and sets the clip origin.  Input and output will be clipped to
+	remain contained within the region.  The clip origin is interpreted
+	relative to the origin of the drawable associated with picture.  The
+	region is interpreted relative to the clip origin.  Future changes
+	to region have no effect on the picture clip-mask.
+
+	Errors: Picture, Region
+
+9. Cursor Names
+
+Attaching names to cursors permits some abstract semantic content to be
+associated with specific cursor images.  Reflecting those names back to
+applications allows that semantic content to be related to the user through
+non-visual means.
+
+9.1 Events
+
+CursorNotify
+
+		subtype:		CURSOREVENT
+		window:			Window
+		cursor-serial:		CARD32
+		timestamp:		Timestamp
+		name:			Atom or None
+	
+	In Version 2 of the XFIXES protocol, this event adds the atom
+	of any name associated with the current cursor (else None).
+
+9.2 Requests
+
+SetCursorName
+
+		cursor:			CURSOR
+		name:			LISTofCARD8
+
+	This request interns name as an atom and sets that atom as the name
+	of cursor.
+
+	Errors: Cursor
+
+GetCursorName
+
+		cursor:			CURSOR
+		->
+		atom:			ATOM or None
+		name:			LISTofCARD8
+
+	This request returns the name and atom of cursor.  If no name is
+	set, atom is None and name is empty.
+
+	Errors: Cursor
+
+GetCursorImageAndName
+
+		->
+
+		x:			INT16
+		y:			INT16
+		width:			CARD16
+		height:			CARD16
+		x-hot:			CARD16
+		y-hot:			CARD16
+		cursor-serial:		CARD32
+		cursor-atom:		ATOM
+		cursor-image:		LISTofCARD32
+		cursor-name:		LISTofCARD8
+
+	This is similar to GetCursorImage except for including both
+	the atom and name of the current cursor.
+
+ChangeCursor
+
+		source, destination:	CURSOR
+
+	This request replaces all references to the destination with a
+	reference to source.  Any existing uses of the destination cursor
+	object will now show the source cursor image.
+
+ChangeCursorByName
+
+		src:			CURSOR
+		name:			LISTofCARD8
+
+	This request replaces the contents of all cursors with the specified
+	name with the src cursor.
+
+************* XFIXES VERSION 3 OR BETTER ***********
+
+10. Region Expansion
+
+This update provides another operation on the region objects defined in
+Section 8 of this document.
+
+10.1 Requests
+
+ExpandRegion
+		source:				REGION
+		destination:			REGION
+		left, right, top, bottom:	CARD16
+
+	Creates destination region containing the area specified by
+	expanding each rectangle in the source region by the specified
+	number of pixels to the left, right, top and bottom.
+
+************* XFIXES VERSION 4 OR BETTER ***********
+
+11. Cursor Visibility
+
+Composite managers may want to render the cursor themselves instead of
+relying on the X server sprite drawing, this provides a way for them to
+do so without getting a double cursor image.
+
+11.1 Requests
+
+HideCursor
+
+		window:			WINDOW
+
+	A client sends this request to indicate that it wants the
+	cursor image to be hidden (i.e. to not be displayed) when
+	the sprite is on the same screen as the specified window.
+	The sprite will be hidden if one or more clients have called
+	HideCursor and not ShowCursor.
+
+	Note that even though cursor hiding causes the cursor image
+	to be invisible, CursorNotify events will still be sent
+	normally, as if the cursor image were visible.
+
+	When a client with outstanding cursor hiding requests
+	terminates its connection these requests will be deleted.
+
+	Servers supporting the X Input Extension Version 2.0 or higher hide
+	all visible cursors in response to a HideCursor request. If a master
+	pointer is created while the cursors are hidden, this master pointer's
+	cursor will be hidden as well.
+
+ShowCursor
+
+		window:			WINDOW
+
+	A client sends this request to indicate that it wants the
+	cursor image to be displayed when the sprite is on the same
+	screen as the specified window. The sprite will be hidden
+	if one or more clients have called HideCursor and not ShowCursor.
+
+	If the client has made no outstanding HideCursor requests
+	a BadMatch error is generated.
+
+	Servers supporting the X Input Extension Version 2.0 or higher show
+	all visible cursors in response to a ShowCursor request.
+
+************* XFIXES VERSION 5 OR BETTER ***********
+
+12. Pointer Barriers
+
+Compositing managers and desktop environments may have UI elements in
+particular screen locations such that for a single-headed display they
+correspond to easy targets according to Fitt's Law, for example, the top
+left corner.  For a multi-headed environment these corners should still be
+semi-impermeable.  Pointer barriers allow the application to define
+additional constraint on cursor motion so that these areas behave as
+expected even in the face of multiple displays.
+
+Absolute positioning devices like touchscreens do not obey pointer barriers.
+There's no advantage to target acquisition to do so, since on a touchscreen
+all points are in some sense equally large, whereas for a relative
+positioning device the edges and corners are infinitely large.
+
+WarpPointer and similar requests do not obey pointer barriers, for
+essentially the same reason.
+
+12.1 Types
+
+	BARRIER:	XID
+
+	BarrierDirections
+
+		BarrierPositiveX:	    1 << 0
+		BarrierPositiveY:	    1 << 1
+		BarrierNegativeX:	    1 << 2
+		BarrierNegativeY:	    1 << 3
+
+12.2 Errors
+
+	Barrier
+
+12.3 Requests
+
+CreatePointerBarrier
+
+		barrier:		    BARRIER
+		window:			    Window
+		x1, y2, x2, y2:		    INT16
+		directions:		    CARD32
+		devices:		    LISTofDEVICEID
+
+	Creates a pointer barrier along the line specified by the given
+	coordinates on the screen associated with the given window.  The
+	barrier has no spatial extent; it is simply a line along the left
+	or top edge of the specified pixels.  Barrier coordinates are in
+	screen space.
+
+	The coordinates must be axis aligned, either x1 == x2, or
+	y1 == y2, but not both.  The varying coordinates may be specified
+	in any order.  For x1 == x2, either y1 > y2 or y1 < y2 is valid.
+	If the coordinates are not valid BadValue is generated.
+
+	Motion is allowed through the barrier in the directions specified:
+	setting the BarrierPositiveX bit allows travel through the barrier
+	in the positive X direction, etc.  Nonsensical values (forbidding Y
+	axis travel through a vertical barrier, for example) and excess set
+	bits are ignored.
+
+	If the server supports the X Input Extension version 2 or higher,
+	the devices element names a set of master device to apply the
+	barrier to.  If XIAllDevices or XIAllMasterDevices are given, the
+	barrier applies to all master devices.  If a slave device is named,
+	BadDevice is generated; this does not apply to slave devices named
+	implicitly by XIAllDevices.  Naming a device multiple times is
+	legal, and is treated as though it were named only once.  If a
+	device is removed, the barrier continues to apply to the remaining
+	devices, but will not apply to any future device with the same ID
+	as the removed device.  Nothing special happens when all matching
+	devices are removed; barriers must be explicitly destroyed.
+
+	Errors: IDChoice, Window, Value, Device
+
+DestroyPointerBarrier
+
+		barrier:		    BARRIER
+
+	Destroys the named barrier.
+
+	Errors: Barrier 
+
+************* XFIXES VERSION 6 OR BETTER ***********
+
+13. Disconnect mode
+
+The X11 server is capable of terminating itself once all X11 clients are
+gone.
+
+Yet, in a typical user session, there are a number of X11 clients running
+continuously (e.g. Xsettings daemon, IBus, etc.). Those always-running
+clients will prevent the X11 server from terminating, because the actual
+number of X11 clients will never drop to 0.
+
+Disconnect mode allows the X11 clients themselves to specify that they
+should not be accounted for when checking the remaining clients prior
+to terminate the X11 server.
+
+This can be particularly useful for Wayland compositors which are able to
+start Xwayland on demand, as this allows Xwayland to terminate automatically
+when the relevant X11 clients have quit.
+
+13.1 Types
+
+	XFixesClientDisconnectFlags
+
+		XFixesClientDisconnectFlagDefault:	    0
+		XFixesClientDisconnectFlagTerminate:	    1 << 0
+		XFixesClientDisconnectFlagForceTerminate:   1 << 1
+
+	XFixesClientDisconnectFlagDefault is the default behavior for
+	regular clients: the X11 server won't terminate as long as such
+	clients are still connected and no other clients trigger
+	termination.
+
+	XFixesClientDisconnectFlagTerminate indicates to the X11 server that
+	it can ignore the client and terminate itself even though the client
+	is still connected to the X11 server.
+
+	If XFixesClientDisconnectFlagForceTerminate is set at the time the
+	client disconnects, the X11 server MUST terminate and/or reset without
+	delivering further events to clients, even if other clients that have
+	not set XFixesClientDisconnectFlagTerminate are still connected.
+	Screen lockers SHOULD use this flag to ensure that the screen does not
+	unlock if they exit, which would create a security vulnerability.
+	Programs SHOULD NOT use this flag unless unexpected termination would
+	create a security vulnerability or other severe problem.
+
+	Because XFixesClientDisconnectFlagForceTerminate allows the client to
+	cause the server to terminate, it is subject to security checks to
+	prevent unauthorized use.  Servers that support the X Access Control
+	Extension (XACE) MUST deny attempts to set
+	XFixesClientDisconnectFlagForceTerminate, unless the client has
+	DixManageAccess to the server.  Servers that support the SECURITY
+	extension MUST forbid untrusted clients from setting
+	XFixesClientDisconnectFlagForceTerminate. Servers MAY refuse to allow
+	clients to set this flag for other reasons. For instance, a server
+	might only allow the flag to be set by local clients.  If the server
+	refuses to allow the client to set this flag, an Access error results.
+
+	XFixesClientDisconnectFlagForceTerminate is only available in XFixes
+	versions 6.1 and better.
+
+13.2 Requests
+
+SetClientDisconnectMode
+
+		disconnect-mode:	    CARD32
+
+	Sets the disconnect mode for the client.
+
+	The disconnect-mode is a bit mask of XFixesClientDisconnectFlags.
+
+
+GetClientDisconnectMode
+
+	Gets the disconnect mode for the client.
+
+		->
+
+		disconnect-mode:	    CARD32
+
+	The disconnect-mode is a bit mask of XFixesClientDisconnectFlags.
+
+
+99. Future compatibility
+
+This extension is not expected to remain fixed.  Future changes will
+strive to remain compatible if at all possible.  The X server will always
+support version 1 of the extension protocol if requested by a client.
+
+Additions to the protocol will always by marked by minor version number
+changes so that applications will be able to detect what requests are
+supported.
