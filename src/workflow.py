@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import logging
+
 from src.config.configuration import get_recursion_limit
 from src.graph import build_graph
 

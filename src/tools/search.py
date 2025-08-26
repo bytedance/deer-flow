@@ -17,18 +17,16 @@ from langchain_community.utilities import (
     WikipediaAPIWrapper,
 )
 
-from src.config import SearchEngine, SELECTED_SEARCH_ENGINE
-from src.config import load_yaml_config
-from src.tools.tavily_search.tavily_search_results_with_images import (
-    TavilySearchResultsWithImages,
-)
-
+from src.config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
 from src.tools.decorators import create_logged_tool
+from src.tools.tavily_search.tavily_search_results_with_images import (
+    TavilySearchWithImages,
+)
 
 logger = logging.getLogger(__name__)
 
 # Create logged versions of the search tools
-LoggedTavilySearch = create_logged_tool(TavilySearchResultsWithImages)
+LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)

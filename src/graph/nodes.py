@@ -8,28 +8,27 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
-from langgraph.types import Command, interrupt
+from langchain_core.tools import tool, BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
-from src.tools.search import LoggedTavilySearch
-from src.tools import (
-    crawl_tool,
-    get_web_search_tool,
-    get_retriever_tool,
-    python_repl_tool,
-)
-
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
 from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
+from src.tools import (
+    crawl_tool,
+    get_retriever_tool,
+    get_web_search_tool,
+    python_repl_tool,
+)
+from src.tools.search import LoggedTavilySearch
 from src.utils.json_utils import repair_json_output
 
-from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
+from .types import State
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,7 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
         return {}, {}
 
 
-async def get_mcp_tools_info(config: RunnableConfig) -> []:
+async def get_mcp_tools_info(config: RunnableConfig) -> list[BaseTool]:
     """拿到所有可用的 MCP 工具信息.
     
     Args:
@@ -99,22 +98,23 @@ async def get_mcp_tools_info(config: RunnableConfig) -> []:
         mcp_servers, enabled_tools = get_mcp_servers(config)
         # Get MCP tools if available
         if mcp_servers:
-            async with MultiServerMCPClient(mcp_servers) as client:
-                for tool in client.get_tools():
-                    for server_name in mcp_servers:
-                        prefixed_name = f"{server_name}_{tool.name}"
-                        if prefixed_name in enabled_tools:
-                            # Create a copy of the tool for this specific server
-                            import copy
-                            tool_copy = copy.deepcopy(tool)
-                            tool_copy.name = prefixed_name
-                            tool_copy.description = (
-                                f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
-                            )
-                            tools.append(tool_copy)
-                        else:
-                            logger.debug(f"Tool {prefixed_name} NOT found in enabled_tools")
-                logger.info(f"Successfully collected {len(tools)} MCP tools")
+            client = MultiServerMCPClient(mcp_servers)
+            m_tools = await client.get_tools()
+            for tool in m_tools:
+                for server_name in mcp_servers:
+                    prefixed_name = f"{server_name}_{tool.name}"
+                    if prefixed_name in enabled_tools:
+                        # Create a copy of the tool for this specific server
+                        import copy
+                        tool_copy = copy.deepcopy(tool)
+                        tool_copy.name = prefixed_name
+                        tool_copy.description = (
+                            f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                        )
+                        tools.append(tool_copy)
+                    else:
+                        logger.debug(f"Tool {prefixed_name} NOT found in enabled_tools")
+            logger.info(f"Successfully collected {len(tools)} MCP tools")
         return tools
     except Exception as e:
         logger.error(f"Failed to collect MCP tools info: {e}")
@@ -203,7 +203,7 @@ async def planner_node(
     elif AGENT_LLM_MAP["planner"] == "basic":
         llm = get_llm_by_type("basic").with_structured_output(
             Plan,
-            method="json_mode",
+            # method="json_mode",
         )
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
@@ -538,22 +538,23 @@ async def _setup_and_execute_agent_step(
     loaded_tools = default_tools[:]
     mcp_servers, enabled_tools = get_mcp_servers(config)
     if mcp_servers:
-        async with MultiServerMCPClient(mcp_servers) as client:
-            for tool in client.get_tools():
-                for server_name in mcp_servers:
-                    prefixed_name = f"{server_name}_{tool.name}"
-                    if prefixed_name in enabled_tools:
-                        # Create a copy of the tool for this specific server
-                        import copy
-                        tool_copy = copy.deepcopy(tool)
-                        tool_copy.name = prefixed_name
-                        tool_copy.description = (
-                            f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
-                        )
-                        loaded_tools.append(tool_copy)
-            logger.info(f"{agent_type} successfully collected {len(loaded_tools)} MCP tools")
-            agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
-            return await _execute_agent_step(state, agent, agent_type)
+        client = MultiServerMCPClient(mcp_servers)
+        tools = await client.get_tools()
+        for tool in tools:
+            for server_name in mcp_servers:
+                prefixed_name = f"{server_name}_{tool.name}"
+                if prefixed_name in enabled_tools:
+                    # Create a copy of the tool for this specific server
+                    import copy
+                    tool_copy = copy.deepcopy(tool)
+                    tool_copy.name = prefixed_name
+                    tool_copy.description = (
+                        f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                    )
+                    loaded_tools.append(tool_copy)
+        logger.info(f"{agent_type} successfully collected {len(loaded_tools)} MCP tools")
+        agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
+        return await _execute_agent_step(state, agent, agent_type)
     else:
         # Use default tools if no MCP servers are configured
         agent = create_agent(agent_type, agent_type, default_tools, agent_type)

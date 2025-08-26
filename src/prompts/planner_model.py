@@ -13,28 +13,37 @@ class StepType(str, Enum):
 
 
 class StepTool(BaseModel):
-    """表示步骤中使用的工具。"""
-    name: str = Field(..., description="工具名称")
-    description: str = Field(..., description="工具描述")
-    server: str = Field(..., description="工具所属的MCP服务器")
+    """
+    Schema for a tool used in a workflow step.
+
+    Attributes:
+        name (str): Unique identifier of the tool.
+        description (str): Human-readable description of the tool.
+        server (str): The MCP server providing the tool.
+        parameters (Optional[Dict[str, Any]]): Optional configuration parameters for the tool.
+    """
+    name: str = Field(..., description="Unique identifier of the tool")
+    description: str = Field(..., description="Human-readable description of the tool")
+    server: str = Field(..., description="MCP server providing the tool")
     parameters: Optional[Dict[str, Any]] = Field(
-        default=None, description="工具参数配置"
+        default=None,
+        description="Optional configuration parameters for the tool"
     )
 
     @validator('name')
     def validate_name(cls, v):
-        """验证工具名称不能为空且符合命名规范"""
+        """Ensure the tool name is not empty and follows naming conventions"""
         if not v or not v.strip():
-            raise ValueError("工具名称不能为空")
+            raise ValueError("Tool name cannot be empty")
         if not v.replace('_', '').replace('-', '').isalnum():
-            raise ValueError("工具名称只能包含字母、数字、下划线和连字符")
+            raise ValueError("Tool name can only contain letters, numbers, underscores, and hyphens")
         return v.strip()
 
     @validator('server')
     def validate_server(cls, v):
-        """验证服务器名称不能为空"""
+        """Ensure the server name is not empty"""
         if not v or not v.strip():
-            raise ValueError("服务器名称不能为空")
+            raise ValueError("Server name cannot be empty")
         return v.strip()
 
     class Config:

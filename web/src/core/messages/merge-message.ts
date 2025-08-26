@@ -49,7 +49,11 @@ function mergeTextMessage(message: Message, event: MessageChunkEvent) {
     message.reasoningContentChunks.push(event.data.reasoning_content);
   }
 }
-
+function convertToolChunkArgs(args: string) {
+  // Convert escaped characters in args
+  if (!args) return "";
+  return args.replace(/&#91;/g, "[").replace(/&#93;/g, "]").replace(/&#123;/g, "{").replace(/&#125;/g, "}");
+}
 function mergeToolCallMessage(
   message: Message,
   event: ToolCallsEvent | ToolCallChunksEvent,
@@ -70,14 +74,14 @@ function mergeToolCallMessage(
         (toolCall) => toolCall.id === chunk.id,
       );
       if (toolCall) {
-        toolCall.argsChunks = [chunk.args];
+        toolCall.argsChunks = [convertToolChunkArgs(chunk.args)];
       }
     } else {
       const streamingToolCall = message.toolCalls.find(
         (toolCall) => toolCall.argsChunks?.length,
       );
       if (streamingToolCall) {
-        streamingToolCall.argsChunks!.push(chunk.args);
+        streamingToolCall.argsChunks!.push(convertToolChunkArgs(chunk.args));
       }
     }
   }
