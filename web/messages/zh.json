@@ -50,12 +50,7 @@
       "enableDisable": "启用/禁用服务器",
       "deleteServer": "删除服务器",
       "disabled": "已禁用",
-      "new": "新增",
-      "plannerIntegration": {
-        "title": "规划器集成",
-        "description": "启用 MCP 工具在研究规划过程中被考虑和使用。启用后，规划器将为每个研究步骤建议合适的工具。",
-        "enabledNote": "规划器现在会在创建研究计划时考虑可用的 MCP 工具，并为每个步骤建议最合适的工具。"
-      }
+      "new": "新增"
     },
     "about": {
       "title": "关于"

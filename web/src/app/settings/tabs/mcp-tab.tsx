@@ -8,10 +8,8 @@ import { useCallback, useState } from "react";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Switch } from "~/components/ui/switch";
 import type { MCPServerMetadata } from "~/core/mcp";
-import { setMcpPlannerIntegration } from "~/core/store/settings-store";
 import { cn } from "~/lib/utils";
 
 import { AddMCPServerDialog } from "../dialogs/add-mcp-server-dialog";
@@ -89,40 +87,6 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
         </div>
       </header>
       
-      {/* MCP Planner Integration Section */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Brain className="h-5 w-5" />
-              <CardTitle className="text-base">{t("plannerIntegration.title")}</CardTitle>
-            </div>
-            <Switch
-              checked={settings.mcp.plannerIntegration}
-              onCheckedChange={(checked) => {
-                setMcpPlannerIntegration(checked);
-                onChange({ 
-                  ...settings, 
-                  mcp: { 
-                    ...settings.mcp, 
-                    plannerIntegration: checked 
-                  } 
-                });
-              }}
-            />
-          </div>
-          <CardDescription className="text-sm">
-            {t("plannerIntegration.description")}
-          </CardDescription>
-        </CardHeader>
-        {settings.mcp.plannerIntegration && (
-          <CardContent className="pt-0">
-            <div className="text-sm text-muted-foreground">
-              {t("plannerIntegration.enabledNote")}
-            </div>
-          </CardContent>
-        )}
-      </Card>
       <main>
         <ul id="mcp-servers-list" className="flex flex-col gap-4">
           {servers.map((server) => {

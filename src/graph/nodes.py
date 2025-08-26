@@ -14,7 +14,7 @@ from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
 from src.config.agents import AGENT_LLM_MAP
-from src.config.configuration import Configuration
+from src.config.configuration import Configuration, get_bool_env
 from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
@@ -175,7 +175,8 @@ async def planner_node(
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
     
     # 根据配置决定是否收集 MCP 工具信息
-    if configurable.mcp_planner_integration:
+    mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
+    if mcp_enabled:
         logger.info("MCP planner integration is enabled, collecting tool information")
         state["mcp_tools_info"] = await get_mcp_tools_info(config)
     else:
