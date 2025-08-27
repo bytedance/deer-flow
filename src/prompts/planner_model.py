@@ -76,16 +76,16 @@ class Step(BaseModel):
 
     @validator('tools')
     def validate_tools(cls, v):
-        """验证工具列表的合理性"""
+        """Verify the rationality of the tool list"""
         if v is not None:
-            # todo: 检查工具名称是否重复, 如果名称和参数完全一致, 要有对应的策略.
+            # todo: Check if the tool name is repeated. If the name and parameters are exactly the same,
+            #  there must be a corresponding strategy.
             # tool_names = [tool.name for tool in v]
             # if len(tool_names) != len(set(tool_names)):
             
-            # 检查工具列表不能为空
+            # Check tool list cannot be empty
             if len(v) == 0:
-                raise ValueError("如果指定了工具列表，则不能为空")
-        
+                raise ValueError("If a tool list is specified, it cannot be empty")
         return v
 
 
@@ -103,13 +103,12 @@ class Plan(BaseModel):
 
     @validator('steps')
     def validate_steps(cls, v):
-        """验证步骤列表的合理性"""
+        """Verify the rationality of the list of steps"""
         if v:
-            # 检查步骤标题是否重复
+            # Check if step title is repeated
             step_titles = [step.title for step in v]
             if len(step_titles) != len(set(step_titles)):
-                raise ValueError("计划中不能包含重复标题的步骤")
-        
+                raise ValueError("The plan cannot contain steps with duplicate titles")
         return v
 
     class Config:

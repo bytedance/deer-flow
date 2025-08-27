@@ -4,7 +4,7 @@
 import { useSettingsStore } from "../store";
 
 /**
- * 解析工具名称，提取服务器名称和实际工具名称
+ * Parse the tool name, extract the server name and the actual tool name
  */
 export function parseToolName(fullToolName: string): { serverName?: string; toolName: string } {
   if (fullToolName.includes('_')) {
@@ -18,7 +18,7 @@ export function parseToolName(fullToolName: string): { serverName?: string; tool
 }
 
 /**
- * 格式化工具显示名称
+ * Format tool display name
  */
 export function formatToolDisplayName(fullToolName: string): string {
   const { toolName } = parseToolName(fullToolName);

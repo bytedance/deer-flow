@@ -34,21 +34,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dict, dict]:
-    """获取可用的 MCP 服务器配置和启用的工具信息.
-    
+    """Get information about available MCP server configurations and enabled tools.
+
     Args:
-        config: 运行时配置
-        agent_type: 代理类型，用于过滤适用的工具
-        
+    config: Runtime configuration
+    agent_type: Agent type, used to filter applicable tools
+
     Returns:
-        包含 MCP 服务器配置和启用工具的元组 (mcp_servers, enabled_tools).
+    A tuple containing the MCP server configurations and enabled tools (mcp_servers, enabled_tools).
     """
     try:
         configurable = Configuration.from_runnable_config(config)
         mcp_servers = {}
         enabled_tools = {}
 
-        # 检查是否有 MCP 设置
+        # Check if MCP is set
         if not configurable.mcp_settings:
             logger.debug("No MCP settings found in configuration")
             return {}, {}
@@ -63,7 +63,7 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
             if not server_config.get("enabled_tools"):
                 continue
                 
-            # todo: 精细化根据特定的 agent 类型进行过滤
+            # todo: refine, filter by specific agent type
             # if agent_type and server_config.get("add_to_agents"):
             #     if agent_type not in server_config["add_to_agents"]:
             #         continue
@@ -85,13 +85,13 @@ def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dic
 
 
 async def get_mcp_tools_info(config: RunnableConfig) -> list[BaseTool]:
-    """拿到所有可用的 MCP 工具信息.
-    
+    """Get information about all available MCP tools.
+
     Args:
-        config: 运行时配置
-        
+    config: Runtime configuration
+
     Returns:
-        包含工具名称、描述的列表.
+    A list containing tool names and descriptions.
     """
     try:
         tools = []
@@ -174,7 +174,7 @@ async def planner_node(
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
     
-    # 根据配置决定是否收集 MCP 工具信息
+    #Decide whether to collect MCP tool information based on configuration
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
     if mcp_enabled:
         logger.info("MCP planner integration is enabled, collecting tool information")
@@ -236,7 +236,7 @@ async def planner_node(
                 },
                 goto="reporter",
             )
-        # 计划需要进一步执行
+        # Plan requires further execution
         return Command(
             update={
                 "messages": [AIMessage(content=full_response, name="planner")],
@@ -246,7 +246,7 @@ async def planner_node(
         )
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Planner response parsing failed: {e}")
-        # 如果有历史迭代，直接生成报告；否则终止
+        # If there is a historical iteration, generate a report directly; otherwise terminate
         goto_target = "reporter" if plan_iterations > 0 else "__end__"
         return Command(goto=goto_target)
 
