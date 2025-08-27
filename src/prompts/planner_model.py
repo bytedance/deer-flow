@@ -68,7 +68,7 @@ class Step(BaseModel):
     description: str = Field(..., description="Specify exactly what data to collect")
     step_type: StepType = Field(..., description="Indicates the nature of the step")
     tools: Optional[List[StepTool]] = Field(
-        default=None, description="MCP工具列表，用于此步骤的执行"
+        default=None, description="List of MCP tools used to perform this step"
     )
     execution_res: Optional[str] = Field(
         default=None, description="The Step execution result"
