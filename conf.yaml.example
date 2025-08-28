@@ -25,9 +25,9 @@ BASIC_MODEL:
 
 
 # OTHER SETTINGS:
-# Search engine configuration (Only supports Tavily currently)
+# Search engine configuration (Only supports Tavily and Linkup currently)
 # SEARCH_ENGINE:
-#   engine: tavily
+#   engine: tavily or linkup
 #   # Only include results from these domains
 #   include_domains:
 #     - example.com
