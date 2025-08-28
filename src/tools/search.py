@@ -22,11 +22,15 @@ from src.tools.decorators import create_logged_tool
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchWithImages,
 )
+from src.tools.linkup_search.linkup_search_api_wrapper import (
+    EnhancedLinkupSearchAPIWrapper,
+)
 
 logger = logging.getLogger(__name__)
 
 # Create logged versions of the search tools
 LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
+LoggedLinkupSearch = create_logged_tool(EnhancedLinkupSearchAPIWrapper)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
@@ -65,6 +69,21 @@ def get_web_search_tool(max_search_results: int):
         return LoggedDuckDuckGoSearch(
             name="web_search",
             num_results=max_search_results,
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.LINKUP.value:
+        search_config = get_search_config()
+        include_domains: Optional[List[str]] = search_config.get("include_domains", [])
+        exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
+
+        logger.info(
+            f"Linkup search configuration loaded: include_domains={include_domains}, exclude_domains={exclude_domains}"
+        )
+        return LoggedLinkupSearch(
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            name="web_search",
+            depth="standard",
+            output_type="sourcedAnswer"
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.BRAVE_SEARCH.value:
         return LoggedBraveSearch(

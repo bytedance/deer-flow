@@ -167,7 +167,7 @@ DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die
 Um Ihre bevorzugte Suchmaschine zu konfigurieren, setzen Sie die Variable `SEARCH_API` in Ihrer `.env`-Datei:
 
 ```bash
-# Wählen Sie eine: tavily, duckduckgo, brave_search, arxiv
+# Wählen Sie eine: tavily, linkup, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
 

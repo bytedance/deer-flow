@@ -35,6 +35,7 @@ dependencies = [
     "langchain-deepseek>=0.1.3",
     "wikipedia>=1.4.0",
     "langchain-tavily<0.3",
+    "linkup-sdk>=0.2.8",
     "langgraph-checkpoint-mongodb>=0.1.4",
     "langgraph-checkpoint-postgres==2.0.21",
 ]
