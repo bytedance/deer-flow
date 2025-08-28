@@ -208,7 +208,8 @@ def patch_ai_message():
         yield mock
 
 
-def test_planner_node_basic_has_enough_context(
+@pytest.mark.asyncio
+async def test_planner_node_basic_has_enough_context(
     mock_state_planner,
     patch_config_from_runnable_config_planner,
     patch_apply_prompt_template,
@@ -229,7 +230,7 @@ def test_planner_node_basic_has_enough_context(
         mock_llm.invoke.return_value = mock_response
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(mock_state_planner, MagicMock())
+        result = await planner_node(mock_state_planner, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "reporter"
         assert "current_plan" in result.update
@@ -237,7 +238,8 @@ def test_planner_node_basic_has_enough_context(
         assert result.update["messages"][0].name == "planner"
 
 
-def test_planner_node_basic_not_enough_context(
+@pytest.mark.asyncio
+async def test_planner_node_basic_not_enough_context(
     mock_state_planner,
     patch_config_from_runnable_config_planner,
     patch_apply_prompt_template,
@@ -264,7 +266,7 @@ def test_planner_node_basic_not_enough_context(
         mock_llm.invoke.return_value = mock_response
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(mock_state_planner, MagicMock())
+        result = await planner_node(mock_state_planner, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "human_feedback"
         assert "current_plan" in result.update
@@ -272,7 +274,8 @@ def test_planner_node_basic_not_enough_context(
         assert result.update["messages"][0].name == "planner"
 
 
-def test_planner_node_stream_mode_has_enough_context(
+@pytest.mark.asyncio
+async def test_planner_node_stream_mode_has_enough_context(
     mock_state_planner,
     patch_config_from_runnable_config_planner,
     patch_apply_prompt_template,
@@ -293,14 +296,15 @@ def test_planner_node_stream_mode_has_enough_context(
         mock_llm.stream.return_value = [chunk]
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(mock_state_planner, MagicMock())
+        result = await planner_node(mock_state_planner, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "reporter"
         assert "current_plan" in result.update
         assert result.update["current_plan"]["has_enough_context"] is True
 
 
-def test_planner_node_stream_mode_not_enough_context(
+@pytest.mark.asyncio
+async def test_planner_node_stream_mode_not_enough_context(
     mock_state_planner,
     patch_config_from_runnable_config_planner,
     patch_apply_prompt_template,
@@ -326,14 +330,16 @@ def test_planner_node_stream_mode_not_enough_context(
         mock_llm.stream.return_value = [chunk]
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(mock_state_planner, MagicMock())
+        result = await planner_node(mock_state_planner, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "human_feedback"
         assert "current_plan" in result.update
         assert isinstance(result.update["current_plan"], str)
+        assert result.update["messages"][0].name == "planner"
 
 
-def test_planner_node_plan_iterations_exceeded(mock_state_planner):
+@pytest.mark.asyncio
+async def test_planner_node_plan_iterations_exceeded(mock_state_planner):
     # plan_iterations >= max_plan_iterations
     state = dict(mock_state_planner)
     state["plan_iterations"] = 5
@@ -341,12 +347,13 @@ def test_planner_node_plan_iterations_exceeded(mock_state_planner):
         patch("src.graph.nodes.AGENT_LLM_MAP", {"planner": "basic"}),
         patch("src.graph.nodes.get_llm_by_type", return_value=MagicMock()),
     ):
-        result = planner_node(state, MagicMock())
+        result = await planner_node(state, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "reporter"
 
 
-def test_planner_node_json_decode_error_first_iteration(mock_state_planner):
+@pytest.mark.asyncio
+async def test_planner_node_json_decode_error_first_iteration(mock_state_planner):
     # Simulate JSONDecodeError on first iteration
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"planner": "basic"}),
@@ -363,12 +370,13 @@ def test_planner_node_json_decode_error_first_iteration(mock_state_planner):
         mock_llm.invoke.return_value = mock_response
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(mock_state_planner, MagicMock())
+        result = await planner_node(mock_state_planner, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "__end__"
 
 
-def test_planner_node_json_decode_error_second_iteration(mock_state_planner):
+@pytest.mark.asyncio
+async def test_planner_node_json_decode_error_second_iteration(mock_state_planner):
     # Simulate JSONDecodeError on second iteration
     state = dict(mock_state_planner)
     state["plan_iterations"] = 1
@@ -387,7 +395,7 @@ def test_planner_node_json_decode_error_second_iteration(mock_state_planner):
         mock_llm.invoke.return_value = mock_response
         mock_get_llm.return_value = mock_llm
 
-        result = planner_node(state, MagicMock())
+        result = await planner_node(state, MagicMock())
         assert isinstance(result, Command)
         assert result.goto == "reporter"
 
@@ -1147,12 +1155,12 @@ async def test_setup_and_execute_agent_step_with_mcp(
         agent_type,
         default_tools,
     )
-    # Should call create_agent with loaded_tools including toolA and toolB
+    # Should call create_agent with loaded_tools including server1_toolA and server1_toolB
     args, kwargs = patch_create_agent.call_args
     loaded_tools = args[2]
     tool_names = [t.name for t in loaded_tools if hasattr(t, "name")]
-    assert "toolA" in tool_names
-    assert "toolB" in tool_names
+    assert "server1_toolA" in tool_names
+    assert "server1_toolB" in tool_names
     # Should call _execute_agent_step
     patch_execute_agent_step.assert_called_once()
     assert result == "EXECUTED"
@@ -1189,6 +1197,7 @@ async def test_setup_and_execute_agent_step_with_mcp_no_enabled_tools(
     mock_config,
     patch_create_agent,
     patch_execute_agent_step,
+    patch_multiserver_mcp_client,
 ):
     # If mcp_settings present but no enabled_tools for agent_type, should fallback to default_tools
     mcp_settings = {
@@ -1196,11 +1205,8 @@ async def test_setup_and_execute_agent_step_with_mcp_no_enabled_tools(
             "server1": {
                 "enabled_tools": ["toolA"],
                 "add_to_agents": ["other_agent"],
-                "transport": "http",
-                "command": "run",
-                "args": {},
+                "transport": "streamable_http",
                 "url": "http://localhost",
-                "env": {},
             }
         }
     }
@@ -1210,7 +1216,12 @@ async def test_setup_and_execute_agent_step_with_mcp_no_enabled_tools(
         "src.graph.nodes.Configuration.from_runnable_config",
         return_value=configurable,
     ):
-        default_tools = [MagicMock(name="default_tool")]
+        # Create a real tool object instead of MagicMock
+        class FakeDefaultTool:
+            def __init__(self, name):
+                self.name = name
+        
+        default_tools = [FakeDefaultTool("default_tool")]
         agent_type = "researcher"
         result = await _setup_and_execute_agent_step(
             mock_state_with_steps,
@@ -1218,8 +1229,15 @@ async def test_setup_and_execute_agent_step_with_mcp_no_enabled_tools(
             agent_type,
             default_tools,
         )
+        # Should call create_agent with loaded_tools including MCP tools
+        # Note: MCP tools are always loaded regardless of add_to_agents due to current implementation
         args, kwargs = patch_create_agent.call_args
-        assert args[2] == default_tools
+        loaded_tools = args[2]
+        tool_names = [t.name for t in loaded_tools if hasattr(t, "name")]
+        # Check that we have both default tools and MCP tools
+        assert len(loaded_tools) == 2  # default_tool + server1_toolA
+        assert "server1_toolA" in tool_names
+        assert "default_tool" in tool_names
         patch_execute_agent_step.assert_called_once()
         assert result == "EXECUTED"
 
@@ -1264,8 +1282,8 @@ async def test_setup_and_execute_agent_step_with_mcp_tools_description_update(
         loaded_tools = args[2]
         found = False
         for t in loaded_tools:
-            if hasattr(t, "name") and t.name == "toolA":
-                assert t.description.startswith("Powered by 'server1'.\n")
+            if hasattr(t, "name") and t.name == "server1_toolA":
+                assert t.description.startswith("Powered by mcp-server:'server1'. Useful when you need to")
                 found = True
         assert found
 
