@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { motion } from "framer-motion";
-import { FastForward, Play } from "lucide-react";
+import { FastForward, Play, CornerDownLeft } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
@@ -59,7 +59,7 @@ export function MessagesBlock({ className }: { className?: string }) {
             abortSignal: abortController.signal,
           },
         );
-      } catch {}
+      } catch { }
     },
     [feedback],
   );
@@ -184,6 +184,17 @@ export function MessagesBlock({ className }: { className?: string }) {
                       <Button className="w-24" onClick={handleStartReplay}>
                         <Play size={16} />
                         {t("play")}
+                      </Button>
+                    )}
+                    {!responding && replayStarted && (
+
+                      <Button className="w-24" onClick={() => {
+                        // Handle return to chat logic here
+                        console.log("Returning to chat");
+                        location.href = "/chat";
+                      }}>
+                        <CornerDownLeft size={16} />
+                        Return
                       </Button>
                     )}
                   </div>
