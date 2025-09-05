@@ -11,16 +11,17 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
-from langgraph.types import Command
-from langgraph.store.memory import InMemoryStore
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
 from psycopg_pool import AsyncConnectionPool
 
-from src.config.configuration import get_recursion_limit, get_bool_env, get_str_env
+from src.config.configuration import get_bool_env, get_recursion_limit, get_str_env
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
+from src.graph.checkpoint import chat_stream_message
 from src.llms.llm import get_configured_llm_models
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
@@ -45,7 +46,6 @@ from src.server.rag_request import (
     RAGResourcesResponse,
 )
 from src.tools import VolcengineTTS
-from src.graph.checkpoint import chat_stream_message
 from src.utils.json_utils import sanitize_args
 
 logger = logging.getLogger(__name__)
