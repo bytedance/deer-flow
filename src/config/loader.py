@@ -7,6 +7,29 @@ from typing import Any, Dict
 import yaml
 
 
+def get_bool_env(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def get_str_env(name: str, default: str = "") -> str:
+    val = os.getenv(name)
+    return default if val is None else str(val).strip()
+
+
+def get_int_env(name: str, default: int = 0) -> int:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return int(val.strip())
+    except ValueError:
+        print(f"Invalid integer value for {name}: {val}. Using default {default}.")
+        return default
+
+
 def replace_env_vars(value: str) -> str:
     """Replace environment variables in string values."""
     if not isinstance(value, str):
