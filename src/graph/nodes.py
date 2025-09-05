@@ -141,6 +141,9 @@ def background_investigation_node(state: State, config: RunnableConfig):
         searched_content = LoggedTavilySearch(
             max_results=configurable.max_search_results
         ).invoke(query)
+        # check if the searched_content is a tuple, then we need to unpack it
+        if isinstance(searched_content, tuple):
+            searched_content = searched_content[0]
         if isinstance(searched_content, list):
             background_investigation_results = [
                 f"## {elem['title']}\n\n{elem['content']}" for elem in searched_content
@@ -204,7 +207,7 @@ async def planner_node(
     elif AGENT_LLM_MAP["planner"] == "basic":
         llm = get_llm_by_type("basic").with_structured_output(
             Plan,
-            # method="json_mode",
+            method="json_mode",
         )
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
