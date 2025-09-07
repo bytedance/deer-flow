@@ -78,3 +78,8 @@ extend-include = ["*.pyi"]
 indent-style = "space"
 line-ending = "auto"
 exclude = ['^/build/']
+
+[dependency-groups]
+test = [
+    "mongomock>=4.3.0",
+]
