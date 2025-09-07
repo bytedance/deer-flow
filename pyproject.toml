@@ -48,6 +48,11 @@ test = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.0.0",
+    "asyncpg-stubs>=0.30.2",
+    "mongomock>=4.3.0",
+    "psycopg[binary]>=3.2.9",
+    "pytest-postgresql>=7.0.2",
 ]
 
 [tool.uv]
@@ -79,7 +84,3 @@ indent-style = "space"
 line-ending = "auto"
 exclude = ['^/build/']
 
-[dependency-groups]
-test = [
-    "mongomock>=4.3.0",
-]
