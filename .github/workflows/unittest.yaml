@@ -54,7 +54,7 @@ jobs:
     - name: Run test cases with coverage
       run: |
         source .venv/bin/activate
-        TAVILY_API_KEY=mock-key make coverage
+        TAVILY_API_KEY=mock-key DB_TESTS_ENABLED=true make coverage
 
     - name: Generate HTML Coverage Report
       run: |
