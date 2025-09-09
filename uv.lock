@@ -407,6 +407,7 @@ dependencies = [
     { name = "mcp" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "python-dotenv" },
     { name = "readabilipy" },
     { name = "socksio" },
@@ -424,7 +425,6 @@ dev = [
 test = [
     { name = "asyncpg-stubs" },
     { name = "mongomock" },
-    { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -457,7 +457,7 @@ requires-dist = [
     { name = "mongomock", marker = "extra == 'test'", specifier = ">=4.3.0" },
     { name = "numpy", specifier = ">=2.2.3" },
     { name = "pandas", specifier = ">=2.2.3" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'test'", specifier = ">=3.2.9" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2.9" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.0.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.1.0" },
@@ -473,9 +473,6 @@ requires-dist = [
     { name = "yfinance", specifier = ">=0.2.54" },
 ]
 provides-extras = ["dev", "test"]
-
-[package.metadata.requires-dev]
-test = []
 
 [[package]]
 name = "distro"

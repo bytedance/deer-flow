@@ -37,6 +37,7 @@ dependencies = [
     "langchain-tavily<0.3",
     "langgraph-checkpoint-mongodb>=0.1.4",
     "langgraph-checkpoint-postgres==2.0.21",
+    "psycopg[binary]>=3.2.9",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +52,6 @@ test = [
     "pytest-cov>=6.0.0",
     "asyncpg-stubs>=0.30.2",
     "mongomock>=4.3.0",
-    "psycopg[binary]>=3.2.9",
     "pytest-postgresql>=7.0.2",
 ]
 
