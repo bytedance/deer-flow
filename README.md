@@ -140,6 +140,9 @@ This project also includes a Web UI, offering a more dynamic and engaging intera
 # On Windows
 bootstrap.bat -d
 ```
+> [!Note]
+> By default, the backend server binds to 127.0.0.1 (localhost) for security reasons. If you need to allow external connections (e.g., when deploying on Linux server), you can modify the server host to 0.0.0.0 in the bootstrap script(uv run server.py --host 0.0.0.0).
+> Please ensure your environment is properly secured before exposing the service to external networks.
 
 Open your browser and visit [`http://localhost:3000`](http://localhost:3000) to explore the web UI.
 
