@@ -30,7 +30,12 @@ async def _get_tools_from_client_session(
     Raises:
         Exception: If there's an error during the process
     """
-    async with client_context_manager as (read, write, _):
+    async with client_context_manager as context_result:
+        # Access by index to be safe
+        read = context_result[0]
+        write = context_result[1]
+        # Ignore any additional values
+
         async with ClientSession(
             read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)
         ) as session:
