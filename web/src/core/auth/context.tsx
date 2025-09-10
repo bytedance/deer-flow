@@ -5,6 +5,7 @@
 
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+
 import { resolveServiceURL } from "~/core/api/resolve-service-url";
 
 // Define user types
@@ -21,7 +22,7 @@ export interface User {
 interface AuthContextType {
   user: User | null;
   login: (email: string, password: string) => Promise<boolean>;
-  logout: () => void;
+  logout: () => Promise<void>;
   isLoading: boolean;
 }
 
@@ -44,12 +45,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (userData.id && userData.email) {
           setUser(userData);
         }
-      } catch (e) {
+      } catch (error) {
         // If there's an error parsing user data, remove the token
         localStorage.removeItem("authToken");
         localStorage.removeItem("userData");
         // Also clear the cookie
         document.cookie = "authToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+        console.error("Error parsing user data:", error);
       }
     }
     setIsLoading(false);
@@ -82,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return true;
       } else {
         const errorData = await response.json();
-        throw new Error(errorData.detail || "Login failed");
+        throw new Error(errorData.detail ?? "Login failed");
       }
     } catch (error) {
       console.error("Login error:", error);

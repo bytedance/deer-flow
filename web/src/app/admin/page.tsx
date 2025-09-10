@@ -3,22 +3,21 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
+import { useEffect, useState } from "react";
 
-import { useAuth } from "~/core/auth/context";
-import { AdminWrapper } from "~/core/auth/wrapper";
 
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
+import { useAuth } from "~/core/auth/context";
+import { AdminWrapper } from "~/core/auth/wrapper";
 
 export default function AdminPage() {
   const { user } = useAuth();
   const t = useTranslations("admin");
   
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [config, setConfig] = useState({
     tavilyApiKey: "",
     braveSearchApiKey: "",
@@ -50,7 +49,7 @@ export default function AdminPage() {
           <CardHeader>
             <CardTitle>{t("systemConfiguration")}</CardTitle>
             <CardDescription>
-              {t("systemConfigurationDescription")}
+              {t("systemConfigurationDescription")} {user?.name}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">

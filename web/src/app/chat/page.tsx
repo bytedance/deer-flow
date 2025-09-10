@@ -9,9 +9,9 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Suspense } from "react";
 
+import { Button } from "~/components/ui/button";
 import { AuthWrapper } from "~/core/auth/wrapper";
 
-import { Button } from "~/components/ui/button";
 
 import { Logo } from "../../components/deer-flow/logo";
 import { ThemeToggle } from "../../components/deer-flow/theme-toggle";

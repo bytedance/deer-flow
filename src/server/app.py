@@ -51,6 +51,14 @@ from src.graph.checkpoint import chat_stream_message
 from src.utils.json_utils import sanitize_args
 from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
 
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="DeerFlow API",
+    description="API for Deer",
+    version="0.1.0",
+)
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str
@@ -90,12 +98,6 @@ async def logout():
     """Logout user"""
     # In a real implementation, you might want to add the token to a blacklist
     return {"message": "Successfully logged out"}
-
-app = FastAPI(
-    title="DeerFlow API",
-    description="API for Deer",
-    version="0.1.0",
-)
 
 # Add CORS middleware
 # It's recommended to load the allowed origins from an environment variable
