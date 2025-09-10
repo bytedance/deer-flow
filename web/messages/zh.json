@@ -99,7 +99,10 @@
     "page": {
       "loading": "正在加载 DeerFlow...",
       "welcomeUser": "欢迎，{username}",
-      "starOnGitHub": "在 GitHub 上点赞"
+      "starOnGitHub": "在 GitHub 上点赞",
+      "userMenu": {
+        "logout": "登出"
+      }
     },
     "welcome": {
       "greeting": "👋 你好！",
