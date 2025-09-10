@@ -9,7 +9,28 @@
     "send": "Send",
     "stop": "Stop",
     "linkNotReliable": "This link might be a hallucination from AI model and may not be reliable.",
-    "noResult": "No result"
+    "noResult": "No result",
+    "logout": "Logout"
+  },
+  "auth": {
+    "login": "Login",
+    "loginDescription": "Enter your email and password to login to your account.",
+    "email": "Email",
+    "password": "Password",
+    "signIn": "Sign In",
+    "signingIn": "Signing In...",
+    "invalidCredentials": "Invalid email or password",
+    "loginError": "An error occurred during login"
+  },
+  "admin": {
+    "systemConfiguration": "System Configuration",
+    "systemConfigurationDescription": "Configure system-wide settings and API keys",
+    "tavilyApiKey": "Tavily API Key",
+    "braveSearchApiKey": "Brave Search API Key",
+    "volcengineTtsAppId": "Volcengine TTS App ID",
+    "ragflowApiKey": "RAGFlow API Key",
+    "saveConfiguration": "Save Configuration",
+    "configSaved": "Configuration saved successfully"
   },
   "messageInput": {
     "placeholder": "What can I do for you?",
