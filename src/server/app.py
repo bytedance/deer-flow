@@ -52,6 +52,7 @@ from src.utils.json_utils import sanitize_args
 from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
 
 logger = logging.getLogger(__name__)
+INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
 app = FastAPI(
     title="DeerFlow API",
