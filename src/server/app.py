@@ -7,9 +7,11 @@ import logging
 from typing import Annotated, List, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.store.memory import InMemoryStore
@@ -47,10 +49,47 @@ from src.server.rag_request import (
 from src.tools import VolcengineTTS
 from src.graph.checkpoint import chat_stream_message
 from src.utils.json_utils import sanitize_args
+from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
 
-logger = logging.getLogger(__name__)
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
 
-INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(form_data: dict):
+    """Authenticate user and return JWT token"""
+    email = form_data.get("email")
+    password = form_data.get("password")
+    
+    if not email or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Email and password are required"
+        )
+    
+    user = authenticate_user(email, password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials"
+        )
+    
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"], "role": user["role"]}
+    )
+    
+    return LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=user
+    )
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Logout user"""
+    # In a real implementation, you might want to add the token to a blacklist
+    return {"message": "Successfully logged out"}
 
 app = FastAPI(
     title="DeerFlow API",
@@ -78,7 +117,7 @@ graph = build_graph_with_memory()
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     # Check if MCP server configuration is enabled
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
 
@@ -528,7 +567,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
 
 
 @app.post("/api/mcp/server/metadata", response_model=MCPServerMetadataResponse)
-async def mcp_server_metadata(request: MCPServerMetadataRequest):
+async def mcp_server_metadata(request: MCPServerMetadataRequest, current_user: dict = Depends(require_admin_user)):
     """Get information about an MCP server."""
     # Check if MCP server configuration is enabled
     if not get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False):

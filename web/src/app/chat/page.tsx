@@ -9,6 +9,8 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Suspense } from "react";
 
+import { AuthWrapper } from "~/core/auth/wrapper";
+
 import { Button } from "~/components/ui/button";
 
 import { Logo } from "../../components/deer-flow/logo";
@@ -29,27 +31,29 @@ export default function HomePage() {
   const t = useTranslations("chat.page");
 
   return (
-    <div className="flex h-screen w-screen justify-center overscroll-none">
-      <header className="fixed top-0 left-0 flex h-12 w-full items-center justify-between px-4">
-        <Logo />
-        <div className="flex items-center">
-          <Tooltip title={t("starOnGitHub")}>
-            <Button variant="ghost" size="icon" asChild>
-              <Link
-                href="https://github.com/bytedance/deer-flow"
-                target="_blank"
-              >
-                <GithubOutlined />
-              </Link>
-            </Button>
-          </Tooltip>
-          <ThemeToggle />
-          <Suspense>
-            <SettingsDialog />
-          </Suspense>
-        </div>
-      </header>
-      <Main />
-    </div>
+    <AuthWrapper>
+      <div className="flex h-screen w-screen justify-center overscroll-none">
+        <header className="fixed top-0 left-0 flex h-12 w-full items-center justify-between px-4">
+          <Logo />
+          <div className="flex items-center">
+            <Tooltip title={t("starOnGitHub")}>
+              <Button variant="ghost" size="icon" asChild>
+                <Link
+                  href="https://github.com/bytedance/deer-flow"
+                  target="_blank"
+                >
+                  <GithubOutlined />
+                </Link>
+              </Button>
+            </Tooltip>
+            <ThemeToggle />
+            <Suspense>
+              <SettingsDialog />
+            </Suspense>
+          </div>
+        </header>
+        <Main />
+      </div>
+    </AuthWrapper>
   );
 }

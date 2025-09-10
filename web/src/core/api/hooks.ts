@@ -1,6 +1,8 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+"use client";
+
 import { useEffect, useRef, useState } from "react";
 
 import { env } from "~/env";
