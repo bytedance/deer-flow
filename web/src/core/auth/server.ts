@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { cookies } from 'next/headers';
-import { jwtVerify } from 'jose';
+// import { jwtVerify } from 'jose'; // Commented out as it's not currently used
 
 // Define user types
 export type UserRole = "admin" | "user";
@@ -19,7 +19,7 @@ export interface User {
 // Get user from cookies on server side
 export async function getUserFromCookies(): Promise<User | null> {
   try {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const token = cookieStore.get('authToken')?.value;
     
     if (!token) {
@@ -28,7 +28,12 @@ export async function getUserFromCookies(): Promise<User | null> {
     
     // In a real implementation, you would verify the JWT token with your secret
     // For now, we'll parse the token to extract user info
-    const payload = JSON.parse(atob(token.split('.')[1]));
+    const tokenParts = token.split('.');
+    if (tokenParts.length !== 3 || !tokenParts[1]) {
+      return null;
+    }
+    
+    const payload = JSON.parse(atob(tokenParts[1]));
     
     // Check if token is expired
     if (payload.exp && payload.exp < Date.now() / 1000) {

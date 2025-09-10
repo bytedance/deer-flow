@@ -7,13 +7,13 @@ import { StarFilledIcon, GitHubLogoIcon } from "@radix-ui/react-icons";
 import Link from "next/link";
 import { useTranslations } from 'next-intl';
 
-import { useAuth } from "~/core/auth/context";
 
-import { env } from "~/env";
 
 import { LanguageSwitcher } from "~/components/deer-flow/language-switcher";
 import { NumberTicker } from "~/components/magicui/number-ticker";
 import { Button } from "~/components/ui/button";
+import { useAuth } from "~/core/auth/context";
+import { env } from "~/env";
 
 export function SiteHeader() {
   const t = useTranslations('common');

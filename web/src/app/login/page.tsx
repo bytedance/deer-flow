@@ -3,16 +3,16 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { useState, useEffect } from "react";
 
-import { useAuth } from "~/core/auth/context";
 
 import { Button } from "~/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "~/components/ui/card";
+import { useAuth } from "~/core/auth/context";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -44,8 +44,8 @@ export default function LoginPage() {
         setError(t("invalidCredentials"));
       }
     } catch (err) {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       setError(t("loginError"));
+      console.error("Login error:", err);
     } finally {
       setIsLoading(false);
     }

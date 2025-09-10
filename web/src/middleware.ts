@@ -7,7 +7,7 @@ import type { NextRequest } from 'next/server';
 // Define protected routes
 const protectedRoutes = ['/chat', '/admin'];
 const authRoutes = ['/login'];
-const publicRoutes = ['/', '/landing'];
+// const publicRoutes = ['/', '/landing']; // Commented out as it's not currently used
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -18,7 +18,7 @@ export function middleware(request: NextRequest) {
   // Check if route is protected
   const isProtectedRoute = protectedRoutes.some(route => pathname.startsWith(route));
   const isAuthRoute = authRoutes.some(route => pathname.startsWith(route));
-  const isPublicRoute = publicRoutes.some(route => pathname.startsWith(route)) || pathname === '/';
+  // const isPublicRoute = publicRoutes.some(route => pathname.startsWith(route)) || pathname === '/'; // Commented out as it's not currently used
   
   // Redirect authenticated users away from auth routes
   if (isAuthRoute && token) {

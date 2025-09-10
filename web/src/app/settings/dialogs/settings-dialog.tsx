@@ -7,17 +7,8 @@ import { Settings } from "lucide-react";
 import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { useAuth } from "~/core/auth/context";
 
-import { useReplay } from "~/core/replay";
-import {
-  type SettingsState,
-  changeSettings,
-  saveSettings,
-  useSettingsStore,
-} from "~/core/store";
 
-import { cn } from "~/lib/utils";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Badge } from "~/components/ui/badge";
@@ -32,6 +23,15 @@ import {
   DialogTrigger,
 } from "~/components/ui/dialog";
 import { Tabs, TabsContent } from "~/components/ui/tabs";
+import { useAuth } from "~/core/auth/context";
+import { useReplay } from "~/core/replay";
+import {
+  type SettingsState,
+  changeSettings,
+  saveSettings,
+  useSettingsStore,
+} from "~/core/store";
+import { cn } from "~/lib/utils";
 
 import { SETTINGS_TABS } from "../tabs";
 

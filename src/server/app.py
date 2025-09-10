@@ -341,6 +341,14 @@ async def lifespan(app):
 
 from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
 
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="DeerFlow API",
+    description="API for Deer",
+    version="0.1.0",
+)
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str
@@ -409,6 +417,25 @@ async def logout():
     """Logout user"""
     # In a real implementation, you might want to add the token to a blacklist
     return {"message": "Successfully logged out"}
+
+# Add CORS middleware
+# It's recommended to load the allowed origins from an environment variable
+# for better security and flexibility across different environments.
+allowed_origins_str = get_str_env("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
+logger.info(f"Allowed origins: {allowed_origins}")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,  # Restrict to specific origins
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
+    allow_headers=["*"],  # Now allow all headers, but can be restricted further
+)
+in_memory_store = InMemoryStore()
+graph = build_graph_with_memory()
+
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
