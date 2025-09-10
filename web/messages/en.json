@@ -122,9 +122,12 @@
   },
   "chat": {
     "page": {
-      "loading": "Loading DeerFlow...",
-      "welcomeUser": "Welcome, {username}",
-      "starOnGitHub": "Star DeerFlow on GitHub"
+        "loading": "Loading DeerFlow...",
+        "welcomeUser": "Welcome, {username}",
+        "starOnGitHub": "Star DeerFlow on GitHub",
+        "userMenu": {
+          "logout": "Logout"
+        }
     },
     "welcome": {
       "greeting": "👋 Hello, there!",

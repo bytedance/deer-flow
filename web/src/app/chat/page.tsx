@@ -16,6 +16,7 @@ import { AuthWrapper } from "~/core/auth/wrapper";
 import { Logo } from "../../components/deer-flow/logo";
 import { ThemeToggle } from "../../components/deer-flow/theme-toggle";
 import { Tooltip } from "../../components/deer-flow/tooltip";
+import { UserMenu } from "../../components/deer-flow/user-menu";
 import { SettingsDialog } from "../settings/dialogs/settings-dialog";
 
 const Main = dynamic(() => import("./main"), {
@@ -47,6 +48,7 @@ export default function HomePage() {
               </Button>
             </Tooltip>
             <ThemeToggle />
+            <UserMenu />
             <Suspense>
               <SettingsDialog />
             </Suspense>
