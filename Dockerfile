@@ -10,6 +10,11 @@ RUN apt-get update && apt-get install -y \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 
+# Install system dependencies including libpq
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+    
 WORKDIR /app
 
 # Pre-cache the application dependencies.

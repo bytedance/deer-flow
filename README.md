@@ -140,6 +140,9 @@ This project also includes a Web UI, offering a more dynamic and engaging intera
 # On Windows
 bootstrap.bat -d
 ```
+> [!Note]
+> By default, the backend server binds to 127.0.0.1 (localhost) for security reasons. If you need to allow external connections (e.g., when deploying on Linux server), you can modify the server host to 0.0.0.0 in the bootstrap script(uv run server.py --host 0.0.0.0).
+> Please ensure your environment is properly secured before exposing the service to external networks.
 
 Open your browser and visit [`http://localhost:3000`](http://localhost:3000) to explore the web UI.
 
@@ -392,10 +395,23 @@ This will enable trace visualization in LangGraph Studio and send your traces to
 3. Supports saving and loading checkpoints for workflow execution.
 4. Supports saving chat stream events for replaying conversations.
 
-Note: 
+*Note: About langgraph issue #5557* 
 The latest langgraph-checkpoint-postgres-2.0.23 have checkpointing issue, you can check the open issue:"TypeError: Object of type HumanMessage is not JSON serializable"  [https://github.com/langchain-ai/langgraph/issues/5557].
 
 To use postgres checkpoint you should install langgraph-checkpoint-postgres-2.0.21
+
+*Note: About psycopg dependencies* 
+Please read the following document before using postgres:  https://www.psycopg.org/psycopg3/docs/basic/install.html
+
+BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq mannually:
+
+```bash
+pip install psycopg[binary]
+```
+This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform : https://pypi.org/project/psycopg-binary/#files
+
+if not supported, you can select local-installation: https://www.psycopg.org/psycopg3/docs/basic/install.html#local-installation
+
 
 The default database and collection will be automatically created if not exists.
 Default database: checkpoing_db

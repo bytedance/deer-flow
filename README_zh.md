@@ -134,6 +134,9 @@ uv run main.py
 # 在Windows上
 bootstrap.bat -d
 ```
+> [! 注意]
+> 出于安全考虑，后端服务器默认绑定到 127.0.0.1 (localhost)。如果您需要允许外部连接（例如，在Linux服务器上部署时），您可以修改启动脚本中的主机地址为 0.0.0.0。（uv run server.py --host 0.0.0.0）
+> 请注意，在将服务暴露给外部网络之前，请务必确保您的环境已经过适当的安全加固。
 
 打开浏览器并访问[`http://localhost:3000`](http://localhost:3000)探索 Web UI。
 
