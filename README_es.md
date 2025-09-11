@@ -138,6 +138,9 @@ Este proyecto también incluye una Interfaz Web, que ofrece una experiencia inte
 # En Windows
 bootstrap.bat -d
 ```
+> [!NOTA]
+> Por defecto, el servidor backend se enlaza a 127.0.0.1 (localhost) por razones de seguridad. Si necesitas permitir conexiones externas (por ejemplo, al desplegar en un servidor Linux), puedes modificar el host del servidor a 0.0.0.0 en el script de arranque (uv run server.py --host 0.0.0.0).
+> Por favor, asegúrate de que tu entorno esté correctamente protegido antes de exponer el servicio a redes externas.
 
 Abre tu navegador y visita [`http://localhost:3000`](http://localhost:3000) para explorar la interfaz web.
 
