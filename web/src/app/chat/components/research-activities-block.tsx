@@ -91,6 +91,9 @@ function ActivityListItem({ messageId }: { messageId: string }) {
   if (message) {
     if (!message.isStreaming && message.toolCalls?.length) {
       for (const toolCall of message.toolCalls) {
+        if (toolCall.result?.startsWith("Error")) {
+          return null;
+        }
         if (toolCall.name === "web_search") {
           return <WebSearchToolCall key={toolCall.id} toolCall={toolCall} />;
         } else if (toolCall.name === "crawl_tool") {
@@ -111,16 +114,16 @@ function ActivityListItem({ messageId }: { messageId: string }) {
 const __pageCache = new LRUCache<string, string>({ max: 100 });
 type SearchResult =
   | {
-      type: "page";
-      title: string;
-      url: string;
-      content: string;
-    }
+    type: "page";
+    title: string;
+    url: string;
+    content: string;
+  }
   | {
-      type: "image";
-      image_url: string;
-      image_description: string;
-    };
+    type: "image";
+    image_url: string;
+    image_description: string;
+  };
 
 function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   const t = useTranslations("chat.research");

@@ -53,6 +53,14 @@ def mock_config():
 
 
 @pytest.fixture
+def mock_config_thread():
+    # 你可以根据实际需要返回一个 MagicMock 或 dict
+    mock = MagicMock()
+    mock.thread_id = "_default_"
+    return mock
+
+
+@pytest.fixture
 def patch_config_from_runnable_config(mock_configurable):
     with patch(
         "src.graph.nodes.Configuration.from_runnable_config",
@@ -416,52 +424,58 @@ def mock_state_base():
     }
 
 
-def test_human_feedback_node_auto_accepted(monkeypatch, mock_state_base):
+def test_human_feedback_node_auto_accepted(
+    monkeypatch, mock_state_base, mock_config_thread
+):
     # auto_accepted_plan True, should skip interrupt and parse plan
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = True
-    result = human_feedback_node(state)
+    result = human_feedback_node(state, mock_config_thread)
     assert isinstance(result, Command)
     assert result.goto == "research_team"
     assert result.update["plan_iterations"] == 1
     assert result.update["current_plan"]["has_enough_context"] is False
 
 
-def test_human_feedback_node_edit_plan(monkeypatch, mock_state_base):
+def test_human_feedback_node_edit_plan(
+    monkeypatch, mock_state_base, mock_config_thread
+):
     # interrupt returns [EDIT_PLAN]..., should return Command to planner
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
     with patch("src.graph.nodes.interrupt", return_value="[EDIT_PLAN] Please revise"):
-        result = human_feedback_node(state)
+        result = human_feedback_node(state, mock_config_thread)
         assert isinstance(result, Command)
         assert result.goto == "planner"
         assert result.update["messages"][0].name == "feedback"
         assert "[EDIT_PLAN]" in result.update["messages"][0].content
 
 
-def test_human_feedback_node_accepted(monkeypatch, mock_state_base):
+def test_human_feedback_node_accepted(monkeypatch, mock_state_base, mock_config_thread):
     # interrupt returns [ACCEPTED]..., should proceed to parse plan
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
     with patch("src.graph.nodes.interrupt", return_value="[ACCEPTED] Looks good!"):
-        result = human_feedback_node(state)
+        result = human_feedback_node(state, mock_config_thread)
         assert isinstance(result, Command)
         assert result.goto == "research_team"
         assert result.update["plan_iterations"] == 1
         assert result.update["current_plan"]["has_enough_context"] is False
 
 
-def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base):
+def test_human_feedback_node_invalid_interrupt(
+    monkeypatch, mock_state_base, mock_config_thread
+):
     # interrupt returns something else, should raise TypeError
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
     with patch("src.graph.nodes.interrupt", return_value="RANDOM_FEEDBACK"):
         with pytest.raises(TypeError):
-            human_feedback_node(state)
+            human_feedback_node(state, mock_config_thread)
 
 
 def test_human_feedback_node_json_decode_error_first_iteration(
-    monkeypatch, mock_state_base
+    monkeypatch, mock_state_base, mock_config_thread
 ):
     # repair_json_output returns bad json, json.loads raises JSONDecodeError, plan_iterations=0
     state = dict(mock_state_base)
@@ -470,13 +484,13 @@ def test_human_feedback_node_json_decode_error_first_iteration(
     with patch(
         "src.graph.nodes.json.loads", side_effect=json.JSONDecodeError("err", "doc", 0)
     ):
-        result = human_feedback_node(state)
+        result = human_feedback_node(state, mock_config_thread)
         assert isinstance(result, Command)
         assert result.goto == "__end__"
 
 
 def test_human_feedback_node_json_decode_error_second_iteration(
-    monkeypatch, mock_state_base
+    monkeypatch, mock_state_base, mock_config_thread
 ):
     # repair_json_output returns bad json, json.loads raises JSONDecodeError, plan_iterations>0
     state = dict(mock_state_base)
@@ -485,12 +499,14 @@ def test_human_feedback_node_json_decode_error_second_iteration(
     with patch(
         "src.graph.nodes.json.loads", side_effect=json.JSONDecodeError("err", "doc", 0)
     ):
-        result = human_feedback_node(state)
+        result = human_feedback_node(state, mock_config_thread)
         assert isinstance(result, Command)
         assert result.goto == "reporter"
 
 
-def test_human_feedback_node_not_enough_context(monkeypatch, mock_state_base):
+def test_human_feedback_node_not_enough_context(
+    monkeypatch, mock_state_base, mock_config_thread
+):
     # Plan does not have enough context, should goto research_team
     plan = {
         "has_enough_context": False,
@@ -502,7 +518,7 @@ def test_human_feedback_node_not_enough_context(monkeypatch, mock_state_base):
     state = dict(mock_state_base)
     state["current_plan"] = json.dumps(plan)
     state["auto_accepted_plan"] = True
-    result = human_feedback_node(state)
+    result = human_feedback_node(state, mock_config_thread)
     assert isinstance(result, Command)
     assert result.goto == "research_team"
     assert result.update["plan_iterations"] == 1
@@ -905,14 +921,16 @@ def mock_agent():
 
 
 @pytest.mark.asyncio
-async def test_execute_agent_step_basic(mock_state_with_steps, mock_agent):
+async def test_execute_agent_step_basic(
+    mock_state_with_steps, mock_agent, mock_config_thread
+):
     # Should execute the first unexecuted step and update execution_res
     with patch(
         "src.graph.nodes.HumanMessage",
         side_effect=lambda content, name=None: MagicMock(content=content, name=name),
     ):
         result = await _execute_agent_step(
-            mock_state_with_steps, mock_agent, "researcher"
+            mock_state_with_steps, mock_config_thread, mock_agent, "researcher"
         )
         assert isinstance(result, Command)
         assert result.goto == "research_team"
@@ -929,12 +947,12 @@ async def test_execute_agent_step_basic(mock_state_with_steps, mock_agent):
 
 @pytest.mark.asyncio
 async def test_execute_agent_step_no_unexecuted_step(
-    mock_state_no_unexecuted, mock_agent
+    mock_state_no_unexecuted, mock_agent, mock_config_thread
 ):
     # Should return Command with goto="research_team" and not fail
     with patch("src.graph.nodes.logger") as mock_logger:
         result = await _execute_agent_step(
-            mock_state_no_unexecuted, mock_agent, "researcher"
+            mock_state_no_unexecuted, mock_config_thread, mock_agent, "researcher"
         )
         assert isinstance(result, Command)
         assert result.goto == "research_team"
@@ -964,11 +982,13 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         return {"messages": [MagicMock(content="resource result")]}
 
     agent.ainvoke = ainvoke
+    config = MagicMock()
+    config.thread_id = "test_thread"
     with patch(
         "src.graph.nodes.HumanMessage",
         side_effect=lambda content, name=None: MagicMock(content=content, name=name),
     ):
-        result = await _execute_agent_step(state, agent, "researcher")
+        result = await _execute_agent_step(state, config, agent, "researcher")
         assert isinstance(result, Command)
         assert result.goto == "research_team"
         assert result.update["observations"][-1] == "resource result"
@@ -976,7 +996,7 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
 
 @pytest.mark.asyncio
 async def test_execute_agent_step_recursion_limit_env(
-    monkeypatch, mock_state_with_steps, mock_agent
+    monkeypatch, mock_state_with_steps, mock_agent, mock_config_thread
 ):
     # Should respect AGENT_RECURSION_LIMIT env variable if set and valid
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "42")
@@ -989,14 +1009,16 @@ async def test_execute_agent_step_recursion_limit_env(
             ),
         ),
     ):
-        result = await _execute_agent_step(mock_state_with_steps, mock_agent, "coder")
+        result = await _execute_agent_step(
+            mock_state_with_steps, mock_config_thread, mock_agent, "coder"
+        )
         assert isinstance(result, Command)
         mock_logger.info.assert_any_call("Recursion limit set to: 42")
 
 
 @pytest.mark.asyncio
 async def test_execute_agent_step_recursion_limit_env_invalid(
-    monkeypatch, mock_state_with_steps, mock_agent
+    monkeypatch, mock_state_with_steps, mock_agent, mock_config_thread
 ):
     # Should fallback to default if env variable is invalid
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "notanint")
@@ -1009,7 +1031,9 @@ async def test_execute_agent_step_recursion_limit_env_invalid(
             ),
         ),
     ):
-        result = await _execute_agent_step(mock_state_with_steps, mock_agent, "coder")
+        result = await _execute_agent_step(
+            mock_state_with_steps, mock_config_thread, mock_agent, "coder"
+        )
         assert isinstance(result, Command)
         mock_logger.warning.assert_any_call(
             "Invalid AGENT_RECURSION_LIMIT value: 'notanint'. Using default value 25."
@@ -1018,7 +1042,7 @@ async def test_execute_agent_step_recursion_limit_env_invalid(
 
 @pytest.mark.asyncio
 async def test_execute_agent_step_recursion_limit_env_negative(
-    monkeypatch, mock_state_with_steps, mock_agent
+    monkeypatch, mock_state_with_steps, mock_agent, mock_config_thread
 ):
     # Should fallback to default if env variable is negative or zero
     monkeypatch.setenv("AGENT_RECURSION_LIMIT", "-5")
@@ -1031,7 +1055,9 @@ async def test_execute_agent_step_recursion_limit_env_negative(
             ),
         ),
     ):
-        result = await _execute_agent_step(mock_state_with_steps, mock_agent, "coder")
+        result = await _execute_agent_step(
+            mock_state_with_steps, mock_config_thread, mock_agent, "coder"
+        )
         assert isinstance(result, Command)
         mock_logger.warning.assert_any_call(
             "AGENT_RECURSION_LIMIT value '-5' (parsed as -5) is not positive. Using default value 25."
@@ -1091,7 +1117,7 @@ def patch_create_agent():
 
 @pytest.fixture
 def patch_execute_agent_step():
-    async def fake_execute_agent_step(state, agent, agent_type):
+    async def fake_execute_agent_step(state, config, agent, agent_type):
         return "EXECUTED"
 
     with patch(
