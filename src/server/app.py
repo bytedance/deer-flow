@@ -219,7 +219,6 @@ async def _process_message_chunk(message_chunk, message_metadata, thread_id, age
         if message_chunk.tool_calls:
             # AI Message - Tool Call
             event_stream_message["tool_calls"] = message_chunk.tool_calls
-            event_stream_message["tool_call_chunks"] = message_chunk.tool_call_chunks
             event_stream_message["tool_call_chunks"] = _process_tool_call_chunks(
                 message_chunk.tool_call_chunks
             )
