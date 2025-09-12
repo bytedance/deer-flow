@@ -37,6 +37,8 @@ dependencies = [
     "langchain-tavily<0.3",
     "langgraph-checkpoint-mongodb>=0.1.4",
     "langgraph-checkpoint-postgres==2.0.21",
+    "pymilvus>=2.3.0",
+    "langchain-milvus>=0.2.1",
     "psycopg[binary]>=3.2.9",
 ]
 

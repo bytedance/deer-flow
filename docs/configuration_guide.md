@@ -179,4 +179,40 @@ SEARCH_ENGINE:
   exclude_domains:
     - unreliable-site.com
     - spam-domain.net
+```
 
+## RAG (Retrieval-Augmented Generation) Configuration
+
+DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.
+
+### Supported RAG Providers
+
+- **RAGFlow**: Document retrieval using RAGFlow API
+- **VikingDB Knowledge Base**: ByteDance's VikingDB knowledge base service
+- **Milvus**: Open-source vector database for similarity search
+
+### Milvus Configuration
+
+To use Milvus as your RAG provider, set the following environment variables:
+
+```bash
+# RAG_PROVIDER: milvus  (using free milvus instance on zilliz cloud: https://docs.zilliz.com/docs/quick-start )
+RAG_PROVIDER=milvus
+MILVUS_URI=<endpoint_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_USER=<username_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_PASSWORD=<password_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
+
+# RAG_PROVIDER: milvus  (using milvus lite on Mac or Linux)
+RAG_PROVIDER=milvus
+MILVUS_URI=./milvus_demo.db
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
+```
