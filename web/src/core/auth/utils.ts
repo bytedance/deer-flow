@@ -108,7 +108,7 @@ export function parseToken(token: string): JWTPayload | null {
     }
     
     // Decode payload (base64url)
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const payload = JSON.parse(atob((parts[1] || '').replace(/-/g, '+').replace(/_/g, '/')));
     
     // Check if token is expired
     if (payload.exp && payload.exp * 1000 < Date.now()) {
