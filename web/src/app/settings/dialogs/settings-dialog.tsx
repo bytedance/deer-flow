@@ -1,9 +1,14 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+"use client";
+
 import { Settings } from "lucide-react";
 import { useTranslations } from 'next-intl';
 import { useCallback, useEffect, useMemo, useState } from "react";
+
+
+
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Badge } from "~/components/ui/badge";
@@ -18,6 +23,7 @@ import {
   DialogTrigger,
 } from "~/components/ui/dialog";
 import { Tabs, TabsContent } from "~/components/ui/tabs";
+import { useAuth } from "~/core/auth/context";
 import { useReplay } from "~/core/replay";
 import {
   type SettingsState,
@@ -33,10 +39,20 @@ export function SettingsDialog() {
   const t = useTranslations('settings');
   const tCommon = useTranslations('common');
   const { isReplay } = useReplay();
+  const { user } = useAuth();
   const [activeTabId, setActiveTabId] = useState(SETTINGS_TABS[0]!.id);
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState(useSettingsStore.getState());
   const [changes, setChanges] = useState<Partial<SettingsState>>({});
+
+  // Filter tabs based on user role
+  const filteredTabs = useMemo(() => {
+    if (user?.role === "admin") {
+      return SETTINGS_TABS;
+    }
+    // Non-admin users don't see the MCP tab which contains sensitive configuration
+    return SETTINGS_TABS.filter(tab => tab.id !== "mcp");
+  }, [user]);
 
   const handleTabChange = useCallback(
     (newChanges: Partial<SettingsState>) => {
@@ -68,7 +84,11 @@ export function SettingsDialog() {
 
   const handleOpen = useCallback(() => {
     setSettings(useSettingsStore.getState());
-  }, []);
+    // Set active tab to first available tab
+    if (filteredTabs.length > 0 && filteredTabs[0]?.id) {
+      setActiveTabId(filteredTabs[0].id);
+    }
+  }, [filteredTabs]);
 
   const handleClose = useCallback(() => {
     setChanges({});
@@ -113,7 +133,7 @@ export function SettingsDialog() {
           <div className="flex h-120 w-full overflow-auto border-y">
             <ul className="flex w-50 shrink-0 border-r p-1">
               <div className="size-full">
-                {SETTINGS_TABS.map((tab) => (
+                {filteredTabs.map((tab) => (
                   <li
                     key={tab.id}
                     className={cn(
@@ -146,7 +166,7 @@ export function SettingsDialog() {
                 id="settings-content-scrollable"
                 className="size-full overflow-auto p-4"
               >
-                {SETTINGS_TABS.map((tab) => (
+                {filteredTabs.map((tab) => (
                   <TabsContent key={tab.id} value={tab.id}>
                     <tab.component
                       settings={mergedSettings}
