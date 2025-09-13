@@ -10,7 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from pymongo import MongoClient
 from langgraph.store.memory import InMemoryStore
-from src.config.configuration import get_bool_env, get_str_env
+from src.config.loader import get_bool_env, get_str_env
 
 
 class ChatStreamManager:
