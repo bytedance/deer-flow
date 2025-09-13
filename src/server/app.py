@@ -19,7 +19,8 @@ from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
-from src.config.configuration import get_recursion_limit, get_bool_env, get_str_env
+from src.config.configuration import get_recursion_limit
+from src.config.loader import get_bool_env, get_str_env
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
@@ -29,6 +30,7 @@ from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
 from src.rag.builder import build_retriever
+from src.rag.milvus import load_examples
 from src.rag.retriever import Resource
 from src.server.chat_request import (
     ChatRequest,
@@ -135,6 +137,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
     allow_headers=["*"],  # Now allow all headers, but can be restricted further
 )
+
+# Load examples into Milvus if configured
+load_examples()
+
 in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
 
@@ -281,7 +287,6 @@ async def _process_message_chunk(message_chunk, message_metadata, thread_id, age
         if message_chunk.tool_calls:
             # AI Message - Tool Call
             event_stream_message["tool_calls"] = message_chunk.tool_calls
-            event_stream_message["tool_call_chunks"] = message_chunk.tool_call_chunks
             event_stream_message["tool_call_chunks"] = _process_tool_call_chunks(
                 message_chunk.tool_call_chunks
             )

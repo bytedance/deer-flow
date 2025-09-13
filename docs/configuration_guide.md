@@ -97,7 +97,30 @@ AGENT_LLM_MAP: dict[str, LLMType] = {
     "prompt_enhancer": "basic",
 }
 
+
+### How to use Google AI Studio models?
+
+DeerFlow supports native integration with Google AI Studio (formerly Google Generative AI) API. This provides direct access to Google's Gemini models with their full feature set and optimized performance.
+
+To use Google AI Studio models, you need to:
+1. Get your API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Set the `platform` field to `"google_aistudio"` in your configuration
+3. Configure your model and API key
+
+The following is a configuration example for using Google AI Studio models:
+
+```yaml
+# Google AI Studio native API (recommended for Google models)
+BASIC_MODEL:
+  platform: "google_aistudio"
+  model: "gemini-2.5-flash"  # or "gemini-1.5-pro" ,...
+  api_key: YOUR_GOOGLE_API_KEY # Get from https://aistudio.google.com/app/apikey
+
 ```
+
+**Note:** The `platform: "google_aistudio"` field is required to distinguish from other providers that may offer Gemini models through OpenAI-compatible APIs.
+```
+
 ### How to use models with self-signed SSL certificates?
 
 If your LLM server uses self-signed SSL certificates, you can disable SSL certificate verification by adding the `verify_ssl: false` parameter to your model configuration:
@@ -179,4 +202,40 @@ SEARCH_ENGINE:
   exclude_domains:
     - unreliable-site.com
     - spam-domain.net
+```
 
+## RAG (Retrieval-Augmented Generation) Configuration
+
+DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.
+
+### Supported RAG Providers
+
+- **RAGFlow**: Document retrieval using RAGFlow API
+- **VikingDB Knowledge Base**: ByteDance's VikingDB knowledge base service
+- **Milvus**: Open-source vector database for similarity search
+
+### Milvus Configuration
+
+To use Milvus as your RAG provider, set the following environment variables:
+
+```bash
+# RAG_PROVIDER: milvus  (using free milvus instance on zilliz cloud: https://docs.zilliz.com/docs/quick-start )
+RAG_PROVIDER=milvus
+MILVUS_URI=<endpoint_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_USER=<username_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_PASSWORD=<password_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
+
+# RAG_PROVIDER: milvus  (using milvus lite on Mac or Linux)
+RAG_PROVIDER=milvus
+MILVUS_URI=./milvus_demo.db
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
+```
