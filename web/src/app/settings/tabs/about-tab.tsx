@@ -12,7 +12,7 @@ import type { Tab } from "./types";
 
 export const AboutTab: Tab = () => {
   const locale = useLocale();
-  const t = useTranslations("settings.about");
+  //const t = useTranslations("settings.about");
 
   const aboutContent = locale === "zh" ? aboutZh : aboutEn;
 

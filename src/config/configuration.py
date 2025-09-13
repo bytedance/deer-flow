@@ -8,8 +8,9 @@ from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 
-from src.rag.retriever import Resource
 from src.config.report_style import ReportStyle
+from src.rag.retriever import Resource
+from src.config.loader import get_str_env, get_int_env, get_bool_env
 
 logger = logging.getLogger(__name__)
 
@@ -23,23 +24,15 @@ def get_recursion_limit(default: int = 25) -> int:
     Returns:
         int: The recursion limit to use
     """
-    try:
-        env_value_str = os.getenv("AGENT_RECURSION_LIMIT", str(default))
-        parsed_limit = int(env_value_str)
+    env_value_str = get_str_env("AGENT_RECURSION_LIMIT", str(default))
+    parsed_limit = get_int_env("AGENT_RECURSION_LIMIT", default)
 
-        if parsed_limit > 0:
-            logger.info(f"Recursion limit set to: {parsed_limit}")
-            return parsed_limit
-        else:
-            logger.warning(
-                f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
-                f"Using default value {default}."
-            )
-            return default
-    except ValueError:
-        raw_env_value = os.getenv("AGENT_RECURSION_LIMIT")
+    if parsed_limit > 0:
+        logger.info(f"Recursion limit set to: {parsed_limit}")
+        return parsed_limit
+    else:
         logger.warning(
-            f"Invalid AGENT_RECURSION_LIMIT value: '{raw_env_value}'. "
+            f"AGENT_RECURSION_LIMIT value '{env_value_str}' (parsed as {parsed_limit}) is not positive. "
             f"Using default value {default}."
         )
         return default

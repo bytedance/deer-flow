@@ -304,3 +304,12 @@ span[style] > strong {
 mark[style] > strong {
   color: inherit;
 }
+
+.prose ol, .prose ul {
+  margin-left: 1.2em;
+  color: #b0b0b0;
+  font-size: 0.98em;
+}
+.prose ol > li::marker, .prose ul > li::marker {
+  color: #b0b0b0;
+}

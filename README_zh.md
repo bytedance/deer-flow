@@ -134,6 +134,9 @@ uv run main.py
 # 在Windows上
 bootstrap.bat -d
 ```
+> [! 注意]
+> 出于安全考虑，后端服务器默认绑定到 127.0.0.1 (localhost)。如果您需要允许外部连接（例如，在Linux服务器上部署时），您可以修改启动脚本中的主机地址为 0.0.0.0。（uv run server.py --host 0.0.0.0）
+> 请注意，在将服务暴露给外部网络之前，请务必确保您的环境已经过适当的安全加固。
 
 打开浏览器并访问[`http://localhost:3000`](http://localhost:3000)探索 Web UI。
 
@@ -406,7 +409,8 @@ docker build -t deer-flow-api .
 
 ```bash
 # 将deer-flow-api-app替换为您首选的容器名称
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# 启动服务器并绑定到localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # 停止服务器
 docker stop deer-flow-api-app
@@ -423,6 +427,9 @@ docker compose build
 # 启动服务器
 docker compose up
 ```
+
+> [!WARNING]
+> 如果您想将 DeerFlow 部署到生产环境中，请为网站添加身份验证，并评估 MCPServer 和 Python Repl 的安全检查。
 
 ## 文本转语音集成
 

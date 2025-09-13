@@ -1,8 +1,9 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi import HTTPException
 
 import src.server.mcp_utils as mcp_utils
@@ -86,10 +87,15 @@ async def test_load_mcp_tools_sse_success(mock_sse_client, mock_get_tools):
     result = await mcp_utils.load_mcp_tools(
         server_type="sse",
         url="http://localhost:1234",
+        headers={"Authorization": "Bearer 1234567890"},
         timeout_seconds=7,
     )
     assert result == ["toolB"]
-    mock_sse_client.assert_called_once_with(url="http://localhost:1234")
+    mock_sse_client.assert_called_once_with(
+        url="http://localhost:1234",
+        headers={"Authorization": "Bearer 1234567890"},
+        timeout=7,
+    )
     mock_get_tools.assert_awaited_once_with(mock_client, 7)
 
 

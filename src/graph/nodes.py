@@ -9,27 +9,26 @@ from typing import Annotated, Literal
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
-from src.tools.search import LoggedTavilySearch
-from src.tools import (
-    crawl_tool,
-    get_web_search_tool,
-    get_retriever_tool,
-    python_repl_tool,
-)
-
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
 from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
+from src.tools import (
+    crawl_tool,
+    get_retriever_tool,
+    get_web_search_tool,
+    python_repl_tool,
+)
+from src.tools.search import LoggedTavilySearch
 from src.utils.json_utils import repair_json_output
 
-from .types import State
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
+from .types import State
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +53,9 @@ def background_investigation_node(state: State, config: RunnableConfig):
         searched_content = LoggedTavilySearch(
             max_results=configurable.max_search_results
         ).invoke(query)
+        # check if the searched_content is a tuple, then we need to unpack it
+        if isinstance(searched_content, tuple):
+            searched_content = searched_content[0]
         if isinstance(searched_content, list):
             background_investigation_results = [
                 f"## {elem['title']}\n\n{elem['content']}" for elem in searched_content
@@ -451,7 +453,7 @@ async def _setup_and_execute_agent_step(
                 mcp_servers[server_name] = {
                     k: v
                     for k, v in server_config.items()
-                    if k in ("transport", "command", "args", "url", "env")
+                    if k in ("transport", "command", "args", "url", "env", "headers")
                 }
                 for tool_name in server_config["enabled_tools"]:
                     enabled_tools[tool_name] = server_name

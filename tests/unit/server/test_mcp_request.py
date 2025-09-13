@@ -3,6 +3,7 @@
 
 import pytest
 from pydantic import ValidationError
+
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 
 
