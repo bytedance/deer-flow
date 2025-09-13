@@ -12,13 +12,7 @@ import { sleep } from "../utils";
 import { resolveServiceURL } from "./resolve-service-url";
 import type { ChatEvent } from "./types";
 
-// Get auth token from localStorage
-function getAuthToken() {
-  if (typeof window !== "undefined") {
-    return localStorage.getItem("authToken");
-  }
-  return null;
-}
+import { getAuthHeaders } from "~/core/auth/utils";
 
 export async function* chatStream(
   userMessage: string,
@@ -53,21 +47,12 @@ export async function* chatStream(
     return yield* chatReplayStream(userMessage, params, options);
   
   try{
-    const token = getAuthToken();
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    
     const stream = fetchStream(resolveServiceURL("chat/stream"), {
       body: JSON.stringify({
         messages: [{ role: "user", content: userMessage }],
         ...params,
       }),
-      headers,
+      headers: getAuthHeaders(),
       signal: options.abortSignal,
     });
     

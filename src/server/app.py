@@ -4,7 +4,7 @@
 import base64
 import json
 import logging
-from typing import Annotated, List, cast
+from typing import Annotated, List, cast, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Depends
@@ -49,7 +49,7 @@ from src.server.rag_request import (
 from src.tools import VolcengineTTS
 from src.graph.checkpoint import chat_stream_message
 from src.utils.json_utils import sanitize_args
-from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
+from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user, generate_csrf_token
 
 logger = logging.getLogger(__name__)
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
@@ -64,9 +64,10 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: dict
+    csrf_token: Optional[str] = None
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(form_data: dict):
+async def login(form_data: dict, response: Response):
     """Authenticate user and return JWT token"""
     email = form_data.get("email")
     password = form_data.get("password")
@@ -88,11 +89,30 @@ async def login(form_data: dict):
         data={"sub": user["id"], "email": user["email"], "role": user["role"]}
     )
     
-    return LoginResponse(
+    # Generate CSRF token
+    csrf_token = generate_csrf_token()
+    
+    # Set CSRF token in cookie
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        max_age=86400  # 24 hours
+    )
+    
+    login_response = LoginResponse(
         access_token=access_token,
         token_type="bearer",
         user=user
     )
+    
+    # Add CSRF token if available (for new auth system)
+    if csrf_token:
+        login_response.csrf_token = csrf_token
+    
+    return login_response
 
 @app.post("/api/auth/logout")
 async def logout():

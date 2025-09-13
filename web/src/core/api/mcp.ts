@@ -5,27 +5,12 @@ import type { SimpleMCPServerMetadata } from "../mcp";
 
 import { resolveServiceURL } from "./resolve-service-url";
 
-// Get auth token from localStorage
-function getAuthToken() {
-  if (typeof window !== "undefined") {
-    return localStorage.getItem("authToken");
-  }
-  return null;
-}
+import { getAuthHeaders } from "~/core/auth/utils";
 
 export async function queryMCPServerMetadata(config: SimpleMCPServerMetadata, signal?: AbortSignal) {
-  const token = getAuthToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  
   const response = await fetch(resolveServiceURL("mcp/server/metadata"), {
     method: "POST",
-    headers,
+    headers: getAuthHeaders(),
     body: JSON.stringify(config),
     signal,
   });
