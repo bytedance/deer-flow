@@ -8,17 +8,7 @@ import type { ReactNode } from "react";
 
 import { resolveServiceURL } from "~/core/api/resolve-service-url";
 
-import { clearAuthData } from "./utils";
-
-// Define user types
-export type UserRole = "admin" | "user";
-
-export interface User {
-  id: string;
-  email: string;
-  name: string;
-  role: UserRole;
-}
+import { clearAuthData, type User } from "./utils";
 
 // Define auth context type
 interface AuthContextType {
@@ -69,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    void checkAuth();
     void checkAuth();
   }, []);
 
