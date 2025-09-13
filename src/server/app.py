@@ -385,7 +385,7 @@ in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(form_data: dict):
+async def login(form_data: dict, response: Response):
     """Authenticate user and return JWT token"""
     email = form_data.get("email")
     password = form_data.get("password")
@@ -407,11 +407,30 @@ async def login(form_data: dict):
         data={"sub": user["id"], "email": user["email"], "role": user["role"]}
     )
     
-    return LoginResponse(
+    # Generate CSRF token
+    csrf_token = generate_csrf_token()
+    
+    # Set CSRF token in cookie
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        max_age=86400  # 24 hours
+    )
+    
+    login_response = LoginResponse(
         access_token=access_token,
         token_type="bearer",
         user=user
     )
+    
+    # Add CSRF token if available (for new auth system)
+    if csrf_token:
+        login_response.csrf_token = csrf_token
+    
+    return login_response
 
 @app.post("/api/auth/logout")
 async def logout():

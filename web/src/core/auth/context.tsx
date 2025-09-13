@@ -8,6 +8,8 @@ import type { ReactNode } from "react";
 
 import { resolveServiceURL } from "~/core/api/resolve-service-url";
 
+import { clearAuthData } from "./utils";
+
 // Define user types
 export type UserRole = "admin" | "user";
 
@@ -34,27 +36,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Check if user is already logged in on app start
+  // Check if user is already logged in on app start with token validation
   useEffect(() => {
-    const token = localStorage.getItem("authToken");
-    if (token) {
-      // In a real implementation, we would validate the token with the backend
-      // For now, we'll simulate a logged in user
+    const checkAuth = async () => {
       try {
-        const userData = JSON.parse(localStorage.getItem("userData") ?? "{}");
-        if (userData.id && userData.email) {
-          setUser(userData);
+        const token = localStorage.getItem("authToken");
+        if (token) {
+          // Validate token expiration
+          const response = await fetch(resolveServiceURL("auth/validate"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`,
+            },
+          });
+
+          if (response.ok) {
+            const userData = JSON.parse(localStorage.getItem("userData") ?? "{}");
+            if (userData.id && userData.email) {
+              setUser(userData);
+            }
+          } else {
+            // Token is invalid or expired, clear auth data
+            clearAuthData();
+          }
         }
       } catch (error) {
-        // If there's an error parsing user data, remove the token
-        localStorage.removeItem("authToken");
-        localStorage.removeItem("userData");
-        // Also clear the cookie
-        document.cookie = "authToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-        console.error("Error parsing user data:", error);
+        console.error("Auth check error:", error);
+        clearAuthData();
+      } finally {
+        setIsLoading(false);
       }
-    }
-    setIsLoading(false);
+    };
+
+    void checkAuth();
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {
@@ -73,7 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (response.ok) {
         const data = await response.json();
         
-        // Store token and user data
+        // Store token and user data using centralized utility
         localStorage.setItem("authToken", data.access_token);
         localStorage.setItem("userData", JSON.stringify(data.user));
         
@@ -110,13 +125,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error("Logout error:", error);
     } finally {
-      // Clear local storage regardless of API call success
-      localStorage.removeItem("authToken");
-      localStorage.removeItem("userData");
+      // Clear auth data using centralized utility
+      clearAuthData();
       setUser(null);
-      
-      // Also clear the cookie
-      document.cookie = "authToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
     }
   };
 

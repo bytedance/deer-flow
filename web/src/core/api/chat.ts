@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { getAuthHeaders, getAuthToken } from "~/core/auth/utils";
 import { env } from "~/env";
 
 import type { MCPServerMetadata } from "../mcp";
@@ -35,14 +36,6 @@ function getLocaleFromCookie(): string {
   
   // Map raw locale to backend format, fallback to en-US if unmapped
   return LOCALE_MAP[rawLocale as keyof typeof LOCALE_MAP] ?? "en-US";
-}
-
-// Get auth token from localStorage
-function getAuthToken() {
-  if (typeof window !== "undefined") {
-    return localStorage.getItem("authToken");
-  }
-  return null;
 }
 
 export async function* chatStream(
@@ -97,7 +90,7 @@ export async function* chatStream(
         locale,
         ...params,
       }),
-      headers,
+      headers: getAuthHeaders(),
       signal: options.abortSignal,
     });
     

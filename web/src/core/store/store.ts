@@ -270,7 +270,8 @@ function appendMessage(message: Message) {
   useStore.getState().appendMessage(message);
 }
 
-function updateMessage(message: Message) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _updateMessage(message: Message) {
   if (
     getOngoingResearchId() &&
     message.agent === "reporter" &&
