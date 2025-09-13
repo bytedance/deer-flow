@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { getAuthHeaders } from "~/core/auth/utils";
 import { env } from "~/env";
 
 import type { MCPServerMetadata } from "../mcp";
@@ -11,8 +12,6 @@ import { sleep } from "../utils";
 
 import { resolveServiceURL } from "./resolve-service-url";
 import type { ChatEvent } from "./types";
-
-import { getAuthHeaders } from "~/core/auth/utils";
 
 export async function* chatStream(
   userMessage: string,

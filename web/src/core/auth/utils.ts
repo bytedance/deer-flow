@@ -14,6 +14,14 @@ export interface JWTPayload {
   iat?: number;
 }
 
+// User interface
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: "admin" | "user";
+}
+
 // Auth configuration
 const AUTH_CONFIG = {
   TOKEN_KEY: "authToken",
@@ -55,7 +63,7 @@ export function getCSRFToken(): string | null {
 /**
  * Store authentication token and user data
  */
-export function storeAuthData(token: string, user: any): void {
+export function storeAuthData(token: string, user: User): void {
   if (typeof window === "undefined") return;
   
   try {
@@ -128,7 +136,7 @@ export function isTokenValid(): boolean {
 /**
  * Get user data from localStorage
  */
-export function getUserData(): any {
+export function getUserData(): User | null {
   if (typeof window === "undefined") return null;
   
   try {
