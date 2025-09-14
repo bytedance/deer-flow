@@ -265,7 +265,7 @@ async def _stream_graph_events(
             ):
                 yield event
     except Exception as e:
-        logger.exception(f"Error during graph execution: {str(e)}")
+        logger.exception("Error during graph execution")
         yield _make_event(
             "error",
             {
