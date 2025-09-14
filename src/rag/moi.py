@@ -19,7 +19,7 @@ class MOIProvider(RAGFlowProvider):
         moi_url = os.getenv("MOI_API_URL")
         if not moi_url:
             raise ValueError("MOI_API_URL is not set")
-        os.environ["RAGFLOW_API_URL"] = moi_url
+        os.environ["RAGFLOW_API_URL"] = moi_url + "/byoa"
         
         moi_key = os.getenv("MOI_API_KEY")
         if not moi_key:
