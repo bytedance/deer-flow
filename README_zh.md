@@ -183,11 +183,11 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
    RAGFLOW_RETRIEVAL_SIZE=10
    ```
 
-- **MOI**：基于RAGFlow后端的MOI配置选项
+- **[MOI数据库]**：开源的云数据库与智能数据平台
    ```
    # 参照示例进行配置 .env.example
    RAG_PROVIDER=moi
-   MOI_API_URL="{moi_server_rul}/byoa"
+   MOI_API_URL="https://freetier-01.cn-hangzhou.cluster.matrixonecloud.cn"
    MOI_API_KEY="xxx-xxx-xxx-xxx"
    MOI_RETRIEVAL_SIZE=10
    ```
