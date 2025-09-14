@@ -35,17 +35,28 @@ export const resourceSuggestion: MentionOptions["suggestion"] = {
 
     return {
       onStart: (props) => {
-        if (!props.clientRect) {
-          return;
-        }
-
+        // 总是创建渲染器，不检查clientRect
         reactRenderer = new ReactRenderer(ResourceMentions, {
           props,
           editor: props.editor,
         });
 
+        // 创建弹窗，使用实际的光标位置
+        const clientRect = props.clientRect || (() => {
+          const selection = props.editor.state.selection;
+          const coords = props.editor.view.coordsAtPos(selection.from);
+          return {
+            top: coords.top,
+            left: coords.left,
+            right: coords.right,
+            bottom: coords.bottom,
+            width: 0,
+            height: 0,
+          };
+        });
+
         popup = tippy("body", {
-          getReferenceClientRect: props.clientRect as any,
+          getReferenceClientRect: clientRect as any,
           appendTo: () => document.body,
           content: reactRenderer.element,
           showOnCreate: true,
@@ -56,15 +67,30 @@ export const resourceSuggestion: MentionOptions["suggestion"] = {
       },
 
       onUpdate(props) {
-        reactRenderer.updateProps(props);
-
-        if (!props.clientRect) {
-          return;
+        // 总是更新渲染器
+        if (reactRenderer) {
+          reactRenderer.updateProps(props);
         }
 
-        popup?.[0]?.setProps({
-          getReferenceClientRect: props.clientRect as any,
-        });
+        // 更新弹窗位置（如果弹窗存在且未被销毁）
+        if (popup?.[0] && !popup[0].state.isDestroyed) {
+          const clientRect = props.clientRect || (() => {
+            const selection = props.editor.state.selection;
+            const coords = props.editor.view.coordsAtPos(selection.from);
+            return {
+              top: coords.top,
+              left: coords.left,
+              right: coords.right,
+              bottom: coords.bottom,
+              width: 0,
+              height: 0,
+            };
+          });
+          
+          popup[0].setProps({
+            getReferenceClientRect: clientRect as any,
+          });
+        }
       },
 
       onKeyDown(props) {
