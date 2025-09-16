@@ -11,9 +11,17 @@ from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 class MOIProvider(Retriever):
     """
-    MOIProvider is a provider that uses MOI API to retrieve documents and resources.
+    MatrixOne Intelligence (MOI) is a multimodal data AI processing platform. 
+    It supports connecting, processing, managing, and using both structured and unstructured data. 
+    Through steps such as parsing, extraction, segmentation, cleaning, and enhancement, 
+    it transforms raw data like documents, images, and audio/video into AI-ready application data. 
+    With its self-developed data service layer (the MatrixOne database), 
+    it can directly provide retrieval services for the processed data.
+
     The open-source repository is available at: https://github.com/matrixorigin/matrixone
     For more information, please visit the website: https://www.matrixorigin.io/matrixone-intelligence
+    Documentation: https://docs.matrixorigin.cn/zh/m1intelligence/MatrixOne-Intelligence/Workspace-Mgmt/overview/
+    Online Demo: https://www.matrixorigin.io/demo
     """
 
     def __init__(self):
