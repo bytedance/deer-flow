@@ -211,7 +211,6 @@ class ChatDashscope(ChatOpenAI):
                 and hasattr(response.choices[0], "message")
                 and hasattr(response.choices[0].message, "reasoning_content")
             ):
-
                 reasoning_content = response.choices[0].message.reasoning_content
                 if reasoning_content and chat_result.generations:
                     chat_result.generations[0].message.additional_kwargs[

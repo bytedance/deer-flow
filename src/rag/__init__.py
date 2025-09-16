@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from .builder import build_retriever
+from .dify import DifyProvider
 from .ragflow import RAGFlowProvider
 from .moi import MOIProvider
 from .retriever import Chunk, Document, Resource, Retriever
@@ -11,6 +12,7 @@ __all__ = [
     Retriever,
     Document,
     Resource,
+    DifyProvider,
     RAGFlowProvider,
     MOIProvider,
     VikingDBKnowledgeBaseProvider,

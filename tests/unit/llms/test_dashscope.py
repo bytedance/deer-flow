@@ -2,23 +2,21 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 from langchain_core.messages import (
     AIMessageChunk,
+    ChatMessageChunk,
+    FunctionMessageChunk,
     HumanMessageChunk,
     SystemMessageChunk,
-    FunctionMessageChunk,
     ToolMessageChunk,
 )
 
 from src.llms import llm as llm_module
-from langchain_core.messages import ChatMessageChunk
 from src.llms.providers import dashscope as dashscope_module
-
 from src.llms.providers.dashscope import (
     ChatDashscope,
-    _convert_delta_to_message_chunk,
     _convert_chunk_to_generation_chunk,
+    _convert_delta_to_message_chunk,
 )
 
 

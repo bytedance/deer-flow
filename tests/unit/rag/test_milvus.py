@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
-from uuid import uuid4
-from types import SimpleNamespace
+
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
+
 import pytest
 
 import src.rag.milvus as milvus_mod
@@ -13,7 +15,6 @@ from src.rag.retriever import Resource
 
 
 class DummyEmbedding:
-
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
@@ -369,9 +370,7 @@ def test_create_collection_lite(monkeypatch):
         def list_collections(self):  # noqa: D401
             return []  # empty triggers creation
 
-        def create_collection(
-            self, collection_name, schema, index_params
-        ):  # noqa: D401
+        def create_collection(self, collection_name, schema, index_params):  # noqa: D401
             created["name"] = collection_name
             created["schema"] = schema
             created["index"] = index_params

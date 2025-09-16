@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from langchain_milvus.vectorstores import Milvus as LangchainMilvus
-from pymilvus import MilvusClient, CollectionSchema, FieldSchema, DataType
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
+from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+
+from src.config.loader import get_bool_env, get_int_env, get_str_env
 from src.rag.retriever import Chunk, Document, Resource, Retriever
-from src.config.loader import get_bool_env, get_str_env, get_int_env
 
 logger = logging.getLogger(__name__)
 
@@ -466,7 +467,7 @@ class MilvusRetriever(Retriever):
                     resources.append(
                         Resource(
                             uri=r.get(self.url_field, "")
-                            or f"milvus://{r.get(self.id_field,'')}",
+                            or f"milvus://{r.get(self.id_field, '')}",
                             title=r.get(self.title_field, "")
                             or r.get(self.id_field, "Unnamed"),
                             description="Stored Milvus document",
@@ -476,21 +477,23 @@ class MilvusRetriever(Retriever):
                 # Use similarity_search_by_vector for lightweight listing.
                 # If a query is provided embed it; else use a zero vector.
                 docs: Iterable[Any] = self.client.similarity_search(
-                    query, k=100, expr="source == 'examples'"  # Limit to 100 results
+                    query,
+                    k=100,
+                    expr="source == 'examples'",  # Limit to 100 results
                 )
                 for d in docs:
                     meta = getattr(d, "metadata", {}) or {}
                     # check if the resource is in the list of resources
                     if resources and any(
                         r.uri == meta.get(self.url_field, "")
-                        or r.uri == f"milvus://{meta.get(self.id_field,'')}"
+                        or r.uri == f"milvus://{meta.get(self.id_field, '')}"
                         for r in resources
                     ):
                         continue
                     resources.append(
                         Resource(
                             uri=meta.get(self.url_field, "")
-                            or f"milvus://{meta.get(self.id_field,'')}",
+                            or f"milvus://{meta.get(self.id_field, '')}",
                             title=meta.get(self.title_field, "")
                             or meta.get(self.id_field, "Unnamed"),
                             description="Stored Milvus document",

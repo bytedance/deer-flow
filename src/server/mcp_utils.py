@@ -97,7 +97,8 @@ async def load_mcp_tools(
                 )
 
             return await _get_tools_from_client_session(
-                sse_client(url=url, headers=headers, timeout=timeout_seconds), timeout_seconds
+                sse_client(url=url, headers=headers, timeout=timeout_seconds),
+                timeout_seconds,
             )
 
         elif server_type == "streamable_http":
@@ -107,7 +108,10 @@ async def load_mcp_tools(
                 )
 
             return await _get_tools_from_client_session(
-                streamablehttp_client(url=url, headers=headers, timeout=timeout_seconds), timeout_seconds,
+                streamablehttp_client(
+                    url=url, headers=headers, timeout=timeout_seconds
+                ),
+                timeout_seconds,
             )
 
         else:
