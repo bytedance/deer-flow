@@ -57,7 +57,7 @@ class MOIProvider(Retriever):
         Query relevant documents from MOI API using the provided resources.
         """
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "moi-key": f"{self.api_key}",
             "Content-Type": "application/json",
         }
 
