@@ -270,7 +270,7 @@ async def _stream_graph_events(
             "error",
             {
                 "thread_id": thread_id,
-                "error": str(e),
+                "error": "Error during graph execution",
             },
         )
 
