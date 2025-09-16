@@ -183,13 +183,14 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
    RAGFLOW_RETRIEVAL_SIZE=10
    ```
 
-- **MOI**：基于RAGFlow后端的MOI配置选项
+- **[MOI]**：AI 原生多模态数据智能平台
    ```
    # 参照示例进行配置 .env.example
    RAG_PROVIDER=moi
-   MOI_API_URL="{moi_server_rul}/byoa"
+   MOI_API_URL="https://freetier-01.cn-hangzhou.cluster.matrixonecloud.cn"
    MOI_API_KEY="xxx-xxx-xxx-xxx"
    MOI_RETRIEVAL_SIZE=10
+   MOI_LIST_LIMIT=10
    ```
 
 - **[VikingDB 知识库](https://www.volcengine.com/docs/84313/1254457)**：火山引擎提供的公有云知识库引擎
