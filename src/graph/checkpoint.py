@@ -5,7 +5,8 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import List, Optional, Tuple
+
+from typing import List, Optional, Tuple, cast
 
 import psycopg
 from langgraph.store.memory import InMemoryStore
@@ -86,6 +87,8 @@ class ChatStreamManager:
             self.postgres_conn = psycopg.connect(self.db_uri, row_factory=dict_row)
             self.logger.info("Successfully connected to PostgreSQL")
             self._create_chat_streams_table()
+            self._create_langgraph_events_table()
+            self._create_research_replays_table()
         except Exception as e:
             self.logger.error(f"Failed to connect to PostgreSQL: {e}")
 
@@ -111,6 +114,319 @@ class ChatStreamManager:
             self.logger.error(f"Failed to create chat_streams table: {e}")
             if self.postgres_conn:
                 self.postgres_conn.rollback()
+
+    def _create_langgraph_events_table(self) -> None:
+        """Create the langgraph_events table if it doesn't exist."""
+        try:
+            with self.postgres_conn.cursor() as cursor:
+                create_table_sql = """
+                CREATE TABLE IF NOT EXISTS langgraph_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    thread_id VARCHAR(255) NOT NULL,
+                    event VARCHAR(255) NOT NULL,
+                    level VARCHAR(50) NOT NULL,
+                    message JSONB NOT NULL,
+                    ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_langgraph_events_thread_id ON langgraph_events(thread_id);
+                CREATE INDEX IF NOT EXISTS idx_langgraph_events_ts ON langgraph_events(ts);
+                """
+                cursor.execute(create_table_sql)
+                self.postgres_conn.commit()
+                self.logger.info("Langgraph events table created/verified successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to create langgraph_events table: {e}")
+            if self.postgres_conn:
+                self.postgres_conn.rollback()
+
+    def _create_research_replays_table(self) -> None:
+        """Create the research_replays table if it doesn't exist."""
+        try:
+            with self.postgres_conn.cursor() as cursor:
+                create_table_sql = """
+                CREATE TABLE IF NOT EXISTS research_replays (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    thread_id VARCHAR(255) NOT NULL,
+                    research_topic VARCHAR(255) NOT NULL,
+                    report_style VARCHAR(50) NOT NULL,
+                    messages INTEGER NOT NULL,
+                    ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_research_replays_thread_id ON research_replays(thread_id);
+                CREATE INDEX IF NOT EXISTS idx_research_replays_ts ON research_replays(ts);
+                """
+                cursor.execute(create_table_sql)
+                self.postgres_conn.commit()
+                self.logger.info("Research replays table created/verified successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to create research_replays table: {e}")
+            if self.postgres_conn:
+                self.postgres_conn.rollback()
+
+    def _process_stream_messages(self, stream_message: dict | str | None) -> str:
+        if stream_message is None:
+            return ""
+        if isinstance(stream_message, str):
+            # If stream_message is a string, return it directly
+            return stream_message
+        if not isinstance(stream_message, dict):
+            # If stream_message is not a dict, return an empty string
+            return ""
+        messages = cast(list, stream_message.get("messages", []))
+        # remove the first message which is usually the system prompt
+        if messages and isinstance(messages, list) and len(messages) > 0:
+            # Decode byte messages back to strings
+            decoded_messages = []
+            for message in messages:
+                if isinstance(message, bytes):
+                    decoded_messages.append(message.decode("utf-8"))
+                else:
+                    decoded_messages.append(str(message))
+            # Return all messages except the first one
+            valid_messages = []
+            for message in decoded_messages:
+                if (
+                    str(message).find("event:") == -1
+                    and str(message).find("data:") == -1
+                ):
+                    continue
+                if str(message).find("message_chunk") > -1:
+                    if (
+                        str(message).find("content") > -1
+                        or str(message).find("reasoning_content") > -1
+                        or str(message).find("finish_reason") > -1
+                    ):
+                        valid_messages.append(message)
+
+                else:
+                    valid_messages.append(message)
+            return "".join(valid_messages) if valid_messages else ""
+        elif messages and isinstance(messages, str):
+            # If messages is a single string, return it directly
+            return messages
+        else:
+            # If no messages found, return an empty string
+            return ""
+
+    def log_research_replays(
+        self, thread_id: str, research_topic: str, report_style: str, messages: int
+    ) -> None:
+        if not self.checkpoint_saver:
+            logging.warning(
+                "Checkpoint saver is disabled, cannot retrieve conversation"
+            )
+            return None
+        if self.mongo_db is None and self.postgres_conn is None:
+            logging.warning("No DB connection available")
+            return None
+        if self.mongo_db is not None:
+            try:
+                collection = self.mongo_db.research_replays
+                # Update existing conversation with new messages count
+                if messages > 0:
+                    existing_document = collection.find_one({"thread_id": thread_id})
+                    if existing_document:
+                        update_result = collection.update_one(
+                            {"thread_id": thread_id},
+                            {
+                                "$set": {
+                                    "messages": messages,
+                                }
+                            },
+                        )
+                        self.logger.info(
+                            f"Updated research replay for thread {thread_id}: "
+                            f"{update_result.modified_count} documents modified"
+                        )
+                else:
+                    result = collection.insert_one(
+                        {
+                            "thread_id": thread_id,
+                            "research_topic": research_topic,
+                            "report_style": report_style,
+                            "messages": messages,
+                            "ts": datetime.now(),
+                            "id": uuid.uuid4().hex,
+                        }
+                    )
+                    self.logger.info(f"Event logged: {result.inserted_id}")
+            except Exception as e:
+                self.logger.error(f"Error logging event: {e}")
+        elif self.postgres_conn is not None:
+            try:
+                # Update existing conversation with new messages count
+                if messages > 0:
+                    with self.postgres_conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT id FROM research_replays WHERE thread_id = %s",
+                            (thread_id,),
+                        )
+                        existing_record = cursor.fetchone()
+                    if existing_record:
+                        with self.postgres_conn.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                UPDATE research_replays
+                                SET messages = %s
+                                WHERE thread_id = %s
+                                """,
+                                (messages, thread_id),
+                            )
+                        self.postgres_conn.commit()
+                        self.logger.info(
+                            f"Updated research replay for thread {thread_id}: "
+                            f"{cursor.rowcount} rows modified"
+                        )
+                else:
+                    with self.postgres_conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                        INSERT INTO research_replays (thread_id, research_topic, report_style, messages, ts)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                            (
+                                thread_id,
+                                research_topic,
+                                report_style,
+                                messages,
+                                datetime.now(),
+                            ),
+                        )
+                    self.postgres_conn.commit()
+                    self.logger.info("Research replay logged successfully")
+            except Exception as e:
+                self.logger.error(f"Error logging research replay: {e}")
+
+    def log_graph_event(
+        self, thread_id: str, event: str, level: str, message: dict
+    ) -> None:
+        """
+        Log an event related to a conversation thread.
+        Args:
+            thread_id (str): Unique identifier for the conversation thread
+            event (str): Event type or name
+            level (str): Log level (e.g., "info", "warning", "error")
+            message (dict): Additional message data to log
+        """
+        if not self.checkpoint_saver:
+            logging.warning(
+                "Checkpoint saver is disabled, cannot retrieve conversation"
+            )
+            return None
+        if self.mongo_db is None and self.postgres_conn is None:
+            logging.warning("No mongodb connection available")
+            return None
+        if self.mongo_db is not None:
+            try:
+                collection = self.mongo_db.langgraph_events
+                result = collection.insert_one(
+                    {
+                        "thread_id": thread_id,
+                        "event": event,
+                        "level": level,
+                        "message": message,
+                        "ts": datetime.now(),
+                        "id": uuid.uuid4().hex,
+                    }
+                )
+                self.logger.info(f"Event logged: {result.inserted_id}")
+            except Exception as e:
+                self.logger.error(f"Error logging event: {e}")
+        elif self.postgres_conn is not None:
+            try:
+                with self.postgres_conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO langgraph_events (thread_id, event, level, message, ts)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            thread_id,
+                            event,
+                            level,
+                            json.dumps(message),
+                            datetime.now(),
+                        ),
+                    )
+                    self.postgres_conn.commit()
+                    self.logger.info("Event logged successfully")
+            except Exception as e:
+                self.logger.error(f"Error logging event: {e}")
+
+    def get_messages_by_id(self, thread_id: str) -> Optional[str]:
+        """Retrieve a conversation by thread_id."""
+        if not self.checkpoint_saver:
+            logging.warning(
+                "Checkpoint saver is disabled, cannot retrieve conversation"
+            )
+            return None
+        if self.mongo_db is None and self.postgres_conn is None:
+            logging.warning("No database connection available")
+            return None
+        if self.mongo_db is not None:
+            # MongoDB retrieval
+            collection = self.mongo_db.chat_streams
+            conversation = collection.find_one({"thread_id": thread_id})
+            if conversation is None:
+                logging.warning(f"No conversation found for thread_id: {thread_id}")
+                return None
+            messages = self._process_stream_messages(conversation)
+            return messages
+        elif self.postgres_conn:
+            # PostgreSQL retrieval
+            with self.postgres_conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM chat_streams WHERE thread_id = %s", (thread_id,)
+                )
+                conversation = cursor.fetchone()
+                if conversation is None:
+                    logging.warning(f"No conversation found for thread_id: {thread_id}")
+                    return None
+                messages = self._process_stream_messages(conversation)
+                return messages
+        else:
+            logging.warning("No database connection available")
+            return None
+
+    def get_stream_messages(self, limit: int = 10, sort: str = "ts") -> List[dict]:
+        """
+        Retrieve chat stream messages from the database.
+        Args:
+            limit (int): Maximum number of messages to retrieve
+            sort (str): Field to sort by, default is 'ts' (timestamp)
+        Returns:
+            List[dict]: List of chat stream messages, sorted by the specified field
+        """
+        if not self.checkpoint_saver:
+            self.logger.warning(
+                "Checkpoint saver is disabled, cannot retrieve messages"
+            )
+            return []
+        if self.mongo_db is None and self.postgres_conn is None:
+            self.logger.warning("No database connection available")
+            return []
+        try:
+            if self.mongo_db is not None:
+                # MongoDB retrieval
+                collection = self.mongo_db.research_replays
+                cursor = collection.find().sort(sort, -1).limit(limit)
+                messages = list(cursor) if cursor is not None else []
+                return messages
+            elif self.postgres_conn:
+                # PostgreSQL retrieval
+                with self.postgres_conn.cursor() as cursor:
+                    query = (
+                        f"SELECT * FROM research_replays ORDER BY {sort} DESC LIMIT %s"
+                    )
+                    cursor.execute(query, (limit,))
+                    messages = cursor.fetchall()
+                    return messages
+            else:
+                self.logger.warning("No database connection available")
+                return []
+        except Exception as e:
+            self.logger.error(f"Error retrieving chat stream messages: {e}")
+            return []
 
     def process_stream_message(
         self, thread_id: str, message: str, finish_reason: str
@@ -208,7 +524,8 @@ class ChatStreamManager:
             if not self.checkpoint_saver:
                 self.logger.warning("Checkpoint saver is disabled")
                 return False
-
+            # Log the event of persisting conversation
+            self.log_research_replays(thread_id, "", "", len(messages))
             # Choose persistence method based on available connection
             if self.mongo_db is not None:
                 return self._persist_to_mongodb(thread_id, messages)
@@ -371,3 +688,44 @@ def chat_stream_message(thread_id: str, message: str, finish_reason: str) -> boo
         )
     else:
         return False
+
+
+def list_conversations(limit: int, sort: str = "ts"):
+    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
+    if checkpoint_saver:
+        return _default_manager.get_stream_messages(limit, sort)
+    else:
+        logging.warning("Checkpoint saver is disabled, message not processed")
+        return []
+
+
+def get_conversation(thread_id: str):
+    """Retrieve a conversation by thread_id."""
+    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
+    if checkpoint_saver:
+        return _default_manager.get_messages_by_id(thread_id)
+    else:
+        logging.warning("Checkpoint saver is disabled, message not processed")
+        return ""
+
+
+def log_graph_event(thread_id: str, event: str, level: str, message: dict):
+    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
+    if checkpoint_saver:
+        return _default_manager.log_graph_event(thread_id, event, level, message)
+    else:
+        logging.warning("Checkpoint saver is disabled, message not processed")
+        return ""
+
+
+def log_research_replays(
+    thread_id: str, research_topic: str, report_style: str, messages: int
+):
+    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
+    if checkpoint_saver:
+        return _default_manager.log_research_replays(
+            thread_id, research_topic, report_style, messages
+        )
+    else:
+        logging.warning("Checkpoint saver is disabled, message not processed")
+        return ""
