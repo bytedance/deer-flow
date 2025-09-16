@@ -2,53 +2,108 @@
 # SPDX-License-Identifier: MIT
 
 import os
-from typing import List, Optional
+from urllib.parse import urlparse
 
-from src.rag.ragflow import RAGFlowProvider
+import requests
+
+from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 
-class MOIProvider(RAGFlowProvider):
+class MOIProvider(Retriever):
     """
-    MOIProvider is a provider that uses MOI configuration but inherits all logic from RAGFlowProvider.
-    It only overrides the initialization to read MOI_* environment variables instead of RAGFLOW_*.
+    MOIProvider is a provider that uses MOI API to retrieve documents and resources.
+    The open-source repository is available at: https://github.com/matrixorigin/matrixone
+    For more information, please visit the website: https://www.matrixorigin.io/matrixone-intelligence
     """
 
     def __init__(self):
-        # 将MOI环境变量映射到RAGFLOW环境变量，但不恢复
-        # 这样RAGFlowProvider的所有方法都能正常工作
-        moi_url = os.getenv("MOI_API_URL")
-        if not moi_url:
+        # Initialize MOI API configuration from environment variables
+        self.api_url = os.getenv("MOI_API_URL")
+        if not self.api_url:
             raise ValueError("MOI_API_URL is not set")
-        os.environ["RAGFLOW_API_URL"] = moi_url + "/byoa"
         
-        moi_key = os.getenv("MOI_API_KEY")
-        if not moi_key:
+        # Add /byoa suffix to the API URL for MOI compatibility
+        if not self.api_url.endswith("/byoa"):
+            self.api_url = self.api_url + "/byoa"
+        
+        self.api_key = os.getenv("MOI_API_KEY")
+        if not self.api_key:
             raise ValueError("MOI_API_KEY is not set")
-        os.environ["RAGFLOW_API_KEY"] = moi_key
         
+        # Set page size for document retrieval
+        self.page_size = 10
         moi_size = os.getenv("MOI_RETRIEVAL_SIZE")
         if moi_size:
-            os.environ["RAGFLOW_RETRIEVAL_SIZE"] = moi_size
-            
-        moi_languages = os.getenv("MOI_CROSS_LANGUAGES")
-        if moi_languages:
-            os.environ["RAGFLOW_CROSS_LANGUAGES"] = moi_languages
+            self.page_size = int(moi_size)
         
-        # 调用父类的初始化方法
-        super().__init__()
-        
-        # 设置MOI特有的list_limit参数
+        # Set MOI-specific list limit parameter
         self.moi_list_limit = None
         moi_list_limit = os.getenv("MOI_LIST_LIMIT")
         if moi_list_limit:
             self.moi_list_limit = int(moi_list_limit)
 
-    def list_resources(self, query: str | None = None) -> list:
+    def query_relevant_documents(
+        self, query: str, resources: list[Resource] = []
+    ) -> list[Document]:
         """
-        重写list_resources方法以支持MOI的limit参数
+        Query relevant documents from MOI API using the provided resources.
         """
-        from src.rag.retriever import Resource
-        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        dataset_ids: list[str] = []
+        document_ids: list[str] = []
+
+        for resource in resources:
+            dataset_id, document_id = self._parse_uri(resource.uri)
+            dataset_ids.append(dataset_id)
+            if document_id:
+                document_ids.append(document_id)
+
+        payload = {
+            "question": query,
+            "dataset_ids": dataset_ids,
+            "document_ids": document_ids,
+            "page_size": self.page_size,
+        }
+
+        response = requests.post(
+            f"{self.api_url}/api/v1/retrieval", headers=headers, json=payload
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to query documents: {response.text}")
+
+        result = response.json()
+        data = result.get("data", {})
+        doc_aggs = data.get("doc_aggs", [])
+        docs: dict[str, Document] = {
+            doc.get("doc_id"): Document(
+                id=doc.get("doc_id"),
+                title=doc.get("doc_name"),
+                chunks=[],
+            )
+            for doc in doc_aggs
+        }
+
+        for chunk in data.get("chunks", []):
+            doc = docs.get(chunk.get("document_id"))
+            if doc:
+                doc.chunks.append(
+                    Chunk(
+                        content=chunk.get("content"),
+                        similarity=chunk.get("similarity"),
+                    )
+                )
+
+        return list(docs.values())
+
+    def list_resources(self, query: str | None = None) -> list[Resource]:
+        """
+        List resources from MOI API with optional query filtering and limit support.
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -58,11 +113,9 @@ class MOIProvider(RAGFlowProvider):
         if query:
             params["name"] = query
         
-        # 添加MOI特有的limit参数
         if self.moi_list_limit:
             params["limit"] = self.moi_list_limit
 
-        import requests
         response = requests.get(
             f"{self.api_url}/api/v1/datasets", headers=headers, params=params
         )
@@ -82,3 +135,12 @@ class MOIProvider(RAGFlowProvider):
             resources.append(resource)
 
         return resources
+
+    def _parse_uri(self, uri: str) -> tuple[str, str]:
+        """
+        Parse URI to extract dataset ID and document ID.
+        """
+        parsed = urlparse(uri)
+        if parsed.scheme != "rag":
+            raise ValueError(f"Invalid URI: {uri}")
+        return parsed.path.split("/")[1], parsed.fragment
