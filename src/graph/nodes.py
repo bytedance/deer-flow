@@ -1,6 +1,6 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
-
+import copy
 import json
 import logging
 import os
@@ -8,13 +8,13 @@ from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool
+from langchain_core.tools import tool, BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
 from src.config.agents import AGENT_LLM_MAP
-from src.config.configuration import Configuration
+from src.config.configuration import Configuration, get_bool_env
 from src.llms.llm import get_llm_by_type
 from src.prompts.planner_model import Plan
 from src.prompts.template import apply_prompt_template
@@ -31,6 +31,94 @@ from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
 
 logger = logging.getLogger(__name__)
+
+
+def get_mcp_servers(config: RunnableConfig, agent_type: str = None) -> tuple[dict, dict]:
+    """Get information about available MCP server configurations and enabled tools.
+
+    Args:
+    config: Runtime configuration
+    agent_type: Agent type, used to filter applicable tools
+
+    Returns:
+    A tuple containing the MCP server configurations and enabled tools (mcp_servers, enabled_tools).
+    """
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        mcp_servers = {}
+        enabled_tools = {}
+
+        # Check if MCP is set
+        if not configurable.mcp_settings:
+            logger.debug("No MCP settings found in configuration")
+            return {}, {}
+
+        servers = configurable.mcp_settings.get("servers", {})
+        if not servers:
+            logger.debug("No MCP servers configured")
+            return {}, {}
+
+        # Extract MCP server configuration
+        for server_name, server_config in servers.items():
+            if not server_config.get("enabled_tools"):
+                continue
+                
+            # todo: refine, filter by specific agent type
+            # if agent_type and server_config.get("add_to_agents"):
+            #     if agent_type not in server_config["add_to_agents"]:
+            #         continue
+            
+            mcp_servers[server_name] = {
+                k: v
+                for k, v in server_config.items()
+                if k in ("transport", "command", "args", "url", "env")
+            }
+            for tool_name in server_config["enabled_tools"]:
+                prefixed_name = f"{server_name}_{tool_name}"
+                enabled_tools[prefixed_name] = server_name
+        
+        return mcp_servers, enabled_tools
+        
+    except Exception as e:
+        logger.error(f"Failed to collect MCP servers info: {e}")
+        return {}, {}
+
+
+async def get_mcp_tools_info(config: RunnableConfig) -> list[BaseTool]:
+    """Get information about all available MCP tools.
+
+    Args:
+    config: Runtime configuration
+
+    Returns:
+    A list containing tool names and descriptions.
+    """
+    try:
+        tools = []
+        mcp_servers, enabled_tools = get_mcp_servers(config)
+        # Get MCP tools if available
+        if mcp_servers:
+            client = MultiServerMCPClient(mcp_servers)
+            m_tools = await client.get_tools()
+            for tool in m_tools:
+                for server_name in mcp_servers:
+                    prefixed_name = f"{server_name}_{tool.name}"
+                    if prefixed_name in enabled_tools:
+                        # Create a copy of the tool for this specific server
+                        import copy
+                        tool_copy = copy.deepcopy(tool)
+                        tool_copy.name = prefixed_name
+                        tool_copy.description = (
+                            f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                        )
+                        tools.append(tool_copy)
+                    else:
+                        logger.debug(f"Tool {prefixed_name} NOT found in enabled_tools")
+            logger.info(f"Successfully collected {len(tools)} MCP tools")
+        return tools
+    except Exception as e:
+        logger.error(f"Failed to collect MCP tools info: {e}")
+        return []
 
 
 @tool
@@ -80,13 +168,24 @@ def background_investigation_node(state: State, config: RunnableConfig):
     }
 
 
-def planner_node(
+async def planner_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["human_feedback", "reporter"]]:
     """Planner node that generate the full plan."""
     logger.info("Planner generating full plan")
+        
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
+    
+    #Decide whether to collect MCP tool information based on configuration
+    mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
+    if mcp_enabled:
+        logger.info("MCP planner integration is enabled, collecting tool information")
+        state["mcp_tools_info"] = await get_mcp_tools_info(config)
+    else:
+        logger.info("MCP planner integration is disabled")
+        state["mcp_tools_info"] = []
+
     messages = apply_prompt_template("planner", state, configurable)
 
     if state.get("enable_background_investigation") and state.get(
@@ -130,29 +229,29 @@ def planner_node(
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
-    except json.JSONDecodeError:
-        logger.warning("Planner response is not a valid JSON")
-        if plan_iterations > 0:
-            return Command(goto="reporter")
-        else:
-            return Command(goto="__end__")
-    if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
-        logger.info("Planner response has enough context.")
-        new_plan = Plan.model_validate(curr_plan)
+        if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
+            logger.info("Planner response has enough context.")
+            new_plan = Plan.model_validate(curr_plan)
+            return Command(
+                update={
+                    "messages": [AIMessage(content=full_response, name="planner")],
+                    "current_plan": new_plan,
+                },
+                goto="reporter",
+            )
+        # Plan requires further execution
         return Command(
             update={
                 "messages": [AIMessage(content=full_response, name="planner")],
-                "current_plan": new_plan,
+                "current_plan": full_response,
             },
-            goto="reporter",
+            goto="human_feedback",
         )
-    return Command(
-        update={
-            "messages": [AIMessage(content=full_response, name="planner")],
-            "current_plan": full_response,
-        },
-        goto="human_feedback",
-    )
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Planner response parsing failed: {e}")
+        # If there is a historical iteration, generate a report directly; otherwise terminate
+        goto_target = "reporter" if plan_iterations > 0 else "__end__"
+        return Command(goto=goto_target)
 
 
 def human_feedback_node(
@@ -439,36 +538,25 @@ async def _setup_and_execute_agent_step(
     Returns:
         Command to update state and go to research_team
     """
-    configurable = Configuration.from_runnable_config(config)
-    mcp_servers = {}
-    enabled_tools = {}
-
-    # Extract MCP server configuration for this agent type
-    if configurable.mcp_settings:
-        for server_name, server_config in configurable.mcp_settings["servers"].items():
-            if (
-                server_config["enabled_tools"]
-                and agent_type in server_config["add_to_agents"]
-            ):
-                mcp_servers[server_name] = {
-                    k: v
-                    for k, v in server_config.items()
-                    if k in ("transport", "command", "args", "url", "env", "headers")
-                }
-                for tool_name in server_config["enabled_tools"]:
-                    enabled_tools[tool_name] = server_name
-
     # Create and execute agent with MCP tools if available
+    loaded_tools = default_tools[:]
+    mcp_servers, enabled_tools = get_mcp_servers(config)
     if mcp_servers:
         client = MultiServerMCPClient(mcp_servers)
-        loaded_tools = default_tools[:]
-        all_tools = await client.get_tools()
-        for tool in all_tools:
-            if tool.name in enabled_tools:
-                tool.description = (
-                    f"Powered by '{enabled_tools[tool.name]}'.\n{tool.description}"
-                )
-                loaded_tools.append(tool)
+        tools = await client.get_tools()
+        for tool in tools:
+            for server_name in mcp_servers:
+                prefixed_name = f"{server_name}_{tool.name}"
+                if prefixed_name in enabled_tools:
+                    # Create a copy of the tool for this specific server
+                    import copy
+                    tool_copy = copy.deepcopy(tool)
+                    tool_copy.name = prefixed_name
+                    tool_copy.description = (
+                        f"Powered by mcp-server:'{server_name}'. Useful when you need to {tool.description}"
+                    )
+                    loaded_tools.append(tool_copy)
+        logger.info(f"{agent_type} successfully collected {len(loaded_tools)} MCP tools")
         agent = create_agent(agent_type, agent_type, loaded_tools, agent_type)
         return await _execute_agent_step(state, agent, agent_type)
     else:

@@ -3,8 +3,32 @@
 
 import { useSettingsStore } from "../store";
 
+/**
+ * Parse the tool name, extract the server name and the actual tool name
+ */
+export function parseToolName(fullToolName: string): { serverName?: string; toolName: string } {
+  if (fullToolName.includes('_')) {
+    const parts = fullToolName.split('_');
+    return {
+      serverName: parts[0],
+      toolName: parts.slice(1).join('_')
+    };
+  }
+  return { toolName: fullToolName };
+}
+
+/**
+ * Format tool display name
+ */
+export function formatToolDisplayName(fullToolName: string): string {
+  const { toolName } = parseToolName(fullToolName);
+  return toolName.replace(/^mcp_/, "");
+}
+
 export function findMCPTool(name: string) {
   const mcpServers = useSettingsStore.getState().mcp.servers;
+  
+  // First try exact match
   for (const server of mcpServers) {
     for (const tool of server.tools) {
       if (tool.name === name) {
@@ -12,5 +36,22 @@ export function findMCPTool(name: string) {
       }
     }
   }
+  
+  // If no exact match and name contains underscore, try matching without server prefix
+  if (name.includes('_')) {
+    const toolNameWithoutPrefix = name.substring(name.indexOf('_') + 1);
+    for (const server of mcpServers) {
+      for (const tool of server.tools) {
+        if (tool.name === toolNameWithoutPrefix) {
+          return {
+            ...tool,
+            name: name, // Return with the prefixed name
+            description: `[${server.name}] ${tool.description}`
+          };
+        }
+      }
+    }
+  }
+  
   return null;
 }
