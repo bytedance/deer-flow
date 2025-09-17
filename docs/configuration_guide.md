@@ -188,7 +188,7 @@ DeerFlow allows you to control which domains are included or excluded in Tavily 
 
 `Tips`: it only supports Tavily currently. 
 
-You can configure domain filtering in your `conf.yaml` file as follows:
+You can configure domain filtering and search results in your `conf.yaml` file as follows:
 
 ```yaml
 SEARCH_ENGINE:
@@ -202,6 +202,12 @@ SEARCH_ENGINE:
   exclude_domains:
     - unreliable-site.com
     - spam-domain.net
+  # Include images in search results, default: false 
+  include_images: true
+  # Include image descriptions in search results, default: false
+  include_image_descriptions: true
+  # Include raw content in search results, default: true
+  include_raw_content: false
 ```
 
 ## RAG (Retrieval-Augmented Generation) Configuration
