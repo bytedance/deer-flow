@@ -47,12 +47,11 @@ def get_web_search_tool(max_search_results: int):
         # Only get and apply include/exclude domains for Tavily
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
-        include_raw_content = search_config.get("include_raw_content", False)
+        include_raw_content = search_config.get("include_raw_content", True)
         include_images: Optional[bool] = search_config.get("include_images", False)
-        include_image_descriptions: Optional[bool] = (include_images and search_config.get(
-            "include_image_descriptions", False)
+        include_image_descriptions: Optional[bool] = (
+            include_images and search_config.get("include_image_descriptions", False)
         )
-        
 
         logger.info(
             f"Tavily search configuration loaded: include_domains={include_domains}, exclude_domains={exclude_domains}"

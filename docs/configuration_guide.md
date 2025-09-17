@@ -206,8 +206,8 @@ SEARCH_ENGINE:
   include_images: true
   # Include image descriptions in search results, default: false
   include_image_descriptions: true
-  # Include raw content in search results, default: false
-  include_raw_content: true
+  # Include raw content in search results, default: true
+  include_raw_content: false
 ```
 
 ## RAG (Retrieval-Augmented Generation) Configuration
