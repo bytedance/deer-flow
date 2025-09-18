@@ -11,11 +11,11 @@ from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 class MOIProvider(Retriever):
     """
-    MatrixOne Intelligence (MOI) is a multimodal data AI processing platform. 
-    It supports connecting, processing, managing, and using both structured and unstructured data. 
-    Through steps such as parsing, extraction, segmentation, cleaning, and enhancement, 
-    it transforms raw data like documents, images, and audio/video into AI-ready application data. 
-    With its self-developed data service layer (the MatrixOne database), 
+    MatrixOne Intelligence (MOI) is a multimodal data AI processing platform.
+    It supports connecting, processing, managing, and using both structured and unstructured data.
+    Through steps such as parsing, extraction, segmentation, cleaning, and enhancement,
+    it transforms raw data like documents, images, and audio/video into AI-ready application data.
+    With its self-developed data service layer (the MatrixOne database),
     it can directly provide retrieval services for the processed data.
 
     The open-source repository is available at: https://github.com/matrixorigin/matrixone
@@ -29,21 +29,21 @@ class MOIProvider(Retriever):
         self.api_url = os.getenv("MOI_API_URL")
         if not self.api_url:
             raise ValueError("MOI_API_URL is not set")
-        
+
         # Add /byoa suffix to the API URL for MOI compatibility
         if not self.api_url.endswith("/byoa"):
             self.api_url = self.api_url + "/byoa"
-        
+
         self.api_key = os.getenv("MOI_API_KEY")
         if not self.api_key:
             raise ValueError("MOI_API_KEY is not set")
-        
+
         # Set page size for document retrieval
         self.page_size = 10
         moi_size = os.getenv("MOI_RETRIEVAL_SIZE")
         if moi_size:
             self.page_size = int(moi_size)
-        
+
         # Set MOI-specific list limit parameter
         self.moi_list_limit = None
         moi_list_limit = os.getenv("MOI_LIST_LIMIT")
@@ -120,7 +120,7 @@ class MOIProvider(Retriever):
         params = {}
         if query:
             params["name"] = query
-        
+
         if self.moi_list_limit:
             params["limit"] = self.moi_list_limit
 
