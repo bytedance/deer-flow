@@ -275,7 +275,6 @@ async def _stream_graph_events(
         )
 
 
-
 async def _astream_workflow_generator(
     messages: List[dict],
     thread_id: str,
