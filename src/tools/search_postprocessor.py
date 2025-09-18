@@ -123,7 +123,7 @@ class SearchResultPostProcessor:
         if "image_url" in cleaned_result and isinstance(
             cleaned_result["image_url"], str
         ):
-            # Check if image_url contains base64 data
+            # Check if image_url contains base64 data 
             if "data:image" in cleaned_result["image_url"]:
                 return {}
 
