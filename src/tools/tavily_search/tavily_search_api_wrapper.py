@@ -11,6 +11,7 @@ from langchain_tavily._utilities import TAVILY_API_URL
 from langchain_tavily.tavily_search import (
     TavilySearchAPIWrapper as OriginalTavilySearchAPIWrapper,
 )
+from src.tools.search_postprocessor import SearchResultPostProcessor
 
 
 class EnhancedTavilySearchAPIWrapper(OriginalTavilySearchAPIWrapper):
@@ -110,4 +111,9 @@ class EnhancedTavilySearchAPIWrapper(OriginalTavilySearchAPIWrapper):
                 "image_description": image["description"],
             }
             clean_results.append(clean_result)
+
+        clean_results = SearchResultPostProcessor(
+            min_score_threshold=0.5, max_content_length=20000
+        ).process_results(clean_results)
+
         return clean_results
