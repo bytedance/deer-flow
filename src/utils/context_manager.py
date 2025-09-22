@@ -57,18 +57,18 @@ class ContextManager:
         Returns:
             Number of tokens
         """
-        # Estimate token count based on character length (typically 1 token ≈ 4 characters)
+        # Estimate token count based on character length (different calculation for English and non-English)
         token_count = 0
 
         # Count tokens in content field
         if hasattr(message, "content") and message.content:
             # Handle different content types
             if isinstance(message.content, str):
-                token_count += len(message.content) // 4
+                token_count += self._count_text_tokens(message.content)
 
         # Count role-related tokens
         if hasattr(message, "type"):
-            token_count += len(message.type) // 4
+            token_count += self._count_text_tokens(message.type)
 
         # Special handling for different message types
         if isinstance(message, SystemMessage):
@@ -88,7 +88,7 @@ class ContextManager:
         if hasattr(message, "additional_kwargs") and message.additional_kwargs:
             # Simple estimation of extra field tokens
             extra_str = str(message.additional_kwargs)
-            token_count += len(extra_str) // 4
+            token_count += self._count_text_tokens(extra_str)
 
             # If there are tool_calls, add estimation
             if "tool_calls" in message.additional_kwargs:
@@ -96,6 +96,37 @@ class ContextManager:
 
         # Ensure at least 1 token
         return max(1, token_count)
+
+    def _count_text_tokens(self, text: str) -> int:
+        """
+        Count tokens in text with different calculations for English and non-English characters.
+        English characters: 4 characters ≈ 1 token
+        Non-English characters (e.g., Chinese): 1 character ≈ 1 token
+
+        Args:
+            text: Text to count tokens for
+
+        Returns:
+            Number of tokens
+        """
+        if not text:
+            return 0
+
+        english_chars = 0
+        non_english_chars = 0
+
+        for char in text:
+            # Check if character is ASCII (English letters, digits, punctuation)
+            if ord(char) < 128:
+                english_chars += 1
+            else:
+                non_english_chars += 1
+
+        # Calculate tokens: English at 4 chars/token, others at 1 char/token
+        english_tokens = english_chars // 4
+        non_english_tokens = non_english_chars
+
+        return english_tokens + non_english_tokens
 
     def is_over_limit(self, messages: List[BaseMessage]) -> bool:
         """
