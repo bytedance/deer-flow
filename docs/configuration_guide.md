@@ -11,11 +11,11 @@ cp conf.yaml.example conf.yaml
 
 ## Which models does DeerFlow support?
 
-In DeerFlow, currently we only support non-reasoning models, which means models like OpenAI's o1/o3 or DeepSeek's R1 are not supported yet, but we will add support for them in the future.
+In DeerFlow, we currently only support non-reasoning models. This means models like OpenAI's o1/o3 or DeepSeek's R1 are not supported yet, but we plan to add support for them in the future. Additionally, all Gemma-3 models are currently unsupported due to the lack of tool usage capabilities.
 
 ### Supported Models
 
-`doubao-1.5-pro-32k-250115`, `gpt-4o`, `qwen-max-latest`, `gemini-2.0-flash`, `deepseek-v3`, and theoretically any other non-reasoning chat models that implement the OpenAI API specification.
+`doubao-1.5-pro-32k-250115`, `gpt-4o`, `qwen-max-latest`,`qwen3-235b-a22b`,`qwen3-coder`, `gemini-2.0-flash`, `deepseek-v3`, and theoretically any other non-reasoning chat models that implement the OpenAI API specification.
 
 > [!NOTE]
 > The Deep Research process requires the model to have a **longer context window**, which is not supported by all models.
@@ -56,6 +56,69 @@ BASIC_MODEL:
   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
   model: "gemini-2.0-flash"
   api_key: YOUR_API_KEY
+```
+The following is a configuration example of `conf.yaml` for using best opensource OpenAI-Compatible models:
+```yaml
+# Use latest deepseek-v3 to handle basic tasks, the open source SOTA model for basic tasks
+BASIC_MODEL:
+  base_url: https://api.deepseek.com
+  model: "deepseek-v3"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+# Use qwen3-235b-a22b to handle reasoning tasks, the open source SOTA model for reasoning
+REASONING_MODEL:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: "qwen3-235b-a22b-thinking-2507"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+# Use qwen3-coder-480b-a35b-instruct to handle coding tasks, the open source SOTA model for coding
+CODE_MODEL:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: "qwen3-coder-480b-a35b-instruct"
+  api_key: YOUR_API_KEY
+  temperature: 0.6
+  top_p: 0.90
+```
+In addition, you need to set the `AGENT_LLM_MAP` in `src/config/agents.py` to use the correct model for each agent. For example:
+
+```python
+# Define agent-LLM mapping
+AGENT_LLM_MAP: dict[str, LLMType] = {
+    "coordinator": "reasoning",
+    "planner": "reasoning",
+    "researcher": "reasoning",
+    "coder": "basic",
+    "reporter": "basic",
+    "podcast_script_writer": "basic",
+    "ppt_composer": "basic",
+    "prose_writer": "basic",
+    "prompt_enhancer": "basic",
+}
+
+
+### How to use Google AI Studio models?
+
+DeerFlow supports native integration with Google AI Studio (formerly Google Generative AI) API. This provides direct access to Google's Gemini models with their full feature set and optimized performance.
+
+To use Google AI Studio models, you need to:
+1. Get your API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
+2. Set the `platform` field to `"google_aistudio"` in your configuration
+3. Configure your model and API key
+
+The following is a configuration example for using Google AI Studio models:
+
+```yaml
+# Google AI Studio native API (recommended for Google models)
+BASIC_MODEL:
+  platform: "google_aistudio"
+  model: "gemini-2.5-flash"  # or "gemini-1.5-pro" ,...
+  api_key: YOUR_GOOGLE_API_KEY # Get from https://aistudio.google.com/app/apikey
+
+```
+
+**Note:** The `platform: "google_aistudio"` field is required to distinguish from other providers that may offer Gemini models through OpenAI-compatible APIs.
 ```
 
 ### How to use models with self-signed SSL certificates?
@@ -105,13 +168,80 @@ BASIC_MODEL:
 
 Note: The available models and their exact names may change over time. Please verify the currently available models and their correct identifiers in [OpenRouter's official documentation](https://openrouter.ai/docs).
 
-### How to use Azure models?
 
-DeerFlow supports the integration of Azure models. You can refer to [litellm Azure](https://docs.litellm.ai/docs/providers/azure). Configuration example of `conf.yaml`:
+### How to use Azure OpenAI chat models?
+
+DeerFlow supports the integration of Azure OpenAI chat models. You can refer to [AzureChatOpenAI](https://python.langchain.com/api_reference/openai/chat_models/langchain_openai.chat_models.azure.AzureChatOpenAI.html). Configuration example of `conf.yaml`:
 ```yaml
 BASIC_MODEL:
   model: "azure/gpt-4o-2024-08-06"
-  api_base: $AZURE_API_BASE
-  api_version: $AZURE_API_VERSION
-  api_key: $AZURE_API_KEY
+  azure_endpoint: $AZURE_OPENAI_ENDPOINT
+  api_version: $OPENAI_API_VERSION
+  api_key: $AZURE_OPENAI_API_KEY
+```
+
+## About Search Engine
+
+### How to control search domains for Tavily?
+
+DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.
+
+`Tips`: it only supports Tavily currently. 
+
+You can configure domain filtering and search results in your `conf.yaml` file as follows:
+
+```yaml
+SEARCH_ENGINE:
+  engine: tavily
+  # Only include results from these domains (whitelist)
+  include_domains:
+    - trusted-news.com
+    - gov.org
+    - reliable-source.edu
+  # Exclude results from these domains (blacklist)
+  exclude_domains:
+    - unreliable-site.com
+    - spam-domain.net
+  # Include images in search results, default: true
+  include_images: false
+  # Include image descriptions in search results, default: true
+  include_image_descriptions: false
+  # Include raw content in search results, default: true
+  include_raw_content: false
+```
+
+## RAG (Retrieval-Augmented Generation) Configuration
+
+DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.
+
+### Supported RAG Providers
+
+- **RAGFlow**: Document retrieval using RAGFlow API
+- **VikingDB Knowledge Base**: ByteDance's VikingDB knowledge base service
+- **Milvus**: Open-source vector database for similarity search
+
+### Milvus Configuration
+
+To use Milvus as your RAG provider, set the following environment variables:
+
+```bash
+# RAG_PROVIDER: milvus  (using free milvus instance on zilliz cloud: https://docs.zilliz.com/docs/quick-start )
+RAG_PROVIDER=milvus
+MILVUS_URI=<endpoint_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_USER=<username_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_PASSWORD=<password_of_self_hosted_milvus_or_zilliz_cloud>
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
+
+# RAG_PROVIDER: milvus  (using milvus lite on Mac or Linux)
+RAG_PROVIDER=milvus
+MILVUS_URI=./milvus_demo.db
+MILVUS_COLLECTION=documents
+MILVUS_EMBEDDING_PROVIDER=openai
+MILVUS_EMBEDDING_BASE_URL=
+MILVUS_EMBEDDING_MODEL=
+MILVUS_EMBEDDING_API_KEY=
 ```

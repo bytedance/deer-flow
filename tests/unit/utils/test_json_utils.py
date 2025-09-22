@@ -1,14 +1,12 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
 import json
-from unittest.mock import patch
+
 from src.utils.json_utils import repair_json_output
 
 
 class TestRepairJsonOutput:
-
     def test_valid_json_object(self):
         """Test with valid JSON object"""
         content = '{"key": "value", "number": 123}'

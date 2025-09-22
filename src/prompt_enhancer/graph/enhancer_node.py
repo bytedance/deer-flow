@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 import logging
+import re
 
-from langchain.schema import HumanMessage, SystemMessage
+from langchain.schema import HumanMessage
 
 from src.config.agents import AGENT_LLM_MAP
 from src.llms.llm import get_llm_by_type
-from src.prompts.template import env, apply_prompt_template
 from src.prompt_enhancer.graph.state import PromptEnhancerState
+from src.prompts.template import apply_prompt_template
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,6 @@ def prompt_enhancer_node(state: PromptEnhancerState):
     model = get_llm_by_type(AGENT_LLM_MAP["prompt_enhancer"])
 
     try:
-
         # Create messages with context if provided
         context_info = ""
         if state.get("context"):
@@ -41,23 +41,38 @@ def prompt_enhancer_node(state: PromptEnhancerState):
         # Get the response from the model
         response = model.invoke(messages)
 
-        # Clean up the response - remove any extra formatting or comments
-        enhanced_prompt = response.content.strip()
+        # Extract content from response
+        response_content = response.content.strip()
+        logger.debug(f"Response content: {response_content}")
 
-        # Remove common prefixes that might be added by the model
-        prefixes_to_remove = [
-            "Enhanced Prompt:",
-            "Enhanced prompt:",
-            "Here's the enhanced prompt:",
-            "Here is the enhanced prompt:",
-            "**Enhanced Prompt**:",
-            "**Enhanced prompt**:",
-        ]
+        # Try to extract content from XML tags first
+        xml_match = re.search(
+            r"<enhanced_prompt>(.*?)</enhanced_prompt>", response_content, re.DOTALL
+        )
 
-        for prefix in prefixes_to_remove:
-            if enhanced_prompt.startswith(prefix):
-                enhanced_prompt = enhanced_prompt[len(prefix) :].strip()
-                break
+        if xml_match:
+            # Extract content from XML tags and clean it up
+            enhanced_prompt = xml_match.group(1).strip()
+            logger.debug("Successfully extracted enhanced prompt from XML tags")
+        else:
+            # Fallback to original logic if no XML tags found
+            enhanced_prompt = response_content
+            logger.warning("No XML tags found in response, using fallback parsing")
+
+            # Remove common prefixes that might be added by the model
+            prefixes_to_remove = [
+                "Enhanced Prompt:",
+                "Enhanced prompt:",
+                "Here's the enhanced prompt:",
+                "Here is the enhanced prompt:",
+                "**Enhanced Prompt**:",
+                "**Enhanced prompt**:",
+            ]
+
+            for prefix in prefixes_to_remove:
+                if enhanced_prompt.startswith(prefix):
+                    enhanced_prompt = enhanced_prompt[len(prefix) :].strip()
+                    break
 
         logger.info("Prompt enhancement completed successfully")
         logger.debug(f"Enhanced prompt: {enhanced_prompt}")

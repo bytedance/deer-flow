@@ -3,12 +3,13 @@
 
 import logging
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,12 @@ async def _get_tools_from_client_session(
     Raises:
         Exception: If there's an error during the process
     """
-    async with client_context_manager as (read, write):
+    async with client_context_manager as context_result:
+        # Access by index to be safe
+        read = context_result[0]
+        write = context_result[1]
+        # Ignore any additional values
+
         async with ClientSession(
             read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)
         ) as session:
@@ -46,17 +52,19 @@ async def load_mcp_tools(
     args: Optional[List[str]] = None,
     url: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
+    headers: Optional[Dict[str, str]] = None,
     timeout_seconds: int = 60,  # Longer default timeout for first-time executions
 ) -> List:
     """
     Load tools from an MCP server.
 
     Args:
-        server_type: The type of MCP server connection (stdio or sse)
+        server_type: The type of MCP server connection (stdio, sse, or streamable_http)
         command: The command to execute (for stdio type)
         args: Command arguments (for stdio type)
-        url: The URL of the SSE server (for sse type)
-        env: Environment variables
+        url: The URL of the SSE/HTTP server (for sse/streamable_http type)
+        env: Environment variables (for stdio type)
+        headers: HTTP headers (for sse/streamable_http type)
         timeout_seconds: Timeout in seconds (default: 60 for first-time executions)
 
     Returns:
@@ -89,7 +97,21 @@ async def load_mcp_tools(
                 )
 
             return await _get_tools_from_client_session(
-                sse_client(url=url), timeout_seconds
+                sse_client(url=url, headers=headers, timeout=timeout_seconds),
+                timeout_seconds,
+            )
+
+        elif server_type == "streamable_http":
+            if not url:
+                raise HTTPException(
+                    status_code=400, detail="URL is required for streamable_http type"
+                )
+
+            return await _get_tools_from_client_session(
+                streamablehttp_client(
+                    url=url, headers=headers, timeout=timeout_seconds
+                ),
+                timeout_seconds,
             )
 
         else:

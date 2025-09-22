@@ -4,7 +4,8 @@
 import { MagicWandIcon } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUp, Lightbulb, X } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import { useCallback, useRef, useState } from "react";
 
 import { Detective } from "~/components/deer-flow/icons/detective";
 import MessageInput, {
@@ -15,7 +16,7 @@ import { Tooltip } from "~/components/deer-flow/tooltip";
 import { BorderBeam } from "~/components/magicui/border-beam";
 import { Button } from "~/components/ui/button";
 import { enhancePrompt } from "~/core/api";
-import { getConfig } from "~/core/api/config";
+import { useConfig } from "~/core/api/hooks";
 import type { Option, Resource } from "~/core/messages";
 import {
   setEnableDeepThinking,
@@ -46,13 +47,15 @@ export function InputBox({
   onCancel?: () => void;
   onRemoveFeedback?: () => void;
 }) {
+  const t = useTranslations("chat.inputBox");
+  const tCommon = useTranslations("common");
   const enableDeepThinking = useSettingsStore(
     (state) => state.general.enableDeepThinking,
   );
   const backgroundInvestigation = useSettingsStore(
     (state) => state.general.enableBackgroundInvestigation,
   );
-  const reasoningModel = useMemo(() => getConfig().models.reasoning?.[0], []);
+  const { config, loading } = useConfig();
   const reportStyle = useSettingsStore((state) => state.general.reportStyle);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<MessageInputRef>(null);
@@ -203,23 +206,28 @@ export function InputBox({
             isEnhanceAnimating && "transition-all duration-500",
           )}
           ref={inputRef}
+          loading={loading}
+          config={config}
           onEnter={handleSendMessage}
           onChange={setCurrentPrompt}
         />
       </div>
       <div className="flex items-center px-4 py-2">
         <div className="flex grow gap-2">
-          {reasoningModel && (
+          {config?.models.reasoning?.[0] && (
             <Tooltip
               className="max-w-60"
               title={
                 <div>
                   <h3 className="mb-2 font-bold">
-                    Deep Thinking Mode: {enableDeepThinking ? "On" : "Off"}
+                    {t("deepThinkingTooltip.title", {
+                      status: enableDeepThinking ? t("on") : t("off"),
+                    })}
                   </h3>
                   <p>
-                    When enabled, DeerFlow will use reasoning model (
-                    {reasoningModel}) to generate more thoughtful plans.
+                    {t("deepThinkingTooltip.description", {
+                      model: config.models.reasoning?.[0] ?? "",
+                    })}
                   </p>
                 </div>
               }
@@ -234,7 +242,7 @@ export function InputBox({
                   setEnableDeepThinking(!enableDeepThinking);
                 }}
               >
-                <Lightbulb /> Deep Thinking
+                <Lightbulb /> {t("deepThinking")}
               </Button>
             </Tooltip>
           )}
@@ -244,13 +252,11 @@ export function InputBox({
             title={
               <div>
                 <h3 className="mb-2 font-bold">
-                  Investigation Mode: {backgroundInvestigation ? "On" : "Off"}
+                  {t("investigationTooltip.title", {
+                    status: backgroundInvestigation ? t("on") : t("off"),
+                  })}
                 </h3>
-                <p>
-                  When enabled, DeerFlow will perform a quick search before
-                  planning. This is useful for researches related to ongoing
-                  events and news.
-                </p>
+                <p>{t("investigationTooltip.description")}</p>
               </div>
             }
           >
@@ -264,13 +270,13 @@ export function InputBox({
                 setEnableBackgroundInvestigation(!backgroundInvestigation)
               }
             >
-              <Detective /> Investigation
+              <Detective /> {t("investigation")}
             </Button>
           </Tooltip>
           <ReportStyleDialog />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Tooltip title="Enhance prompt with AI">
+          <Tooltip title={t("enhancePrompt")}>
             <Button
               variant="ghost"
               size="icon"
@@ -290,7 +296,7 @@ export function InputBox({
               )}
             </Button>
           </Tooltip>
-          <Tooltip title={responding ? "Stop" : "Send"}>
+          <Tooltip title={responding ? tCommon("stop") : tCommon("send")}>
             <Button
               variant="outline"
               size="icon"

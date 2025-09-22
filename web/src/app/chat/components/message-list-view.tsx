@@ -9,7 +9,9 @@ import {
   ChevronDown,
   ChevronRight,
   Lightbulb,
+  Wrench,
 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import React, { useCallback, useMemo, useRef, useState } from "react";
 
 import { LoadingAnimation } from "~/components/deer-flow/loading-animation";
@@ -184,7 +186,7 @@ function MessageListItem({
             )}
           >
             <MessageBubble message={message}>
-              <div className="flex w-full flex-col text-wrap break-words">
+              <div className="flex w-full flex-col break-words">
                 <Markdown
                   className={cn(
                     message.role === "user" &&
@@ -232,11 +234,12 @@ function MessageBubble({
   return (
     <div
       className={cn(
-        `group flex w-fit max-w-[85%] flex-col rounded-2xl px-4 py-3 text-nowrap shadow`,
+        "group flex w-auto max-w-[90vw] flex-col rounded-2xl px-4 py-3 break-words",
         message.role === "user" && "bg-brand rounded-ee-none",
         message.role === "assistant" && "bg-card rounded-es-none",
         className,
       )}
+      style={{ wordBreak: "break-all" }}
     >
       {children}
     </div>
@@ -252,6 +255,7 @@ function ResearchCard({
   researchId: string;
   onToggleResearch?: () => void;
 }) {
+  const t = useTranslations("chat.research");
   const reportId = useStore((state) => state.researchReportIds.get(researchId));
   const hasReport = reportId !== undefined;
   const reportGenerating = useStore(
@@ -260,10 +264,10 @@ function ResearchCard({
   const openResearchId = useStore((state) => state.openResearchId);
   const state = useMemo(() => {
     if (hasReport) {
-      return reportGenerating ? "Generating report..." : "Report generated";
+      return reportGenerating ? t("generatingReport") : t("reportGenerated");
     }
-    return "Researching...";
-  }, [hasReport, reportGenerating]);
+    return t("researching");
+  }, [hasReport, reportGenerating, t]);
   const msg = useResearchMessage(researchId);
   const title = useMemo(() => {
     if (msg) {
@@ -283,8 +287,8 @@ function ResearchCard({
     <Card className={cn("w-full", className)}>
       <CardHeader>
         <CardTitle>
-          <RainbowText animated={state !== "Report generated"}>
-            {title !== undefined && title !== "" ? title : "Deep Research"}
+          <RainbowText animated={state !== t("reportGenerated")}>
+            {title !== undefined && title !== "" ? title : t("deepResearch")}
           </RainbowText>
         </CardTitle>
       </CardHeader>
@@ -297,7 +301,7 @@ function ResearchCard({
             variant={!openResearchId ? "default" : "outline"}
             onClick={handleOpen}
           >
-            {researchId !== openResearchId ? "Open" : "Close"}
+            {researchId !== openResearchId ? t("open") : t("close")}
           </Button>
         </div>
       </CardFooter>
@@ -316,6 +320,7 @@ function ThoughtBlock({
   isStreaming?: boolean;
   hasMainContent?: boolean;
 }) {
+  const t = useTranslations("chat.research");
   const [isOpen, setIsOpen] = useState(true);
 
   const [hasAutoCollapsed, setHasAutoCollapsed] = useState(false);
@@ -359,7 +364,7 @@ function ThoughtBlock({
                   isStreaming ? "text-primary" : "text-foreground",
                 )}
               >
-                Deep Thinking
+                {t("deepThinking")}
               </span>
               {isStreaming && <LoadingAnimation className="ml-2 scale-75" />}
               <div className="flex-grow" />
@@ -432,10 +437,11 @@ function PlanCard({
   ) => void;
   waitForFeedback?: boolean;
 }) {
+  const t = useTranslations("chat.research");
   const plan = useMemo<{
     title?: string;
     thought?: string;
-    steps?: { title?: string; description?: string }[];
+    steps?: { title?: string; description?: string; tools?: string[] }[];
   }>(() => {
     return parseJSON(message.content ?? "", {});
   }, [message.content]);
@@ -482,33 +488,52 @@ function PlanCard({
                   {`### ${
                     plan.title !== undefined && plan.title !== ""
                       ? plan.title
-                      : "Deep Research"
+                      : t("deepResearch")
                   }`}
                 </Markdown>
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <Markdown className="opacity-80" animated={message.isStreaming}>
-                {plan.thought}
-              </Markdown>
-              {plan.steps && (
-                <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
-                  {plan.steps.map((step, i) => (
-                    <li key={`step-${i}`}>
-                      <h3 className="mb text-lg font-medium">
-                        <Markdown animated={message.isStreaming}>
-                          {step.title}
-                        </Markdown>
-                      </h3>
-                      <div className="text-muted-foreground text-sm">
-                        <Markdown animated={message.isStreaming}>
-                          {step.description}
-                        </Markdown>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                <Markdown className="opacity-80" animated={message.isStreaming}>
+                  {plan.thought}
+                </Markdown>
+                {plan.steps && (
+                  <ul className="my-2 flex list-decimal flex-col gap-4 border-l-[2px] pl-8">
+                    {plan.steps.map((step, i) => (
+                      <li key={`step-${i}`} style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                        <div className="flex items-start gap-2">
+                          <div className="flex-1">
+                            <h3 className="mb flex items-center gap-2 text-lg font-medium">
+                              <Markdown animated={message.isStreaming}>
+                                {step.title}
+                              </Markdown>
+                              {step.tools && step.tools.length > 0 && (
+                                <Tooltip
+                                  title={`Uses ${step.tools.length} MCP tool${step.tools.length > 1 ? "s" : ""}`}
+                                >
+                                  <div className="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-800">
+                                    <Wrench size={12} />
+                                    <span>{step.tools.length}</span>
+                                  </div>
+                                </Tooltip>
+                              )}
+                            </h3>
+                            <div className="text-muted-foreground text-sm" style={{ wordBreak: 'break-all', whiteSpace: 'normal' }}>
+                              <Markdown animated={message.isStreaming}>
+                                {step.description}
+                              </Markdown>
+                            </div>
+                            {step.tools && step.tools.length > 0 && (
+                              <ToolsDisplay tools={step.tools} />
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </CardContent>
             <CardFooter className="flex justify-end">
               {!message.isStreaming && interruptMessage?.options?.length && (
@@ -622,5 +647,20 @@ function PodcastCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function ToolsDisplay({ tools }: { tools: string[] }) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {tools.map((tool, index) => (
+        <span
+          key={index}
+          className="rounded-md bg-muted px-2 py-1 text-xs font-mono text-muted-foreground"
+        >
+          {tool}
+        </span>
+      ))}
+    </div>
   );
 }

@@ -1,12 +1,12 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from src.prompt_enhancer.graph.builder import build_graph
 from src.prompt_enhancer.graph.state import PromptEnhancerState
-from src.config.report_style import ReportStyle
 
 
 class TestBuildGraph:
@@ -48,7 +48,7 @@ class TestBuildGraph:
         mock_state_graph.return_value = mock_builder
         mock_builder.compile.return_value = mock_compiled_graph
 
-        result = build_graph()
+        build_graph()
 
         # Verify the correct node function was added
         mock_builder.add_node.assert_called_once_with("enhancer", mock_enhancer_node)

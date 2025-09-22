@@ -1,20 +1,19 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import json
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, patch, AsyncMock
-from typing import Dict, Any
-from src.tools.tavily_search.tavily_search_results_with_images import (
-    TavilySearchResultsWithImages,
-)
+
 from src.tools.tavily_search.tavily_search_api_wrapper import (
     EnhancedTavilySearchAPIWrapper,
 )
+from src.tools.tavily_search.tavily_search_results_with_images import (
+    TavilySearchWithImages,
+)
 
 
-class TestTavilySearchResultsWithImages:
-
+class TestTavilySearchWithImages:
     @pytest.fixture
     def mock_api_wrapper(self):
         """Create a mock API wrapper."""
@@ -23,8 +22,8 @@ class TestTavilySearchResultsWithImages:
 
     @pytest.fixture
     def search_tool(self, mock_api_wrapper):
-        """Create a TavilySearchResultsWithImages instance with mocked dependencies."""
-        tool = TavilySearchResultsWithImages(
+        """Create a TavilySearchWithImages instance with mocked dependencies."""
+        tool = TavilySearchWithImages(
             max_results=5,
             include_answer=True,
             include_raw_content=True,
@@ -66,22 +65,18 @@ class TestTavilySearchResultsWithImages:
 
     def test_init_default_values(self):
         """Test initialization with default values."""
-        tool = TavilySearchResultsWithImages()
+        tool = TavilySearchWithImages()
         assert tool.include_image_descriptions is False
         assert isinstance(tool.api_wrapper, EnhancedTavilySearchAPIWrapper)
 
     def test_init_custom_values(self):
         """Test initialization with custom values."""
-        tool = TavilySearchResultsWithImages(
-            max_results=10, include_image_descriptions=True
-        )
+        tool = TavilySearchWithImages(max_results=10, include_image_descriptions=True)
         assert tool.max_results == 10
         assert tool.include_image_descriptions is True
 
-    @patch("builtins.print")
     def test_run_success(
         self,
-        mock_print,
         search_tool,
         mock_api_wrapper,
         sample_raw_results,
@@ -111,10 +106,8 @@ class TestTavilySearchResultsWithImages:
         mock_api_wrapper.clean_results_with_images.assert_called_once_with(
             sample_raw_results
         )
-        mock_print.assert_called_once()
 
-    @patch("builtins.print")
-    def test_run_exception(self, mock_print, search_tool, mock_api_wrapper):
+    def test_run_exception(self, search_tool, mock_api_wrapper):
         """Test synchronous run with exception."""
         mock_api_wrapper.raw_results.side_effect = Exception("API Error")
 
@@ -125,10 +118,8 @@ class TestTavilySearchResultsWithImages:
         mock_api_wrapper.clean_results_with_images.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("builtins.print")
     async def test_arun_success(
         self,
-        mock_print,
         search_tool,
         mock_api_wrapper,
         sample_raw_results,
@@ -158,11 +149,9 @@ class TestTavilySearchResultsWithImages:
         mock_api_wrapper.clean_results_with_images.assert_called_once_with(
             sample_raw_results
         )
-        mock_print.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("builtins.print")
-    async def test_arun_exception(self, mock_print, search_tool, mock_api_wrapper):
+    async def test_arun_exception(self, search_tool, mock_api_wrapper):
         """Test asynchronous run with exception."""
         mock_api_wrapper.raw_results_async = AsyncMock(
             side_effect=Exception("Async API Error")
@@ -174,10 +163,8 @@ class TestTavilySearchResultsWithImages:
         assert raw == {}
         mock_api_wrapper.clean_results_with_images.assert_not_called()
 
-    @patch("builtins.print")
     def test_run_with_run_manager(
         self,
-        mock_print,
         search_tool,
         mock_api_wrapper,
         sample_raw_results,
@@ -194,10 +181,8 @@ class TestTavilySearchResultsWithImages:
         assert raw == sample_raw_results
 
     @pytest.mark.asyncio
-    @patch("builtins.print")
     async def test_arun_with_run_manager(
         self,
-        mock_print,
         search_tool,
         mock_api_wrapper,
         sample_raw_results,
@@ -214,52 +199,3 @@ class TestTavilySearchResultsWithImages:
 
         assert result == sample_cleaned_results
         assert raw == sample_raw_results
-
-    @patch("builtins.print")
-    def test_print_output_format(
-        self,
-        mock_print,
-        search_tool,
-        mock_api_wrapper,
-        sample_raw_results,
-        sample_cleaned_results,
-    ):
-        """Test that print outputs correctly formatted JSON."""
-        mock_api_wrapper.raw_results.return_value = sample_raw_results
-        mock_api_wrapper.clean_results_with_images.return_value = sample_cleaned_results
-
-        search_tool._run("test query")
-
-        # Verify print was called with expected format
-        call_args = mock_print.call_args[0]
-        assert call_args[0] == "sync"
-        assert isinstance(call_args[1], str)  # Should be JSON string
-
-        # Verify it's valid JSON
-        json_data = json.loads(call_args[1])
-        assert json_data == sample_cleaned_results
-
-    @pytest.mark.asyncio
-    @patch("builtins.print")
-    async def test_async_print_output_format(
-        self,
-        mock_print,
-        search_tool,
-        mock_api_wrapper,
-        sample_raw_results,
-        sample_cleaned_results,
-    ):
-        """Test that async print outputs correctly formatted JSON."""
-        mock_api_wrapper.raw_results_async = AsyncMock(return_value=sample_raw_results)
-        mock_api_wrapper.clean_results_with_images.return_value = sample_cleaned_results
-
-        await search_tool._arun("test query")
-
-        # Verify print was called with expected format
-        call_args = mock_print.call_args[0]
-        assert call_args[0] == "async"
-        assert isinstance(call_args[1], str)  # Should be JSON string
-
-        # Verify it's valid JSON
-        json_data = json.loads(call_args[1])
-        assert json_data == sample_cleaned_results

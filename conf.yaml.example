@@ -10,13 +10,38 @@ BASIC_MODEL:
   base_url: https://ark.cn-beijing.volces.com/api/v3
   model: "doubao-1-5-pro-32k-250115"
   api_key: xxxx
+  # max_retries: 3 # Maximum number of retries for LLM calls
   # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
+
+# To use Google Ai Studio as your basic platform:
+# BASIC_MODEL:
+#   platform: "google_aistudio"
+#   model: "gemini-2.5-flash"  # or "gemini-1.5-pro", "gemini-2.5-flash-exp", etc.
+#   api_key: your_gemini_api_key  # Get from https://aistudio.google.com/app/apikey
+#   max_retries: 3
  
 # Reasoning model is optional.
 # Uncomment the following settings if you want to use reasoning model
 # for planning.
 
 # REASONING_MODEL:
-#   base_url: https://ark-cn-beijing.bytedance.net/api/v3
+#   base_url: https://ark.cn-beijing.volces.com/api/v3
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
+#   max_retries: 3 # Maximum number of retries for LLM calls
+
+
+# OTHER SETTINGS:
+# Search engine configuration (Only supports Tavily currently)
+# SEARCH_ENGINE:
+#   engine: tavily
+#   # Only include results from these domains
+#   include_domains:
+#     - example.com
+#     - trusted-news.com
+#     - reliable-source.org
+#     - gov.cn
+#     - edu.cn
+#   # Exclude results from these domains
+#   exclude_domains:
+#     - example.com

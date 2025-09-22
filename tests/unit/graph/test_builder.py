@@ -1,10 +1,11 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import pytest
-from unittest.mock import MagicMock, patch
 import importlib
 import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 import src.graph.builder as builder_mod
 
@@ -64,6 +65,17 @@ def test_continue_to_running_research_team_next_coder(mock_state):
     ]
     state = {"current_plan": Plan(steps=steps)}
     assert builder_mod.continue_to_running_research_team(state) == "coder"
+
+
+def test_continue_to_running_research_team_next_coder_withresult(mock_state):
+    Step = mock_state["Step"]
+    Plan = mock_state["Plan"]
+    steps = [
+        Step(execution_res=True),
+        Step(execution_res=True, step_type=builder_mod.StepType.PROCESSING),
+    ]
+    state = {"current_plan": Plan(steps=steps)}
+    assert builder_mod.continue_to_running_research_team(state) == "planner"
 
 
 def test_continue_to_running_research_team_default_planner(mock_state):

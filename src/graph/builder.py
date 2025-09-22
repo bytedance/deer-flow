@@ -1,35 +1,45 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+
 from src.prompts.planner_model import StepType
 
-from .types import State
 from .nodes import (
+    background_investigation_node,
+    coder_node,
     coordinator_node,
+    human_feedback_node,
     planner_node,
     reporter_node,
     research_team_node,
     researcher_node,
-    coder_node,
-    human_feedback_node,
-    background_investigation_node,
 )
+from .types import State
 
 
 def continue_to_running_research_team(state: State):
     current_plan = state.get("current_plan")
     if not current_plan or not current_plan.steps:
         return "planner"
+
     if all(step.execution_res for step in current_plan.steps):
         return "planner"
+
+    # Find first incomplete step
+    incomplete_step = None
     for step in current_plan.steps:
         if not step.execution_res:
+            incomplete_step = step
             break
-    if step.step_type and step.step_type == StepType.RESEARCH:
+
+    if not incomplete_step:
+        return "planner"
+
+    if incomplete_step.step_type == StepType.RESEARCH:
         return "researcher"
-    if step.step_type and step.step_type == StepType.PROCESSING:
+    if incomplete_step.step_type == StepType.PROCESSING:
         return "coder"
     return "planner"
 

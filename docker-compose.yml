@@ -4,12 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: deer-flow-backend
-    ports:
-      - "8000:8000"
+    # Remove the ports section to not expose to host
     env_file:
       - .env
     volumes:
-      - ./conf.yaml:/app/conf.yaml
+      - ./conf.yaml:/app/conf.yaml:ro
     restart: unless-stopped
     networks:
       - deer-flow-network

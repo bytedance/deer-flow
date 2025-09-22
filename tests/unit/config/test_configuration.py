@@ -1,13 +1,9 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import os
-import pytest
 import sys
 import types
-from pathlib import Path
-import builtins
-import importlib
+
 from src.config.configuration import Configuration
 
 # Patch sys.path so relative import works
@@ -93,3 +89,49 @@ def test_from_runnable_config_with_no_config():
     assert config.max_search_results == 3
     assert config.resources == []
     assert config.mcp_settings is None
+
+
+def test_get_recursion_limit_default():
+    from src.config.configuration import get_recursion_limit
+
+    result = get_recursion_limit()
+    assert result == 25
+
+
+def test_get_recursion_limit_custom_default():
+    from src.config.configuration import get_recursion_limit
+
+    result = get_recursion_limit(50)
+    assert result == 50
+
+
+def test_get_recursion_limit_from_env(monkeypatch):
+    from src.config.configuration import get_recursion_limit
+
+    monkeypatch.setenv("AGENT_RECURSION_LIMIT", "100")
+    result = get_recursion_limit()
+    assert result == 100
+
+
+def test_get_recursion_limit_invalid_env_value(monkeypatch):
+    from src.config.configuration import get_recursion_limit
+
+    monkeypatch.setenv("AGENT_RECURSION_LIMIT", "invalid")
+    result = get_recursion_limit()
+    assert result == 25
+
+
+def test_get_recursion_limit_negative_env_value(monkeypatch):
+    from src.config.configuration import get_recursion_limit
+
+    monkeypatch.setenv("AGENT_RECURSION_LIMIT", "-5")
+    result = get_recursion_limit()
+    assert result == 25
+
+
+def test_get_recursion_limit_zero_env_value(monkeypatch):
+    from src.config.configuration import get_recursion_limit
+
+    monkeypatch.setenv("AGENT_RECURSION_LIMIT", "0")
+    result = get_recursion_limit()
+    assert result == 25

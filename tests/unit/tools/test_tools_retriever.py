@@ -1,14 +1,16 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from unittest.mock import Mock, patch, MagicMock
-from langchain_core.callbacks import (
-    CallbackManagerForToolRun,
-    AsyncCallbackManagerForToolRun,
-)
+from unittest.mock import Mock, patch
+
 import pytest
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForToolRun,
+    CallbackManagerForToolRun,
+)
+
+from src.rag import Chunk, Document, Resource, Retriever
 from src.tools.retriever import RetrieverInput, RetrieverTool, get_retriever_tool
-from src.rag import Document, Retriever, Resource, Chunk
 
 
 def test_retriever_input_model():

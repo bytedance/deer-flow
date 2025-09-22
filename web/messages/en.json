@@ -1,0 +1,229 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "settings": "Settings",
+    "getStarted": "Get Started",
+    "learnMore": "Learn More",
+    "starOnGitHub": "Star on GitHub",
+    "send": "Send",
+    "stop": "Stop",
+    "linkNotReliable": "This link might be a hallucination from AI model and may not be reliable.",
+    "noResult": "No result"
+  },
+  "messageInput": {
+    "placeholder": "What can I do for you?",
+    "placeholderWithRag": "What can I do for you? \nYou may refer to RAG resources by using @."
+  },
+  "header": {
+    "title": "DeerFlow"
+  },
+  "hero": {
+    "title": "Deep Research",
+    "subtitle": "at Your Fingertips",
+    "description": "Meet DeerFlow, your personal Deep Research assistant. With powerful tools like search engines, web crawlers, Python and MCP services, it delivers instant insights, comprehensive reports, and even captivating podcasts.",
+    "footnote": "* DEER stands for Deep Exploration and Efficient Research."
+  },
+  "settings": {
+    "title": "DeerFlow Settings",
+    "description": "Manage your DeerFlow settings here.",
+    "addServers": "Add Servers",
+    "cancel": "Cancel",
+    "addNewMCPServers": "Add New MCP Servers",
+    "mcpConfigDescription": "DeerFlow uses the standard JSON MCP config to create a new server.",
+    "pasteConfigBelow": "Paste your config below and click \"Add\" to add new servers.",
+    "add": "Add",
+    "general": {
+      "title": "General",
+      "autoAcceptPlan": "Allow automatic acceptance of plans",
+      "maxPlanIterations": "Max plan iterations",
+      "maxPlanIterationsDescription": "Set to 1 for single-step planning. Set to 2 or more to enable re-planning.",
+      "maxStepsOfPlan": "Max steps of a research plan",
+      "maxStepsDescription": "By default, each research plan has 3 steps.",
+      "maxSearchResults": "Max search results",
+      "maxSearchResultsDescription": "By default, each search step has 3 results."
+    },
+    "mcp": {
+      "title": "MCP Servers",
+      "description": "The Model Context Protocol boosts DeerFlow by integrating external tools for tasks like private domain searches, web browsing, food ordering, and more. Click here to",
+      "learnMore": "learn more about MCP.",
+      "enableDisable": "Enable/disable server",
+      "deleteServer": "Delete server",
+      "disabled": "Disabled",
+      "new": "New"
+    },
+    "about": {
+      "title": "About"
+    },
+    "reportStyle": {
+      "writingStyle": "Writing Style",
+      "chooseTitle": "Choose Writing Style",
+      "chooseDesc": "Select the writing style for your research reports. Different styles are optimized for different audiences and purposes.",
+      "academic": "Academic",
+      "academicDesc": "Formal, objective, and analytical with precise terminology",
+      "popularScience": "Popular Science",
+      "popularScienceDesc": "Engaging and accessible for general audience",
+      "news": "News",
+      "newsDesc": "Factual, concise, and impartial journalistic style",
+      "socialMedia": "Social Media",
+      "socialMediaDesc": "Concise, attention-grabbing, and shareable"
+    }
+  },
+  "footer": {
+    "quote": "Originated from Open Source, give back to Open Source.",
+    "license": "Licensed under MIT License",
+    "copyright": "DeerFlow"
+  },
+  "chat": {
+    "page": {
+        "loading": "Loading DeerFlow...",
+        "welcomeUser": "Welcome, {username}",
+        "starOnGitHub": "Star DeerFlow on GitHub"
+    },
+    "welcome": {
+      "greeting": "👋 Hello, there!",
+      "description": "Welcome to 🦌 DeerFlow, a deep research assistant built on cutting-edge language models, helps you search on web, browse information, and handle complex tasks."
+    },
+    "conversationStarters": [
+      "How many times taller is the Eiffel Tower than the tallest building in the world?",
+      "How many years does an average Tesla battery last compared to a gasoline engine?",
+      "How many liters of water are required to produce 1 kg of beef?",
+      "How many times faster is the speed of light compared to the speed of sound?"
+    ],
+    "inputBox": {
+      "deepThinking": "Deep Thinking",
+      "deepThinkingTooltip": {
+        "title": "Deep Thinking Mode: {status}",
+        "description": "When enabled, DeerFlow will use reasoning model ({model}) to generate more thoughtful plans."
+      },
+      "investigation": "Investigation",
+      "investigationTooltip": {
+        "title": "Investigation Mode: {status}",
+        "description": "When enabled, DeerFlow will perform a quick search before planning. This is useful for researches related to ongoing events and news."
+      },
+      "enhancePrompt": "Enhance prompt with AI",
+      "on": "On",
+      "off": "Off"
+    },
+    "research": {
+      "deepResearch": "Deep Research",
+      "researching": "Researching...",
+      "generatingReport": "Generating report...",
+      "reportGenerated": "Report generated",
+      "open": "Open",
+      "close": "Close",
+      "deepThinking": "Deep Thinking",
+      "report": "Report",
+      "activities": "Activities",
+      "generatePodcast": "Generate podcast",
+      "edit": "Edit",
+      "copy": "Copy",
+      "downloadReport": "Download report as markdown",
+      "searchingFor": "Searching for",
+      "reading": "Reading",
+      "runningPythonCode": "Running Python code",
+      "errorExecutingCode": "Error when executing the above code",
+      "executionOutput": "Execution output",
+      "retrievingDocuments": "Retrieving documents from RAG",
+      "running": "Running",
+      "generatingPodcast": "Generating podcast...",
+      "nowPlayingPodcast": "Now playing podcast...",
+      "podcast": "Podcast",
+      "errorGeneratingPodcast": "Error when generating podcast. Please try again.",
+      "downloadPodcast": "Download podcast"
+    },
+    "messages": {
+      "replaying": "Replaying",
+      "replayDescription": "DeerFlow is now replaying the conversation...",
+      "replayHasStopped": "The replay has been stopped.",
+      "replayModeDescription": "You're now in DeerFlow's replay mode. Click the \"Play\" button on the right to start.",
+      "play": "Play",
+      "fastForward": "Fast Forward",
+      "demoNotice": "* This site is for demo purposes only. If you want to try your own question, please",
+      "clickHere": "click here",
+      "cloneLocally": "to clone it locally and run it."
+    },
+    "multiAgent": {
+      "moveToPrevious": "Move to the previous step",
+      "playPause": "Play / Pause",
+      "moveToNext": "Move to the next step",
+      "toggleFullscreen": "Toggle fullscreen"
+    }
+  },
+  "landing": {
+    "caseStudies": {
+      "title": "Case Studies",
+      "description": "See DeerFlow in action through replays.",
+      "clickToWatch": "Click to watch replay",
+      "cases": [
+        {
+          "title": "How tall is Eiffel Tower compared to tallest building?",
+          "description": "The research compares the heights and global significance of the Eiffel Tower and Burj Khalifa, and uses Python code to calculate the multiples."
+        },
+        {
+          "title": "What are the top trending repositories on GitHub?",
+          "description": "The research utilized MCP services to identify the most popular GitHub repositories and documented them in detail using search engines."
+        },
+        {
+          "title": "Write an article about Nanjing's traditional dishes",
+          "description": "The study vividly showcases Nanjing's famous dishes through rich content and imagery, uncovering their hidden histories and cultural significance."
+        },
+        {
+          "title": "How to decorate a small rental apartment?",
+          "description": "The study provides readers with practical and straightforward methods for decorating apartments, accompanied by inspiring images."
+        },
+        {
+          "title": "Introduce the movie 'Léon: The Professional'",
+          "description": "The research provides a comprehensive introduction to the movie 'Léon: The Professional', including its plot, characters, and themes."
+        },
+        {
+          "title": "How do you view the takeaway war in China? (in Chinese)",
+          "description": "The research analyzes the intensifying competition between JD and Meituan, highlighting their strategies, technological innovations, and challenges."
+        },
+        {
+          "title": "Are ultra-processed foods linked to health?",
+          "description": "The research examines the health risks of rising ultra-processed food consumption, urging more research on long-term effects and individual differences."
+        },
+        {
+          "title": "Write an article on \"Would you insure your AI twin?\"",
+          "description": "The research explores the concept of insuring AI twins, highlighting their benefits, risks, ethical considerations, and the evolving regulatory."
+        }
+      ]
+    },
+    "coreFeatures": {
+      "title": "Core Features",
+      "description": "Find out what makes DeerFlow effective.",
+      "features": [
+        {
+          "name": "Dive Deeper and Reach Wider",
+          "description": "Unlock deeper insights with advanced tools. Our powerful search + crawling and Python tools gathers comprehensive data, delivering in-depth reports to enhance your study."
+        },
+        {
+          "name": "Human-in-the-loop",
+          "description": "Refine your research plan, or adjust focus areas all through simple natural language."
+        },
+        {
+          "name": "Lang Stack",
+          "description": "Build with confidence using the LangChain and LangGraph frameworks."
+        },
+        {
+          "name": "MCP Integrations",
+          "description": "Supercharge your research workflow and expand your toolkit with seamless MCP integrations."
+        },
+        {
+          "name": "Podcast Generation",
+          "description": "Instantly generate podcasts from reports. Perfect for on-the-go learning or sharing findings effortlessly."
+        }
+      ]
+    },
+    "multiAgent": {
+      "title": "Multi-Agent Architecture",
+      "description": "Experience the agent teamwork with our Supervisor + Handoffs design pattern."
+    },
+    "joinCommunity": {
+      "title": "Join the DeerFlow Community",
+      "description": "Contribute brilliant ideas to shape the future of DeerFlow. Collaborate, innovate, and make impacts.",
+      "contributeNow": "Contribute Now"
+    }
+  }
+}

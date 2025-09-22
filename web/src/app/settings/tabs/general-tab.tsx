@@ -3,6 +3,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Settings } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useEffect, useMemo } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -47,6 +48,7 @@ export const GeneralTab: Tab = ({
   settings: SettingsState;
   onChange: (changes: Partial<SettingsState>) => void;
 }) => {
+  const t = useTranslations("settings.general");
   const generalSettings = useMemo(() => settings.general, [settings]);
   const form = useForm<z.infer<typeof generalFormSchema>>({
     resolver: zodResolver(generalFormSchema, undefined, undefined),
@@ -75,7 +77,7 @@ export const GeneralTab: Tab = ({
   return (
     <div className="flex flex-col gap-4">
       <header>
-        <h1 className="text-lg font-medium">General</h1>
+        <h1 className="text-lg font-medium">{t("title")}</h1>
       </header>
       <main>
         <Form {...form}>
@@ -93,7 +95,7 @@ export const GeneralTab: Tab = ({
                         onCheckedChange={field.onChange}
                       />
                       <Label className="text-sm" htmlFor="autoAcceptedPlan">
-                        Allow automatic acceptance of plans
+                        {t("autoAcceptPlan")}
                       </Label>
                     </div>
                   </FormControl>
@@ -105,7 +107,7 @@ export const GeneralTab: Tab = ({
               name="maxPlanIterations"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Max plan iterations</FormLabel>
+                  <FormLabel>{t("maxPlanIterations")}</FormLabel>
                   <FormControl>
                     <Input
                       className="w-60"
@@ -118,8 +120,7 @@ export const GeneralTab: Tab = ({
                     />
                   </FormControl>
                   <FormDescription>
-                    Set to 1 for single-step planning. Set to 2 or more to
-                    enable re-planning.
+                    {t("maxPlanIterationsDescription")}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>
@@ -130,7 +131,7 @@ export const GeneralTab: Tab = ({
               name="maxStepNum"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Max steps of a research plan</FormLabel>
+                  <FormLabel>{t("maxStepsOfPlan")}</FormLabel>
                   <FormControl>
                     <Input
                       className="w-60"
@@ -142,9 +143,7 @@ export const GeneralTab: Tab = ({
                       }
                     />
                   </FormControl>
-                  <FormDescription>
-                    By default, each research plan has 3 steps.
-                  </FormDescription>
+                  <FormDescription>{t("maxStepsDescription")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -154,7 +153,7 @@ export const GeneralTab: Tab = ({
               name="maxSearchResults"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Max search results</FormLabel>
+                  <FormLabel>{t("maxSearchResults")}</FormLabel>
                   <FormControl>
                     <Input
                       className="w-60"
@@ -167,7 +166,7 @@ export const GeneralTab: Tab = ({
                     />
                   </FormControl>
                   <FormDescription>
-                    By default, each search step has 3 results.
+                    {t("maxSearchResultsDescription")}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

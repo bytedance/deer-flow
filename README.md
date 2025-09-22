@@ -21,7 +21,7 @@ Please visit [our official website](https://deerflow.tech/) for more details.
 
 ### Video
 
-https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e
+<https://github.com/user-attachments/assets/f3786598-1f2a-4d07-919e-8b99dfa1de3e>
 
 In this demo, we showcase how to use DeerFlow to:
 
@@ -140,6 +140,9 @@ This project also includes a Web UI, offering a more dynamic and engaging intera
 # On Windows
 bootstrap.bat -d
 ```
+> [!Note]
+> By default, the backend server binds to 127.0.0.1 (localhost) for security reasons. If you need to allow external connections (e.g., when deploying on Linux server), you can modify the server host to 0.0.0.0 in the bootstrap script(uv run server.py --host 0.0.0.0).
+> Please ensure your environment is properly secured before exposing the service to external networks.
 
 Open your browser and visit [`http://localhost:3000`](http://localhost:3000) to explore the web UI.
 
@@ -147,19 +150,18 @@ Explore more details in the [`web`](./web/) directory.
 
 ## Supported Search Engines
 
+### Web Search
+
 DeerFlow supports multiple search engines that can be configured in your `.env` file using the `SEARCH_API` variable:
 
 - **Tavily** (default): A specialized search API for AI applications
-
   - Requires `TAVILY_API_KEY` in your `.env` file
   - Sign up at: https://app.tavily.com/home
 
 - **DuckDuckGo**: Privacy-focused search engine
-
   - No API key required
 
 - **Brave Search**: Privacy-focused search engine with advanced features
-
   - Requires `BRAVE_SEARCH_API_KEY` in your `.env` file
   - Sign up at: https://brave.com/search/api/
 
@@ -178,35 +180,41 @@ To configure your preferred search engine, set the `SEARCH_API` variable in your
 SEARCH_API=tavily
 ```
 
+### Private Knowledgebase
+
+DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you can use your private documents to answer questions.
+
+- **[RAGFlow](https://ragflow.io/docs/dev/)**：open source RAG engine
+   ```
+   # examples in .env.example
+   RAG_PROVIDER=ragflow
+   RAGFLOW_API_URL="http://localhost:9388"
+   RAGFLOW_API_KEY="ragflow-xxx"
+   RAGFLOW_RETRIEVAL_SIZE=10
+   RAGFLOW_CROSS_LANGUAGES=English,Chinese,Spanish,French,German,Japanese,Korean
+   ```
+
 ## Features
 
 ### Core Capabilities
 
 - 🤖 **LLM Integration**
   - It supports the integration of most models through [litellm](https://docs.litellm.ai/docs/providers).
-  - Support for open source models like Qwen
+  - Support for open source models like Qwen, you need to read the [configuration](docs/configuration_guide.md) for more details.
   - OpenAI-compatible API interface
   - Multi-tier LLM system for different task complexities
 
 ### Tools and MCP Integrations
 
 - 🔍 **Search and Retrieval**
-
   - Web search via Tavily, Brave Search and more
   - Crawling with Jina
   - Advanced content extraction
+  - Support for private knowledgebase
 
 - 📃 **RAG Integration**
 
   - Supports mentioning files from [RAGFlow](https://github.com/infiniflow/ragflow) within the input box. [Start up RAGFlow server](https://ragflow.io/docs/dev/).
-
-  ```bash
-     # .env
-     RAG_PROVIDER=ragflow
-     RAGFLOW_API_URL="http://localhost:9388"
-     RAGFLOW_API_KEY="ragflow-xxx"
-     RAGFLOW_RETRIEVAL_SIZE=10
-  ```
 
 - 🔗 **MCP Seamless Integration**
   - Expand capabilities for private domain access, knowledge graph, web browsing and more
@@ -215,7 +223,6 @@ SEARCH_API=tavily
 ### Human Collaboration
 
 - 🧠 **Human-in-the-loop**
-
   - Supports interactive modification of research plans using natural language
   - Supports auto-acceptance of research plans
 
@@ -386,6 +393,46 @@ DeerFlow supports LangSmith tracing to help you debug and monitor your workflows
 
 This will enable trace visualization in LangGraph Studio and send your traces to LangSmith for monitoring and analysis.
 
+### Checkpointing
+1. Postgres and MonogDB implementation of LangGraph checkpoint saver.
+2. In-memory store is used to caching the streaming messages before persisting to database, If finish_reason is "stop" or "interrupt", it triggers persistence.
+3. Supports saving and loading checkpoints for workflow execution.
+4. Supports saving chat stream events for replaying conversations.
+
+*Note: About langgraph issue #5557* 
+The latest langgraph-checkpoint-postgres-2.0.23 have checkpointing issue, you can check the open issue:"TypeError: Object of type HumanMessage is not JSON serializable"  [https://github.com/langchain-ai/langgraph/issues/5557].
+
+To use postgres checkpoint you should install langgraph-checkpoint-postgres-2.0.21
+
+*Note: About psycopg dependencies* 
+Please read the following document before using postgres:  https://www.psycopg.org/psycopg3/docs/basic/install.html
+
+BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq mannually:
+
+```bash
+pip install psycopg[binary]
+```
+This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform : https://pypi.org/project/psycopg-binary/#files
+
+if not supported, you can select local-installation: https://www.psycopg.org/psycopg3/docs/basic/install.html#local-installation
+
+
+The default database and collection will be automatically created if not exists.
+Default database: checkpoing_db
+Default collection: checkpoint_writes_aio (langgraph checkpoint writes)
+Default collection: checkpoints_aio (langgraph checkpoints)
+Default collection: chat_streams (chat stream events for replaying conversations)
+
+You need to set the following environment variables in your `.env` file:
+
+```bash
+# Enable LangGraph checkpoint saver, supports MongoDB, Postgres
+LANGGRAPH_CHECKPOINT_SAVER=true
+# Set the database URL for saving checkpoints
+LANGGRAPH_CHECKPOINT_DB_URL="mongodb://localhost:27017/"
+#LANGGRAPH_CHECKPOINT_DB_URL=postgresql://localhost:5432/postgres
+```
+
 ## Docker
 
 You can also run this project with Docker.
@@ -402,7 +449,8 @@ Final, start up a docker container running the web server:
 
 ```bash
 # Replace deer-flow-api-app with your preferred container name
-docker run -d -t -p 8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
+# Start the server then bind to localhost:8000
+docker run -d -t -p 127.0.0.1:8000:8000 --env-file .env --name deer-flow-api-app deer-flow-api
 
 # stop the server
 docker stop deer-flow-api-app
@@ -419,6 +467,9 @@ docker compose build
 # start the server
 docker compose up
 ```
+
+> [!WARNING]
+> If you want to deploy the deer flow into production environments, please add authentication to the website and evaluate your security check of the MCPServer and Python Repl. 
 
 ## Examples
 
@@ -523,6 +574,7 @@ DeerFlow includes a human in the loop mechanism that allows you to review, edit,
    - Via API: Set `auto_accepted_plan: true` in your request
 
 4. **API Integration**: When using the API, you can provide feedback through the `feedback` parameter:
+
    ```json
    {
      "messages": [{ "role": "user", "content": "What is quantum computing?" }],

@@ -5,6 +5,7 @@ import { PythonOutlined } from "@ant-design/icons";
 import { motion } from "framer-motion";
 import { LRUCache } from "lru-cache";
 import { BookOpenText, FileText, PencilRuler, Search } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
 import { useMemo } from "react";
 import SyntaxHighlighter from "react-syntax-highlighter";
@@ -90,6 +91,9 @@ function ActivityListItem({ messageId }: { messageId: string }) {
   if (message) {
     if (!message.isStreaming && message.toolCalls?.length) {
       for (const toolCall of message.toolCalls) {
+        if (toolCall.result?.startsWith("Error")) {
+          return null;
+        }
         if (toolCall.name === "web_search") {
           return <WebSearchToolCall key={toolCall.id} toolCall={toolCall} />;
         } else if (toolCall.name === "crawl_tool") {
@@ -110,18 +114,19 @@ function ActivityListItem({ messageId }: { messageId: string }) {
 const __pageCache = new LRUCache<string, string>({ max: 100 });
 type SearchResult =
   | {
-      type: "page";
-      title: string;
-      url: string;
-      content: string;
-    }
+    type: "page";
+    title: string;
+    url: string;
+    content: string;
+  }
   | {
-      type: "image";
-      image_url: string;
-      image_description: string;
-    };
+    type: "image";
+    image_url: string;
+    image_description: string;
+  };
 
 function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
+  const t = useTranslations("chat.research");
   const searching = useMemo(() => {
     return toolCall.result === undefined;
   }, [toolCall.result]);
@@ -159,7 +164,7 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
           animated={searchResults === undefined}
         >
           <Search size={16} className={"mr-2"} />
-          <span>Searching for&nbsp;</span>
+          <span>{t("searchingFor")}&nbsp;</span>
           <span className="max-w-[500px] overflow-hidden text-ellipsis whitespace-nowrap">
             {(toolCall.args as { query: string }).query}
           </span>
@@ -238,6 +243,7 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
 }
 
 function CrawlToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
+  const t = useTranslations("chat.research");
   const url = useMemo(
     () => (toolCall.args as { url: string }).url,
     [toolCall.args],
@@ -251,7 +257,7 @@ function CrawlToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
           animated={toolCall.result === undefined}
         >
           <BookOpenText size={16} className={"mr-2"} />
-          <span>Reading</span>
+          <span>{t("reading")}</span>
         </RainbowText>
       </div>
       <ul className="mt-2 flex flex-wrap gap-4">
@@ -279,6 +285,7 @@ function CrawlToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
 }
 
 function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
+  const t = useTranslations("chat.research");
   const searching = useMemo(() => {
     return toolCall.result === undefined;
   }, [toolCall.result]);
@@ -292,7 +299,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
       <div className="font-medium italic">
         <RainbowText className="flex items-center" animated={searching}>
           <Search size={16} className={"mr-2"} />
-          <span>Retrieving documents from RAG&nbsp;</span>
+          <span>{t("retrievingDocuments")}&nbsp;</span>
           <span className="max-w-[500px] overflow-hidden text-ellipsis whitespace-nowrap">
             {(toolCall.args as { keywords: string }).keywords}
           </span>
@@ -313,7 +320,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
                   />
                 </li>
               ))}
-            {documents.map((doc, i) => (
+            {documents?.map((doc, i) => (
               <motion.li
                 key={`search-result-${i}`}
                 className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
@@ -326,7 +333,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
                 }}
               >
                 <FileText size={32} />
-                {doc.title}
+                {doc.title} (chunk-{i},size-{doc.content.length})
               </motion.li>
             ))}
           </ul>
@@ -337,6 +344,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
 }
 
 function PythonToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
+  const t = useTranslations("chat.research");
   const code = useMemo<string | undefined>(() => {
     return (toolCall.args as { code?: string }).code;
   }, [toolCall.args]);
@@ -349,7 +357,7 @@ function PythonToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
           className="text-base font-medium italic"
           animated={toolCall.result === undefined}
         >
-          Running Python code
+          {t("runningPythonCode")}
         </RainbowText>
       </div>
       <div>
@@ -373,6 +381,7 @@ function PythonToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
 }
 
 function PythonToolCallResult({ result }: { result: string }) {
+  const t = useTranslations("chat.research");
   const { resolvedTheme } = useTheme();
   const hasError = useMemo(
     () => result.includes("Error executing code:\n"),
@@ -399,7 +408,7 @@ function PythonToolCallResult({ result }: { result: string }) {
   return (
     <>
       <div className="mt-4 font-medium italic">
-        {hasError ? "Error when executing the above code" : "Execution output"}
+        {hasError ? t("errorExecutingCode") : t("executionOutput")}
       </div>
       <div className="bg-accent mt-2 max-h-[400px] max-w-[calc(100%-120px)] overflow-y-auto rounded-md p-2 text-sm">
         <SyntaxHighlighter
