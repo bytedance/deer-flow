@@ -87,17 +87,6 @@
             }
         },
         {
-            "name": "Debug: python server",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/server.py",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            }
-        },
-        {
             "name": "Debug: nodejs web",
             "type": "node",
             "request": "launch",
