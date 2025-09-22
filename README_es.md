@@ -168,6 +168,10 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
   - No requiere clave API
   - Especializado en artículos científicos y académicos
 
+- **Searx/SearxNG**: Motor de metabúsqueda autoalojado
+  - Requiere `SEARX_HOST` en tu archivo `.env`
+  - Compatible con Searx o SearxNG
+
 Para configurar tu motor de búsqueda preferido, establece la variable `SEARCH_API` en tu archivo `.env`:
 
 ```bash

@@ -162,6 +162,10 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
   - APIキー不要
   - 科学・学術論文専用
 
+- **Searx/SearxNG**セルフホスト型メタ検索エンジン
+  - `.env`ファイルに`SEARX_HOST`が必要
+  - Searx または SearxNG に接続可能
+
 お好みの検索エンジンを設定するには、`.env`ファイルで`SEARCH_API`変数を設定します：
 
 ```bash

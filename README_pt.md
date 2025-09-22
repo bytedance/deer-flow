@@ -171,6 +171,10 @@ DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no se
   - Não requer chave API
   - Especializado em artigos científicos e acadêmicos
 
+- **Searx/SearxNG**: Mecanismo de metabusca auto-hospedado
+  - Requer `SEARX_HOST` no seu arquivo `.env`
+  - Suporta integração com Searx ou SearxNG
+
 Para configurar o seu mecanismo preferido, defina a variável `SEARCH_API` no seu arquivo:
 
 ```bash

@@ -8,12 +8,14 @@ from typing import List, Optional
 from langchain_community.tools import (
     BraveSearch,
     DuckDuckGoSearchResults,
+    SearxSearchRun,
     WikipediaQueryRun,
 )
 from langchain_community.tools.arxiv import ArxivQueryRun
 from langchain_community.utilities import (
     ArxivAPIWrapper,
     BraveSearchWrapper,
+    SearxSearchWrapper,
     WikipediaAPIWrapper,
 )
 
@@ -30,6 +32,7 @@ LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
+LoggedSearxSearch = create_logged_tool(SearxSearchRun)
 LoggedWikipediaSearch = create_logged_tool(WikipediaQueryRun)
 
 
@@ -87,6 +90,13 @@ def get_web_search_tool(max_search_results: int):
                 load_max_docs=max_search_results,
                 load_all_available_meta=True,
             ),
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.SEARX.value:
+        return LoggedSearxSearch(
+            name="web_search",
+            wrapper=SearxSearchWrapper(
+                k=max_search_results,
+            )
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.WIKIPEDIA.value:
         wiki_lang = search_config.get("wikipedia_lang", "en")
