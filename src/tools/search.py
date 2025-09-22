@@ -48,9 +48,9 @@ def get_web_search_tool(max_search_results: int):
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
         include_raw_content = search_config.get("include_raw_content", True)
-        include_images: Optional[bool] = search_config.get("include_images", False)
+        include_images: Optional[bool] = search_config.get("include_images", True)
         include_image_descriptions: Optional[bool] = (
-            include_images and search_config.get("include_image_descriptions", False)
+            include_images and search_config.get("include_image_descriptions", True)
         )
 
         logger.info(

@@ -202,10 +202,10 @@ SEARCH_ENGINE:
   exclude_domains:
     - unreliable-site.com
     - spam-domain.net
-  # Include images in search results, default: false 
-  include_images: true
-  # Include image descriptions in search results, default: false
-  include_image_descriptions: true
+  # Include images in search results, default: true
+  include_images: false
+  # Include image descriptions in search results, default: true
+  include_image_descriptions: false
   # Include raw content in search results, default: true
   include_raw_content: false
 ```
