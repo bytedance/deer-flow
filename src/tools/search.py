@@ -16,11 +16,6 @@ from langchain_community.utilities import (
     ArxivAPIWrapper,
     BraveSearchWrapper,
     SearxSearchWrapper,
-)
-
-from src.config import SearchEngine, SELECTED_SEARCH_ENGINE
-from src.tools.tavily_search.tavily_search_results_with_images import (
-    TavilySearchResultsWithImages,
     WikipediaAPIWrapper,
 )
 
