@@ -169,6 +169,10 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
   - No API key required
   - Specialized for scientific and academic papers
 
+- **Searx/SearxNG**: Self-hosted metasearch engine
+  - Requires `SEARX_HOST` to be set in the `.env` file
+  - Supports connecting to either Searx or SearxNG
+
 To configure your preferred search engine, set the `SEARCH_API` variable in your `.env` file:
 
 ```bash

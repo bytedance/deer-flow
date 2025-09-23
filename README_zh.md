@@ -163,6 +163,10 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
   - 无需 API 密钥
   - 专为科学和学术论文设计
 
+- **Searx/SearxNG**：自托管的元搜索引擎
+  - 需要在`.env`文件中设置`SEARX_HOST`
+  - 支持对接Searx或SearxNG
+
 要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash

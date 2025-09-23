@@ -14,6 +14,7 @@ class SearchEngine(enum.Enum):
     DUCKDUCKGO = "duckduckgo"
     BRAVE_SEARCH = "brave_search"
     ARXIV = "arxiv"
+    SEARX = "searx"
     WIKIPEDIA = "wikipedia"
 
 
