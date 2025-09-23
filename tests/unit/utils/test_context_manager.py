@@ -38,7 +38,9 @@ class TestContextManager:
     def test_count_tokens_with_tool_message(self):
         """Test counting tokens with tool message"""
         context_manager = ContextManager(token_limit=1000)
-        messages = [ToolMessage(content="Tool execution result data here", tool_call_id="test")]
+        messages = [
+            ToolMessage(content="Tool execution result data here", tool_call_id="test")
+        ]
         token_count = context_manager.count_tokens(messages)
         # Tool message has about 32 characters, should be around 10 tokens (32/4 * 1.3)
         assert token_count > 0
@@ -66,7 +68,11 @@ class TestContextManager:
         """Test is_over_limit when messages exceed token limit"""
         # Create a context manager with a very low limit
         low_limit_cm = ContextManager(token_limit=5)
-        long_messages = [HumanMessage(content="This is a very long message that should exceed the limit")]
+        long_messages = [
+            HumanMessage(
+                content="This is a very long message that should exceed the limit"
+            )
+        ]
         is_over = low_limit_cm.is_over_limit(long_messages)
         assert is_over is True
 
@@ -74,7 +80,7 @@ class TestContextManager:
         """Test compress_messages when messages are not over limit"""
         context_manager = ContextManager(token_limit=1000)
         messages = [HumanMessage(content="Short message")]
-        compressed = context_manager.compress_messages({"messages":messages})
+        compressed = context_manager.compress_messages({"messages": messages})
         # Should return the same messages when not over limit
         assert len(compressed["messages"]) == len(messages)
 
@@ -82,15 +88,18 @@ class TestContextManager:
         """Test compress_messages preserves system message"""
         # Create a context manager with limited token capacity
         limited_cm = ContextManager(token_limit=200)
-        
+
         messages = [
             SystemMessage(content="You are a helpful assistant."),
             HumanMessage(content="Hello"),
             AIMessage(content="Hi there!"),
-            HumanMessage(content="Can you tell me a very long story that would exceed token limits? " * 100),
+            HumanMessage(
+                content="Can you tell me a very long story that would exceed token limits? "
+                * 100
+            ),
         ]
-        
-        compressed = limited_cm.compress_messages({"messages":messages})
+
+        compressed = limited_cm.compress_messages({"messages": messages})
         # Should preserve system message and some recent messages
         assert len(compressed["messages"]) == 1
 
@@ -98,14 +107,17 @@ class TestContextManager:
         """Test compress_messages when no system message is present"""
         # Create a context manager with limited token capacity
         limited_cm = ContextManager(token_limit=100, preserve_prefix_message_count=2)
-        
+
         messages = [
             HumanMessage(content="Hello"),
             AIMessage(content="Hi there!"),
-            HumanMessage(content="Can you tell me a very long story that would exceed token limits? " * 10),
+            HumanMessage(
+                content="Can you tell me a very long story that would exceed token limits? "
+                * 10
+            ),
         ]
-        
-        compressed = limited_cm.compress_messages({"messages":messages})
+
+        compressed = limited_cm.compress_messages({"messages": messages})
         # Should keep only the most recent messages that fit
         assert len(compressed["messages"]) == 3
 
@@ -115,7 +127,7 @@ class TestContextManager:
         message = ToolMessage(
             content="Tool result",
             tool_call_id="test",
-            additional_kwargs={"tool_calls": [{"name": "test_function"}]}
+            additional_kwargs={"tool_calls": [{"name": "test_function"}]},
         )
         token_count = context_manager._count_message_tokens(message)
         assert token_count > 0

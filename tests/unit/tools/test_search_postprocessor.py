@@ -8,7 +8,9 @@ class TestSearchResultPostProcessor:
     @pytest.fixture
     def post_processor(self):
         """Create a SearchResultPostProcessor instance for testing"""
-        return SearchResultPostProcessor(min_score_threshold=0.5, max_content_length=100)
+        return SearchResultPostProcessor(
+            min_score_threshold=0.5, max_content_length=100
+        )
 
     def test_process_results_empty_input(self, post_processor):
         """Test processing empty results"""
@@ -50,7 +52,7 @@ class TestSearchResultPostProcessor:
                 "url": "https://example.com/high",
                 "content": "High score content",
                 "score": 0.9,
-            }
+            },
         ]
         processed = post_processor.process_results(results)
         assert len(processed) == 1
@@ -72,7 +74,7 @@ class TestSearchResultPostProcessor:
                 "url": "https://example.com",  # Duplicate URL
                 "content": "Content 2",
                 "score": 0.7,
-            }
+            },
         ]
         processed = post_processor.process_results(results)
         assert len(processed) == 1
@@ -101,7 +103,7 @@ class TestSearchResultPostProcessor:
                 "url": "https://example.com/medium",
                 "content": "Medium score content",
                 "score": 0.6,
-            }
+            },
         ]
         processed = post_processor.process_results(results)
         assert len(processed) == 2  # Low score filtered out
@@ -128,8 +130,10 @@ class TestSearchResultPostProcessor:
 
     def test_process_results_remove_base64_images(self, post_processor):
         """Test removing base64 images from content"""
-        content_with_base64 = "Content with image " + \
-            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        content_with_base64 = (
+            "Content with image "
+            + "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        )
         results = [
             {
                 "type": "page",
@@ -170,7 +174,7 @@ class TestSearchResultPostProcessor:
                 "type": "image",
                 "image_url": "https://example.com/image.jpg",
                 "image_description": "Regular image",
-            }
+            },
         ]
         processed = post_processor.process_results(results)
         assert len(processed) == 1

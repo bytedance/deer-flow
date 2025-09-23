@@ -96,7 +96,7 @@ def get_web_search_tool(max_search_results: int):
             name="web_search",
             wrapper=SearxSearchWrapper(
                 k=max_search_results,
-            )
+            ),
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.WIKIPEDIA.value:
         wiki_lang = search_config.get("wikipedia_lang", "en")

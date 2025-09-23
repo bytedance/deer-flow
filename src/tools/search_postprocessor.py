@@ -14,17 +14,17 @@ class SearchResultPostProcessor:
     base64_pattern = r"data:image/[^;]+;base64,[a-zA-Z0-9+/=]+"
 
     def __init__(
-        self, min_score_threshold: float = 0.5, max_content_length: int = 20000
+        self, min_score_threshold: float = 0.5, max_content_length_per_page: int = 10000
     ):
         """
         Initialize the post-processor
 
         Args:
             min_score_threshold: Minimum relevance score threshold
-            max_content_length: Maximum content length
+            max_content_length_per_page: Maximum content length
         """
         self.min_score_threshold = min_score_threshold
-        self.max_content_length = max_content_length
+        self.max_content_length_per_page = max_content_length_per_page
 
     def process_results(self, results: List[Dict]) -> List[Dict]:
         """
@@ -131,9 +131,14 @@ class SearchResultPostProcessor:
         if "image_description" in cleaned_result and isinstance(
             cleaned_result["image_description"], str
         ):
-            if len(cleaned_result["image_description"]) > self.max_content_length:
+            if (
+                len(cleaned_result["image_description"])
+                > self.max_content_length_per_page
+            ):
                 cleaned_result["image_description"] = (
-                    cleaned_result["image_description"][: self.max_content_length]
+                    cleaned_result["image_description"][
+                        : self.max_content_length_per_page
+                    ]
                     + "..."
                 )
 
@@ -147,15 +152,17 @@ class SearchResultPostProcessor:
         # Truncate content length
         if "content" in truncated_result:
             content = truncated_result["content"]
-            if len(content) > self.max_content_length:
-                truncated_result["content"] = content[: self.max_content_length] + "..."
+            if len(content) > self.max_content_length_per_page:
+                truncated_result["content"] = (
+                    content[: self.max_content_length_per_page] + "..."
+                )
 
         # Truncate raw content length (can be slightly longer)
         if "raw_content" in truncated_result:
             raw_content = truncated_result["raw_content"]
-            if len(raw_content) > self.max_content_length * 2:
+            if len(raw_content) > self.max_content_length_per_page * 2:
                 truncated_result["raw_content"] = (
-                    raw_content[: self.max_content_length * 2] + "..."
+                    raw_content[: self.max_content_length_per_page * 2] + "..."
                 )
 
         return truncated_result
