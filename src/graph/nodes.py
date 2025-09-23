@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Annotated, Literal
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -296,10 +296,10 @@ def reporter_node(state: State, config: RunnableConfig):
 
     # Context compression
     llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP["reporter"])
-    compressed_messages = ContextManager(llm_token_limit).compress_messages(
-        observation_messages
+    compressed_state = ContextManager(llm_token_limit).compress_messages(
+        {"messages": observation_messages}
     )
-    invoke_messages += compressed_messages
+    invoke_messages += compressed_state.get("messages", [])
 
     logger.debug(f"Current invoke messages: {invoke_messages}")
     response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
@@ -307,7 +307,6 @@ def reporter_node(state: State, config: RunnableConfig):
     logger.info(f"reporter response: {response_content}")
 
     return {"final_report": response_content}
-
 
 def research_team_node(state: State):
     """Research team node that collaborates on tasks."""
@@ -482,7 +481,7 @@ async def _setup_and_execute_agent_step(
                 loaded_tools.append(tool)
 
         llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
-        pre_model_hook = partial(ContextManager(llm_token_limit).compress_messages)
+        pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
         agent = create_agent(
             agent_type, agent_type, loaded_tools, agent_type, pre_model_hook
         )
@@ -490,7 +489,7 @@ async def _setup_and_execute_agent_step(
     else:
         # Use default tools if no MCP servers are configured
         llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
-        pre_model_hook = partial(ContextManager(llm_token_limit).compress_messages)
+        pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
         agent = create_agent(
             agent_type, agent_type, default_tools, agent_type, pre_model_hook
         )

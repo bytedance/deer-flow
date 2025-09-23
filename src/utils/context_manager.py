@@ -8,6 +8,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 import logging
+import copy
 
 from src.config import load_yaml_config
 
@@ -23,14 +24,16 @@ def get_search_config():
 class ContextManager:
     """Context manager and compression class"""
 
-    def __init__(self, token_limit: int):
+    def __init__(self, token_limit: int, preserve_prefix_message_count: int = 0):
         """
         Initialize ContextManager
 
         Args:
             token_limit: Maximum token limit
+            preserve_prefix_message_count: Number of messages to preserve at the beginning of the context
         """
         self.token_limit = token_limit
+        self.preserve_prefix_message_count = preserve_prefix_message_count
 
     def count_tokens(self, messages: List[BaseMessage]) -> int:
         """
@@ -140,18 +143,24 @@ class ContextManager:
         """
         return self.count_tokens(messages) > self.token_limit
 
-    def compress_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+    def compress_messages(self, state: dict) -> List[BaseMessage]:
         """
         Compress messages to fit within token limit
 
         Args:
-            messages: Original message list
+            state: state with original messages
 
         Returns:
-            Compressed message list
+            Compressed state with compressed messages
         """
+        if not isinstance(state, dict) or 'messages' not in state:
+            logger.warning("No messages found in state")
+            return state
+
+        messages = state['messages']
+
         if not self.is_over_limit(messages):
-            return messages
+            return state
 
         # 2. Compress messages
         compressed_messages = self._compress_messages(messages)
@@ -159,7 +168,9 @@ class ContextManager:
         logger.info(
             f"Message compression completed: {self.count_tokens(messages)} -> {self.count_tokens(compressed_messages)} tokens"
         )
-        return compressed_messages
+
+        state['messages'] = compressed_messages
+        return state
 
     def _compress_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """
@@ -171,30 +182,64 @@ class ContextManager:
         Returns:
             Compressed message list
         """
-        # 1. Protect system message
-        if messages and isinstance(messages[0], SystemMessage):
-            sys_msg = messages[0]
-            available_token = self.token_limit - self._count_message_tokens(sys_msg)
-        else:
-            available_token = self.token_limit
 
-        # 2. Keep messages from newest to oldest
-        new_messages = []
+        available_token = self.token_limit
+        prefix_messages = []
+
+        # 1. Preserve head messages of specified length to retain system prompts and user input
+        for i in range(min(self.preserve_prefix_message_count, len(messages))):
+            cur_token_cnt = self._count_message_tokens(messages[i])
+            if available_token > 0 and available_token >= cur_token_cnt:
+                prefix_messages.append(messages[i])
+                available_token -= cur_token_cnt
+            elif available_token > 0:
+                # Truncate content to fit available tokens
+                truncated_message = self._truncate_message_content(messages[i], available_token)
+                prefix_messages.append(truncated_message)
+                return prefix_messages
+            else:
+                break
+
+        # 2. Compress subsequent messages from the tail, some messages may be discarded
+        messages = messages[len(prefix_messages):]
+        suffix_messages = []
         for i in range(len(messages) - 1, -1, -1):
-            # Fixed logical error: should check if current message is system message, not first message
-            if isinstance(messages[i], SystemMessage):
-                continue
 
             cur_token_cnt = self._count_message_tokens(messages[i])
 
-            if cur_token_cnt <= available_token:
-                new_messages = [messages[i]] + new_messages
+            if cur_token_cnt > 0 and available_token >= cur_token_cnt:
+                suffix_messages = [messages[i]] + suffix_messages
                 available_token -= cur_token_cnt
+            elif available_token > 0:
+                # Truncate content to fit available tokens
+                truncated_message = self._truncate_message_content(messages[i], available_token)
+                suffix_messages = [truncated_message] + suffix_messages
+                return prefix_messages + suffix_messages
             else:
-                # TODO: summary message
                 break
 
-        return new_messages
+        return prefix_messages + suffix_messages
+
+    def _truncate_message_content(self, message: BaseMessage, max_tokens: int) -> BaseMessage:
+        """
+        Truncate message content while preserving all other attributes by copying the original message
+        and only modifying its content attribute.
+        
+        Args:
+            message: The message to truncate
+            max_tokens: Maximum number of tokens to keep
+            
+        Returns:
+            New message instance with truncated content
+        """
+        
+        # Create a deep copy of the original message to preserve all attributes
+        truncated_message = copy.deepcopy(message)
+        
+        # Truncate only the content attribute
+        truncated_message.content = message.content[:max_tokens]
+        
+        return truncated_message
 
     def _create_summary_message(self, messages: List[BaseMessage]) -> BaseMessage:
         """

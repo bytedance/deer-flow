@@ -67,6 +67,10 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
     # Merge configurations, with environment variables taking precedence
     merged_conf = {**llm_conf, **env_conf}
 
+    # Remove unnecessary parameters when initializing the client
+    if "token_limit" in merged_conf:
+        merged_conf.pop("token_limit")
+
     if not merged_conf:
         raise ValueError(f"No configuration found for LLM type: {llm_type}")
 
