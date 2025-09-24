@@ -78,9 +78,9 @@
   },
   "chat": {
     "page": {
-        "loading": "Loading DeerFlow...",
-        "welcomeUser": "Welcome, {username}",
-        "starOnGitHub": "Star DeerFlow on GitHub"
+      "loading": "Loading DeerFlow...",
+      "welcomeUser": "Welcome, {username}",
+      "starOnGitHub": "Star DeerFlow on GitHub"
     },
     "welcome": {
       "greeting": "👋 Hello, there!",
@@ -133,6 +133,16 @@
       "podcast": "Podcast",
       "errorGeneratingPodcast": "Error when generating podcast. Please try again.",
       "downloadPodcast": "Download podcast"
+    },
+    "agents": {
+      "working": "Working...",
+      "coordinator": "Coordinator",
+      "backgroundInvestigator": "Background Investigator",
+      "planner": "Planner",
+      "researcher": "Researcher",
+      "coder": "Coder",
+      "reporter": "Reporter",
+      "unknown": "Processing..."
     },
     "messages": {
       "replaying": "Replaying",

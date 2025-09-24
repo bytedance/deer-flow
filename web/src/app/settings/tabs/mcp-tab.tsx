@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { motion } from "framer-motion";
-import { Blocks, PencilRuler, Trash } from "lucide-react";
+import { Blocks, PencilRuler, Trash, Brain } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useState } from "react";
 
@@ -86,6 +86,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
           </a>
         </div>
       </header>
+      
       <main>
         <ul id="mcp-servers-list" className="flex flex-col gap-4">
           {servers.map((server) => {

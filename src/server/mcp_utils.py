@@ -21,7 +21,7 @@ async def _get_tools_from_client_session(
     Helper function to get tools from a client session.
 
     Args:
-        client_context_manager: A context manager that returns (read, write) functions
+        client_context_manager: A context manager that returns (read, write, callback) functions
         timeout_seconds: Timeout in seconds for the read operation
 
     Returns:
