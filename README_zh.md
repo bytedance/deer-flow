@@ -163,6 +163,10 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
   - 无需 API 密钥
   - 专为科学和学术论文设计
 
+- **Searx/SearxNG**：自托管的元搜索引擎
+  - 需要在`.env`文件中设置`SEARX_HOST`
+  - 支持对接Searx或SearxNG
+
 要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash
@@ -181,6 +185,16 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
    RAGFLOW_API_URL="http://localhost:9388"
    RAGFLOW_API_KEY="ragflow-xxx"
    RAGFLOW_RETRIEVAL_SIZE=10
+   ```
+
+- **[MOI]**：AI 原生多模态数据智能平台
+   ```
+   # 参照示例进行配置 .env.example
+   RAG_PROVIDER=moi
+   MOI_API_URL="https://freetier-01.cn-hangzhou.cluster.matrixonecloud.cn"
+   MOI_API_KEY="xxx-xxx-xxx-xxx"
+   MOI_RETRIEVAL_SIZE=10
+   MOI_LIST_LIMIT=10
    ```
 
 - **[VikingDB 知识库](https://www.volcengine.com/docs/84313/1254457)**：火山引擎提供的公有云知识库引擎

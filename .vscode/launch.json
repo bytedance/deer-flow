@@ -86,5 +86,22 @@
                 "PYTHONPATH": "${workspaceFolder}"
             }
         },
+        {
+            "name": "Debug: nodejs web",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "pnpm",
+            "runtimeArgs": [
+                "dev"
+            ],
+            "cwd": "${workspaceFolder}/web",
+            "console": "integratedTerminal"
+        },
+    ],
+    "compounds": [
+        {
+            "name": "Launch Deerflow",
+            "configurations": ["Debug: server", "Debug: web"]
+        }
     ]
 }
