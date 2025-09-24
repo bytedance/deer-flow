@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Annotated, Literal
 
+from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -103,25 +104,46 @@ def planner_node(
             }
         ]
 
-    if configurable.enable_deep_thinking:
-        llm = get_llm_by_type("reasoning")
-    elif AGENT_LLM_MAP["planner"] == "basic":
-        llm = get_llm_by_type("basic").with_structured_output(
-            Plan,
-            method="json_mode",
-        )
-    else:
-        llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
-
     # if the plan iterations is greater than the max plan iterations, return the reporter node
     if plan_iterations >= configurable.max_plan_iterations:
         return Command(goto="reporter")
 
     full_response = ""
-    if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
-        response = llm.invoke(messages)
-        full_response = response.model_dump_json(indent=4, exclude_none=True)
+    if configurable.enable_deep_thinking:
+        llm = get_llm_by_type("reasoning")
+    elif AGENT_LLM_MAP["planner"] == "basic":
+        try:
+            # Try generating plan in 'json_mode' first because not all LLMs support a strict json schema
+            llm = get_llm_by_type(AGENT_LLM_MAP["planner"]).with_structured_output(
+                Plan,
+                method="json_mode",
+            )
+            response = llm.invoke(messages)
+            full_response = response.model_dump_json(indent=4, exclude_none=True)
+        except OutputParserException as e:
+            logger.debug(f"Planner exception in json_mode: {e}")
+            logger.info(
+                f"Plan did not comply with desired json format. Now trying to generate plan with strict json schema..."
+            )
+            try:
+                # If pydantic throws a model validation error then the LLM did not respond in the desired
+                # json format, so try to generate plan using a strict json schema.
+                llm = get_llm_by_type(AGENT_LLM_MAP["planner"]).with_structured_output(
+                    Plan,
+                    method="json_schema",
+                    strict=True,
+                )
+                response = llm.invoke(messages)
+                full_response = response.model_dump_json(indent=4, exclude_none=True)
+            except Exception as f:
+                # If another exception occurs then the LLM does not support a strict json schema and we are out of options.
+                logger.debug(f"Planner exception with strict json_schema: {f}")
+                logger.info(
+                    f"Unable to generate plan with strict json schema. Try to reduce the complexity of your query."
+                )
+                raise
     else:
+        llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         response = llm.stream(messages)
         for chunk in response:
             full_response += chunk.content
