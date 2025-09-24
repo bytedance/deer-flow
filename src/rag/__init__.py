@@ -3,8 +3,8 @@
 
 from .builder import build_retriever
 from .dify import DifyProvider
-from .ragflow import RAGFlowProvider
 from .moi import MOIProvider
+from .ragflow import RAGFlowProvider
 from .retriever import Chunk, Document, Resource, Retriever
 from .vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
 

@@ -275,7 +275,6 @@ async def _stream_graph_events(
         )
 
 
-
 async def _astream_workflow_generator(
     messages: List[dict],
     thread_id: str,
@@ -519,6 +518,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
                     "POPULAR_SCIENCE": ReportStyle.POPULAR_SCIENCE,
                     "NEWS": ReportStyle.NEWS,
                     "SOCIAL_MEDIA": ReportStyle.SOCIAL_MEDIA,
+                    "STRATEGIC_INVESTMENT": ReportStyle.STRATEGIC_INVESTMENT,
                 }
                 report_style = style_mapping.get(
                     request.report_style.upper(), ReportStyle.ACADEMIC
