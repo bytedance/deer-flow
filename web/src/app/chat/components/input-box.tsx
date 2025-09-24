@@ -7,6 +7,7 @@ import { ArrowUp, Lightbulb, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
+
 import { Detective } from "~/components/deer-flow/icons/detective";
 import MessageInput, {
   type MessageInputRef,

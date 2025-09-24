@@ -6,12 +6,12 @@ import { useMemo } from "react";
 
 import { env } from "~/env";
 
-import { extractReplayIdFromSearchParams } from "./get-replay-id";
+import { extractFromSearchParams } from "./get-replay-id";
 
 export function useReplay() {
   const searchParams = useSearchParams();
   const replayId = useMemo(
-    () => extractReplayIdFromSearchParams(searchParams.toString()),
+    () => extractFromSearchParams(searchParams.toString(), "replay") ?? extractFromSearchParams(searchParams.toString(), "thread_id"),
     [searchParams],
   );
   return {

@@ -47,7 +47,19 @@ from src.server.rag_request import (
     RAGResourceRequest,
     RAGResourcesResponse,
 )
+from src.server.conversation_request import (
+    Conversation,
+    ConversationsRequest,
+    ConversationsResponse,
+)
 from src.tools import VolcengineTTS
+
+from src.graph.checkpoint import (
+    chat_stream_message,
+    get_conversation,
+    list_conversations,
+)
+
 from src.utils.json_utils import sanitize_args
 
 logger = logging.getLogger(__name__)
@@ -611,3 +623,48 @@ async def config():
         rag=RAGConfigResponse(provider=SELECTED_RAG_PROVIDER),
         models=get_configured_llm_models(),
     )
+
+
+@app.get("/api/conversation/{thread_id}", response_model=str)
+async def get_converstation(thread_id: str) -> Response:
+    """Get the Conversation content for a specific thread ID."""
+    try:
+        content = get_conversation(thread_id)
+        if not content:
+            raise HTTPException(status_code=404, detail="Converstation not found")
+
+        return Response(
+            content=content,
+            media_type="text/plain",
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
+
+    except Exception as e:
+        logger.exception(f"Error getting Converstation: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
+
+
+@app.get("/api/conversations", response_model=ConversationsResponse)
+async def get_conversations(
+    request: Annotated[ConversationsRequest, Query()],
+) -> ConversationsResponse:
+    """Get conversations based on the provided request parameters."""
+    try:
+        conversations = list_conversations(limit=request.limit, sort=request.sort)
+        response = []
+        for conversation in conversations:
+            response.append(
+                Conversation(
+                    id=conversation.get("thread_id", ""),
+                    title=conversation.get("research_topic", ""),
+                    count=conversation.get("messages", 0),
+                    date=conversation.get("ts", ""),
+                    category=conversation.get("report_style", ""),
+                    data_type="database",  # Assuming default data type is 'txt'
+                )
+            )
+        data = ConversationsResponse(data=response)
+        return data
+    except Exception as e:
+        logger.exception(f"Error getting conversations: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
