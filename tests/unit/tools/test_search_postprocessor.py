@@ -9,7 +9,7 @@ class TestSearchResultPostProcessor:
     def post_processor(self):
         """Create a SearchResultPostProcessor instance for testing"""
         return SearchResultPostProcessor(
-            min_score_threshold=0.5, max_content_length=100
+            min_score_threshold=0.5, max_content_length_per_page=100
         )
 
     def test_process_results_empty_input(self, post_processor):
