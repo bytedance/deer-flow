@@ -121,9 +121,9 @@ class EnhancedTavilySearchAPIWrapper(OriginalTavilySearchAPIWrapper):
 
         search_config = get_search_config()
         clean_results = SearchResultPostProcessor(
-            min_score_threshold=search_config.get("min_score_threshold", 0.5),
+            min_score_threshold=search_config.get("min_score_threshold"),
             max_content_length_per_page=search_config.get(
-                "max_content_length_per_page", 10000
+                "max_content_length_per_page"
             ),
         ).process_results(clean_results)
 

@@ -153,6 +153,10 @@ class ContextManager:
         Returns:
             Compressed state with compressed messages
         """
+        # If not set token_limit, return original state
+        if self.token_limit is None:
+            return state
+
         if not isinstance(state, dict) or "messages" not in state:
             logger.warning("No messages found in state")
             return state
@@ -256,5 +260,5 @@ class ContextManager:
         Returns:
             Summary message
         """
-        # Simple summary implementation
+        # TODO: summary implementation
         pass

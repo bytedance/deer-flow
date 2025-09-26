@@ -193,7 +193,7 @@ def get_llm_token_limit_by_type(llm_type: str) -> int:
     config_key = llm_type_config_keys.get(llm_type)
 
     conf = load_yaml_config(_get_config_file_path())
-    llm_max_token = conf.get(config_key, {}).get("token_limit", 128000)
+    llm_max_token = conf.get(config_key, {}).get("token_limit")
     return llm_max_token
 
 

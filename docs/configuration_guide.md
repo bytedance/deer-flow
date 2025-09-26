@@ -233,8 +233,8 @@ DeerFlow can post-process Tavily search results:
 * Length truncation: Truncate each search result according to the user-configured length
 
 The filtering of low-quality content and length truncation depend on user configuration, providing two configurable parameters:
-* min_score_threshold: Minimum relevance score threshold, search results below this threshold will be filtered, default value is `0.5`;
-* max_content_length_per_page: Maximum length limit for each search result content, parts exceeding this length will be truncated, default value is `10000`;
+* min_score_threshold: Minimum relevance score threshold, search results below this threshold will be filtered. If not set, no filtering will be performed;
+* max_content_length_per_page: Maximum length limit for each search result content, parts exceeding this length will be truncated. If not set, no truncation will be performed;
 
 These two parameters can be configured in `conf.yaml` as shown below:
 ```yaml
@@ -244,6 +244,7 @@ SEARCH_ENGINE:
   min_score_threshold: 0.4
   max_content_length_per_page: 5000
 ```
+That's meaning that the search results will be filtered based on the minimum relevance score threshold and truncated to the maximum length limit for each search result content.
 
 ## RAG (Retrieval-Augmented Generation) Configuration
 

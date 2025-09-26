@@ -13,9 +13,7 @@ class SearchResultPostProcessor:
 
     base64_pattern = r"data:image/[^;]+;base64,[a-zA-Z0-9+/=]+"
 
-    def __init__(
-        self, min_score_threshold: float = 0.5, max_content_length_per_page: int = 10000
-    ):
+    def __init__(self, min_score_threshold: float, max_content_length_per_page: int):
         """
         Initialize the post-processor
 
@@ -52,6 +50,8 @@ class SearchResultPostProcessor:
             # 2. Filter low quality results
             if (
                 "page" == cleaned_result.get("type")
+                and self.min_score_threshold
+                and self.min_score_threshold > 0
                 and cleaned_result.get("score", 0) < self.min_score_threshold
             ):
                 continue
@@ -61,8 +61,12 @@ class SearchResultPostProcessor:
             if not cleaned_result:
                 continue
 
-            # 4. Truncate long content
-            cleaned_result = self._truncate_long_content(cleaned_result)
+            # 4. When max_content_length_per_page is set, truncate long content
+            if (
+                self.max_content_length_per_page
+                and self.max_content_length_per_page > 0
+            ):
+                cleaned_result = self._truncate_long_content(cleaned_result)
 
             if cleaned_result:
                 cleaned_results.append(cleaned_result)
@@ -98,20 +102,25 @@ class SearchResultPostProcessor:
         if "content" in result:
             original_content = result["content"]
             cleaned_content = re.sub(self.base64_pattern, " ", original_content)
+            cleaned_result["content"] = cleaned_content
 
             # Log if significant content was removed
             if len(cleaned_content) < len(original_content) * 0.8:
                 logger.debug(
-                    f"Removed base64 images from search result: {result.get('url', 'unknown')}"
+                    f"Removed base64 images from search content: {result.get('url', 'unknown')}"
                 )
-
-            cleaned_result["content"] = cleaned_content
 
         # Clean base64 images from raw content
         if "raw_content" in cleaned_result:
             original_raw_content = cleaned_result["raw_content"]
             cleaned_raw_content = re.sub(self.base64_pattern, " ", original_raw_content)
             cleaned_result["raw_content"] = cleaned_raw_content
+
+            # Log if significant content was removed
+            if len(cleaned_raw_content) < len(original_raw_content) * 0.8:
+                logger.debug(
+                    f"Removed base64 images from search raw content: {result.get('url', 'unknown')}"
+                )
 
         return cleaned_result
 
@@ -125,14 +134,27 @@ class SearchResultPostProcessor:
         ):
             # Check if image_url contains base64 data
             if "data:image" in cleaned_result["image_url"]:
-                return {}
+                original_image_url = cleaned_result["image_url"]
+                cleaned_image_url = re.sub(self.base64_pattern, " ", original_image_url)
+                if len(cleaned_image_url) == 0 or not cleaned_image_url.startswith(
+                    "http"
+                ):
+                    logger.debug(
+                        f"Removed base64 data from image_url and the cleaned_image_url is empty or not start with http, origin image_url: {result.get('image_url', 'unknown')}"
+                    )
+                    return {}
+                cleaned_result["image_url"] = cleaned_image_url
+                logger.debug(
+                    f"Removed base64 data from image_url: {result.get('image_url', 'unknown')}"
+                )
 
         # Truncate very long image descriptions
         if "image_description" in cleaned_result and isinstance(
             cleaned_result["image_description"], str
         ):
             if (
-                len(cleaned_result["image_description"])
+                self.max_content_length_per_page
+                and len(cleaned_result["image_description"])
                 > self.max_content_length_per_page
             ):
                 cleaned_result["image_description"] = (
@@ -140,6 +162,9 @@ class SearchResultPostProcessor:
                         : self.max_content_length_per_page
                     ]
                     + "..."
+                )
+                logger.info(
+                    f"Truncated long image description from search result: {result.get('image_url', 'unknown')}"
                 )
 
         return cleaned_result
@@ -156,6 +181,9 @@ class SearchResultPostProcessor:
                 truncated_result["content"] = (
                     content[: self.max_content_length_per_page] + "..."
                 )
+                logger.info(
+                    f"Truncated long content from search result: {result.get('url', 'unknown')}"
+                )
 
         # Truncate raw content length (can be slightly longer)
         if "raw_content" in truncated_result:
@@ -163,6 +191,9 @@ class SearchResultPostProcessor:
             if len(raw_content) > self.max_content_length_per_page * 2:
                 truncated_result["raw_content"] = (
                     raw_content[: self.max_content_length_per_page * 2] + "..."
+                )
+                logger.info(
+                    f"Truncated long raw content from search result: {result.get('url', 'unknown')}"
                 )
 
         return truncated_result

@@ -209,3 +209,54 @@ class TestSearchResultPostProcessor:
         assert len(processed) == 1
         assert processed[0]["type"] == "video"
         assert processed[0]["title"] == "Test Video"
+
+    def test_process_results_truncate_long_content_with_no_config(self):
+        """Test truncating long content"""
+        post_processor = SearchResultPostProcessor(None, None)
+        long_content = "A" * 150  # Longer than max_content_length of 100
+        results = [
+            {
+                "type": "page",
+                "title": "Long Content Page",
+                "url": "https://example.com",
+                "content": long_content,
+                "score": 0.8,
+            }
+        ]
+        processed = post_processor.process_results(results)
+        assert len(processed) == 1
+        assert len(processed[0]["content"]) == len("A" * 150)
+
+    def test_process_results_truncate_long_content_with_max_content_length_config(self):
+        """Test truncating long content"""
+        post_processor = SearchResultPostProcessor(None, 100)
+        long_content = "A" * 150  # Longer than max_content_length of 100
+        results = [
+            {
+                "type": "page",
+                "title": "Long Content Page",
+                "url": "https://example.com",
+                "content": long_content,
+                "score": 0.8,
+            }
+        ]
+        processed = post_processor.process_results(results)
+        assert len(processed) == 1
+        assert len(processed[0]["content"]) == 103
+        assert processed[0]["content"].endswith("...")
+
+    def test_process_results_truncate_long_content_with_min_score_config(self):
+        """Test truncating long content"""
+        post_processor = SearchResultPostProcessor(0.8, None)
+        long_content = "A" * 150  # Longer than max_content_length of 100
+        results = [
+            {
+                "type": "page",
+                "title": "Long Content Page",
+                "url": "https://example.com",
+                "content": long_content,
+                "score": 0.3,
+            }
+        ]
+        processed = post_processor.process_results(results)
+        assert len(processed) == 0
