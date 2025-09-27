@@ -153,7 +153,11 @@ When planning information gathering, consider these key aspects and ensure COMPR
 
 # Output Format
 
-Directly output the raw JSON format of `Plan` without "```json". The `Plan` interface is defined as follows:
+**CRITICAL: You MUST output a valid JSON object that exactly matches the Plan interface below. Do not include any text before or after the JSON. Do not use markdown code blocks. Output ONLY the raw JSON.**
+
+**IMPORTANT: The JSON must contain ALL required fields: locale, has_enough_context, thought, title, and steps. Do not return an empty object {}.**
+
+The `Plan` interface is defined as follows:
 
 ```ts
 interface Step {
@@ -169,6 +173,24 @@ interface Plan {
   thought: string;
   title: string;
   steps: Step[]; // Research & Processing steps to get more context
+}
+```
+
+**Example Output:**
+```json
+{
+  "locale": "en-US",
+  "has_enough_context": false,
+  "thought": "To understand the current market trends in AI, we need to gather comprehensive information about recent developments, key players, and market dynamics.",
+  "title": "AI Market Research Plan",
+  "steps": [
+    {
+      "need_search": true,
+      "title": "Current AI Market Analysis",
+      "description": "Collect data on market size, growth rates, major players, and investment trends in AI sector.",
+      "step_type": "research"
+    }
+  ]
 }
 ```
 
