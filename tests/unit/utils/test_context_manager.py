@@ -121,6 +121,26 @@ class TestContextManager:
         # Should keep only the most recent messages that fit
         assert len(compressed["messages"]) == 3
 
+    def test_compress_messages_without_config(self):
+        """Test compress_messages preserves system message"""
+        # Create a context manager with limited token capacity
+        limited_cm = ContextManager(None)
+
+        messages = [
+            SystemMessage(content="You are a helpful assistant."),
+            HumanMessage(content="Hello"),
+            AIMessage(content="Hi there!"),
+            HumanMessage(
+                content="Can you tell me a very long story that would exceed token limits? "
+                * 100
+            ),
+        ]
+
+        compressed = limited_cm.compress_messages({"messages": messages})
+        # return the original messages
+        assert len(compressed["messages"]) == 4
+
+
     def test_count_message_tokens_with_additional_kwargs(self):
         """Test counting tokens for messages with additional kwargs"""
         context_manager = ContextManager(token_limit=1000)

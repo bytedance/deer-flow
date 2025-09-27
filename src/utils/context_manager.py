@@ -155,6 +155,7 @@ class ContextManager:
         """
         # If not set token_limit, return original state
         if self.token_limit is None:
+            logger.info("No token_limit set, the context management doesn't work.")
             return state
 
         if not isinstance(state, dict) or "messages" not in state:

@@ -192,7 +192,7 @@ BASIC_MODEL:
 ```
 This means that the context length limit using this model is 128k. 
 
-The default value is `128000` if not specified.
+The context management doesn't work if the token_limit is not set.
 
 ## About Search Engine
 
