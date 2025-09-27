@@ -17,6 +17,14 @@ In DeerFlow, we currently only support non-reasoning models. This means models l
 
 `doubao-1.5-pro-32k-250115`, `gpt-4o`, `qwen-max-latest`,`qwen3-235b-a22b`,`qwen3-coder`, `gemini-2.0-flash`, `deepseek-v3`, and theoretically any other non-reasoning chat models that implement the OpenAI API specification.
 
+### Local Model Support
+
+DeerFlow supports local models through OpenAI-compatible APIs:
+
+- **Ollama**: `http://localhost:11434/v1` (tested and supported for local development)
+
+See the `conf.yaml.example` file for detailed configuration examples.
+
 > [!NOTE]
 > The Deep Research process requires the model to have a **longer context window**, which is not supported by all models.
 > A work-around is to set the `Max steps of a research plan` to `2` in the settings dialog located on the top right corner of the web page,

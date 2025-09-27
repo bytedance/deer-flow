@@ -95,6 +95,7 @@ cp .env.example .env
 
 # Configure conf.yaml for your LLM model and API keys
 # Please refer to 'docs/configuration_guide.md' for more details
+# For local development, you can use Ollama or other local models
 cp conf.yaml.example conf.yaml
 
 # Install marp for ppt generation
