@@ -4,7 +4,7 @@
 # - Replace `api_key` with your own credentials.
 # - Replace `base_url` and `model` name if you want to use a custom model.
 # - Set `verify_ssl` to `false` if your LLM server uses self-signed certificates
-# - A restart is required every time you change the `config.yaml` file.
+# - A restart is required every time you change the `conf.yaml` file.
 
 BASIC_MODEL:
   base_url: https://ark.cn-beijing.volces.com/api/v3
@@ -12,6 +12,16 @@ BASIC_MODEL:
   api_key: xxxx
   # max_retries: 3 # Maximum number of retries for LLM calls
   # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
+
+# Local model configuration example:
+
+# Ollama (Tested and supported for local development)
+# BASIC_MODEL:
+#   base_url: "http://localhost:11434/v1"  # Ollama OpenAI compatible endpoint
+#   model: "qwen3:14b"  # or "llama3.2", etc.
+#   api_key: "ollama"  # Ollama doesn't need real API key
+#   max_retries: 3
+#   verify_ssl: false  # Local deployment usually doesn't need SSL verification
 
 # To use Google Ai Studio as your basic platform:
 # BASIC_MODEL:

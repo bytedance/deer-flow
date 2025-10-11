@@ -4,6 +4,7 @@
 import json
 import logging
 from typing import Any
+
 import json_repair
 
 logger = logging.getLogger(__name__)

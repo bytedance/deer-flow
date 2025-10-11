@@ -95,6 +95,7 @@ cp .env.example .env
 
 # Configure conf.yaml for your LLM model and API keys
 # Please refer to 'docs/configuration_guide.md' for more details
+# For local development, you can use Ollama or other local models
 cp conf.yaml.example conf.yaml
 
 # Install marp for ppt generation
@@ -168,6 +169,10 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 - **Arxiv**: Scientific paper search for academic research
   - No API key required
   - Specialized for scientific and academic papers
+
+- **Searx/SearxNG**: Self-hosted metasearch engine
+  - Requires `SEARX_HOST` to be set in the `.env` file
+  - Supports connecting to either Searx or SearxNG
 
 To configure your preferred search engine, set the `SEARCH_API` variable in your `.env` file:
 

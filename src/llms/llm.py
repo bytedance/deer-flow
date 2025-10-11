@@ -10,7 +10,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_deepseek import ChatDeepSeek
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
-from typing import get_args
 
 from src.config import load_yaml_config
 from src.config.agents import LLMType
@@ -67,6 +66,10 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     # Merge configurations, with environment variables taking precedence
     merged_conf = {**llm_conf, **env_conf}
+
+    # Remove unnecessary parameters when initializing the client
+    if "token_limit" in merged_conf:
+        merged_conf.pop("token_limit")
 
     if not merged_conf:
         raise ValueError(f"No configuration found for LLM type: {llm_type}")
@@ -173,6 +176,25 @@ def get_configured_llm_models() -> dict[str, list[str]]:
         # Log error and return empty dict to avoid breaking the application
         print(f"Warning: Failed to load LLM configuration: {e}")
         return {}
+
+
+def get_llm_token_limit_by_type(llm_type: str) -> int:
+    """
+    Get the maximum token limit for a given LLM type.
+
+    Args:
+        llm_type (str): The type of LLM.
+
+    Returns:
+        int: The maximum token limit for the specified LLM type.
+    """
+
+    llm_type_config_keys = _get_llm_type_config_keys()
+    config_key = llm_type_config_keys.get(llm_type)
+
+    conf = load_yaml_config(_get_config_file_path())
+    llm_max_token = conf.get(config_key, {}).get("token_limit")
+    return llm_max_token
 
 
 # In the future, we will use reasoning_llm and vl_llm for different purposes

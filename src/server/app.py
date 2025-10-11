@@ -4,7 +4,8 @@
 import base64
 import json
 import logging
-from typing import Annotated, List, cast, Optional
+
+from typing import Annotated, Any, List, cast, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Depends
@@ -13,10 +14,10 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
-from langgraph.types import Command
-from langgraph.store.memory import InMemoryStore
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import Command
 from psycopg_pool import AsyncConnectionPool
 
 from src.config.configuration import get_recursion_limit
@@ -24,6 +25,7 @@ from src.config.loader import get_bool_env, get_str_env
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
+from src.graph.checkpoint import chat_stream_message
 from src.llms.llm import get_configured_llm_models
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
@@ -49,7 +51,6 @@ from src.server.rag_request import (
     RAGResourcesResponse,
 )
 from src.tools import VolcengineTTS
-from src.graph.checkpoint import chat_stream_message
 from src.utils.json_utils import sanitize_args
 from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user, generate_csrf_token
 
@@ -306,25 +307,35 @@ async def _stream_graph_events(
     graph_instance, workflow_input, workflow_config, thread_id
 ):
     """Stream events from the graph and process them."""
-    async for agent, _, event_data in graph_instance.astream(
-        workflow_input,
-        config=workflow_config,
-        stream_mode=["messages", "updates"],
-        subgraphs=True,
-    ):
-        if isinstance(event_data, dict):
-            if "__interrupt__" in event_data:
-                yield _create_interrupt_event(thread_id, event_data)
-            continue
-
-        message_chunk, message_metadata = cast(
-            tuple[BaseMessage, dict[str, any]], event_data
-        )
-
-        async for event in _process_message_chunk(
-            message_chunk, message_metadata, thread_id, agent
+    try:
+        async for agent, _, event_data in graph_instance.astream(
+            workflow_input,
+            config=workflow_config,
+            stream_mode=["messages", "updates"],
+            subgraphs=True,
         ):
-            yield event
+            if isinstance(event_data, dict):
+                if "__interrupt__" in event_data:
+                    yield _create_interrupt_event(thread_id, event_data)
+                continue
+
+            message_chunk, message_metadata = cast(
+                tuple[BaseMessage, dict[str, Any]], event_data
+            )
+
+            async for event in _process_message_chunk(
+                message_chunk, message_metadata, thread_id, agent
+            ):
+                yield event
+    except Exception as e:
+        logger.exception("Error during graph execution")
+        yield _make_event(
+            "error",
+            {
+                "thread_id": thread_id,
+                "error": "Error during graph execution",
+            },
+        )
 
 
 async def _astream_workflow_generator(
@@ -570,6 +581,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
                     "POPULAR_SCIENCE": ReportStyle.POPULAR_SCIENCE,
                     "NEWS": ReportStyle.NEWS,
                     "SOCIAL_MEDIA": ReportStyle.SOCIAL_MEDIA,
+                    "STRATEGIC_INVESTMENT": ReportStyle.STRATEGIC_INVESTMENT,
                 }
                 report_style = style_mapping.get(
                     request.report_style.upper(), ReportStyle.ACADEMIC

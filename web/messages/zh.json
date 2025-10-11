@@ -87,7 +87,9 @@
       "news": "新闻",
       "newsDesc": "事实、简明、公正的新闻风格",
       "socialMedia": "社交媒体",
-      "socialMediaDesc": "简洁有趣，易于传播"
+      "socialMediaDesc": "简洁有趣，易于传播",
+      "strategicInvestment": "战略投资",
+      "strategicInvestmentDesc": "面向战略投资机构的深度综合分析，提供可执行的投资洞察"
     }
   },
   "footer": {
