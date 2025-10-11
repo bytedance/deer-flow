@@ -6,7 +6,6 @@ import { useMemo, useState } from "react";
 import ReactMarkdown, {
   type Options as ReactMarkdownOptions,
 } from "react-markdown";
-import type { PluggableList } from "unified";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -52,8 +51,11 @@ export function Markdown({
     };
   }, [checkLinkCredibility]);
 
-  const rehypePlugins = useMemo<PluggableList>(() => {
-    const plugins: PluggableList = [[rehypeKatex, katexOptions]];
+  const rehypePlugins = useMemo<NonNullable<ReactMarkdownOptions["rehypePlugins"]>>(() => {
+    const plugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [[
+      rehypeKatex,
+      katexOptions,
+    ]];
     if (animated) {
       plugins.push(rehypeSplitWordsIntoSpans);
     }
