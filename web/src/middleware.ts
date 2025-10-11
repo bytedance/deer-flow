@@ -9,14 +9,32 @@ const protectedRoutes = ['/chat', '/admin'];
 const authRoutes = ['/login'];
 // const publicRoutes = ['/', '/landing']; // Commented out as it's not currently used
 
+function getTokenPayload(token: string): { role?: string } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3 || !parts[1]) {
+      return null;
+    }
+
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(normalized.length + (4 - (normalized.length % 4)) % 4, '=');
+    const decoded = globalThis.atob(padded);
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
   // Get token from cookies
   const token = request.cookies.get('authToken')?.value;
+  const tokenPayload = token ? getTokenPayload(token) : null;
   
   // Check if route is protected
   const isProtectedRoute = protectedRoutes.some(route => pathname.startsWith(route));
+  const isAdminRoute = pathname.startsWith('/admin');
   const isAuthRoute = authRoutes.some(route => pathname.startsWith(route));
   // const isPublicRoute = publicRoutes.some(route => pathname.startsWith(route)) || pathname === '/'; // Commented out as it's not currently used
   
@@ -40,6 +58,14 @@ export function middleware(request: NextRequest) {
   // Redirect authenticated users from root to chat
   if (pathname === '/' && token) {
     return NextResponse.redirect(new URL('/chat', request.url));
+  }
+
+  // Block non-admin users from admin routes
+  if (isAdminRoute) {
+    const isAdmin = tokenPayload?.role === 'admin';
+    if (!token || !isAdmin) {
+      return NextResponse.redirect(new URL('/chat', request.url));
+    }
   }
   
   return NextResponse.next();

@@ -3,7 +3,7 @@
 
 "use client";
 
-import { UserOutlined, LogoutOutlined } from "@ant-design/icons";
+import { UserOutlined, LogoutOutlined, SettingOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
 import { useAuth } from "~/core/auth/context";
 
@@ -60,6 +60,18 @@ export function UserMenu() {
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {user.role === "admin" && (
+          <DropdownMenuItem
+            onClick={() => {
+              window.location.href = "/admin";
+            }}
+            className="cursor-pointer"
+          >
+            <SettingOutlined className="mr-2 h-4 w-4" />
+            <span>{t("adminConsole", { defaultMessage: "Admin Console" })}</span>
+          </DropdownMenuItem>
+        )}
+        {user.role === "admin" && <DropdownMenuSeparator />}
         <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
           <LogoutOutlined className="mr-2 h-4 w-4" />
           <span>{t("logout")}</span>
