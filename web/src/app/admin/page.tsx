@@ -3,9 +3,9 @@
 
 "use client";
 
+import { Loader2, RefreshCw } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 
@@ -13,9 +13,9 @@ import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
+import { fetchAdminConfig, type AdminConfig, updateAdminConfig } from "~/core/api/admin";
 import { useAuth } from "~/core/auth/context";
 import { AdminWrapper } from "~/core/auth/wrapper";
-import { fetchAdminConfig, type AdminConfig, updateAdminConfig } from "~/core/api/admin";
 
 export default function AdminPage() {
   const { user } = useAuth();
