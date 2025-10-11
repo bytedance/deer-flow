@@ -13,6 +13,7 @@ import "katex/dist/katex.min.css";
 
 import { Button } from "~/components/ui/button";
 import { rehypeSplitWordsIntoSpans } from "~/core/rehype";
+import { katexOptions } from "~/core/markdown/katex";
 import { autoFixMarkdown } from "~/core/utils/markdown";
 import { cn } from "~/lib/utils";
 
@@ -50,11 +51,15 @@ export function Markdown({
     };
   }, [checkLinkCredibility]);
 
-  const rehypePlugins = useMemo(() => {
+  const rehypePlugins = useMemo<NonNullable<ReactMarkdownOptions["rehypePlugins"]>>(() => {
+    const plugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [[
+      rehypeKatex,
+      katexOptions,
+    ]];
     if (animated) {
-      return [rehypeKatex, rehypeSplitWordsIntoSpans];
+      plugins.push(rehypeSplitWordsIntoSpans);
     }
-    return [rehypeKatex];
+    return plugins;
   }, [animated]);
   return (
     <div className={cn(className, "prose dark:prose-invert")} style={style}>
