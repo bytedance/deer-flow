@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import ReactMarkdown, {
   type Options as ReactMarkdownOptions,
 } from "react-markdown";
+import type { PluggableList } from "unified";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -13,6 +14,7 @@ import "katex/dist/katex.min.css";
 
 import { Button } from "~/components/ui/button";
 import { rehypeSplitWordsIntoSpans } from "~/core/rehype";
+import { katexOptions } from "~/core/markdown/katex";
 import { autoFixMarkdown } from "~/core/utils/markdown";
 import { cn } from "~/lib/utils";
 
@@ -50,11 +52,12 @@ export function Markdown({
     };
   }, [checkLinkCredibility]);
 
-  const rehypePlugins = useMemo(() => {
+  const rehypePlugins = useMemo<PluggableList>(() => {
+    const plugins: PluggableList = [[rehypeKatex, katexOptions]];
     if (animated) {
-      return [rehypeKatex, rehypeSplitWordsIntoSpans];
+      plugins.push(rehypeSplitWordsIntoSpans);
     }
-    return [rehypeKatex];
+    return plugins;
   }, [animated]);
   return (
     <div className={cn(className, "prose dark:prose-invert")} style={style}>
