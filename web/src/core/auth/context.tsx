@@ -8,7 +8,14 @@ import type { ReactNode } from "react";
 
 import { resolveServiceURL } from "~/core/api/resolve-service-url";
 
-import { clearAuthData, type User } from "./utils";
+import {
+  clearAuthData,
+  getAuthHeaders,
+  getAuthToken,
+  getUserData,
+  storeAuthData,
+  type User,
+} from "./utils";
 
 // Define auth context type
 interface AuthContextType {
@@ -30,20 +37,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const token = localStorage.getItem("authToken");
+        const token = getAuthToken();
         if (token) {
           // Validate token expiration
           const response = await fetch(resolveServiceURL("auth/validate"), {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${token}`,
-            },
+            headers: getAuthHeaders(),
           });
 
           if (response.ok) {
-            const userData = JSON.parse(localStorage.getItem("userData") ?? "{}");
-            if (userData.id && userData.email) {
+            const userData = getUserData();
+            if (userData?.id && userData.email) {
               setUser(userData);
             }
           } else {
@@ -77,15 +81,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       if (response.ok) {
         const data = await response.json();
-        
-        // Store token and user data using centralized utility
-        localStorage.setItem("authToken", data.access_token);
-        localStorage.setItem("userData", JSON.stringify(data.user));
-        
-        // Also store in cookie for server-side access
-        document.cookie = `authToken=${data.access_token}; path=/; max-age=86400; SameSite=Lax`;
-        
-        setUser(data.user);
+        if (data?.access_token && data?.user) {
+          storeAuthData(data.access_token, data.user);
+          setUser(data.user);
+        } else {
+          throw new Error("Invalid login response");
+        }
         return true;
       } else {
         const errorData = await response.json();
@@ -101,15 +102,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      const token = localStorage.getItem("authToken");
+      const token = getAuthToken();
       if (token) {
         // Call the backend logout API
         await fetch(resolveServiceURL("auth/logout"), {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`,
-          },
+          headers: getAuthHeaders(),
         });
       }
     } catch (error) {
