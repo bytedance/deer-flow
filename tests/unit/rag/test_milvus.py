@@ -1,8 +1,25 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+"""
+Tests for Milvus RAG provider.
+
+IMPORTANT NOTE: This test file creates temporary directories for testing examples
+functionality. All temporary directories are automatically cleaned up using pytest
+fixtures. When adding new tests that create temporary directories:
+
+1. Use the provided fixtures (temp_examples_dir, temp_error_examples_dir, etc.)
+2. Never create temporary directories without automatic cleanup
+3. Follow the pattern: fixture -> use -> automatic cleanup
+4. If you need a new directory pattern, create a corresponding fixture
+
+This ensures tests don't leave behind temporary files that clutter the workspace.
+"""
+
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -43,6 +60,74 @@ def project_root():
     return Path(milvus_mod.__file__).parent.parent.parent
 
 
+@pytest.fixture
+def temp_examples_dir(project_root):
+    """Create a temporary examples directory with automatic cleanup."""
+    # Create a unique temporary directory name
+    temp_dir_name = f"examples_test_{uuid4().hex}"
+    temp_dir_path = project_root / temp_dir_name
+
+    # Create the directory
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+
+    yield temp_dir_path
+
+    # Cleanup: remove the directory and all its contents
+    if temp_dir_path.exists():
+        shutil.rmtree(temp_dir_path)
+
+
+@pytest.fixture
+def temp_error_examples_dir(project_root):
+    """Create a temporary error examples directory with automatic cleanup."""
+    # Create a unique temporary directory name for error tests
+    temp_dir_name = f"examples_error_{uuid4().hex}"
+    temp_dir_path = project_root / temp_dir_name
+
+    # Create the directory
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+
+    yield temp_dir_path
+
+    # Cleanup: remove the directory and all its contents
+    if temp_dir_path.exists():
+        shutil.rmtree(temp_dir_path)
+
+
+@pytest.fixture
+def temp_load_skip_examples_dir(project_root):
+    """Create a temporary examples directory for load_skip tests with automatic cleanup."""
+    # Use the expected directory name for this test
+    temp_dir_name = "examples_test_load_skip"
+    temp_dir_path = project_root / temp_dir_name
+
+    # Create the directory if it doesn't exist
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+
+    yield temp_dir_path
+
+    # Cleanup: remove the directory and all its contents
+    if temp_dir_path.exists():
+        shutil.rmtree(temp_dir_path)
+
+
+@pytest.fixture
+def temp_single_chunk_examples_dir(project_root):
+    """Create a temporary examples directory for single_chunk tests with automatic cleanup."""
+    # Use the expected directory name for this test
+    temp_dir_name = "examples_test_single_chunk"
+    temp_dir_path = project_root / temp_dir_name
+
+    # Create the directory if it doesn't exist
+    temp_dir_path.mkdir(parents=True, exist_ok=True)
+
+    yield temp_dir_path
+
+    # Cleanup: remove the directory and all its contents
+    if temp_dir_path.exists():
+        shutil.rmtree(temp_dir_path)
+
+
 def _patch_init(monkeypatch):
     """Patch retriever initialization to use dummy embedding model."""
     monkeypatch.setattr(
@@ -60,21 +145,19 @@ def test_list_local_markdown_resources_missing_dir(project_root):
     assert resources == []
 
 
-def test_list_local_markdown_resources_populated(project_root):
+def test_list_local_markdown_resources_populated(temp_examples_dir):
     retriever = MilvusProvider()
-    examples_dir = f"examples_test_{uuid4().hex}"
-    retriever.examples_dir = examples_dir
-    target_dir = project_root / examples_dir
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # Use the name of the temp directory for examples_dir
+    retriever.examples_dir = temp_examples_dir.name
 
     # File with heading
-    (target_dir / "file1.md").write_text(
+    (temp_examples_dir / "file1.md").write_text(
         "# Title One\n\nContent body.", encoding="utf-8"
     )
     # File without heading -> fallback title
-    (target_dir / "file_two.md").write_text("No heading here.", encoding="utf-8")
+    (temp_examples_dir / "file_two.md").write_text("No heading here.", encoding="utf-8")
     # Non-markdown file should be ignored
-    (target_dir / "ignore.txt").write_text("Should not be picked up.", encoding="utf-8")
+    (temp_examples_dir / "ignore.txt").write_text("Should not be picked up.", encoding="utf-8")
 
     resources = retriever._list_local_markdown_resources()
     # Order not guaranteed; sort by uri for assertions
@@ -100,15 +183,13 @@ def test_list_local_markdown_resources_populated(project_root):
     assert r2.description == "Local markdown example (not yet ingested)"
 
 
-def test_list_local_markdown_resources_read_error(monkeypatch, project_root):
+def test_list_local_markdown_resources_read_error(monkeypatch, temp_error_examples_dir):
     retriever = MilvusProvider()
-    examples_dir = f"examples_error_{uuid4().hex}"
-    retriever.examples_dir = examples_dir
-    target_dir = project_root / examples_dir
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # Use the name of the temp directory for examples_dir
+    retriever.examples_dir = temp_error_examples_dir.name
 
-    bad_file = target_dir / "bad.md"
-    good_file = target_dir / "good.md"
+    bad_file = temp_error_examples_dir / "bad.md"
+    good_file = temp_error_examples_dir / "good.md"
     good_file.write_text("# Good Title\n\nBody.", encoding="utf-8")
     bad_file.write_text("Broken", encoding="utf-8")
 
@@ -734,15 +815,12 @@ def test_load_example_files_directory_missing(monkeypatch):
     assert called["insert"] == 0  # sanity (no insertion attempted)
 
 
-def test_load_example_files_loads_and_skips_existing(monkeypatch):
+def test_load_example_files_loads_and_skips_existing(monkeypatch, temp_load_skip_examples_dir):
     _patch_init(monkeypatch)
-    project_root = Path(milvus_mod.__file__).parent.parent.parent
-    examples_dir_name = "examples_test_load_skip"
-    examples_path = project_root / examples_dir_name
-    examples_path.mkdir(exist_ok=True)
+    examples_dir_name = temp_load_skip_examples_dir.name
 
-    file1 = examples_path / "file1.md"
-    file2 = examples_path / "file2.md"
+    file1 = temp_load_skip_examples_dir / "file1.md"
+    file2 = temp_load_skip_examples_dir / "file2.md"
     file1.write_text("# Title One\nContent A", encoding="utf-8")
     file2.write_text("# Title Two\nContent B", encoding="utf-8")
 
@@ -785,14 +863,11 @@ def test_load_example_files_loads_and_skips_existing(monkeypatch):
     assert all(c["title"] == "Title Two" for c in calls)
 
 
-def test_load_example_files_single_chunk_no_suffix(monkeypatch):
+def test_load_example_files_single_chunk_no_suffix(monkeypatch, temp_single_chunk_examples_dir):
     _patch_init(monkeypatch)
-    project_root = Path(milvus_mod.__file__).parent.parent.parent
-    examples_dir_name = "examples_test_single_chunk"
-    examples_path = project_root / examples_dir_name
-    examples_path.mkdir(exist_ok=True)
+    examples_dir_name = temp_single_chunk_examples_dir.name
 
-    file_single = examples_path / "single.md"
+    file_single = temp_single_chunk_examples_dir / "single.md"
     file_single.write_text(
         "# Single Title\nOnly one small paragraph.", encoding="utf-8"
     )
@@ -821,3 +896,28 @@ def test_load_example_files_single_chunk_no_suffix(monkeypatch):
     assert captured["title"] == "Single Title"
     assert captured["metadata"]["file"] == "single.md"
     assert captured["metadata"]["source"] == "examples"
+
+
+# Clean up test database file after tests
+import atexit
+
+def cleanup_test_database():
+    """Clean up milvus_demo.db file created during testing."""
+    import os
+    from pathlib import Path
+
+    # Skip cleanup if disabled
+    if os.getenv("DISABLE_TEST_CLEANUP", "false").lower() == "true":
+        return
+
+    db_file = Path.cwd() / "milvus_demo.db"
+    if db_file.exists():
+        try:
+            db_file.unlink()
+            print("🧹 Cleaned up milvus_demo.db")
+        except Exception:
+            pass  # Silently ignore cleanup errors
+
+
+# Register cleanup to run when Python exits
+atexit.register(cleanup_test_database)

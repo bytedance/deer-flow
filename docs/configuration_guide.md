@@ -188,6 +188,20 @@ BASIC_MODEL:
   api_key: $AZURE_OPENAI_API_KEY
 ```
 
+### How to configure context length for different models
+
+Different models have different context length limitations. DeerFlow provides a method to control the context length between different models. You can configure the context length between different models in the `conf.yaml` file. For example:
+```yaml
+BASIC_MODEL:
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model: "doubao-1-5-pro-32k-250115"
+  api_key: ""
+  token_limit: 128000
+```
+This means that the context length limit using this model is 128k. 
+
+The context management doesn't work if the token_limit is not set.
+
 ## About Search Engine
 
 ### How to control search domains for Tavily?
@@ -217,6 +231,28 @@ SEARCH_ENGINE:
   # Include raw content in search results, default: true
   include_raw_content: false
 ```
+
+### How to post-process Tavily search results
+
+DeerFlow can post-process Tavily search results:
+* Remove duplicate content
+* Filter low-quality content: Filter out results with low relevance scores
+* Clear base64 encoded images
+* Length truncation: Truncate each search result according to the user-configured length
+
+The filtering of low-quality content and length truncation depend on user configuration, providing two configurable parameters:
+* min_score_threshold: Minimum relevance score threshold, search results below this threshold will be filtered. If not set, no filtering will be performed;
+* max_content_length_per_page: Maximum length limit for each search result content, parts exceeding this length will be truncated. If not set, no truncation will be performed;
+
+These two parameters can be configured in `conf.yaml` as shown below:
+```yaml
+SEARCH_ENGINE:
+  engine: tavily
+  include_images: true
+  min_score_threshold: 0.4
+  max_content_length_per_page: 5000
+```
+That's meaning that the search results will be filtered based on the minimum relevance score threshold and truncated to the maximum length limit for each search result content.
 
 ## RAG (Retrieval-Augmented Generation) Configuration
 
