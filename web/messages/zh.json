@@ -36,6 +36,7 @@
     "general": {
       "title": "通用",
       "autoAcceptPlan": "允许自动接受计划",
+      "enableClarification": "允许澄清",
       "maxPlanIterations": "最大计划迭代次数",
       "maxPlanIterationsDescription": "设置为 1 进行单步规划。设置为 2 或更多以启用重新规划。",
       "maxStepsOfPlan": "研究计划的最大步骤数",

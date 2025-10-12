@@ -36,6 +36,7 @@
     "general": {
       "title": "General",
       "autoAcceptPlan": "Allow automatic acceptance of plans",
+        "enableClarification": "Allow clarification",
       "maxPlanIterations": "Max plan iterations",
       "maxPlanIterationsDescription": "Set to 1 for single-step planning. Set to 2 or more to enable re-planning.",
       "maxStepsOfPlan": "Max steps of a research plan",

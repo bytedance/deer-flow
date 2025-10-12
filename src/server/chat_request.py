@@ -65,6 +65,10 @@ class ChatRequest(BaseModel):
     enable_deep_thinking: Optional[bool] = Field(
         False, description="Whether to enable deep thinking"
     )
+    enable_clarification: Optional[bool] = Field(
+        None,
+        description="Whether to enable multi-turn clarification (default: None, uses State default=False)",
+    )
 
 
 class TTSRequest(BaseModel):

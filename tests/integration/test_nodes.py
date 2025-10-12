@@ -514,6 +514,7 @@ def mock_state_coordinator():
     return {
         "messages": [{"role": "user", "content": "test"}],
         "locale": "en-US",
+        "enable_clarification": False,
     }
 
 
@@ -581,6 +582,37 @@ def test_coordinator_node_no_tool_calls(
         assert result.goto == "__end__"
         assert result.update["locale"] == "en-US"
         assert result.update["resources"] == ["resource1", "resource2"]
+
+
+def test_coordinator_node_no_tool_calls_with_clarification_enabled(
+    patch_config_from_runnable_config_coordinator,
+    patch_apply_prompt_template_coordinator,
+    patch_handoff_to_planner,
+    patch_logger,
+):
+    # No tool calls with clarification enabled, should also goto __end__
+    mock_state = {
+        "messages": [{"role": "user", "content": "test"}],
+        "locale": "en-US",
+        "enable_clarification": True,
+    }
+
+    with (
+        patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
+        patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
+    ):
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+        # Create a response with no tool calls and no content
+        mock_response = MagicMock()
+        mock_response.tool_calls = []
+        mock_response.content = ""
+        mock_llm.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(mock_state, MagicMock())
+        assert result.goto == "__end__"
+        assert result.update["locale"] == "en-US"
 
 
 def test_coordinator_node_with_tool_calls_planner(

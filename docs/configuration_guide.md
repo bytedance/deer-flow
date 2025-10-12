@@ -253,3 +253,38 @@ MILVUS_EMBEDDING_BASE_URL=
 MILVUS_EMBEDDING_MODEL=
 MILVUS_EMBEDDING_API_KEY=
 ```
+
+---
+
+## Multi-Turn Clarification (Optional)
+
+An optional feature that helps clarify vague research questions through conversation. **Disabled by default.**
+
+### Enable via Command Line
+
+```bash
+# Enable clarification for vague questions
+uv run main.py "Research AI" --enable-clarification
+
+# Interactive mode with clarification
+uv run main.py --interactive --enable-clarification
+```
+
+### Enable via API
+
+```json
+{
+  "messages": [{"role": "user", "content": "Research AI"}],
+  "enable_clarification": true
+}
+```
+
+### Enable via UI Settings
+
+1. Open DeerFlow web interface
+2. Navigate to **Settings** → **General** tab
+3. Find **"Enable Clarification"** toggle
+4. Turn it **ON** to enable multi-turn clarification. Clarification is **disabled** by default. You need to manually enable it through any of the above methods.
+5. Click **Save** to apply changes
+
+**When enabled**, the Coordinator will ask up to 3 clarifying questions for vague topics before starting research, improving report relevance and depth. To modify the maximum rounds, edit `max_clarification_rounds` in `src/graph/types.py` (default: 3).

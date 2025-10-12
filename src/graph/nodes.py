@@ -44,6 +44,34 @@ def handoff_to_planner(
     return
 
 
+@tool
+def handoff_after_clarification(
+    locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
+):
+    """Handoff to planner after clarification rounds are complete. Pass all clarification history to planner for analysis."""
+    return
+
+
+def needs_clarification(state: dict) -> bool:
+    """
+    Check if clarification is needed based on current state.
+    Centralized logic for determining when to continue clarification.
+    """
+    if not state.get("enable_clarification", False):
+        return False
+
+    clarification_rounds = state.get("clarification_rounds", 0)
+    is_clarification_complete = state.get("is_clarification_complete", False)
+    max_clarification_rounds = state.get("max_clarification_rounds", 3)
+
+    # Need clarification if: enabled + has rounds + not complete + not at max
+    return (
+        clarification_rounds > 0
+        and not is_clarification_complete
+        and clarification_rounds < max_clarification_rounds
+    )
+
+
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
@@ -207,53 +235,226 @@ def human_feedback_node(
 
 def coordinator_node(
     state: State, config: RunnableConfig
-) -> Command[Literal["planner", "background_investigator", "__end__"]]:
-    """Coordinator node that communicate with customers."""
+) -> Command[Literal["planner", "background_investigator", "coordinator", "__end__"]]:
+    """Coordinator node that communicate with customers and handle clarification."""
     logger.info("Coordinator talking.")
     configurable = Configuration.from_runnable_config(config)
-    messages = apply_prompt_template("coordinator", state)
-    response = (
-        get_llm_by_type(AGENT_LLM_MAP["coordinator"])
-        .bind_tools([handoff_to_planner])
-        .invoke(messages)
-    )
-    logger.debug(f"Current state messages: {state['messages']}")
 
-    goto = "__end__"
-    locale = state.get("locale", "en-US")  # Default locale if not specified
-    research_topic = state.get("research_topic", "")
+    # Check if clarification is enabled
+    enable_clarification = state.get("enable_clarification", False)
 
-    if len(response.tool_calls) > 0:
-        goto = "planner"
-        if state.get("enable_background_investigation"):
-            # if the search_before_planning is True, add the web search tool to the planner agent
-            goto = "background_investigator"
-        try:
-            for tool_call in response.tool_calls:
-                if tool_call.get("name", "") != "handoff_to_planner":
-                    continue
-                if tool_call.get("args", {}).get("locale") and tool_call.get(
-                    "args", {}
-                ).get("research_topic"):
-                    locale = tool_call.get("args", {}).get("locale")
-                    research_topic = tool_call.get("args", {}).get("research_topic")
-                    break
-        except Exception as e:
-            logger.error(f"Error processing tool calls: {e}")
-    else:
-        logger.warning(
-            "Coordinator response contains no tool calls. Terminating workflow execution."
+    # ============================================================
+    # BRANCH 1: Clarification DISABLED (Legacy Mode)
+    # ============================================================
+    if not enable_clarification:
+        # Use normal prompt with explicit instruction to skip clarification
+        messages = apply_prompt_template("coordinator", state)
+        messages.append(
+            {
+                "role": "system",
+                "content": "CRITICAL: Clarification is DISABLED. You MUST immediately call handoff_to_planner tool with the user's query as-is. Do NOT ask questions or mention needing more information.",
+            }
         )
-        logger.debug(f"Coordinator response: {response}")
+
+        # Only bind handoff_to_planner tool
+        tools = [handoff_to_planner]
+        response = (
+            get_llm_by_type(AGENT_LLM_MAP["coordinator"])
+            .bind_tools(tools)
+            .invoke(messages)
+        )
+
+        # Process response - should directly handoff to planner
+        goto = "__end__"
+        locale = state.get("locale", "en-US")
+        research_topic = state.get("research_topic", "")
+
+        # Process tool calls for legacy mode
+        if response.tool_calls:
+            try:
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call.get("name", "")
+                    tool_args = tool_call.get("args", {})
+
+                    if tool_name == "handoff_to_planner":
+                        logger.info("Handing off to planner")
+                        goto = "planner"
+
+                        # Extract locale and research_topic if provided
+                        if tool_args.get("locale") and tool_args.get("research_topic"):
+                            locale = tool_args.get("locale")
+                            research_topic = tool_args.get("research_topic")
+                        break
+
+            except Exception as e:
+                logger.error(f"Error processing tool calls: {e}")
+                goto = "planner"
+
+    # ============================================================
+    # BRANCH 2: Clarification ENABLED (New Feature)
+    # ============================================================
+    else:
+        # Load clarification state
+        clarification_rounds = state.get("clarification_rounds", 0)
+        clarification_history = state.get("clarification_history", [])
+        max_clarification_rounds = state.get("max_clarification_rounds", 3)
+
+        # Prepare the messages for the coordinator
+        messages = apply_prompt_template("coordinator", state)
+
+        # Add clarification status for first round
+        if clarification_rounds == 0:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "Clarification mode is ENABLED. Follow the 'Clarification Process' guidelines in your instructions.",
+                }
+            )
+
+        # Add clarification context if continuing conversation (round > 0)
+        elif clarification_rounds > 0:
+            logger.info(
+                f"Clarification enabled (rounds: {clarification_rounds}/{max_clarification_rounds}): Continuing conversation"
+            )
+
+            # Add user's response to clarification history
+            last_message = None
+            if state.get("messages"):
+                last_message = state["messages"][-1]
+                if (
+                    isinstance(last_message, dict)
+                    and last_message.get("role") == "user"
+                ):
+                    clarification_history.append(last_message["content"])
+                    logger.info(
+                        f"Added user response to clarification history: {last_message['content']}"
+                    )
+
+            # Append clarification context to messages (minimal, only state info)
+            current_response = (
+                last_message.get("content")
+                if last_message and isinstance(last_message, dict)
+                else "No response"
+            )
+            clarification_context = f"""
+                Clarification Status:
+                - Current round: {clarification_rounds}/{max_clarification_rounds}
+                - User's latest response: {current_response}
+                - Previous exchanges: {len(clarification_history)} rounds
+
+                Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions.
+                """
+            messages.append({"role": "system", "content": clarification_context})
+
+        # Bind both clarification tools
+        tools = [handoff_to_planner, handoff_after_clarification]
+        response = (
+            get_llm_by_type(AGENT_LLM_MAP["coordinator"])
+            .bind_tools(tools)
+            .invoke(messages)
+        )
+        logger.debug(f"Current state messages: {state['messages']}")
+
+        # Initialize response processing variables
+        goto = "__end__"
+        locale = state.get("locale", "en-US")
+        research_topic = state.get("research_topic", "")
+
+        # --- Process LLM response ---
+        # No tool calls - LLM is asking a clarifying question
+        if not response.tool_calls and response.content:
+            if clarification_rounds < max_clarification_rounds:
+                # Continue clarification process
+                clarification_rounds += 1
+                clarification_history.append(response.content)
+                logger.info(
+                    f"Clarification response: {clarification_rounds}/{max_clarification_rounds}: {response.content}"
+                )
+
+                # Append coordinator's question to messages
+                state_messages = state.get("messages", [])
+                if response.content:
+                    state_messages.append(
+                        HumanMessage(content=response.content, name="coordinator")
+                    )
+
+                return Command(
+                    update={
+                        "messages": state_messages,
+                        "locale": locale,
+                        "research_topic": research_topic,
+                        "resources": configurable.resources,
+                        "clarification_rounds": clarification_rounds,
+                        "clarification_history": clarification_history,
+                        "is_clarification_complete": False,
+                        "clarified_question": "",
+                        "goto": goto,
+                        "__interrupt__": [("coordinator", response.content)],
+                    },
+                    goto=goto,
+                )
+
+            else:
+                # Max rounds reached
+                logger.warning(
+                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
+                )
+                goto = "planner"
+                if state.get("enable_background_investigation"):
+                    goto = "background_investigator"
+
+    # ============================================================
+    # Final: Build and return Command
+    # ============================================================
     messages = state.get("messages", [])
     if response.content:
         messages.append(HumanMessage(content=response.content, name="coordinator"))
+
+    # Process tool calls for BOTH branches (legacy and clarification)
+    if response.tool_calls:
+        try:
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+
+                if tool_name in ["handoff_to_planner", "handoff_after_clarification"]:
+                    logger.info("Handing off to planner")
+                    goto = "planner"
+
+                    # Extract locale and research_topic if provided
+                    if tool_args.get("locale") and tool_args.get("research_topic"):
+                        locale = tool_args.get("locale")
+                        research_topic = tool_args.get("research_topic")
+                    break
+
+        except Exception as e:
+            logger.error(f"Error processing tool calls: {e}")
+            goto = "planner"
+    else:
+        # No tool calls - both modes should goto __end__
+        logger.warning("LLM didn't call any tools. Staying at __end__.")
+        # Keep goto as "__end__" (already set)
+
+    # Apply background_investigation routing if enabled (unified logic)
+    if goto == "planner" and state.get("enable_background_investigation"):
+        goto = "background_investigator"
+
+    # Set default values for state variables (in case they're not defined in legacy mode)
+    if not enable_clarification:
+        clarification_rounds = 0
+        clarification_history = []
+
     return Command(
         update={
             "messages": messages,
             "locale": locale,
             "research_topic": research_topic,
             "resources": configurable.resources,
+            "clarification_rounds": clarification_rounds,
+            "clarification_history": clarification_history,
+            "is_clarification_complete": goto != "coordinator",
+            "clarified_question": research_topic if goto != "coordinator" else "",
+            "goto": goto,
         },
         goto=goto,
     )

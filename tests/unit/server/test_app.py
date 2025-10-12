@@ -532,6 +532,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -571,6 +572,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -605,6 +607,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -641,6 +644,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -682,6 +686,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -723,6 +728,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
@@ -761,6 +767,7 @@ class TestAstreamWorkflowGenerator:
             enable_background_investigation=False,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
+            enable_clarification=False,
         )
 
         events = []
