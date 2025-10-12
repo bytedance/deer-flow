@@ -344,17 +344,15 @@ def coordinator_node(
                 for i, response in enumerate(clarification_history, 1):
                     conversation_summary += f"- Round {i}: {response}\n"
 
-            clarification_context = f"""
-Clarification Status:
-- Current round: {clarification_rounds}/{max_clarification_rounds}
-- User's latest response: {current_response}
+            clarification_context = f"""Clarification Status:
+                - Current round: {clarification_rounds}/{max_clarification_rounds}
+                - User's latest response: {current_response}
 
-{conversation_summary}
+                {conversation_summary}
 
-IMPORTANT: You are continuing a clarification conversation. Build upon the previous exchanges and ask for the remaining missing dimensions. Do NOT start a new topic or repeat questions already asked. Focus on what's still needed to make the research question specific enough (2+ dimensions).
+                IMPORTANT: You are continuing a clarification conversation. Build upon the previous exchanges and ask for the remaining missing dimensions. Do NOT start a new topic or repeat questions already asked. Focus on what's still needed to make the research question specific enough (2+ dimensions).
 
-Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions.
-"""
+                Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions."""
             messages.append({"role": "system", "content": clarification_context})
 
         # Bind both clarification tools
