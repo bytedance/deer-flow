@@ -330,20 +330,31 @@ def coordinator_node(
                         f"Added user response to clarification history: {last_message['content']}"
                     )
 
-            # Append clarification context to messages (minimal, only state info)
+            # Build comprehensive clarification context with conversation history
             current_response = (
                 last_message.get("content")
                 if last_message and isinstance(last_message, dict)
                 else "No response"
             )
-            clarification_context = f"""
-                Clarification Status:
-                - Current round: {clarification_rounds}/{max_clarification_rounds}
-                - User's latest response: {current_response}
-                - Previous exchanges: {len(clarification_history)} rounds
 
-                Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions.
-                """
+            # Create conversation history summary
+            conversation_summary = ""
+            if clarification_history:
+                conversation_summary = "Previous conversation:\n"
+                for i, response in enumerate(clarification_history, 1):
+                    conversation_summary += f"- Round {i}: {response}\n"
+
+            clarification_context = f"""
+Clarification Status:
+- Current round: {clarification_rounds}/{max_clarification_rounds}
+- User's latest response: {current_response}
+
+{conversation_summary}
+
+IMPORTANT: You are continuing a clarification conversation. Build upon the previous exchanges and ask for the remaining missing dimensions. Do NOT start a new topic or repeat questions already asked. Focus on what's still needed to make the research question specific enough (2+ dimensions).
+
+Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions.
+"""
             messages.append({"role": "system", "content": clarification_context})
 
         # Bind both clarification tools
