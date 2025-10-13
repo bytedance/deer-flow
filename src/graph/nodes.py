@@ -117,7 +117,22 @@ def planner_node(
     logger.info("Planner generating full plan")
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
-    messages = apply_prompt_template("planner", state, configurable)
+
+    # For clarification feature: only send the final clarified question to planner
+    if state.get("enable_clarification", False) and state.get("clarified_question"):
+        # Create a clean state with only the clarified question
+        clean_state = {
+            "messages": [{"role": "user", "content": state["clarified_question"]}],
+            "locale": state.get("locale", "en-US"),
+            "research_topic": state["clarified_question"],
+        }
+        messages = apply_prompt_template("planner", clean_state, configurable)
+        logger.info(
+            f"Clarification mode: Using clarified question: {state['clarified_question']}"
+        )
+    else:
+        # Normal mode: use full conversation history
+        messages = apply_prompt_template("planner", state, configurable)
 
     if state.get("enable_background_investigation") and state.get(
         "background_investigation_results"
@@ -319,25 +334,69 @@ def coordinator_node(
                 f"Clarification enabled (rounds: {clarification_rounds}/{max_clarification_rounds}): Continuing conversation"
             )
 
-            # Add user's response to clarification history
+            # Add user's response to clarification history (only user messages)
             last_message = None
             if state.get("messages"):
                 last_message = state["messages"][-1]
-                if (
-                    isinstance(last_message, dict)
-                    and last_message.get("role") == "user"
-                ):
-                    clarification_history.append(last_message["content"])
+                # Extract content from last message for logging
+                if isinstance(last_message, dict):
+                    content = last_message.get("content", "No content")
+                else:
+                    content = getattr(last_message, "content", "No content")
+                logger.info(f"Last message content: {content}")
+                # Handle dict format
+                if isinstance(last_message, dict):
+                    if last_message.get("role") == "user":
+                        clarification_history.append(last_message["content"])
+                        logger.info(
+                            f"Added user response to clarification history: {last_message['content']}"
+                        )
+                # Handle object format (like HumanMessage)
+                elif hasattr(last_message, "role") and last_message.role == "user":
+                    clarification_history.append(last_message.content)
                     logger.info(
-                        f"Added user response to clarification history: {last_message['content']}"
+                        f"Added user response to clarification history: {last_message.content}"
+                    )
+                # Handle object format with content attribute (like the one in logs)
+                elif hasattr(last_message, "content"):
+                    clarification_history.append(last_message.content)
+                    logger.info(
+                        f"Added user response to clarification history: {last_message.content}"
                     )
 
             # Build comprehensive clarification context with conversation history
-            current_response = (
-                last_message.get("content")
-                if last_message and isinstance(last_message, dict)
-                else "No response"
-            )
+            current_response = "No response"
+            if last_message:
+                # Handle dict format
+                if isinstance(last_message, dict):
+                    if last_message.get("role") == "user":
+                        current_response = last_message.get("content", "No response")
+                    else:
+                        # If last message is not from user, try to get the latest user message
+                        messages = state.get("messages", [])
+                        for msg in reversed(messages):
+                            if isinstance(msg, dict) and msg.get("role") == "user":
+                                current_response = msg.get("content", "No response")
+                                break
+                # Handle object format (like HumanMessage)
+                elif hasattr(last_message, "role") and last_message.role == "user":
+                    current_response = last_message.content
+                # Handle object format with content attribute (like the one in logs)
+                elif hasattr(last_message, "content"):
+                    current_response = last_message.content
+                else:
+                    # If last message is not from user, try to get the latest user message
+                    messages = state.get("messages", [])
+                    for msg in reversed(messages):
+                        if isinstance(msg, dict) and msg.get("role") == "user":
+                            current_response = msg.get("content", "No response")
+                            break
+                        elif hasattr(msg, "role") and msg.role == "user":
+                            current_response = msg.content
+                            break
+                        elif hasattr(msg, "content"):
+                            current_response = msg.content
+                            break
 
             # Create conversation history summary
             conversation_summary = ""
@@ -346,15 +405,13 @@ def coordinator_node(
                 for i, response in enumerate(clarification_history, 1):
                     conversation_summary += f"- Round {i}: {response}\n"
 
-            clarification_context = f"""Clarification Status:
-                - Current round: {clarification_rounds}/{max_clarification_rounds}
-                - User's latest response: {current_response}
+            clarification_context = f"""Continuing clarification (round {clarification_rounds}/{max_clarification_rounds}):
+            User's latest response: {current_response}
+            Ask for remaining missing dimensions. Do NOT repeat questions or start new topics."""
 
-                {conversation_summary}
+            # Log the clarification context for debugging
+            logger.info(f"Clarification context: {clarification_context}")
 
-                IMPORTANT: You are continuing a clarification conversation. Build upon the previous exchanges and ask for the remaining missing dimensions. Do NOT start a new topic or repeat questions already asked. Focus on what's still needed to make the research question specific enough (2+ dimensions).
-
-                Follow the 'Clarification Process - Continuing Rounds' guidelines in your instructions."""
             messages.append({"role": "system", "content": clarification_context})
 
         # Bind both clarification tools
@@ -377,7 +434,7 @@ def coordinator_node(
             if clarification_rounds < max_clarification_rounds:
                 # Continue clarification process
                 clarification_rounds += 1
-                clarification_history.append(response.content)
+                # Do NOT add LLM response to clarification_history - only user responses
                 logger.info(
                     f"Clarification response: {clarification_rounds}/{max_clarification_rounds}: {response.content}"
                 )
@@ -405,14 +462,14 @@ def coordinator_node(
                     goto=goto,
                 )
 
-            else:
-                # Max rounds reached
-                logger.warning(
-                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
-                )
-                goto = "planner"
-                if state.get("enable_background_investigation"):
-                    goto = "background_investigator"
+        else:
+            # Max rounds reached
+            logger.warning(
+                f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
+            )
+            goto = "planner"
+            if state.get("enable_background_investigation"):
+                goto = "background_investigator"
 
     # ============================================================
     # Final: Build and return Command
@@ -444,7 +501,7 @@ def coordinator_node(
     else:
         # No tool calls - both modes should goto __end__
         logger.warning("LLM didn't call any tools. Staying at __end__.")
-        # Keep goto as "__end__" (already set)
+        goto = "__end__"
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
