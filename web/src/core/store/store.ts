@@ -105,6 +105,7 @@ export async function sendMessage(
       resources,
       auto_accepted_plan: settings.autoAcceptedPlan,
       enable_clarification: settings.enableClarification ?? false,
+      max_clarification_rounds: settings.maxClarificationRounds ?? 3,
       enable_deep_thinking: settings.enableDeepThinking ?? false,
       enable_background_investigation:
         settings.enableBackgroundInvestigation ?? true,
