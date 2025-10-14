@@ -584,37 +584,6 @@ def test_coordinator_node_no_tool_calls(
         assert result.update["resources"] == ["resource1", "resource2"]
 
 
-def test_coordinator_node_no_tool_calls_with_clarification_enabled(
-    patch_config_from_runnable_config_coordinator,
-    patch_apply_prompt_template_coordinator,
-    patch_handoff_to_planner,
-    patch_logger,
-):
-    # No tool calls with clarification enabled, should also goto __end__
-    mock_state = {
-        "messages": [{"role": "user", "content": "test"}],
-        "locale": "en-US",
-        "enable_clarification": True,
-    }
-
-    with (
-        patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
-        patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
-    ):
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        # Create a response with no tool calls and no content
-        mock_response = MagicMock()
-        mock_response.tool_calls = []
-        mock_response.content = ""
-        mock_llm.invoke.return_value = mock_response
-        mock_get_llm.return_value = mock_llm
-
-        result = coordinator_node(mock_state, MagicMock())
-        assert result.goto == "__end__"
-        assert result.update["locale"] == "en-US"
-
-
 def test_coordinator_node_with_tool_calls_planner(
     mock_state_coordinator,
     patch_config_from_runnable_config_coordinator,
@@ -1417,3 +1386,183 @@ async def test_researcher_node_without_resources(
     tools = args[3]
     assert patch_get_web_search_tool.return_value in tools
     assert result == "RESEARCHER_RESULT"
+
+
+# ============================================================================
+# Clarification Feature Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_clarification_workflow_integration():
+    """Test the complete clarification workflow integration."""
+    import inspect
+
+    from src.workflow import run_agent_workflow_async
+
+    # Verify that the function accepts clarification parameters
+    sig = inspect.signature(run_agent_workflow_async)
+    assert "max_clarification_rounds" in sig.parameters
+    assert "enable_clarification" in sig.parameters
+    assert "initial_state" in sig.parameters
+
+
+def test_clarification_parameters_combinations():
+    """Test various combinations of clarification parameters."""
+    from src.graph.nodes import needs_clarification
+
+    test_cases = [
+        # (enable_clarification, clarification_rounds, max_rounds, is_complete, expected)
+        (True, 0, 3, False, False),  # No rounds started
+        (True, 1, 3, False, True),  # In progress
+        (True, 2, 3, False, True),  # In progress
+        (True, 3, 3, False, True),  # At max - still waiting for last answer
+        (True, 4, 3, False, False),  # Exceeded max
+        (True, 1, 3, True, False),  # Completed
+        (False, 1, 3, False, False),  # Disabled
+    ]
+
+    for enable, rounds, max_rounds, complete, expected in test_cases:
+        state = {
+            "enable_clarification": enable,
+            "clarification_rounds": rounds,
+            "max_clarification_rounds": max_rounds,
+            "is_clarification_complete": complete,
+        }
+
+        result = needs_clarification(state)
+        assert result == expected, f"Failed for case: {state}"
+
+
+def test_handoff_tools():
+    """Test that handoff tools are properly defined."""
+    from src.graph.nodes import handoff_after_clarification, handoff_to_planner
+
+    # Test handoff_to_planner tool - use invoke() method
+    result = handoff_to_planner.invoke(
+        {"research_topic": "renewable energy", "locale": "en-US"}
+    )
+    assert result is None  # Tool should return None (no-op)
+
+    # Test handoff_after_clarification tool - use invoke() method
+    result = handoff_after_clarification.invoke({"locale": "en-US"})
+    assert result is None  # Tool should return None (no-op)
+
+
+@patch("src.graph.nodes.get_llm_by_type")
+def test_coordinator_tools_with_clarification_enabled(mock_get_llm):
+    """Test that coordinator binds correct tools when clarification is enabled."""
+    # Mock LLM response
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = "Let me clarify..."
+    mock_response.tool_calls = []
+    mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+    mock_get_llm.return_value = mock_llm
+
+    # State with clarification enabled (in progress)
+    state = {
+        "messages": [{"role": "user", "content": "Tell me about something"}],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "max_clarification_rounds": 3,
+        "is_clarification_complete": False,
+        "clarification_history": ["response 1", "response 2"],
+        "locale": "en-US",
+        "research_topic": "",
+    }
+
+    # Mock config
+    config = {"configurable": {"resources": []}}
+
+    # Call coordinator_node
+    coordinator_node(state, config)
+
+    # Verify that LLM was called with bind_tools
+    assert mock_llm.bind_tools.called
+    bound_tools = mock_llm.bind_tools.call_args[0][0]
+
+    # Should bind 2 tools when clarification is enabled
+    assert len(bound_tools) == 2
+    tool_names = [tool.name for tool in bound_tools]
+    assert "handoff_to_planner" in tool_names
+    assert "handoff_after_clarification" in tool_names
+
+
+@patch("src.graph.nodes.get_llm_by_type")
+def test_coordinator_tools_with_clarification_disabled(mock_get_llm):
+    """Test that coordinator binds only one tool when clarification is disabled."""
+    # Mock LLM response with tool call
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = ""
+    mock_response.tool_calls = [
+        {
+            "name": "handoff_to_planner",
+            "args": {"research_topic": "test", "locale": "en-US"},
+        }
+    ]
+    mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+    mock_get_llm.return_value = mock_llm
+
+    # State with clarification disabled
+    state = {
+        "messages": [{"role": "user", "content": "Tell me about something"}],
+        "enable_clarification": False,
+        "locale": "en-US",
+        "research_topic": "",
+    }
+
+    # Mock config
+    config = {"configurable": {"resources": []}}
+
+    # Call coordinator_node
+    coordinator_node(state, config)
+
+    # Verify that LLM was called with bind_tools
+    assert mock_llm.bind_tools.called
+    bound_tools = mock_llm.bind_tools.call_args[0][0]
+
+    # Should bind only 1 tool when clarification is disabled
+    assert len(bound_tools) == 1
+    assert bound_tools[0].name == "handoff_to_planner"
+
+
+@patch("src.graph.nodes.get_llm_by_type")
+def test_coordinator_empty_llm_response_corner_case(mock_get_llm):
+    """
+    Corner case test: LLM returns empty response when clarification is enabled.
+
+    This tests error handling when LLM fails to return any content or tool calls
+    in the initial state (clarification_rounds=0). The system should gracefully
+    handle this by going to __end__ instead of crashing.
+
+    Note: This is NOT a typical clarification workflow test, but rather tests
+    fault tolerance when LLM misbehaves.
+    """
+    # Mock LLM response - empty response (failure scenario)
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = ""
+    mock_response.tool_calls = []
+    mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+    mock_get_llm.return_value = mock_llm
+
+    # State with clarification enabled but initial round
+    state = {
+        "messages": [{"role": "user", "content": "test"}],
+        "enable_clarification": True,
+        # clarification_rounds: 0 (default, not started)
+        "locale": "en-US",
+        "research_topic": "",
+    }
+
+    # Mock config
+    config = {"configurable": {"resources": []}}
+
+    # Call coordinator_node - should not crash
+    result = coordinator_node(state, config)
+
+    # Should gracefully handle empty response by going to __end__
+    assert result.goto == "__end__"
+    assert result.update["locale"] == "en-US"
