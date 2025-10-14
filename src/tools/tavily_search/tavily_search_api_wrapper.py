@@ -11,8 +11,9 @@ from langchain_tavily._utilities import TAVILY_API_URL
 from langchain_tavily.tavily_search import (
     TavilySearchAPIWrapper as OriginalTavilySearchAPIWrapper,
 )
-from src.tools.search_postprocessor import SearchResultPostProcessor
+
 from src.config import load_yaml_config
+from src.tools.search_postprocessor import SearchResultPostProcessor
 
 
 def get_search_config():

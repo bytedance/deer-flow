@@ -20,6 +20,8 @@ def ask(
     max_plan_iterations=1,
     max_step_num=3,
     enable_background_investigation=True,
+    enable_clarification=False,
+    max_clarification_rounds=None,
 ):
     """Run the agent workflow with the given question.
 
@@ -29,6 +31,8 @@ def ask(
         max_plan_iterations: Maximum number of plan iterations
         max_step_num: Maximum number of steps in a plan
         enable_background_investigation: If True, performs web search before planning to enhance context
+        enable_clarification: If False (default), skip clarification; if True, enable multi-turn clarification
+        max_clarification_rounds: Maximum number of clarification rounds (default: None, uses State default=3)
     """
     asyncio.run(
         run_agent_workflow_async(
@@ -37,6 +41,8 @@ def ask(
             max_plan_iterations=max_plan_iterations,
             max_step_num=max_step_num,
             enable_background_investigation=enable_background_investigation,
+            enable_clarification=enable_clarification,
+            max_clarification_rounds=max_clarification_rounds,
         )
     )
 
@@ -46,6 +52,8 @@ def main(
     max_plan_iterations=1,
     max_step_num=3,
     enable_background_investigation=True,
+    enable_clarification=False,
+    max_clarification_rounds=None,
 ):
     """Interactive mode with built-in questions.
 
@@ -54,6 +62,8 @@ def main(
         debug: If True, enables debug level logging
         max_plan_iterations: Maximum number of plan iterations
         max_step_num: Maximum number of steps in a plan
+        enable_clarification: If False (default), skip clarification; if True, enable multi-turn clarification
+        max_clarification_rounds: Maximum number of clarification rounds (default: None, uses State default=3)
     """
     # First select language
     language = inquirer.select(
@@ -93,6 +103,8 @@ def main(
         max_plan_iterations=max_plan_iterations,
         max_step_num=max_step_num,
         enable_background_investigation=enable_background_investigation,
+        enable_clarification=enable_clarification,
+        max_clarification_rounds=max_clarification_rounds,
     )
 
 
@@ -124,6 +136,18 @@ if __name__ == "__main__":
         dest="enable_background_investigation",
         help="Disable background investigation before planning",
     )
+    parser.add_argument(
+        "--enable-clarification",
+        action="store_true",
+        dest="enable_clarification",
+        help="Enable multi-turn clarification for vague questions (default: disabled)",
+    )
+    parser.add_argument(
+        "--max-clarification-rounds",
+        type=int,
+        dest="max_clarification_rounds",
+        help="Maximum number of clarification rounds (default: 3)",
+    )
 
     args = parser.parse_args()
 
@@ -134,6 +158,8 @@ if __name__ == "__main__":
             max_plan_iterations=args.max_plan_iterations,
             max_step_num=args.max_step_num,
             enable_background_investigation=args.enable_background_investigation,
+            enable_clarification=args.enable_clarification,
+            max_clarification_rounds=args.max_clarification_rounds,
         )
     else:
         # Parse user input from command line arguments or user input
@@ -153,4 +179,6 @@ if __name__ == "__main__":
             max_plan_iterations=args.max_plan_iterations,
             max_step_num=args.max_step_num,
             enable_background_investigation=args.enable_background_investigation,
+            enable_clarification=args.enable_clarification,
+            max_clarification_rounds=args.max_clarification_rounds,
         )

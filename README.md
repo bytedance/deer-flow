@@ -223,6 +223,13 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 
 ### Human Collaboration
 
+- 💬 **Intelligent Clarification Feature**
+  - Multi-turn dialogue to clarify vague research topics
+  - Improve research precision and report quality
+  - Reduce ineffective searches and token usage
+  - Configurable switch for flexible enable/disable control
+  - See [Configuration Guide - Clarification](./docs/configuration_guide.md#multi-turn-clarification-feature) for details
+
 - 🧠 **Human-in-the-loop**
   - Supports interactive modification of research plans using natural language
   - Supports auto-acceptance of research plans

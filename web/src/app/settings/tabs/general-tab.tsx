@@ -26,6 +26,10 @@ import type { Tab } from "./types";
 
 const generalFormSchema = z.object({
   autoAcceptedPlan: z.boolean(),
+  enableClarification: z.boolean(),
+  maxClarificationRounds: z.number().min(1, {
+    message: "Max clarification rounds must be at least 1.",
+  }),
   maxPlanIterations: z.number().min(1, {
     message: "Max plan iterations must be at least 1.",
   }),
@@ -102,6 +106,52 @@ export const GeneralTab: Tab = ({
                 </FormItem>
               )}
             />
+            <FormField
+              control={form.control}
+              name="enableClarification"
+              render={({ field }) => (
+                <FormItem>
+                  <FormControl>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="enableClarification"
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                      <Label className="text-sm" htmlFor="enableClarification">
+                        {t("enableClarification")} {field.value ? "(On)" : "(Off)"}
+                      </Label>
+                    </div>
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            {form.watch("enableClarification") && (
+              <FormField
+                control={form.control}
+                name="maxClarificationRounds"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t("maxClarificationRounds")}</FormLabel>
+                    <FormControl>
+                      <Input
+                        className="w-60"
+                        type="number"
+                        defaultValue={field.value}
+                        min={1}
+                        onChange={(event) =>
+                          field.onChange(parseInt(event.target.value || "1"))
+                        }
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t("maxClarificationRoundsDescription")}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
             <FormField
               control={form.control}
               name="maxPlanIterations"

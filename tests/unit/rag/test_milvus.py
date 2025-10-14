@@ -157,7 +157,9 @@ def test_list_local_markdown_resources_populated(temp_examples_dir):
     # File without heading -> fallback title
     (temp_examples_dir / "file_two.md").write_text("No heading here.", encoding="utf-8")
     # Non-markdown file should be ignored
-    (temp_examples_dir / "ignore.txt").write_text("Should not be picked up.", encoding="utf-8")
+    (temp_examples_dir / "ignore.txt").write_text(
+        "Should not be picked up.", encoding="utf-8"
+    )
 
     resources = retriever._list_local_markdown_resources()
     # Order not guaranteed; sort by uri for assertions
@@ -815,7 +817,9 @@ def test_load_example_files_directory_missing(monkeypatch):
     assert called["insert"] == 0  # sanity (no insertion attempted)
 
 
-def test_load_example_files_loads_and_skips_existing(monkeypatch, temp_load_skip_examples_dir):
+def test_load_example_files_loads_and_skips_existing(
+    monkeypatch, temp_load_skip_examples_dir
+):
     _patch_init(monkeypatch)
     examples_dir_name = temp_load_skip_examples_dir.name
 
@@ -863,7 +867,9 @@ def test_load_example_files_loads_and_skips_existing(monkeypatch, temp_load_skip
     assert all(c["title"] == "Title Two" for c in calls)
 
 
-def test_load_example_files_single_chunk_no_suffix(monkeypatch, temp_single_chunk_examples_dir):
+def test_load_example_files_single_chunk_no_suffix(
+    monkeypatch, temp_single_chunk_examples_dir
+):
     _patch_init(monkeypatch)
     examples_dir_name = temp_single_chunk_examples_dir.name
 
@@ -900,6 +906,7 @@ def test_load_example_files_single_chunk_no_suffix(monkeypatch, temp_single_chun
 
 # Clean up test database file after tests
 import atexit
+
 
 def cleanup_test_database():
     """Clean up milvus_demo.db file created during testing."""
