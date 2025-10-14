@@ -1,4 +1,5 @@
 import pytest
+
 from src.tools.search_postprocessor import SearchResultPostProcessor
 
 

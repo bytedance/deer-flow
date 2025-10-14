@@ -1,8 +1,8 @@
 # src/tools/search_postprocessor.py
-import re
 import base64
 import logging
-from typing import List, Dict, Any
+import re
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)

@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+from functools import partial
 from typing import Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -11,7 +12,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.types import Command, interrupt
-from functools import partial
 
 from src.agents import create_agent
 from src.config.agents import AGENT_LLM_MAP
@@ -26,8 +26,8 @@ from src.tools import (
     python_repl_tool,
 )
 from src.tools.search import LoggedTavilySearch
-from src.utils.json_utils import repair_json_output
 from src.utils.context_manager import ContextManager
+from src.utils.json_utils import repair_json_output
 
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
@@ -66,11 +66,12 @@ def needs_clarification(state: dict) -> bool:
     is_clarification_complete = state.get("is_clarification_complete", False)
     max_clarification_rounds = state.get("max_clarification_rounds", 3)
 
-    # Need clarification if: enabled + has rounds + not complete + not at max
+    # Need clarification if: enabled + has rounds + not complete + not exceeded max
+    # Use <= because after asking the Nth question, we still need to wait for the Nth answer
     return (
         clarification_rounds > 0
         and not is_clarification_complete
-        and clarification_rounds < max_clarification_rounds
+        and clarification_rounds <= max_clarification_rounds
     )
 
 
@@ -461,15 +462,23 @@ def coordinator_node(
                     },
                     goto=goto,
                 )
-
+            else:
+                # Max rounds reached - no more questions allowed
+                logger.warning(
+                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
+                )
+                goto = "planner"
+                if state.get("enable_background_investigation"):
+                    goto = "background_investigator"
         else:
-            # Max rounds reached
-            logger.warning(
-                f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
-            )
-            goto = "planner"
-            if state.get("enable_background_investigation"):
-                goto = "background_investigator"
+            # LLM called a tool (handoff) or has no content - clarification complete
+            if response.tool_calls:
+                logger.info(
+                    f"Clarification completed after {clarification_rounds} rounds. LLM called handoff tool."
+                )
+            else:
+                logger.warning("LLM response has no content and no tool calls.")
+            # goto will be set in the final section based on tool calls
 
     # ============================================================
     # Final: Build and return Command

@@ -69,6 +69,10 @@ class ChatRequest(BaseModel):
         None,
         description="Whether to enable multi-turn clarification (default: None, uses State default=False)",
     )
+    max_clarification_rounds: Optional[int] = Field(
+        None,
+        description="Maximum number of clarification rounds (default: None, uses State default=3)",
+    )
 
 
 class TTSRequest(BaseModel):

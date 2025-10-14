@@ -1,5 +1,6 @@
 import pytest
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
 from src.utils.context_manager import ContextManager
 
 
@@ -139,7 +140,6 @@ class TestContextManager:
         compressed = limited_cm.compress_messages({"messages": messages})
         # return the original messages
         assert len(compressed["messages"]) == 4
-
 
     def test_count_message_tokens_with_additional_kwargs(self):
         """Test counting tokens for messages with additional kwargs"""

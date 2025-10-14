@@ -114,6 +114,7 @@ async def chat_stream(request: ChatRequest):
             request.report_style,
             request.enable_deep_thinking,
             request.enable_clarification,
+            request.max_clarification_rounds,
         ),
         media_type="text/event-stream",
     )
@@ -290,6 +291,7 @@ async def _astream_workflow_generator(
     report_style: ReportStyle,
     enable_deep_thinking: bool,
     enable_clarification: bool,
+    max_clarification_rounds: int,
 ):
     # Process initial messages
     for message in messages:
@@ -307,6 +309,7 @@ async def _astream_workflow_generator(
         "enable_background_investigation": enable_background_investigation,
         "research_topic": messages[-1]["content"] if messages else "",
         "enable_clarification": enable_clarification,
+        "max_clarification_rounds": max_clarification_rounds,
     }
 
     if not auto_accepted_plan and interrupt_feedback:
