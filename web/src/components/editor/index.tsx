@@ -31,6 +31,7 @@ import GenerativeMenuSwitch from "./generative/generative-menu-switch";
 import { uploadFn } from "./image-upload";
 import { TextButtons } from "./selectors/text-buttons";
 import { slashCommand, suggestionItems } from "./slash-command";
+import { normalizeMathForEditor } from "~/core/utils/markdown";
 // import { defaultEditorContent } from "./content";
 
 import "~/styles/prosemirror.css";
@@ -45,7 +46,13 @@ export interface ReportEditorProps {
 }
 
 const ReportEditor = ({ content, onMarkdownChange }: ReportEditorProps) => {
-  const [initialContent, setInitialContent] = useState<Content>(() => content);
+  const [initialContent, setInitialContent] = useState<Content>(() => {
+    // Normalize math delimiters for editor consumption
+    if (typeof content === "string") {
+      return normalizeMathForEditor(content);
+    }
+    return content;
+  });
   const [saveStatus, setSaveStatus] = useState("Saved");
 
   const [openNode, setOpenNode] = useState(false);
