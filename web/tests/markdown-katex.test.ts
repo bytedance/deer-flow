@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import katex from "katex";
 
-import { katexOptions } from "../src/core/markdown/katex";
+import { katexOptions } from "../src/core/markdown/katex.ts";
 
 function render(expression: string) {
   return katex.renderToString(expression, {
