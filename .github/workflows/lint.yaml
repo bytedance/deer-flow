@@ -58,6 +58,11 @@ jobs:
         cd web
         pnpm typecheck
 
+    - name: Running the frontend tests 
+      run: |
+        cd web
+        node --test tests/*.test.ts
+
     - name: Build frontend
       run: |
         cd web
