@@ -26,7 +26,7 @@ export function ConversationStarter({
       <ul className="flex flex-wrap">
         {questions.map((question, index) => (
           <motion.li
-            key={question}
+            key={`${index}-${question}`}
             className="flex w-1/2 shrink-0 p-2 active:scale-105"
             style={{ transition: "all 0.2s ease-out" }}
             initial={{ opacity: 0, y: 24 }}
