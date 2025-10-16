@@ -14,7 +14,7 @@ import "katex/dist/katex.min.css";
 import { Button } from "~/components/ui/button";
 import { rehypeSplitWordsIntoSpans } from "~/core/rehype";
 import { katexOptions } from "~/core/markdown/katex";
-import { autoFixMarkdown } from "~/core/utils/markdown";
+import { autoFixMarkdown, normalizeMathForDisplay } from "~/core/utils/markdown";
 import { cn } from "~/lib/utils";
 
 import Image from "./image";
@@ -70,7 +70,7 @@ export function Markdown({
         {...props}
       >
         {autoFixMarkdown(
-          dropMarkdownQuote(processKatexInMarkdown(children ?? "")) ?? "",
+          dropMarkdownQuote(normalizeMathForDisplay(children ?? "")) ?? "",
         )}
       </ReactMarkdown>
       {enableCopy && typeof children === "string" && (
@@ -112,20 +112,7 @@ function CopyButton({ content }: { content: string }) {
   );
 }
 
-function processKatexInMarkdown(markdown?: string | null) {
-  if (!markdown) return markdown;
 
-  const markdownWithKatexSyntax = markdown
-    .replace(/\\\\\[/g, "$$$$") // Replace '\\[' with '$$'
-    .replace(/\\\\\]/g, "$$$$") // Replace '\\]' with '$$'
-    .replace(/\\\\\(/g, "$$$$") // Replace '\\(' with '$$'
-    .replace(/\\\\\)/g, "$$$$") // Replace '\\)' with '$$'
-    .replace(/\\\[/g, "$$$$") // Replace '\[' with '$$'
-    .replace(/\\\]/g, "$$$$") // Replace '\]' with '$$'
-    .replace(/\\\(/g, "$$$$") // Replace '\(' with '$$'
-    .replace(/\\\)/g, "$$$$"); // Replace '\)' with '$$';
-  return markdownWithKatexSyntax;
-}
 
 function dropMarkdownQuote(markdown?: string | null): string | null {
   if (!markdown) return null;
