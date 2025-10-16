@@ -1,9 +1,11 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import base64
 import json
 import logging
+import os
 from typing import Annotated, Any, List, cast
 from uuid import uuid4
 
@@ -51,6 +53,11 @@ from src.tools import VolcengineTTS
 from src.utils.json_utils import sanitize_args
 
 logger = logging.getLogger(__name__)
+
+# Configure Windows event loop policy for PostgreSQL compatibility
+# On Windows, psycopg requires a selector-based event loop, not the default ProactorEventLoop
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
