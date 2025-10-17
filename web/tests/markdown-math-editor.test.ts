@@ -10,6 +10,18 @@ describe("markdown math normalization for editor", () => {
     assert.strictEqual(output, "Here is a formula $$E=mc^2$$ in the text.");
   });
 
+  it("converts LaTeX display delimiters to $ with \\ for editor", () => {
+    const input = "Here is a formula \\(F = k\\frac{q_1q_2}{r^2}\\) in the text.";
+    const output = normalizeMathForEditor(input);
+    assert.strictEqual(output, "Here is a formula $F = k\\frac{q_1q_2}{r^2}$ in the text.");
+  });
+
+  it("converts LaTeX display delimiters to $ with \\\\ for editor", () => {
+    const input = "Here is a formula \\(F = k\\\\frac{q_1q_2}{r^2}\\) in the text.";
+    const output = normalizeMathForEditor(input);
+    assert.strictEqual(output, "Here is a formula $F = k\\frac{q_1q_2}{r^2}$ in the text.");
+  });
+
   it("converts escaped LaTeX display delimiters to $$ for editor", () => {
     const input = "Formula \\\\[x^2 + y^2 = z^2\\\\] here.";
     const output = normalizeMathForEditor(input);
