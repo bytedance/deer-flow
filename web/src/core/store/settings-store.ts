@@ -10,6 +10,8 @@ const SETTINGS_KEY = "deerflow.settings";
 const DEFAULT_SETTINGS: SettingsState = {
   general: {
     autoAcceptedPlan: false,
+    enableClarification: false,
+    maxClarificationRounds: 3,
     enableDeepThinking: false,
     enableBackgroundInvestigation: false,
     maxPlanIterations: 1,
@@ -25,6 +27,8 @@ const DEFAULT_SETTINGS: SettingsState = {
 export type SettingsState = {
   general: {
     autoAcceptedPlan: boolean;
+    enableClarification: boolean;
+    maxClarificationRounds: number;
     enableDeepThinking: boolean;
     enableBackgroundInvestigation: boolean;
     maxPlanIterations: number;
@@ -156,6 +160,16 @@ export function setEnableBackgroundInvestigation(value: boolean) {
     general: {
       ...state.general,
       enableBackgroundInvestigation: value,
+    },
+  }));
+  saveSettings();
+}
+
+export function setEnableClarification(value: boolean) {
+  useSettingsStore.setState((state) => ({
+    general: {
+      ...state.general,
+      enableClarification: value,
     },
   }));
   saveSettings();

@@ -19,6 +19,8 @@ export async function* chatStream(
     thread_id: string;
     resources?: Array<Resource>;
     auto_accepted_plan: boolean;
+    enable_clarification?: boolean;
+    max_clarification_rounds?: number;
     max_plan_iterations: number;
     max_step_num: number;
     max_search_results?: number;

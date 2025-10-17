@@ -1,11 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import base64
 import json
 import logging
 
+import os
 from typing import Annotated, Any, List, cast, Optional
+
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Depends
@@ -55,6 +58,13 @@ from src.utils.json_utils import sanitize_args
 from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user, generate_csrf_token
 
 logger = logging.getLogger(__name__)
+
+# Configure Windows event loop policy for PostgreSQL compatibility
+# On Windows, psycopg requires a selector-based event loop, not the default ProactorEventLoop
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
 app = FastAPI(
@@ -176,6 +186,8 @@ async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_cur
             request.enable_background_investigation,
             request.report_style,
             request.enable_deep_thinking,
+            request.enable_clarification,
+            request.max_clarification_rounds,
         ),
         media_type="text/event-stream",
     )
@@ -351,6 +363,8 @@ async def _astream_workflow_generator(
     enable_background_investigation: bool,
     report_style: ReportStyle,
     enable_deep_thinking: bool,
+    enable_clarification: bool,
+    max_clarification_rounds: int,
 ):
     # Process initial messages
     for message in messages:
@@ -367,6 +381,8 @@ async def _astream_workflow_generator(
         "auto_accepted_plan": auto_accepted_plan,
         "enable_background_investigation": enable_background_investigation,
         "research_topic": messages[-1]["content"] if messages else "",
+        "enable_clarification": enable_clarification,
+        "max_clarification_rounds": max_clarification_rounds,
     }
 
     if not auto_accepted_plan and interrupt_feedback:

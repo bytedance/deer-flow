@@ -63,6 +63,12 @@ def _build_base_graph():
         ["planner", "researcher", "coder"],
     )
     builder.add_edge("reporter", END)
+    # Add conditional edges for coordinator to handle clarification flow
+    builder.add_conditional_edges(
+        "coordinator",
+        lambda state: state.get("goto", "planner"),
+        ["planner", "background_investigator", "coordinator", END],
+    )
     return builder
 
 
