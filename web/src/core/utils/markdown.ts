@@ -21,6 +21,23 @@ export function normalizeMathForEditor(markdown: string): string {
     .replace(/\\\\\(([^)]*)\\\\\)/g, (_match, content) => `$${content}$`)  // \\(...\\) → $...$
     .replace(/\\\(([^)]*)\\\)/g, (_match, content) => `$${content}$`);    // \(...\) → $...$
   
+  // Replace double backslashes with single in math contexts
+  // For inline math: $...$
+  normalized = normalized.replace(
+    /\$([^\$]+?)\$/g,
+    (match, mathContent) => {
+      return `$${mathContent.replace(/\\\\/g, '\\')}$`;
+    }
+  );
+  
+  // For display math: $$...$$
+  normalized = normalized.replace(
+    /\$\$([\s\S]+?)\$\$/g,
+    (match, mathContent) => {
+      return `$$${mathContent.replace(/\\\\/g, '\\')}$$`;
+    }
+  );
+
   return normalized;
 }
 
@@ -41,6 +58,23 @@ export function normalizeMathForDisplay(markdown: string): string {
     .replace(/\\\\\(([^)]*)\\\\\)/g, (_match, content) => `$$${content}$$`)   // \\(...\\) → $$...$$
     .replace(/\\\(([^)]*)\\\)/g, (_match, content) => `$$${content}$$`);       // \(...\) → $$...$$
   
+  // Replace double backslashes with single in math contexts
+  // For inline math: $...$
+  normalized = normalized.replace(
+    /\$([^\$]+?)\$/g,
+    (match, mathContent) => {
+      return `$${mathContent.replace(/\\\\/g, '\\')}$`;
+    }
+  );
+  
+  // For display math: $$...$$
+  normalized = normalized.replace(
+    /\$\$([\s\S]+?)\$\$/g,
+    (match, mathContent) => {
+      return `$$${mathContent.replace(/\\\\/g, '\\')}$$`;
+    }
+  );
+    
   return normalized;
 }
 
