@@ -202,7 +202,7 @@ def planner_node(
 
 
 def human_feedback_node(
-    state,
+    state: State, config: RunnableConfig
 ) -> Command[Literal["planner", "research_team", "reporter", "__end__"]]:
     current_plan = state.get("current_plan", "")
     # check if the plan is auto accepted
