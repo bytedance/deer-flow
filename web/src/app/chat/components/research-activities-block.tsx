@@ -7,7 +7,7 @@ import { LRUCache } from "lru-cache";
 import { BookOpenText, FileText, PencilRuler, Search } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useTheme } from "next-themes";
-import { useMemo } from "react";
+import React, { useMemo } from "react";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { docco } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import { dark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -31,6 +31,10 @@ import { useMessage, useStore } from "~/core/store";
 import { parseJSON } from "~/core/utils";
 import { cn } from "~/lib/utils";
 
+// Performance optimization constants
+const MAX_ANIMATED_ITEMS = 10; // Only animate first 10 items
+const ANIMATION_DELAY_MULTIPLIER = 0.05; // Reduced delay between animations
+
 export function ResearchActivitiesBlock({
   className,
   researchId,
@@ -42,27 +46,36 @@ export function ResearchActivitiesBlock({
     state.researchActivityIds.get(researchId),
   )!;
   const ongoing = useStore((state) => state.ongoingResearchId === researchId);
+  
   return (
     <>
       <ul className={cn("flex flex-col py-4", className)}>
         {activityIds.map(
-          (activityId, i) =>
-            i !== 0 && (
+          (activityId, i) => {
+            if (i === 0) return null;
+            
+            // Performance optimization: limit animations for large lists
+            const shouldAnimate = i < MAX_ANIMATED_ITEMS;
+            const animationDelay = shouldAnimate ? Math.min(i * ANIMATION_DELAY_MULTIPLIER, 0.5) : 0;
+            
+            return (
               <motion.li
                 key={activityId}
-                style={{ transition: "all 0.4s ease-out" }}
-                initial={{ opacity: 0, y: 24 }}
+                style={{ transition: shouldAnimate ? "all 0.3s ease-out" : "none" }}
+                initial={shouldAnimate ? { opacity: 0, y: 24 } : { opacity: 1, y: 0 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{
-                  duration: 0.4,
+                transition={shouldAnimate ? {
+                  duration: 0.3, // Reduced from 0.4
+                  delay: animationDelay,
                   ease: "easeOut",
-                }}
+                } : undefined}
               >
                 <ActivityMessage messageId={activityId} />
                 <ActivityListItem messageId={activityId} />
                 {i !== activityIds.length - 1 && <hr className="my-8" />}
               </motion.li>
-            ),
+            );
+          },
         )}
       </ul>
       {ongoing && <LoadingAnimation className="mx-4 my-12" />}
@@ -70,7 +83,7 @@ export function ResearchActivitiesBlock({
   );
 }
 
-function ActivityMessage({ messageId }: { messageId: string }) {
+const ActivityMessage = React.memo(({ messageId }: { messageId: string }) => {
   const message = useMessage(messageId);
   if (message?.agent && message.content) {
     if (message.agent !== "reporter" && message.agent !== "planner") {
@@ -84,9 +97,10 @@ function ActivityMessage({ messageId }: { messageId: string }) {
     }
   }
   return null;
-}
+});
+ActivityMessage.displayName = "ActivityMessage";
 
-function ActivityListItem({ messageId }: { messageId: string }) {
+const ActivityListItem = React.memo(({ messageId }: { messageId: string }) => {
   const message = useMessage(messageId);
   if (message) {
     if (!message.isStreaming && message.toolCalls?.length) {
@@ -109,7 +123,8 @@ function ActivityListItem({ messageId }: { messageId: string }) {
     }
   }
   return null;
-}
+});
+ActivityListItem.displayName = "ActivityListItem";
 
 const __pageCache = new LRUCache<string, string>({ max: 100 });
 type SearchResult =
@@ -187,38 +202,46 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
               ))}
             {pageResults
               .filter((result) => result.type === "page")
-              .map((searchResult, i) => (
-                <motion.li
-                  key={`search-result-${i}`}
-                  className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
-                  initial={{ opacity: 0, y: 10, scale: 0.66 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  transition={{
-                    duration: 0.2,
-                    delay: i * 0.1,
-                    ease: "easeOut",
-                  }}
-                >
-                  <FavIcon
-                    className="mt-1"
-                    url={searchResult.url}
-                    title={searchResult.title}
-                  />
-                  <a href={searchResult.url} target="_blank">
-                    {searchResult.title}
-                  </a>
-                </motion.li>
-              ))}
-            {imageResults.map((searchResult, i) => (
-              <motion.li
-                key={`search-result-${i}`}
-                initial={{ opacity: 0, y: 10, scale: 0.66 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{
-                  duration: 0.2,
-                  delay: i * 0.1,
-                  ease: "easeOut",
-                }}
+              .slice(0, 20) // Limit displayed results for performance
+              .map((searchResult, i) => {
+                const shouldAnimate = i < 6; // Only animate first 6 results
+                return (
+                  <motion.li
+                    key={`search-result-${i}`}
+                    className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
+                    initial={shouldAnimate ? { opacity: 0, y: 10 } : { opacity: 1, y: 0 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={shouldAnimate ? {
+                      duration: 0.15, // Reduced from 0.2
+                      delay: Math.min(i * 0.05, 0.3), // Cap delay at 0.3s
+                      ease: "easeOut",
+                    } : undefined}
+                  >
+                    <FavIcon
+                      className="mt-1"
+                      url={searchResult.url}
+                      title={searchResult.title}
+                    />
+                    <a href={searchResult.url} target="_blank">
+                      {searchResult.title}
+                    </a>
+                  </motion.li>
+                );
+              })}
+            {imageResults
+              .slice(0, 10) // Limit displayed images for performance
+              .map((searchResult, i) => {
+                const shouldAnimate = i < 4; // Only animate first 4 images
+                return (
+                  <motion.li
+                    key={`search-result-${i}`}
+                    initial={shouldAnimate ? { opacity: 0, y: 10 } : { opacity: 1, y: 0 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={shouldAnimate ? {
+                      duration: 0.15,
+                      delay: Math.min(i * 0.05, 0.2),
+                      ease: "easeOut",
+                    } : undefined}
               >
                 <a
                   className="flex flex-col gap-2 overflow-hidden rounded-md opacity-75 transition-opacity duration-300 hover:opacity-100"
@@ -234,7 +257,8 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
                   />
                 </a>
               </motion.li>
-            ))}
+                );
+              })}
           </ul>
         )}
       </div>
@@ -263,10 +287,10 @@ function CrawlToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
       <ul className="mt-2 flex flex-wrap gap-4">
         <motion.li
           className="text-muted-foreground bg-accent flex h-40 w-40 gap-2 rounded-md px-2 py-1 text-sm"
-          initial={{ opacity: 0, y: 10, scale: 0.66 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
           transition={{
-            duration: 0.2,
+            duration: 0.15, // Reduced for better performance
             ease: "easeOut",
           }}
         >
@@ -320,22 +344,25 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
                   />
                 </li>
               ))}
-            {documents?.map((doc, i) => (
-              <motion.li
-                key={`search-result-${i}`}
-                className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
-                initial={{ opacity: 0, y: 10, scale: 0.66 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{
-                  duration: 0.2,
-                  delay: i * 0.1,
-                  ease: "easeOut",
-                }}
-              >
-                <FileText size={32} />
-                {doc.title} (chunk-{i},size-{doc.content.length})
-              </motion.li>
-            ))}
+            {documents?.map((doc, i) => {
+              const shouldAnimate = i < 4; // Only animate first 4 documents
+              return (
+                <motion.li
+                  key={`search-result-${i}`}
+                  className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
+                  initial={shouldAnimate ? { opacity: 0, y: 10 } : { opacity: 1, y: 0 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={shouldAnimate ? {
+                    duration: 0.15,
+                    delay: Math.min(i * 0.05, 0.2),
+                    ease: "easeOut",
+                  } : undefined}
+                >
+                  <FileText size={32} />
+                  {doc.title} (chunk-{i},size-{doc.content.length})
+                </motion.li>
+              );
+            })}
           </ul>
         )}
       </div>
