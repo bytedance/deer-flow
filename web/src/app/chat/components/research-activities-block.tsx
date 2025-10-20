@@ -105,7 +105,7 @@ const ActivityListItem = React.memo(({ messageId }: { messageId: string }) => {
   if (message) {
     if (!message.isStreaming && message.toolCalls?.length) {
       for (const toolCall of message.toolCalls) {
-        if (toolCall.result?.startsWith("Error")) {
+        if (typeof toolCall.result === "string" && toolCall.result?.startsWith("Error")) {
           return null;
         }
         if (toolCall.name === "web_search") {
