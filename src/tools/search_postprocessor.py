@@ -201,7 +201,14 @@ class SearchResultPostProcessor:
     def _remove_duplicates(self, result: Dict, seen_urls: set) -> Dict:
         """Remove duplicate results"""
 
-        url = result.get("url", result.get("image_url", ""))
+        url = result.get("url")
+        if not url:
+            image_url_val = result.get("image_url", "")
+            if isinstance(image_url_val, dict):
+                url = image_url_val.get("url", "")
+            else:
+                url = image_url_val
+        
         if url and url not in seen_urls:
             seen_urls.add(url)
             return result.copy()  # Return a copy to avoid modifying original

@@ -166,8 +166,8 @@ class TestEnhancedTavilySearchAPIWrapper:
 
         # Test image result
         image_result = result[1]
-        assert image_result["type"] == "image"
-        assert image_result["image_url"] == "https://example.com/image.jpg"
+        assert image_result["type"] == "image_url"
+        assert image_result["image_url"] == {"url": "https://example.com/image.jpg"}
         assert image_result["image_description"] == "Test image description"
 
     def test_clean_results_without_raw_content(self, wrapper):
