@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import json
 import logging
 from typing import Annotated
 
@@ -22,7 +23,7 @@ def crawl_tool(
     try:
         crawler = Crawler()
         article = crawler.crawl(url)
-        return {"url": url, "crawled_content": article.to_markdown()[:1000]}
+        return json.dumps({"url": url, "crawled_content": article.to_markdown()[:1000]})
     except BaseException as e:
         error_msg = f"Failed to crawl. Error: {repr(e)}"
         logger.error(error_msg)
