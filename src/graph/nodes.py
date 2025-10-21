@@ -449,8 +449,6 @@ def coordinator_node(
     if response.content:
         messages.append(HumanMessage(content=response.content, name="coordinator"))
 
-    handoff_topic = clarified_topic or research_topic
-
     # Process tool calls for BOTH branches (legacy and clarification)
     if response.tool_calls:
         try:
@@ -468,12 +466,13 @@ def coordinator_node(
                         research_topic = tool_args["research_topic"]
 
                     if enable_clarification:
-                        handoff_topic = clarified_topic or research_topic
-                        logger.info("Using prepared clarified topic: %s", handoff_topic)
-                    else:
-                        handoff_topic = research_topic
                         logger.info(
-                            "Using research topic for handoff: %s", handoff_topic
+                            "Using prepared clarified topic: %s",
+                            clarified_topic or research_topic,
+                        )
+                    else:
+                        logger.info(
+                            "Using research topic for handoff: %s", research_topic
                         )
                     break
 
@@ -496,6 +495,11 @@ def coordinator_node(
         clarification_history = []
 
     clarified_research_topic_value = clarified_topic or research_topic
+
+    if enable_clarification:
+        handoff_topic = clarified_topic or research_topic
+    else:
+        handoff_topic = research_topic
 
     return Command(
         update={
@@ -661,14 +665,15 @@ async def _execute_agent_step(
         )
     except Exception as e:
         import traceback
+
         error_traceback = traceback.format_exc()
         error_message = f"Error executing {agent_name} agent for step '{current_step.title}': {str(e)}"
         logger.exception(error_message)
         logger.error(f"Full traceback:\n{error_traceback}")
-        
+
         detailed_error = f"[ERROR] {agent_name.capitalize()} Agent Error\n\nStep: {current_step.title}\n\nError Details:\n{str(e)}\n\nPlease check the logs for more information."
         current_step.execution_res = detailed_error
-        
+
         return Command(
             update={
                 "messages": [

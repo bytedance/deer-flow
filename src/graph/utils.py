@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from typing import Any, Tuple
+from typing import Any
 
 ASSISTANT_SPEAKER_NAMES = {
     "coordinator",
@@ -52,7 +52,7 @@ def is_user_message(message: Any) -> bool:
     return False
 
 
-def get_latest_user_message(messages: list[Any]) -> Tuple[Any, str]:
+def get_latest_user_message(messages: list[Any]) -> tuple[Any, str]:
     """Return the latest user-authored message and its content."""
     for message in reversed(messages or []):
         if is_user_message(message):

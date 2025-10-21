@@ -164,7 +164,7 @@ def _create_event_stream_message(
     content = message_chunk.content
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False)
-    
+
     event_stream_message = {
         "thread_id": thread_id,
         "agent": agent_name,

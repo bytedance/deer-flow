@@ -451,7 +451,9 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base, mock_config)
         assert result.update["current_plan"]["has_enough_context"] is False
 
 
-def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base, mock_config):
+def test_human_feedback_node_invalid_interrupt(
+    monkeypatch, mock_state_base, mock_config
+):
     # interrupt returns something else, should raise TypeError
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
@@ -490,7 +492,9 @@ def test_human_feedback_node_json_decode_error_second_iteration(
         assert result.goto == "reporter"
 
 
-def test_human_feedback_node_not_enough_context(monkeypatch, mock_state_base, mock_config):
+def test_human_feedback_node_not_enough_context(
+    monkeypatch, mock_state_base, mock_config
+):
     # Plan does not have enough context, should goto research_team
     plan = {
         "has_enough_context": False,
