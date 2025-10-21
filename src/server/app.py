@@ -23,6 +23,10 @@ from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
 from src.graph.builder import build_graph_with_memory
 from src.graph.checkpoint import chat_stream_message
+from src.graph.utils import (
+    build_clarified_topic_from_history,
+    reconstruct_clarification_history,
+)
 from src.llms.llm import get_configured_llm_models
 from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
@@ -298,6 +302,14 @@ async def _astream_workflow_generator(
         if isinstance(message, dict) and "content" in message:
             _process_initial_messages(message, thread_id)
 
+    clarification_history = reconstruct_clarification_history(messages)
+
+    clarified_topic, clarification_history = build_clarified_topic_from_history(
+        clarification_history
+    )
+    latest_message_content = messages[-1]["content"] if messages else ""
+    clarified_research_topic = clarified_topic or latest_message_content
+
     # Prepare workflow input
     workflow_input = {
         "messages": messages,
@@ -307,7 +319,9 @@ async def _astream_workflow_generator(
         "observations": [],
         "auto_accepted_plan": auto_accepted_plan,
         "enable_background_investigation": enable_background_investigation,
-        "research_topic": messages[-1]["content"] if messages else "",
+        "research_topic": latest_message_content,
+        "clarification_history": clarification_history,
+        "clarified_research_topic": clarified_research_topic,
         "enable_clarification": enable_clarification,
         "max_clarification_rounds": max_clarification_rounds,
     }

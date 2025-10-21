@@ -31,6 +31,12 @@ from src.utils.json_utils import repair_json_output
 
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
+from .utils import (
+    build_clarified_topic_from_history,
+    get_message_content,
+    is_user_message,
+    reconstruct_clarification_history,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,9 @@ def handoff_to_planner(
 @tool
 def handoff_after_clarification(
     locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
+    research_topic: Annotated[
+        str, "The clarified research topic based on all clarification rounds."
+    ],
 ):
     """Handoff to planner after clarification rounds are complete. Pass all clarification history to planner for analysis."""
     return
@@ -78,7 +87,7 @@ def needs_clarification(state: dict) -> bool:
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
-    query = state.get("research_topic")
+    query = state.get("clarified_research_topic") or state.get("research_topic")
     background_investigation_results = None
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         searched_content = LoggedTavilySearch(
@@ -260,7 +269,8 @@ def coordinator_node(
 
     # Check if clarification is enabled
     enable_clarification = state.get("enable_clarification", False)
-
+    initial_topic = state.get("research_topic", "")
+    clarified_topic = initial_topic
     # ============================================================
     # BRANCH 1: Clarification DISABLED (Legacy Mode)
     # ============================================================
@@ -282,7 +292,6 @@ def coordinator_node(
             .invoke(messages)
         )
 
-        # Process response - should directly handoff to planner
         goto = "__end__"
         locale = state.get("locale", "en-US")
         research_topic = state.get("research_topic", "")
@@ -314,11 +323,27 @@ def coordinator_node(
     else:
         # Load clarification state
         clarification_rounds = state.get("clarification_rounds", 0)
-        clarification_history = state.get("clarification_history", [])
+        clarification_history = list(state.get("clarification_history", []) or [])
+        clarification_history = [item for item in clarification_history if item]
         max_clarification_rounds = state.get("max_clarification_rounds", 3)
 
         # Prepare the messages for the coordinator
+        state_messages = list(state.get("messages", []))
         messages = apply_prompt_template("coordinator", state)
+
+        clarification_history = reconstruct_clarification_history(
+            state_messages, clarification_history, initial_topic
+        )
+        clarified_topic, clarification_history = build_clarified_topic_from_history(
+            clarification_history
+        )
+        logger.debug("Clarification history rebuilt: %s", clarification_history)
+
+        if clarification_history:
+            initial_topic = clarification_history[0]
+            latest_user_content = clarification_history[-1]
+        else:
+            latest_user_content = ""
 
         # Add clarification status for first round
         if clarification_rounds == 0:
@@ -329,91 +354,21 @@ def coordinator_node(
                 }
             )
 
-        # Add clarification context if continuing conversation (round > 0)
-        elif clarification_rounds > 0:
-            logger.info(
-                f"Clarification enabled (rounds: {clarification_rounds}/{max_clarification_rounds}): Continuing conversation"
-            )
+        logger.info(
+            "Clarification round %s/%s | topic: %s | latest user content: %s",
+            clarification_rounds,
+            max_clarification_rounds,
+            clarified_topic or initial_topic,
+            latest_user_content or "N/A",
+        )
 
-            # Add user's response to clarification history (only user messages)
-            last_message = None
-            if state.get("messages"):
-                last_message = state["messages"][-1]
-                # Extract content from last message for logging
-                if isinstance(last_message, dict):
-                    content = last_message.get("content", "No content")
-                else:
-                    content = getattr(last_message, "content", "No content")
-                logger.info(f"Last message content: {content}")
-                # Handle dict format
-                if isinstance(last_message, dict):
-                    if last_message.get("role") == "user":
-                        clarification_history.append(last_message["content"])
-                        logger.info(
-                            f"Added user response to clarification history: {last_message['content']}"
-                        )
-                # Handle object format (like HumanMessage)
-                elif hasattr(last_message, "role") and last_message.role == "user":
-                    clarification_history.append(last_message.content)
-                    logger.info(
-                        f"Added user response to clarification history: {last_message.content}"
-                    )
-                # Handle object format with content attribute (like the one in logs)
-                elif hasattr(last_message, "content"):
-                    clarification_history.append(last_message.content)
-                    logger.info(
-                        f"Added user response to clarification history: {last_message.content}"
-                    )
+        current_response = latest_user_content or "No response"
 
-            # Build comprehensive clarification context with conversation history
-            current_response = "No response"
-            if last_message:
-                # Handle dict format
-                if isinstance(last_message, dict):
-                    if last_message.get("role") == "user":
-                        current_response = last_message.get("content", "No response")
-                    else:
-                        # If last message is not from user, try to get the latest user message
-                        messages = state.get("messages", [])
-                        for msg in reversed(messages):
-                            if isinstance(msg, dict) and msg.get("role") == "user":
-                                current_response = msg.get("content", "No response")
-                                break
-                # Handle object format (like HumanMessage)
-                elif hasattr(last_message, "role") and last_message.role == "user":
-                    current_response = last_message.content
-                # Handle object format with content attribute (like the one in logs)
-                elif hasattr(last_message, "content"):
-                    current_response = last_message.content
-                else:
-                    # If last message is not from user, try to get the latest user message
-                    messages = state.get("messages", [])
-                    for msg in reversed(messages):
-                        if isinstance(msg, dict) and msg.get("role") == "user":
-                            current_response = msg.get("content", "No response")
-                            break
-                        elif hasattr(msg, "role") and msg.role == "user":
-                            current_response = msg.content
-                            break
-                        elif hasattr(msg, "content"):
-                            current_response = msg.content
-                            break
-
-            # Create conversation history summary
-            conversation_summary = ""
-            if clarification_history:
-                conversation_summary = "Previous conversation:\n"
-                for i, response in enumerate(clarification_history, 1):
-                    conversation_summary += f"- Round {i}: {response}\n"
-
-            clarification_context = f"""Continuing clarification (round {clarification_rounds}/{max_clarification_rounds}):
+        clarification_context = f"""Continuing clarification (round {clarification_rounds}/{max_clarification_rounds}):
             User's latest response: {current_response}
             Ask for remaining missing dimensions. Do NOT repeat questions or start new topics."""
 
-            # Log the clarification context for debugging
-            logger.info(f"Clarification context: {clarification_context}")
-
-            messages.append({"role": "system", "content": clarification_context})
+        messages.append({"role": "system", "content": clarification_context})
 
         # Bind both clarification tools
         tools = [handoff_to_planner, handoff_after_clarification]
@@ -427,7 +382,13 @@ def coordinator_node(
         # Initialize response processing variables
         goto = "__end__"
         locale = state.get("locale", "en-US")
-        research_topic = state.get("research_topic", "")
+        research_topic = (
+            clarification_history[0]
+            if clarification_history
+            else state.get("research_topic", "")
+        )
+        if not clarified_topic:
+            clarified_topic = research_topic
 
         # --- Process LLM response ---
         # No tool calls - LLM is asking a clarifying question
@@ -441,20 +402,21 @@ def coordinator_node(
                 )
 
                 # Append coordinator's question to messages
-                state_messages = state.get("messages", [])
+                updated_messages = list(state_messages)
                 if response.content:
-                    state_messages.append(
+                    updated_messages.append(
                         HumanMessage(content=response.content, name="coordinator")
                     )
 
                 return Command(
                     update={
-                        "messages": state_messages,
+                        "messages": updated_messages,
                         "locale": locale,
                         "research_topic": research_topic,
                         "resources": configurable.resources,
                         "clarification_rounds": clarification_rounds,
                         "clarification_history": clarification_history,
+                        "clarified_research_topic": clarified_topic,
                         "is_clarification_complete": False,
                         "clarified_question": "",
                         "goto": goto,
@@ -465,7 +427,7 @@ def coordinator_node(
             else:
                 # Max rounds reached - no more questions allowed
                 logger.warning(
-                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner."
+                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner. Using prepared clarified topic: {clarified_topic}"
                 )
                 goto = "planner"
                 if state.get("enable_background_investigation"):
@@ -483,9 +445,11 @@ def coordinator_node(
     # ============================================================
     # Final: Build and return Command
     # ============================================================
-    messages = state.get("messages", [])
+    messages = list(state.get("messages", []) or [])
     if response.content:
         messages.append(HumanMessage(content=response.content, name="coordinator"))
+
+    handoff_topic = clarified_topic or research_topic
 
     # Process tool calls for BOTH branches (legacy and clarification)
     if response.tool_calls:
@@ -498,19 +462,29 @@ def coordinator_node(
                     logger.info("Handing off to planner")
                     goto = "planner"
 
-                    # Extract locale and research_topic if provided
-                    if tool_args.get("locale") and tool_args.get("research_topic"):
-                        locale = tool_args.get("locale")
-                        research_topic = tool_args.get("research_topic")
+                    # Extract locale if provided
+                    locale = tool_args.get("locale", locale)
+                    if not enable_clarification and tool_args.get("research_topic"):
+                        research_topic = tool_args["research_topic"]
+
+                    if enable_clarification:
+                        handoff_topic = clarified_topic or research_topic
+                        logger.info("Using prepared clarified topic: %s", handoff_topic)
+                    else:
+                        handoff_topic = research_topic
+                        logger.info(
+                            "Using research topic for handoff: %s", handoff_topic
+                        )
                     break
 
         except Exception as e:
             logger.error(f"Error processing tool calls: {e}")
             goto = "planner"
     else:
-        # No tool calls - both modes should goto __end__
-        logger.warning("LLM didn't call any tools. Staying at __end__.")
-        goto = "__end__"
+        if goto == "__end__":
+            logger.warning("LLM didn't call any tools. Staying at __end__.")
+        else:
+            logger.info("LLM skipped tool call, using prepared handoff to %s.", goto)
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
@@ -521,16 +495,19 @@ def coordinator_node(
         clarification_rounds = 0
         clarification_history = []
 
+    clarified_research_topic_value = clarified_topic or research_topic
+
     return Command(
         update={
             "messages": messages,
             "locale": locale,
             "research_topic": research_topic,
+            "clarified_research_topic": clarified_research_topic_value,
             "resources": configurable.resources,
             "clarification_rounds": clarification_rounds,
             "clarification_history": clarification_history,
             "is_clarification_complete": goto != "coordinator",
-            "clarified_question": research_topic if goto != "coordinator" else "",
+            "clarified_question": handoff_topic if goto != "coordinator" else "",
             "goto": goto,
         },
         goto=goto,
