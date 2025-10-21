@@ -53,9 +53,30 @@ function useProseCompletion() {
 
         let fullText = "";
 
-        // Process the streaming response
+        // Process the streaming response with debounced updates
+        let chunkBuffer = "";
+        let updateTimer: NodeJS.Timeout | undefined;
+
+        const scheduleUpdate = () => {
+          if (updateTimer) clearTimeout(updateTimer);
+          updateTimer = setTimeout(() => {
+            if (chunkBuffer) {
+              fullText += chunkBuffer;
+              setCompletion(fullText);
+              chunkBuffer = "";
+            }
+          }, 16); // ~60fps
+        };
+
         for await (const chunk of response) {
           fullText += chunk.data;
+          chunkBuffer += chunk.data;
+          scheduleUpdate();
+        }
+
+        // Final update
+        if (chunkBuffer) {
+          fullText += chunkBuffer;
           setCompletion(fullText);
         }
 
