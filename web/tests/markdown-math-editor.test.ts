@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeMathForEditor, normalizeMathForDisplay } from "../src/core/utils/markdown.ts";
+import { normalizeMathForEditor, normalizeMathForDisplay, unescapeLatexInMath } from "../src/core/utils/markdown.ts";
 
 describe("markdown math normalization for editor", () => {
   it("converts LaTeX display delimiters to $$ for editor", () => {
@@ -127,5 +127,92 @@ Momentum: \\[p = mv\\]
     
     assert.ok(output.startsWith("Text before"));
     assert.ok(output.endsWith("text after"));
+  });
+});
+
+describe("markdown math unescape (issue #608 fix)", () => {
+  it("unescapes asterisks in inline math", () => {
+    const escaped = "Formula $(f \\* g)(t) = t^2$";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.strictEqual(unescaped, "Formula $(f * g)(t) = t^2$");
+  });
+
+  it("unescapes underscores in display math", () => {
+    const escaped = "Formula $$x\\_{n+1} = x_n - f(x_n)/f'(x_n)$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.strictEqual(unescaped, "Formula $$x_{n+1} = x_n - f(x_n)/f'(x_n)$$");
+  });
+
+  it("unescapes backslashes for LaTeX commands", () => {
+    const escaped = "Formula $$\\\\int_{-\\\\infty}^{\\\\infty} f(x)dx$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.strictEqual(unescaped, "Formula $$\\int_{-\\infty}^{\\infty} f(x)dx$$");
+  });
+
+  it("unescapes square brackets in math", () => {
+    const escaped = "Array $a\\[0\\] = b$ and $$c\\[n\\] = d$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.strictEqual(unescaped, "Array $a[0] = b$ and $$c[n] = d$$");
+  });
+
+  it("handles complex formula from issue #608", () => {
+    const escaped = `| Discrete | $(f \\* g)\\[n\\] = \\\\sum\\_{k=-\\\\infty}^{\\\\infty} f\\[k\\]g\\[n-k\\]$ |`;
+    const unescaped = unescapeLatexInMath(escaped);
+    // Should unescape special characters within math delimiters
+    assert.ok(unescaped.includes("(f * g)"));
+    assert.ok(unescaped.includes("[n]"));
+    assert.ok(unescaped.includes("\\sum"));
+    assert.ok(unescaped.includes("_{k"));
+  });
+
+  it("preserves text outside math delimiters", () => {
+    const escaped = "Before $a \\* b$ middle $$c \\* d$$ after";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.ok(unescaped.startsWith("Before"));
+    assert.ok(unescaped.endsWith("after"));
+    assert.ok(unescaped.includes("middle"));
+  });
+
+  it("handles mixed escaped and unescaped characters", () => {
+    const escaped = "$$f(x) = \\\\int_0^\\\\infty e^{-x^2} \\* dx$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    assert.strictEqual(unescaped, "$$f(x) = \\int_0^\\infty e^{-x^2} * dx$$");
+  });
+
+  it("handles multiple inline formulas", () => {
+    const escaped = "Formulas $a \\* b$ and $c \\* d$ and $e \\* f$";
+    const unescaped = unescapeLatexInMath(escaped);
+    const matches = unescaped.match(/\* /g);
+    assert.strictEqual(matches?.length, 3);
+  });
+
+  it("does not modify non-formula text with backslashes", () => {
+    const text = "Use \\* in text and $a \\* b$ in formula";
+    const unescaped = unescapeLatexInMath(text);
+    // Text outside formulas should not be changed
+    assert.ok(unescaped.includes("Use \\*"));
+    assert.ok(unescaped.includes("a * b"));
+  });
+
+  it("handles edge case of empty math delimiters", () => {
+    const escaped = "Empty $$ and $$$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    // Should not crash, just return as-is
+    assert.ok(typeof unescaped === "string");
+  });
+
+  it("round-trip test: escaped content → unescape → original", () => {
+    // This represents what tiptap-markdown returns after editing
+    // Specific characters are escaped: * → \*, _ → \_, [ → \[, ] → \]
+    const escapedByTiptap = "Physics: $(f \\* g)\\[n\\] = \\sum_{k=-\\infty}^{\\infty} f\\[k\\]g\\[n\\-k\\]$";
+    
+    // Apply unescape
+    const unescaped = unescapeLatexInMath(escapedByTiptap);
+    
+    // Should restore formula content and preserve backslash sequences
+    assert.ok(unescaped.includes("(f * g)"));
+    assert.ok(unescaped.includes("[n]"));
+    assert.ok(unescaped.includes("\\sum"));
+    assert.ok(unescaped.includes("f[k]"));
   });
 });

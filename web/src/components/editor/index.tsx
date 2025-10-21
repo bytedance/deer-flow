@@ -31,7 +31,7 @@ import GenerativeMenuSwitch from "./generative/generative-menu-switch";
 import { uploadFn } from "./image-upload";
 import { TextButtons } from "./selectors/text-buttons";
 import { slashCommand, suggestionItems } from "./slash-command";
-import { normalizeMathForEditor } from "~/core/utils/markdown";
+import { normalizeMathForEditor, unescapeLatexInMath } from "~/core/utils/markdown";
 // import { defaultEditorContent } from "./content";
 
 import "~/styles/prosemirror.css";
@@ -74,7 +74,8 @@ const ReportEditor = ({ content, onMarkdownChange }: ReportEditorProps) => {
   const debouncedUpdates = useDebouncedCallback(
     async (editor: EditorInstance) => {
       if (onMarkdownChange) {
-        const markdown = editor.storage.markdown.getMarkdown();
+        let markdown = editor.storage.markdown.getMarkdown();
+        markdown = unescapeLatexInMath(markdown);
         onMarkdownChange(markdown);
       }
       setSaveStatus("Saved");
