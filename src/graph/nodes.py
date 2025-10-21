@@ -211,7 +211,7 @@ def planner_node(
 
 
 def human_feedback_node(
-    state,
+    state: State, config: RunnableConfig
 ) -> Command[Literal["planner", "research_team", "reporter", "__end__"]]:
     current_plan = state.get("current_plan", "")
     # check if the plan is auto accepted
@@ -655,9 +655,32 @@ async def _execute_agent_step(
         recursion_limit = default_recursion_limit
 
     logger.info(f"Agent input: {agent_input}")
-    result = await agent.ainvoke(
-        input=agent_input, config={"recursion_limit": recursion_limit}
-    )
+    try:
+        result = await agent.ainvoke(
+            input=agent_input, config={"recursion_limit": recursion_limit}
+        )
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        error_message = f"Error executing {agent_name} agent for step '{current_step.title}': {str(e)}"
+        logger.exception(error_message)
+        logger.error(f"Full traceback:\n{error_traceback}")
+        
+        detailed_error = f"[ERROR] {agent_name.capitalize()} Agent Error\n\nStep: {current_step.title}\n\nError Details:\n{str(e)}\n\nPlease check the logs for more information."
+        current_step.execution_res = detailed_error
+        
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=detailed_error,
+                        name=agent_name,
+                    )
+                ],
+                "observations": observations + [detailed_error],
+            },
+            goto="research_team",
+        )
 
     # Process the result
     response_content = result["messages"][-1].content

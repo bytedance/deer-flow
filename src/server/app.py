@@ -1,9 +1,11 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import base64
 import json
 import logging
+import os
 from typing import Annotated, Any, List, cast
 from uuid import uuid4
 
@@ -55,6 +57,11 @@ from src.tools import VolcengineTTS
 from src.utils.json_utils import sanitize_args
 
 logger = logging.getLogger(__name__)
+
+# Configure Windows event loop policy for PostgreSQL compatibility
+# On Windows, psycopg requires a selector-based event loop, not the default ProactorEventLoop
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
@@ -154,6 +161,10 @@ def _create_event_stream_message(
     message_chunk, message_metadata, thread_id, agent_name
 ):
     """Create base event stream message."""
+    content = message_chunk.content
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    
     event_stream_message = {
         "thread_id": thread_id,
         "agent": agent_name,
@@ -163,7 +174,7 @@ def _create_event_stream_message(
         "langgraph_node": message_metadata.get("langgraph_node", ""),
         "langgraph_path": message_metadata.get("langgraph_path", ""),
         "langgraph_step": message_metadata.get("langgraph_step", ""),
-        "content": message_chunk.content,
+        "content": content,
     }
 
     # Add optional fields

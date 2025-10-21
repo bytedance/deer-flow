@@ -10,7 +10,6 @@ import {
   GlobalDragHandle,
   HighlightExtension,
   HorizontalRule,
-  Mathematics,
   Placeholder,
   StarterKit,
   TaskItem,
@@ -31,6 +30,7 @@ import { TableRow } from "@tiptap/extension-table-row";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { cx } from "class-variance-authority";
 import { common, createLowlight } from "lowlight";
+import { MathematicsWithMarkdown } from "./math-serializer";
 
 //TODO I am using cx here to get tailwind autocomplete working, idk if someone else can write a regex to just capture the class key in objects
 const aiHighlight = AIHighlight;
@@ -132,7 +132,7 @@ const twitter = Twitter.configure({
   inline: false,
 });
 
-const mathematics = Mathematics.configure({
+const mathematics = MathematicsWithMarkdown.configure({
   HTMLAttributes: {
     class: cx("text-foreground rounded p-1 hover:bg-accent cursor-pointer"),
   },
