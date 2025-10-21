@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock, patch
 
 from src.tools.crawl import crawl_tool
@@ -21,10 +22,11 @@ class TestCrawlTool:
         result = crawl_tool(url)
 
         # Assert
-        assert isinstance(result, dict)
-        assert result["url"] == url
-        assert "crawled_content" in result
-        assert len(result["crawled_content"]) <= 1000
+        assert isinstance(result, str)
+        result_dict = json.loads(result)
+        assert result_dict["url"] == url
+        assert "crawled_content" in result_dict
+        assert len(result_dict["crawled_content"]) <= 1000
         mock_crawler_class.assert_called_once()
         mock_crawler.crawl.assert_called_once_with(url)
         mock_article.to_markdown.assert_called_once()
@@ -45,7 +47,8 @@ class TestCrawlTool:
         result = crawl_tool(url)
 
         # Assert
-        assert result["crawled_content"] == short_content
+        result_dict = json.loads(result)
+        assert result_dict["crawled_content"] == short_content
 
     @patch("src.tools.crawl.Crawler")
     @patch("src.tools.crawl.logger")
