@@ -47,6 +47,79 @@ class TestMakeEvent:
         assert result == expected
 
 
+@pytest.mark.asyncio
+async def test_astream_workflow_generator_preserves_clarification_history():
+    messages = [
+        {"role": "user", "content": "Research on renewable energy"},
+        {
+            "role": "assistant",
+            "content": "What type of renewable energy would you like to know about?",
+        },
+        {"role": "user", "content": "Solar and wind energy"},
+        {
+            "role": "assistant",
+            "content": "Please tell me the research dimensions you focus on, such as technological development or market applications.",
+        },
+        {"role": "user", "content": "Technological development"},
+        {
+            "role": "assistant",
+            "content": "Please specify the time range you want to focus on, such as current status or future trends.",
+        },
+        {"role": "user", "content": "Current status and future trends"},
+    ]
+
+    captured_data = {}
+
+    def empty_async_iterator(*args, **kwargs):
+        captured_data["workflow_input"] = args[1]
+        captured_data["workflow_config"] = args[2]
+
+        class IteratorObject:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        return IteratorObject()
+
+    with (
+        patch("src.server.app._process_initial_messages"),
+        patch("src.server.app._stream_graph_events", side_effect=empty_async_iterator),
+    ):
+        generator = _astream_workflow_generator(
+            messages=messages,
+            thread_id="clarification-thread",
+            resources=[],
+            max_plan_iterations=1,
+            max_step_num=1,
+            max_search_results=5,
+            auto_accepted_plan=True,
+            interrupt_feedback="",
+            mcp_settings={},
+            enable_background_investigation=True,
+            report_style=ReportStyle.ACADEMIC,
+            enable_deep_thinking=False,
+            enable_clarification=True,
+            max_clarification_rounds=3,
+        )
+
+        with pytest.raises(StopAsyncIteration):
+            await generator.__anext__()
+
+    workflow_input = captured_data["workflow_input"]
+    assert workflow_input["clarification_history"] == [
+        "Research on renewable energy",
+        "Solar and wind energy",
+        "Technological development",
+        "Current status and future trends",
+    ]
+    assert (
+        workflow_input["clarified_research_topic"]
+        == "Research on renewable energy - Solar and wind energy, Technological development, Current status and future trends"
+    )
+
+
 class TestTTSEndpoint:
     @patch.dict(
         os.environ,
