@@ -572,7 +572,7 @@ def test_coordinator_node_no_tool_calls(
     patch_handoff_to_planner,
     patch_logger,
 ):
-    # No tool calls, should goto __end__
+    # No tool calls, should fallback to planner (fix for issue #535)
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
         patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
@@ -583,7 +583,8 @@ def test_coordinator_node_no_tool_calls(
         mock_get_llm.return_value = mock_llm
 
         result = coordinator_node(mock_state_coordinator, MagicMock())
-        assert result.goto == "__end__"
+        # Should fallback to planner instead of __end__ to ensure workflow continues
+        assert result.goto == "planner"
         assert result.update["locale"] == "en-US"
         assert result.update["resources"] == ["resource1", "resource2"]
 
@@ -1545,7 +1546,7 @@ def test_coordinator_empty_llm_response_corner_case(mock_get_llm):
 
     This tests error handling when LLM fails to return any content or tool calls
     in the initial state (clarification_rounds=0). The system should gracefully
-    handle this by going to __end__ instead of crashing.
+    handle this by going to planner instead of crashing (fix for issue #535).
 
     Note: This is NOT a typical clarification workflow test, but rather tests
     fault tolerance when LLM misbehaves.
@@ -1573,8 +1574,8 @@ def test_coordinator_empty_llm_response_corner_case(mock_get_llm):
     # Call coordinator_node - should not crash
     result = coordinator_node(state, config)
 
-    # Should gracefully handle empty response by staying at __end__
-    assert result.goto == "__end__"
+    # Should gracefully handle empty response by going to planner to ensure workflow continues
+    assert result.goto == "planner"
     assert result.update["locale"] == "en-US"
 
 

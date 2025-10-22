@@ -64,6 +64,8 @@ Different types of steps have different web search requirements:
    - Collecting competitor analysis
    - Researching current events or news
    - Finding statistical data or reports
+   - **CRITICAL**: Research plans MUST include at least one step with `need_search: true` to gather real information
+   - Without web search, the report will contain hallucinated/fabricated data
 
 2. **Data Processing Steps** (`need_search: false`):
    - API calls and data extraction
@@ -71,6 +73,15 @@ Different types of steps have different web search requirements:
    - Raw data collection from existing sources
    - Mathematical calculations and analysis
    - Statistical computations and data processing
+   - **NOTE**: Processing steps alone are insufficient - you must include research steps with web search
+
+## Web Search Requirement
+
+**MANDATORY**: Every research plan MUST include at least one step with `need_search: true`. This is critical because:
+- Without web search, models generate hallucinated data
+- Research steps must gather real information from external sources
+- Pure processing steps cannot generate credible information for the final report
+- At least one research step must search the web for factual data
 
 ## Exclusions
 
@@ -143,6 +154,7 @@ When planning information gathering, consider these key aspects and ensure COMPR
   - Create NO MORE THAN {{ max_step_num }} focused and comprehensive steps that cover the most essential aspects
   - Ensure each step is substantial and covers related information categories
   - Prioritize breadth and depth within the {{ max_step_num }}-step constraint
+  - **MANDATORY**: Include at least ONE research step with `need_search: true` to avoid hallucinated data
   - For each step, carefully assess if web search is needed:
     - Research and external data gathering: Set `need_search: true`
     - Internal data processing: Set `need_search: false`
@@ -150,6 +162,7 @@ When planning information gathering, consider these key aspects and ensure COMPR
 - Prioritize depth and volume of relevant information - limited information is not acceptable.
 - Use the same language as the user to generate the plan.
 - Do not include steps for summarizing or consolidating the gathered information.
+- **CRITICAL**: Verify that your plan includes at least one step with `need_search: true` before finalizing
 
 # Output Format
 

@@ -84,6 +84,56 @@ def needs_clarification(state: dict) -> bool:
     )
 
 
+def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
+    """
+    Validate and fix a plan to ensure it meets requirements.
+
+    Args:
+        plan: The plan dict to validate
+        enforce_web_search: If True, ensure at least one step has need_search=true
+
+    Returns:
+        The validated/fixed plan dict
+    """
+    if not isinstance(plan, dict):
+        return plan
+
+    steps = plan.get("steps", [])
+
+    if enforce_web_search:
+        # Check if any step has need_search=true
+        has_search_step = any(step.get("need_search", False) for step in steps)
+
+        if not has_search_step and steps:
+            # Ensure first research step has web search enabled
+            for idx, step in enumerate(steps):
+                if step.get("step_type") == "research":
+                    step["need_search"] = True
+                    logger.info(f"Enforced web search on research step at index {idx}")
+                    break
+            else:
+                # Fallback: If no research step exists, convert the first step to a research step with web search enabled.
+                # This ensures that at least one step will perform a web search as required.
+                steps[0]["step_type"] = "research"
+                steps[0]["need_search"] = True
+                logger.info(
+                    "Converted first step to research with web search enforcement"
+                )
+        elif not has_search_step and not steps:
+            # Add a default research step if no steps exist
+            logger.warning("Plan has no steps. Adding default research step.")
+            plan["steps"] = [
+                {
+                    "need_search": True,
+                    "title": "Initial Research",
+                    "description": "Gather information about the topic",
+                    "step_type": "research",
+                }
+            ]
+
+    return plan
+
+
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
@@ -191,6 +241,11 @@ def planner_node(
             return Command(goto="reporter")
         else:
             return Command(goto="__end__")
+
+    # Validate and fix plan to ensure web search requirements are met
+    if isinstance(curr_plan, dict):
+        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search)
+
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
         new_plan = Plan.model_validate(curr_plan)
@@ -243,6 +298,9 @@ def human_feedback_node(
         plan_iterations += 1
         # parse the plan
         new_plan = json.loads(current_plan)
+        # Validate and fix plan to ensure web search requirements are met
+        configurable = Configuration.from_runnable_config(config)
+        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
@@ -480,10 +538,16 @@ def coordinator_node(
             logger.error(f"Error processing tool calls: {e}")
             goto = "planner"
     else:
-        if goto == "__end__":
-            logger.warning("LLM didn't call any tools. Staying at __end__.")
-        else:
-            logger.info("LLM skipped tool call, using prepared handoff to %s.", goto)
+        # No tool calls detected - fallback to planner instead of ending
+        logger.warning(
+            "LLM didn't call any tools. This may indicate tool calling issues with the model. "
+            "Falling back to planner to ensure research proceeds."
+        )
+        # Log full response for debugging
+        logger.debug(f"Coordinator response content: {response.content}")
+        logger.debug(f"Coordinator response object: {response}")
+        # Fallback to planner to ensure workflow continues
+        goto = "planner"
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
