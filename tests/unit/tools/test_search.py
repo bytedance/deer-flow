@@ -19,6 +19,8 @@ class TestGetWebSearchTool:
         assert tool.include_raw_content is True
         assert tool.include_images is True
         assert tool.include_image_descriptions is True
+        assert tool.include_answer is False
+        assert tool.search_depth == "advanced"
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.DUCKDUCKGO.value)
     def test_get_web_search_tool_duckduckgo(self):

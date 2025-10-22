@@ -55,3 +55,17 @@ BASIC_MODEL:
 #   # Exclude results from these domains
 #   exclude_domains:
 #     - example.com
+#   # Include an answer in the search results
+#   include_answer: false
+#   # Search depth: "basic" or "advanced"
+#   search_depth: "advanced"
+#   # Include raw content from pages
+#   include_raw_content: true
+#   # Include images in search results
+#   include_images: true
+#   # Include descriptions for images
+#   include_image_descriptions: true
+#   # Minimum score threshold for results (0-1)
+#   min_score_threshold: 0.0
+#   # Maximum content length per page
+#   max_content_length_per_page: 4000
