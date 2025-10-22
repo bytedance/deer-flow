@@ -69,11 +69,9 @@ function useProseCompletion() {
         };
 
         for await (const chunk of response) {
-          fullText += chunk.data;
           chunkBuffer += chunk.data;
           scheduleUpdate();
         }
-
         // Final update
         if (chunkBuffer) {
           fullText += chunkBuffer;
