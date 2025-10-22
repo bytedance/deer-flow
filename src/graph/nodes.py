@@ -103,7 +103,8 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
                     logger.info("Enforced web search on first research step")
                     break
             else:
-                # If no research step exists, set first step to research with search
+                # Fallback: If no research step exists, convert the first step to a research step with web search enabled.
+                # This ensures that at least one step will perform a web search as required.
                 steps[0]["step_type"] = "research"
                 steps[0]["need_search"] = True
                 logger.info("Converted first step to research with web search enforcement")
