@@ -451,7 +451,9 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base, mock_config)
         assert result.update["current_plan"]["has_enough_context"] is False
 
 
-def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base, mock_config):
+def test_human_feedback_node_invalid_interrupt(
+    monkeypatch, mock_state_base, mock_config
+):
     # interrupt returns something else, should raise TypeError
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
@@ -490,7 +492,9 @@ def test_human_feedback_node_json_decode_error_second_iteration(
         assert result.goto == "reporter"
 
 
-def test_human_feedback_node_not_enough_context(monkeypatch, mock_state_base, mock_config):
+def test_human_feedback_node_not_enough_context(
+    monkeypatch, mock_state_base, mock_config
+):
     # Plan does not have enough context, should goto research_team
     plan = {
         "has_enough_context": False,
@@ -1446,7 +1450,9 @@ def test_handoff_tools():
     assert result is None  # Tool should return None (no-op)
 
     # Test handoff_after_clarification tool - use invoke() method
-    result = handoff_after_clarification.invoke({"locale": "en-US"})
+    result = handoff_after_clarification.invoke(
+        {"locale": "en-US", "research_topic": "renewable energy research"}
+    )
     assert result is None  # Tool should return None (no-op)
 
 
@@ -1468,9 +1474,13 @@ def test_coordinator_tools_with_clarification_enabled(mock_get_llm):
         "clarification_rounds": 2,
         "max_clarification_rounds": 3,
         "is_clarification_complete": False,
-        "clarification_history": ["response 1", "response 2"],
+        "clarification_history": [
+            "Tell me about something",
+            "response 1",
+            "response 2",
+        ],
         "locale": "en-US",
-        "research_topic": "",
+        "research_topic": "Tell me about something",
     }
 
     # Mock config
@@ -1567,3 +1577,289 @@ def test_coordinator_empty_llm_response_corner_case(mock_get_llm):
     # Should gracefully handle empty response by going to planner to ensure workflow continues
     assert result.goto == "planner"
     assert result.update["locale"] == "en-US"
+
+
+# ============================================================================
+# Clarification flow tests
+# ============================================================================
+
+
+def test_clarification_handoff_combines_history():
+    """Coordinator should merge original topic with all clarification answers before handoff."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {"role": "user", "content": "Research artificial intelligence"},
+            {"role": "assistant", "content": "Which area of AI should we focus on?"},
+            {"role": "user", "content": "Machine learning applications"},
+            {"role": "assistant", "content": "What dimension of that should we cover?"},
+            {"role": "user", "content": "Technical implementation details"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Machine learning applications",
+            "Technical implementation details",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Machine learning applications, Technical implementation details",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-test"})
+
+    mock_response = AIMessage(
+        content="Understood, handing off now.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    assert update["clarification_history"] == [
+        "Research artificial intelligence",
+        "Machine learning applications",
+        "Technical implementation details",
+    ]
+    expected_topic = (
+        "Research artificial intelligence - "
+        "Machine learning applications, Technical implementation details"
+    )
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+    assert update["clarified_question"] == expected_topic
+
+
+def test_clarification_history_reconstructed_from_messages():
+    """Coordinator should rebuild clarification history from full message log when state is incomplete."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    incomplete_state = {
+        "messages": [
+            {"role": "user", "content": "Research on renewable energy"},
+            {
+                "role": "assistant",
+                "content": "Which type of renewable energy interests you?",
+            },
+            {"role": "user", "content": "Solar and wind energy"},
+            {"role": "assistant", "content": "Which aspect should we focus on?"},
+            {"role": "user", "content": "Technical implementation"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": ["Technical implementation"],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research on renewable energy",
+        "clarified_research_topic": "Research on renewable energy",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-history-rebuild"})
+
+    mock_response = AIMessage(
+        content="Understood, handing over now.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(incomplete_state, config)
+
+    update = result.update
+    assert update["clarification_history"] == [
+        "Research on renewable energy",
+        "Solar and wind energy",
+        "Technical implementation",
+    ]
+    assert update["research_topic"] == "Research on renewable energy"
+    assert (
+        update["clarified_research_topic"]
+        == "Research on renewable energy - Solar and wind energy, Technical implementation"
+    )
+
+
+def test_clarification_max_rounds_without_tool_call():
+    """Coordinator should stop asking questions after max rounds and hand off with compiled topic."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {"role": "user", "content": "Research artificial intelligence"},
+            {"role": "assistant", "content": "Which area should we focus on?"},
+            {"role": "user", "content": "Natural language processing"},
+            {"role": "assistant", "content": "Which domain matters most?"},
+            {"role": "user", "content": "Healthcare"},
+            {"role": "assistant", "content": "Any specific scenario to study?"},
+            {"role": "user", "content": "Clinical documentation"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 3,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Natural language processing",
+            "Healthcare",
+            "Clinical documentation",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Natural language processing, Healthcare, Clinical documentation",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-max"})
+
+    mock_response = AIMessage(
+        content="Got it, sending this to the planner.",
+        tool_calls=[],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    expected_topic = (
+        "Research artificial intelligence - "
+        "Natural language processing, Healthcare, Clinical documentation"
+    )
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+    assert result.goto == "planner"
+
+
+def test_clarification_human_message_support():
+    """Coordinator should treat HumanMessage instances from the user as user authored."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            HumanMessage(content="Research artificial intelligence"),
+            HumanMessage(content="Which area should we focus on?", name="coordinator"),
+            HumanMessage(content="Machine learning"),
+            HumanMessage(
+                content="Which dimension should we explore?", name="coordinator"
+            ),
+            HumanMessage(content="Technical feasibility"),
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Machine learning",
+            "Technical feasibility",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Machine learning, Technical feasibility",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-human"})
+
+    mock_response = AIMessage(
+        content="Moving to planner.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "human-message-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    expected_topic = (
+        "Research artificial intelligence - Machine learning, Technical feasibility"
+    )
+    assert update["clarification_history"] == [
+        "Research artificial intelligence",
+        "Machine learning",
+        "Technical feasibility",
+    ]
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+
+
+def test_clarification_no_history_defaults_to_topic():
+    """If clarification never started, coordinator should forward the original topic."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [{"role": "user", "content": "What is quantum computing?"}],
+        "enable_clarification": True,
+        "clarification_rounds": 0,
+        "clarification_history": ["What is quantum computing?"],
+        "max_clarification_rounds": 3,
+        "research_topic": "What is quantum computing?",
+        "clarified_research_topic": "What is quantum computing?",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-none"})
+
+    mock_response = AIMessage(
+        content="Understood.",
+        tool_calls=[
+            {
+                "name": "handoff_to_planner",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "clarification-none",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    assert result.update["research_topic"] == "What is quantum computing?"
+    assert result.update["clarified_research_topic"] == "What is quantum computing?"

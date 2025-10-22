@@ -208,7 +208,7 @@ class SearchResultPostProcessor:
                 url = image_url_val.get("url", "")
             else:
                 url = image_url_val
-        
+
         if url and url not in seen_urls:
             seen_urls.add(url)
             return result.copy()  # Return a copy to avoid modifying original
