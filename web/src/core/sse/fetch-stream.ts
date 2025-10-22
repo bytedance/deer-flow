@@ -66,7 +66,7 @@ export async function* fetchStream(
       }
     }
   } finally {
-    reader.releaseLock(); // Ensure release reader
+    reader.releaseLock(); // Release the reader lock
   }
 
 }
