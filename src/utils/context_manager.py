@@ -264,3 +264,54 @@ class ContextManager:
         """
         # TODO: summary implementation
         pass
+
+
+def validate_message_content(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """
+    Validate and fix all messages to ensure they have valid content before sending to LLM.
+    
+    This function ensures:
+    1. All messages have a content field
+    2. No message has None or empty string content (except for legitimate empty responses)
+    3. Complex objects (lists, dicts) are converted to JSON strings
+    
+    Args:
+        messages: List of messages to validate
+    
+    Returns:
+        List of validated messages with fixed content
+    """
+    validated = []
+    for i, msg in enumerate(messages):
+        try:
+            # Check if message has content attribute
+            if not hasattr(msg, 'content'):
+                logger.warning(f"Message {i} ({type(msg).__name__}) has no content attribute")
+                msg.content = ""
+            
+            # Handle None content
+            elif msg.content is None:
+                logger.warning(f"Message {i} ({type(msg).__name__}) has None content, setting to empty string")
+                msg.content = ""
+            
+            # Handle complex content types (convert to JSON)
+            elif isinstance(msg.content, (list, dict)):
+                logger.debug(f"Message {i} ({type(msg).__name__}) has complex content type {type(msg.content).__name__}, converting to JSON")
+                msg.content = json.dumps(msg.content, ensure_ascii=False)
+            
+            # Handle other non-string types
+            elif not isinstance(msg.content, str):
+                logger.debug(f"Message {i} ({type(msg).__name__}) has non-string content type {type(msg.content).__name__}, converting to string")
+                msg.content = str(msg.content)
+            
+            validated.append(msg)
+        except Exception as e:
+            logger.error(f"Error validating message {i}: {e}")
+            # Create a safe fallback message
+            if isinstance(msg, ToolMessage):
+                msg.content = json.dumps({"error": str(e)}, ensure_ascii=False)
+            else:
+                msg.content = f"[Error processing message: {str(e)}]"
+            validated.append(msg)
+    
+    return validated
