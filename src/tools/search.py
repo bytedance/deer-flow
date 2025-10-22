@@ -47,22 +47,29 @@ def get_web_search_tool(max_search_results: int):
     search_config = get_search_config()
 
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
-        # Only get and apply include/exclude domains for Tavily
+        # Get all Tavily search parameters from configuration with defaults
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
-        include_raw_content = search_config.get("include_raw_content", True)
-        include_images: Optional[bool] = search_config.get("include_images", True)
-        include_image_descriptions: Optional[bool] = (
+        include_answer: bool = search_config.get("include_answer", False)
+        search_depth: str = search_config.get("search_depth", "advanced")
+        include_raw_content: bool = search_config.get("include_raw_content", True)
+        include_images: bool = search_config.get("include_images", True)
+        include_image_descriptions: bool = (
             include_images and search_config.get("include_image_descriptions", True)
         )
 
         logger.info(
-            f"Tavily search configuration loaded: include_domains={include_domains}, exclude_domains={exclude_domains}"
+            f"Tavily search configuration loaded: include_domains={include_domains}, "
+            f"exclude_domains={exclude_domains}, include_answer={include_answer}, "
+            f"search_depth={search_depth}, include_raw_content={include_raw_content}, "
+            f"include_images={include_images}, include_image_descriptions={include_image_descriptions}"
         )
 
         return LoggedTavilySearch(
             name="web_search",
             max_results=max_search_results,
+            include_answer=include_answer,
+            search_depth=search_depth,
             include_raw_content=include_raw_content,
             include_images=include_images,
             include_image_descriptions=include_image_descriptions,
