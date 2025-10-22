@@ -25,13 +25,12 @@ export async function* fetchStream(
   if (!reader) {
     throw new Error("Response body is not readable");
   }
+
   try {
     let buffer = "";
     const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB buffer size limit
 
     while (true) {
-      const index = buffer.indexOf("\n\n");
-      if (index === -1) {
       const { done, value } = await reader.read();
       if (done) {
         // Handle remaining buffer data
@@ -62,7 +61,6 @@ export async function* fetchStream(
             yield event;
           }
         }
-      }
       }
     }
   } finally {
