@@ -120,7 +120,7 @@ export async function sendMessage(
 
   setResponding(true);
   let messageId: string | undefined;
-  let pendingUpdates: Map<string, Message> = new Map();
+  const pendingUpdates = new Map<string, Message>();
   let updateTimer: NodeJS.Timeout | undefined;
 
   const scheduleUpdate = () => {
