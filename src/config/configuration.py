@@ -51,6 +51,7 @@ class Configuration:
     mcp_settings: dict = None  # MCP settings, including dynamic loaded tools
     report_style: str = ReportStyle.ACADEMIC.value  # Report style
     enable_deep_thinking: bool = False  # Whether to enable deep thinking
+    enforce_web_search: bool = False  # Enforce at least one web search step in every plan
 
     @classmethod
     def from_runnable_config(

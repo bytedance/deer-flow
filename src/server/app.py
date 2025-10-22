@@ -223,6 +223,10 @@ def _create_event_stream_message(
     message_chunk, message_metadata, thread_id, agent_name
 ):
     """Create base event stream message."""
+    content = message_chunk.content
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    
     event_stream_message = {
         "thread_id": thread_id,
         "agent": agent_name,
@@ -232,7 +236,7 @@ def _create_event_stream_message(
         "langgraph_node": message_metadata.get("langgraph_node", ""),
         "langgraph_path": message_metadata.get("langgraph_path", ""),
         "langgraph_step": message_metadata.get("langgraph_step", ""),
-        "content": message_chunk.content,
+        "content": content,
     }
 
     # Add optional fields
