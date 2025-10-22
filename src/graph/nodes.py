@@ -288,7 +288,7 @@ def human_feedback_node(
         # parse the plan
         new_plan = json.loads(current_plan)
         # Validate and fix plan to ensure web search requirements are met
-        configurable = Configuration.from_runnable_config()
+        configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
