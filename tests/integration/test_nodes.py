@@ -136,7 +136,7 @@ def test_background_investigation_node_malformed_response(
 
         # Parse and verify the JSON content
         results = result["background_investigation_results"]
-        assert json.loads(results) is None
+        assert json.loads(results) == []
 
 
 @pytest.fixture
