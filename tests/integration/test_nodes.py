@@ -1873,14 +1873,14 @@ def test_clarification_skips_specific_topics():
         "messages": [
             {
                 "role": "user",
-                "content": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+                "content": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
             }
         ],
         "enable_clarification": True,
         "clarification_rounds": 0,
         "clarification_history": [],
         "max_clarification_rounds": 3,
-        "research_topic": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+        "research_topic": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
         "locale": "en-US",
     }
 
@@ -1893,7 +1893,7 @@ def test_clarification_skips_specific_topics():
                 "name": "handoff_to_planner",
                 "args": {
                     "locale": "en-US",
-                    "research_topic": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+                    "research_topic": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
                 },
                 "id": "tool-call-handoff",
                 "type": "tool_call",
@@ -1912,5 +1912,5 @@ def test_clarification_skips_specific_topics():
     assert result.goto == "planner"
     assert (
         result.update["research_topic"]
-        == "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model"
+        == "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model"
     )

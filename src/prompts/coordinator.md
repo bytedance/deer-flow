@@ -67,7 +67,7 @@ Goal: Get 2+ dimensions before handing off to planner.
 ## Smart Clarification Rules
 
 **DO NOT clarify if the topic already contains:**
-- Complete research plan/title (e.g., "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model")
+- Complete research plan/title (e.g., "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model")
 - Specific technology + application + goal (e.g., "Using deep learning to optimize recommendation algorithms")
 - Clear research scope (e.g., "Blockchain applications in financial services research")
 
