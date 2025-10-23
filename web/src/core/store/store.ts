@@ -120,6 +120,20 @@ export async function sendMessage(
 
   setResponding(true);
   let messageId: string | undefined;
+  const pendingUpdates = new Map<string, Message>();
+  let updateTimer: NodeJS.Timeout | undefined;
+
+  const scheduleUpdate = () => {
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = setTimeout(() => {
+      // Batch update message status
+      if (pendingUpdates.size > 0) {
+        useStore.getState().updateMessages(Array.from(pendingUpdates.values()));
+        pendingUpdates.clear();
+      }
+    }, 16); // ~60fps
+  };
+
   try {
     for await (const event of stream) {
       const { type, data } = event;
@@ -145,7 +159,10 @@ export async function sendMessage(
       message ??= getMessage(messageId);
       if (message) {
         message = mergeMessage(message, event);
-        updateMessage(message);
+        // Collect pending messages for update, instead of updating immediately.
+        pendingUpdates.set(message.id, message);
+        scheduleUpdate();
+
       }
     }
   } catch {
@@ -162,6 +179,12 @@ export async function sendMessage(
     useStore.getState().setOngoingResearch(null);
   } finally {
     setResponding(false);
+    // Ensure all pending updates are processed.
+    if (updateTimer) clearTimeout(updateTimer);
+    if (pendingUpdates.size > 0) {
+      useStore.getState().updateMessages(Array.from(pendingUpdates.values()));
+    }
+
   }
 }
 
