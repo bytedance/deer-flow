@@ -1,0 +1,740 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "DeerFlow API",
+    "description": "API for Deer - Advanced research and content generation system",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/api/chat/stream": {
+      "post": {
+        "summary": "Stream chat responses",
+        "description": "Initiates a streaming chat session with the research agent. Returns server-sent events with message chunks, tool calls, and intermediate results.",
+        "tags": ["Chat"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful streaming response",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "object",
+                  "description": "Server-sent events with various message types"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "MCP server configuration is disabled"
+          },
+          "500": {
+            "description": "Internal server error during graph execution"
+          }
+        }
+      }
+    },
+    "/api/tts": {
+      "post": {
+        "summary": "Convert text to speech",
+        "description": "Converts text to speech using Volcengine TTS API. Requires VOLCENGINE_TTS_APPID and VOLCENGINE_TTS_ACCESS_TOKEN environment variables.",
+        "tags": ["Text-to-Speech"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TTSRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Audio file in requested format",
+            "content": {
+              "audio/mp3": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required environment variables"
+          },
+          "500": {
+            "description": "Internal server error during TTS processing"
+          }
+        }
+      }
+    },
+    "/api/podcast/generate": {
+      "post": {
+        "summary": "Generate podcast from content",
+        "description": "Generates an audio podcast from the provided text content",
+        "tags": ["Content Generation"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneratePodcastRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated podcast audio file",
+            "content": {
+              "audio/mp3": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error during podcast generation"
+          }
+        }
+      }
+    },
+    "/api/ppt/generate": {
+      "post": {
+        "summary": "Generate PowerPoint presentation",
+        "description": "Generates a PowerPoint presentation from the provided content",
+        "tags": ["Content Generation"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GeneratePPTRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated PowerPoint file",
+            "content": {
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error during PPT generation"
+          }
+        }
+      }
+    },
+    "/api/prose/generate": {
+      "post": {
+        "summary": "Generate prose content",
+        "description": "Generates prose content with streaming output based on the provided prompt and option",
+        "tags": ["Content Generation"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateProseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Streaming prose content",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-sent events with prose content chunks"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error during prose generation"
+          }
+        }
+      }
+    },
+    "/api/prompt/enhance": {
+      "post": {
+        "summary": "Enhance user prompts",
+        "description": "Enhances and refines user prompts with specified report style and context",
+        "tags": ["Prompt"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnhancePromptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enhanced prompt result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "type": "string",
+                      "description": "The enhanced prompt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error during prompt enhancement"
+          }
+        }
+      }
+    },
+    "/api/mcp/server/metadata": {
+      "post": {
+        "summary": "Get MCP server metadata",
+        "description": "Retrieves metadata and available tools from a Model Context Protocol (MCP) server. Requires ENABLE_MCP_SERVER_CONFIGURATION=true.",
+        "tags": ["MCP"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MCPServerMetadataRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "MCP server metadata and available tools",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MCPServerMetadataResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "MCP server configuration is disabled"
+          },
+          "500": {
+            "description": "Error retrieving MCP server metadata"
+          }
+        }
+      }
+    },
+    "/api/rag/config": {
+      "get": {
+        "summary": "Get RAG configuration",
+        "description": "Returns the current RAG (Retrieval-Augmented Generation) provider configuration",
+        "tags": ["RAG"],
+        "responses": {
+          "200": {
+            "description": "RAG configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RAGConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rag/resources": {
+      "get": {
+        "summary": "Get RAG resources",
+        "description": "Retrieves available resources from the RAG system based on optional query parameter",
+        "tags": ["RAG"],
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Search query for resources",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of RAG resources",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RAGResourcesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Get server configuration",
+        "description": "Returns the complete server configuration including RAG settings and available models",
+        "tags": ["Configuration"],
+        "responses": {
+          "200": {
+            "description": "Server configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatRequest": {
+        "type": "object",
+        "description": "Request for chat streaming endpoint",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            },
+            "description": "History of messages between the user and assistant"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Resource"
+            },
+            "description": "Resources to be used for the research"
+          },
+          "debug": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether to enable debug logging"
+          },
+          "thread_id": {
+            "type": "string",
+            "default": "__default__",
+            "description": "A specific conversation identifier"
+          },
+          "max_plan_iterations": {
+            "type": "integer",
+            "default": 1,
+            "description": "The maximum number of plan iterations"
+          },
+          "max_step_num": {
+            "type": "integer",
+            "default": 3,
+            "description": "The maximum number of steps in a plan"
+          },
+          "max_search_results": {
+            "type": "integer",
+            "default": 3,
+            "description": "The maximum number of search results"
+          },
+          "auto_accepted_plan": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether to automatically accept the plan"
+          },
+          "interrupt_feedback": {
+            "type": "string",
+            "nullable": true,
+            "description": "Interrupt feedback from the user on the plan"
+          },
+          "mcp_settings": {
+            "type": "object",
+            "nullable": true,
+            "description": "MCP settings for the chat request"
+          },
+          "enable_background_investigation": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether to get background investigation before plan"
+          },
+          "report_style": {
+            "type": "string",
+            "enum": ["ACADEMIC", "POPULAR_SCIENCE", "NEWS", "SOCIAL_MEDIA", "STRATEGIC_INVESTMENT"],
+            "default": "ACADEMIC",
+            "description": "The style of the report"
+          },
+          "enable_deep_thinking": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether to enable deep thinking"
+          },
+          "enable_clarification": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Whether to enable multi-turn clarification"
+          },
+          "max_clarification_rounds": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Maximum number of clarification rounds"
+          }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": ["role", "content"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["user", "assistant"],
+            "description": "The role of the message sender"
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Text content"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ContentItem"
+                },
+                "description": "Multiple content items"
+              }
+            ]
+          }
+        }
+      },
+      "ContentItem": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "The type of content (text, image, etc.)"
+          },
+          "text": {
+            "type": "string",
+            "nullable": true,
+            "description": "The text content if type is 'text'"
+          },
+          "image_url": {
+            "type": "string",
+            "nullable": true,
+            "description": "The image URL if type is 'image'"
+          }
+        }
+      },
+      "Resource": {
+        "type": "object",
+        "description": "A resource for RAG queries"
+      },
+      "TTSRequest": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The text to convert to speech (max 1024 characters)"
+          },
+          "voice_type": {
+            "type": "string",
+            "default": "BV700_V2_streaming",
+            "description": "The voice type to use"
+          },
+          "encoding": {
+            "type": "string",
+            "default": "mp3",
+            "enum": ["mp3", "wav"],
+            "description": "The audio encoding format"
+          },
+          "speed_ratio": {
+            "type": "number",
+            "format": "float",
+            "default": 1.0,
+            "description": "Speech speed ratio"
+          },
+          "volume_ratio": {
+            "type": "number",
+            "format": "float",
+            "default": 1.0,
+            "description": "Speech volume ratio"
+          },
+          "pitch_ratio": {
+            "type": "number",
+            "format": "float",
+            "default": 1.0,
+            "description": "Speech pitch ratio"
+          },
+          "text_type": {
+            "type": "string",
+            "default": "plain",
+            "enum": ["plain", "ssml"],
+            "description": "Text type"
+          },
+          "with_frontend": {
+            "type": "integer",
+            "default": 1,
+            "description": "Whether to use frontend processing"
+          },
+          "frontend_type": {
+            "type": "string",
+            "default": "unitTson",
+            "description": "Frontend type"
+          }
+        }
+      },
+      "GeneratePodcastRequest": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The content of the podcast"
+          }
+        }
+      },
+      "GeneratePPTRequest": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The content of the PowerPoint presentation"
+          }
+        }
+      },
+      "GenerateProseRequest": {
+        "type": "object",
+        "required": ["prompt", "option"],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The content/prompt of the prose"
+          },
+          "option": {
+            "type": "string",
+            "description": "The option of the prose writer"
+          },
+          "command": {
+            "type": "string",
+            "default": "",
+            "description": "The user custom command of the prose writer"
+          }
+        }
+      },
+      "EnhancePromptRequest": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The original prompt to enhance"
+          },
+          "context": {
+            "type": "string",
+            "default": "",
+            "description": "Additional context about the intended use"
+          },
+          "report_style": {
+            "type": "string",
+            "default": "academic",
+            "enum": ["academic", "ACADEMIC", "popular_science", "POPULAR_SCIENCE", "news", "NEWS", "social_media", "SOCIAL_MEDIA", "strategic_investment", "STRATEGIC_INVESTMENT"],
+            "description": "The style of the report"
+          }
+        }
+      },
+      "MCPServerMetadataRequest": {
+        "type": "object",
+        "required": ["transport"],
+        "properties": {
+          "transport": {
+            "type": "string",
+            "enum": ["stdio", "sse", "streamable_http"],
+            "description": "The type of MCP server connection"
+          },
+          "command": {
+            "type": "string",
+            "nullable": true,
+            "description": "The command to execute (for stdio type)"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "Command arguments (for stdio type)"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true,
+            "description": "The URL of the SSE server (for sse type)"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "Environment variables (for stdio type)"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "HTTP headers (for sse/streamable_http type)"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Optional custom timeout in seconds"
+          }
+        }
+      },
+      "MCPServerMetadataResponse": {
+        "type": "object",
+        "required": ["transport"],
+        "properties": {
+          "transport": {
+            "type": "string",
+            "description": "The type of MCP server connection"
+          },
+          "command": {
+            "type": "string",
+            "nullable": true,
+            "description": "The command to execute (for stdio type)"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "Command arguments (for stdio type)"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true,
+            "description": "The URL of the SSE server (for sse type)"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "Environment variables (for stdio type)"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true,
+            "description": "HTTP headers (for sse/streamable_http type)"
+          },
+          "tools": {
+            "type": "array",
+            "description": "Available tools from the MCP server"
+          }
+        }
+      },
+      "RAGConfigResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "nullable": true,
+            "description": "The provider of the RAG (default: ragflow)"
+          }
+        }
+      },
+      "RAGResourceRequest": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "nullable": true,
+            "description": "The query of the resource to be searched"
+          }
+        }
+      },
+      "RAGResourcesResponse": {
+        "type": "object",
+        "required": ["resources"],
+        "properties": {
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Resource"
+            },
+            "description": "The resources of the RAG"
+          }
+        }
+      },
+      "ConfigResponse": {
+        "type": "object",
+        "required": ["rag", "models"],
+        "properties": {
+          "rag": {
+            "$ref": "#/components/schemas/RAGConfigResponse",
+            "description": "The config of the RAG"
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "description": "The configured models"
+          }
+        }
+      }
+    }
+  }
+}
