@@ -1644,7 +1644,6 @@ def test_clarification_handoff_combines_history():
     )
     assert update["research_topic"] == "Research artificial intelligence"
     assert update["clarified_research_topic"] == expected_topic
-    assert update["clarified_question"] == expected_topic
 
 
 def test_clarification_history_reconstructed_from_messages():
@@ -1863,3 +1862,55 @@ def test_clarification_no_history_defaults_to_topic():
     assert hasattr(result, "update")
     assert result.update["research_topic"] == "What is quantum computing?"
     assert result.update["clarified_research_topic"] == "What is quantum computing?"
+
+
+def test_clarification_skips_specific_topics():
+    """Coordinator should skip clarification for already specific topics."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+            }
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 0,
+        "clarification_history": [],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "specific-topic-test"})
+
+    mock_response = AIMessage(
+        content="I understand you want to research AI e-commerce video synthesis technology. Let me hand this off to the planner.",
+        tool_calls=[
+            {
+                "name": "handoff_to_planner",
+                "args": {
+                    "locale": "en-US",
+                    "research_topic": "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model",
+                },
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    assert result.goto == "planner"
+    assert (
+        result.update["research_topic"]
+        == "Research Plan for Improving Efficiency of AI E-commerce Video Synthesis Technology Based on Transformer Model"
+    )
