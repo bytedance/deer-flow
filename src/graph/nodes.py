@@ -749,7 +749,8 @@ async def _execute_agent_step(
     
     # Validate message content before invoking agent
     try:
-        agent_input["messages"] = validate_message_content(agent_input["messages"])
+        validated_messages = validate_message_content(agent_input["messages"])
+        agent_input["messages"] = validated_messages
     except Exception as validation_error:
         logger.error(f"Error validating agent input messages: {validation_error}")
     
