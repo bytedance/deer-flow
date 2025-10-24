@@ -29,6 +29,22 @@ export default {
       },
     }],
   },
+  // The following packages are ESM-only or otherwise require transformation by Jest.
+  // If you encounter "SyntaxError: Cannot use import statement outside a module" or similar errors
+  // for a dependency, add it to this list. See: https://jestjs.io/docs/configuration#transformignorepatterns-arraystring
+  // 
+  // Packages included:
+  // - framer-motion: ESM-only
+  // - nanoid: ESM-only
+  // - @tiptap: ESM-only
+  // - lowlight: ESM-only
+  // - highlight.js: ESM-only
+  // - zustand: ESM-only
+  // - sonner: ESM-only
+  // - next-intl: ESM-only
+  // - immer: ESM-only
+  // - use-debounce: ESM-only
+  // - use-stick-to-bottom: ESM-only
   transformIgnorePatterns: [
     'node_modules/(?!(framer-motion|nanoid|@tiptap|lowlight|highlight\\.js|zustand|sonner|next-intl|immer|use-debounce|use-stick-to-bottom)/)',
   ],
