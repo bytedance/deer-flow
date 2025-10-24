@@ -100,6 +100,26 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 
     steps = plan.get("steps", [])
 
+    # ============================================================
+    # SECTION 1: Repair missing step_type fields (Issue #650 fix)
+    # ============================================================
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        
+        # Check if step_type is missing or empty
+        if "step_type" not in step or not step.get("step_type"):
+            # Infer step_type based on need_search value
+            inferred_type = "research" if step.get("need_search", False) else "processing"
+            step["step_type"] = inferred_type
+            logger.info(
+                f"Repaired missing step_type for step {idx} ({step.get('title', 'Untitled')}): "
+                f"inferred as '{inferred_type}' based on need_search={step.get('need_search', False)}"
+            )
+
+    # ============================================================
+    # SECTION 2: Enforce web search requirements
+    # ============================================================
     if enforce_web_search:
         # Check if any step has need_search=true
         has_search_step = any(step.get("need_search", False) for step in steps)

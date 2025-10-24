@@ -164,6 +164,30 @@ CURRENT_TIME: {{ CURRENT_TIME }}
 - 不要包括总结或整合收集信息的步骤。
 - **关键**：在最终确定之前验证你的计划包括至少一个带有`need_search: true`的步骤
 
+## 关键要求：step_type字段
+
+**⚠️ 重要：你必须为计划中的每一个步骤包含`step_type`字段。这是强制性的，不能省略。**
+
+对于你创建的每个步骤，你必须显式设置以下值之一：
+- `"research"` - 用于通过网络搜索或检索来收集信息的步骤（当`need_search: true`时）
+- `"processing"` - 用于分析、计算或处理数据而不进行网络搜索的步骤（当`need_search: false`时）
+
+**验证清单 - 对于每一个步骤，验证所有4个字段都存在：**
+- [ ] `need_search`：必须是`true`或`false`
+- [ ] `title`：必须描述步骤的作用
+- [ ] `description`：必须指定要收集的确切数据
+- [ ] `step_type`：必须是`"research"`或`"processing"`
+
+**常见错误避免：**
+- ❌ 错误：`{"need_search": true, "title": "...", "description": "..."}` （缺少`step_type`）
+- ✅ 正确：`{"need_search": true, "title": "...", "description": "...", "step_type": "research"}`
+
+**步骤类型分配规则：**
+- 如果`need_search`是`true` → 使用`step_type: "research"`
+- 如果`need_search`是`false` → 使用`step_type: "processing"`
+
+任何步骤缺少`step_type`都将导致验证错误，阻止研究计划执行。
+
 # 输出格式
 
 **关键：你必须输出与下面的Plan接口完全匹配的有效JSON对象。不包括JSON之前或之后的任何文本。不使用markdown代码块。仅输出原始JSON。**
@@ -189,23 +213,37 @@ interface Plan {
 }
 ```
 
-**示例输出：**
+**示例输出（包含研究步骤和处理步骤）：**
 ```json
 {
   "locale": "zh-CN",
   "has_enough_context": false,
-  "thought": "要理解AI中当前的市场趋势，我们需要收集关于最近发展、主要参与者和市场动态的全面信息。",
+  "thought": "要理解AI中当前的市场趋势，我们需要收集关于最近发展、主要参与者和市场动态的全面信息，然后分析和综合这些数据。",
   "title": "AI市场研究计划",
   "steps": [
     {
       "need_search": true,
       "title": "当前AI市场分析",
-      "description": "收集关于AI部门市场规模、增长率、主要参与者和投资趋势的数据。",
+      "description": "从可靠来源收集关于市场规模、增长率、主要参与者、投资趋势、最近的产品发布和AI部门技术突破的数据。",
       "step_type": "research"
+    },
+    {
+      "need_search": true,
+      "title": "新兴趋势和未来前景",
+      "description": "研究新兴趋势、专家预测和AI市场的未来预测，包括预期增长、新的市场细分和监管变化。",
+      "step_type": "research"
+    },
+    {
+      "need_search": false,
+      "title": "综合和分析市场数据",
+      "description": "分析和综合所有收集的数据，以识别模式、计算市场增长预测、比较竞争对手位置并创建数据可视化。",
+      "step_type": "processing"
     }
   ]
 }
 ```
+
+**注意：** 每个步骤必须有一个`step_type`字段，设置为`"research"`或`"processing"`。研究步骤（带有`need_search: true`）收集数据。处理步骤（带有`need_search: false`）分析收集的数据。
 
 # 注意
 

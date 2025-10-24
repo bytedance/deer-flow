@@ -1864,6 +1864,214 @@ def test_clarification_no_history_defaults_to_topic():
     assert result.update["clarified_research_topic"] == "What is quantum computing?"
 
 
+# ============================================================================
+# Issue #650: Pydantic validation errors (missing step_type field)
+# ============================================================================
+
+
+def test_planner_node_issue_650_missing_step_type_basic():
+    """Test planner_node with missing step_type fields (Issue #650)."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # Simulate LLM response with missing step_type (Issue #650 scenario)
+    llm_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "thought": "Need to gather data",
+        "title": "Test Plan",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Research Step",
+                "description": "Gather info",
+                # step_type MISSING - this is the issue
+            },
+            {
+                "need_search": False,
+                "title": "Processing Step",
+                "description": "Analyze",
+                # step_type MISSING
+            },
+        ],
+    }
+
+    # Apply the fix
+    fixed_plan = validate_and_fix_plan(llm_response)
+
+    # Verify all steps have step_type after fix
+    assert isinstance(fixed_plan, dict)
+    assert fixed_plan["steps"][0]["step_type"] == "research"
+    assert fixed_plan["steps"][1]["step_type"] == "processing"
+    assert all("step_type" in step for step in fixed_plan["steps"])
+
+
+def test_planner_node_issue_650_water_footprint_scenario():
+    """Test the exact water footprint query scenario from Issue #650."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # Approximate the exact plan structure that caused Issue #650
+    # "How many liters of water are required to produce 1 kg of beef?"
+    llm_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "thought": "You asked about water footprint of beef - need comprehensive data gathering",
+        "title": "Research Plan — Water Footprint of 1 kg of Beef",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Authoritative global estimates",
+                "description": "Collect peer-reviewed estimates",
+                # MISSING step_type
+            },
+            {
+                "need_search": True,
+                "title": "System-specific data",
+                "description": "Gather system-level variation data",
+                # MISSING step_type
+            },
+            {
+                "need_search": False,
+                "title": "Synthesize estimates",
+                "description": "Calculate scenario-based estimates",
+                # MISSING step_type
+            },
+        ],
+    }
+
+    # Apply the fix
+    fixed_plan = validate_and_fix_plan(llm_response)
+
+    # Verify structure - all steps should have step_type filled in
+    assert len(fixed_plan["steps"]) == 3
+    assert fixed_plan["steps"][0]["step_type"] == "research"
+    assert fixed_plan["steps"][1]["step_type"] == "research"
+    assert fixed_plan["steps"][2]["step_type"] == "processing"
+    assert all("step_type" in step for step in fixed_plan["steps"])
+
+
+def test_planner_node_issue_650_validation_error_fixed():
+    """Test that the validation error from Issue #650 is now prevented."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # This is the exact type of response that caused the error in Issue #650
+    malformed_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "title": "Test",
+        "thought": "Test",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Step 1",
+                "description": "Test description",
+                # Missing step_type - caused "Field required" error
+            },
+        ],
+    }
+
+    # Before fix would raise:
+    # ValidationError: 1 validation error for Plan
+    # steps.0.step_type Field required [type=missing, ...]
+
+    # After fix should succeed without raising exception
+    fixed = validate_and_fix_plan(malformed_response)
+
+    # Verify the fix was applied
+    assert fixed["steps"][0]["step_type"] in ["research", "processing"]
+    assert "step_type" in fixed["steps"][0]
+
+
+def test_human_feedback_node_issue_650_plan_parsing():
+    """Test human_feedback_node with Issue #650 plan that has missing step_type."""
+    from src.graph.nodes import human_feedback_node
+
+    # Plan with missing step_type fields
+    state = {
+        "current_plan": json.dumps(
+            {
+                "locale": "en-US",
+                "has_enough_context": False,
+                "title": "Test Plan",
+                "thought": "Test",
+                "steps": [
+                    {
+                        "need_search": True,
+                        "title": "Step 1",
+                        "description": "Gather",
+                        # MISSING step_type
+                    },
+                ],
+            }
+        ),
+        "plan_iterations": 0,
+        "auto_accepted_plan": True,
+    }
+
+    config = MagicMock()
+    with patch(
+        "src.graph.nodes.Configuration.from_runnable_config",
+        return_value=MagicMock(enforce_web_search=False),
+    ):
+        with patch("src.graph.nodes.Plan.model_validate", side_effect=lambda x: x):
+            with patch("src.graph.nodes.repair_json_output", side_effect=lambda x: x):
+                result = human_feedback_node(state, config)
+
+                # Should succeed without validation error
+                assert isinstance(result, Command)
+                assert result.goto == "research_team"
+
+
+def test_plan_validation_with_all_issue_650_error_scenarios():
+    """Test all variations of Issue #650 error scenarios."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    test_scenarios = [
+        # Missing step_type with need_search=true
+        {
+            "steps": [
+                {"need_search": True, "title": "R", "description": "D"},
+            ]
+        },
+        # Missing step_type with need_search=false
+        {
+            "steps": [
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+        # Multiple missing step_types
+        {
+            "steps": [
+                {"need_search": True, "title": "R1", "description": "D"},
+                {"need_search": True, "title": "R2", "description": "D"},
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+        # Mix of missing and present step_type
+        {
+            "steps": [
+                {"need_search": True, "title": "R", "description": "D", "step_type": "research"},
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+    ]
+
+    for scenario in test_scenarios:
+        plan = {
+            "locale": "en-US",
+            "has_enough_context": False,
+            "title": "Test",
+            "thought": "Test",
+            **scenario,
+        }
+
+        # Should not raise exception
+        fixed = validate_and_fix_plan(plan)
+
+        # All steps should have step_type after fix
+        for step in fixed["steps"]:
+            assert "step_type" in step
+            assert step["step_type"] in ["research", "processing"]
+
 def test_clarification_skips_specific_topics():
     """Coordinator should skip clarification for already specific topics."""
     from langchain_core.messages import AIMessage
