@@ -5,7 +5,7 @@ import dataclasses
 import os
 from datetime import datetime
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
 from langgraph.prebuilt.chat_agent_executor import AgentState
 
 from src.config.configuration import Configuration
@@ -32,13 +32,13 @@ def get_prompt_template(prompt_name: str, locale: str = "en-US") -> str:
     """
     try:
         # Normalize locale format
-        normalized_locale = locale.replace("-", "_") if locale else "en_US"
+        normalized_locale = locale.replace("-", "_") if locale and locale.strip() else "en_US"
         
         # Try locale-specific template first (e.g., researcher.zh_CN.md)
         try:
             template = env.get_template(f"{prompt_name}.{normalized_locale}.md")
             return template.render()
-        except:
+        except TemplateNotFound:
             # Fallback to English template if locale-specific not found
             template = env.get_template(f"{prompt_name}.md")
             return template.render()
@@ -73,12 +73,12 @@ def apply_prompt_template(
 
     try:
         # Normalize locale format
-        normalized_locale = locale.replace("-", "_") if locale else "en_US"
+        normalized_locale = locale.replace("-", "_") if locale and locale.strip() else "en_US"
         
         # Try locale-specific template first
         try:
             template = env.get_template(f"{prompt_name}.{normalized_locale}.md")
-        except:
+        except TemplateNotFound:
             # Fallback to English template
             template = env.get_template(f"{prompt_name}.md")
         
