@@ -46,6 +46,7 @@ class Article:
                 if text_part:
                     content.append({"type": "text", "text": text_part})
 
+        # If after processing all parts, content is still empty, provide a fallback message.
         if not content:
             content = [{"type": "text", "text": "No content available"}]
         
