@@ -267,7 +267,9 @@ class TestGetWebSearchTool:
         tool = get_web_search_tool(max_search_results=5)
         assert tool.include_answer is True
         assert tool.include_images is False
-        assert tool.include_image_descriptions is False  # should be False since include_images is False
+        assert (
+            tool.include_image_descriptions is False
+        )  # should be False since include_images is False
         assert tool.search_depth == "advanced"  # default
         assert tool.include_raw_content is True  # default
         assert tool.include_domains == []  # default

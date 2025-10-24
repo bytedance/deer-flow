@@ -54,8 +54,8 @@ def get_web_search_tool(max_search_results: int):
         search_depth: str = search_config.get("search_depth", "advanced")
         include_raw_content: bool = search_config.get("include_raw_content", True)
         include_images: bool = search_config.get("include_images", True)
-        include_image_descriptions: bool = (
-            include_images and search_config.get("include_image_descriptions", True)
+        include_image_descriptions: bool = include_images and search_config.get(
+            "include_image_descriptions", True
         )
 
         logger.info(

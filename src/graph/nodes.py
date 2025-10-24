@@ -201,17 +201,20 @@ def planner_node(
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
 
-    # For clarification feature: only send the final clarified question to planner
-    if state.get("enable_clarification", False) and state.get("clarified_question"):
-        # Create a clean state with only the clarified question
-        clean_state = {
-            "messages": [{"role": "user", "content": state["clarified_question"]}],
-            "locale": state.get("locale", "en-US"),
-            "research_topic": state["clarified_question"],
-        }
-        messages = apply_prompt_template("planner", clean_state, configurable, state.get("locale", "en-US"))
+    # For clarification feature: use the clarified research topic (complete history)
+    if state.get("enable_clarification", False) and state.get(
+        "clarified_research_topic"
+    ):
+        # Modify state to use clarified research topic instead of full conversation
+        modified_state = state.copy()
+        modified_state["messages"] = [
+            {"role": "user", "content": state["clarified_research_topic"]}
+        ]
+        modified_state["research_topic"] = state["clarified_research_topic"]
+        messages = apply_prompt_template("planner", modified_state, configurable, state.get("locale", "en-US"))
+
         logger.info(
-            f"Clarification mode: Using clarified question: {state['clarified_question']}"
+            f"Clarification mode: Using clarified research topic: {state['clarified_research_topic']}"
         )
     else:
         # Normal mode: use full conversation history
@@ -435,15 +438,14 @@ def coordinator_node(
                 }
             )
 
+        current_response = latest_user_content or "No response"
         logger.info(
-            "Clarification round %s/%s | topic: %s | latest user content: %s",
+            "Clarification round %s/%s | topic: %s | current user response: %s",
             clarification_rounds,
             max_clarification_rounds,
             clarified_topic or initial_topic,
-            latest_user_content or "N/A",
+            current_response,
         )
-
-        current_response = latest_user_content or "No response"
 
         clarification_context = f"""Continuing clarification (round {clarification_rounds}/{max_clarification_rounds}):
             User's latest response: {current_response}
@@ -451,8 +453,23 @@ def coordinator_node(
 
         messages.append({"role": "system", "content": clarification_context})
 
-        # Bind both clarification tools
+        # Bind both clarification tools - let LLM choose the appropriate one
         tools = [handoff_to_planner, handoff_after_clarification]
+
+        # Check if we've already reached max rounds
+        if clarification_rounds >= max_clarification_rounds:
+            # Max rounds reached - force handoff by adding system instruction
+            logger.warning(
+                f"Max clarification rounds ({max_clarification_rounds}) reached. Forcing handoff to planner. Using prepared clarified topic: {clarified_topic}"
+            )
+            # Add system instruction to force handoff - let LLM choose the right tool
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"MAX ROUNDS REACHED. You MUST call handoff_after_clarification (not handoff_to_planner) with the appropriate locale based on the user's language and research_topic='{clarified_topic}'. Do not ask any more questions.",
+                }
+            )
+
         response = (
             get_llm_by_type(AGENT_LLM_MAP["coordinator"])
             .bind_tools(tools)
@@ -474,7 +491,15 @@ def coordinator_node(
         # --- Process LLM response ---
         # No tool calls - LLM is asking a clarifying question
         if not response.tool_calls and response.content:
-            if clarification_rounds < max_clarification_rounds:
+            # Check if we've reached max rounds - if so, force handoff to planner
+            if clarification_rounds >= max_clarification_rounds:
+                logger.warning(
+                    f"Max clarification rounds ({max_clarification_rounds}) reached. "
+                    "LLM didn't call handoff tool, forcing handoff to planner."
+                )
+                goto = "planner"
+                # Continue to final section instead of early return
+            else:
                 # Continue clarification process
                 clarification_rounds += 1
                 # Do NOT add LLM response to clarification_history - only user responses
@@ -499,20 +524,11 @@ def coordinator_node(
                         "clarification_history": clarification_history,
                         "clarified_research_topic": clarified_topic,
                         "is_clarification_complete": False,
-                        "clarified_question": "",
                         "goto": goto,
                         "__interrupt__": [("coordinator", response.content)],
                     },
                     goto=goto,
                 )
-            else:
-                # Max rounds reached - no more questions allowed
-                logger.warning(
-                    f"Max clarification rounds ({max_clarification_rounds}) reached. Handing off to planner. Using prepared clarified topic: {clarified_topic}"
-                )
-                goto = "planner"
-                if state.get("enable_background_investigation"):
-                    goto = "background_investigator"
         else:
             # LLM called a tool (handoff) or has no content - clarification complete
             if response.tool_calls:
@@ -583,11 +599,7 @@ def coordinator_node(
 
     clarified_research_topic_value = clarified_topic or research_topic
 
-    if enable_clarification:
-        handoff_topic = clarified_topic or research_topic
-    else:
-        handoff_topic = research_topic
-
+    # clarified_research_topic: Complete clarified topic with all clarification rounds
     return Command(
         update={
             "messages": messages,
@@ -598,7 +610,6 @@ def coordinator_node(
             "clarification_rounds": clarification_rounds,
             "clarification_history": clarification_history,
             "is_clarification_complete": goto != "coordinator",
-            "clarified_question": handoff_topic if goto != "coordinator" else "",
             "goto": goto,
         },
         goto=goto,
