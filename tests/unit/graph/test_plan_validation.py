@@ -479,6 +479,6 @@ class TestValidateAndFixPlanIssue650:
                 result = validate_and_fix_plan(plan)
                 # Should succeed without exception - result may be returned as-is for non-dict
                 # but the function should not raise
-                assert result is not None or result is None
+                # No assertion needed; test passes if no exception is raised
             except Exception as e:
                 pytest.fail(f"validate_and_fix_plan raised exception for {plan}: {e}")
