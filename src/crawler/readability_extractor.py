@@ -18,7 +18,9 @@ class ReadabilityExtractor:
             logger.warning("Readability extraction returned empty content")
             content = "<p>No content could be extracted from this page</p>"
         
-        title = article.get("title") or "Untitled"
+        title = article.get("title")
+        if not title or not str(title).strip():
+            title = "Untitled"
         
         return Article(
             title=title,
