@@ -164,6 +164,30 @@ When planning information gathering, consider these key aspects and ensure COMPR
 - Do not include steps for summarizing or consolidating the gathered information.
 - **CRITICAL**: Verify that your plan includes at least one step with `need_search: true` before finalizing
 
+## CRITICAL REQUIREMENT: step_type Field
+
+**⚠️ IMPORTANT: You MUST include the `step_type` field for EVERY step in your plan. This is mandatory and cannot be omitted.**
+
+For each step you create, you MUST explicitly set ONE of these values:
+- `"research"` - For steps that gather information via web search or retrieval (when `need_search: true`)
+- `"processing"` - For steps that analyze, compute, or process data without web search (when `need_search: false`)
+
+**Validation Checklist - For EVERY Step, Verify ALL 4 Fields Are Present:**
+- [ ] `need_search`: Must be either `true` or `false`
+- [ ] `title`: Must describe what the step does
+- [ ] `description`: Must specify exactly what data to collect
+- [ ] `step_type`: Must be either `"research"` or `"processing"`
+
+**Common Mistake to Avoid:**
+- ❌ WRONG: `{"need_search": true, "title": "...", "description": "..."}`  (missing `step_type`)
+- ✅ CORRECT: `{"need_search": true, "title": "...", "description": "...", "step_type": "research"}`
+
+**Step Type Assignment Rules:**
+- If `need_search` is `true` → use `step_type: "research"`
+- If `need_search` is `false` → use `step_type: "processing"`
+
+Failure to include `step_type` for any step will cause validation errors and prevent the research plan from executing.
+
 # Output Format
 
 **CRITICAL: You MUST output a valid JSON object that exactly matches the Plan interface below. Do not include any text before or after the JSON. Do not use markdown code blocks. Output ONLY the raw JSON.**
@@ -189,23 +213,37 @@ interface Plan {
 }
 ```
 
-**Example Output:**
+**Example Output (with BOTH research and processing steps):**
 ```json
 {
   "locale": "en-US",
   "has_enough_context": false,
-  "thought": "To understand the current market trends in AI, we need to gather comprehensive information about recent developments, key players, and market dynamics.",
+  "thought": "To understand the current market trends in AI, we need to gather comprehensive information about recent developments, key players, and market dynamics, then analyze and synthesize this data.",
   "title": "AI Market Research Plan",
   "steps": [
     {
       "need_search": true,
       "title": "Current AI Market Analysis",
-      "description": "Collect data on market size, growth rates, major players, and investment trends in AI sector.",
+      "description": "Collect data on market size, growth rates, major players, investment trends, recent product launches, and technological breakthroughs in the AI sector from reliable sources.",
       "step_type": "research"
+    },
+    {
+      "need_search": true,
+      "title": "Emerging Trends and Future Outlook",
+      "description": "Research emerging trends, expert forecasts, and future predictions for the AI market including expected growth, new market segments, and regulatory changes.",
+      "step_type": "research"
+    },
+    {
+      "need_search": false,
+      "title": "Synthesize and Analyze Market Data",
+      "description": "Analyze and synthesize all collected data to identify patterns, calculate market growth projections, compare competitor positions, and create data visualizations.",
+      "step_type": "processing"
     }
   ]
 }
 ```
+
+**NOTE:** Every step must have a `step_type` field set to either `"research"` or `"processing"`. Research steps (with `need_search: true`) gather data. Processing steps (with `need_search: false`) analyze the gathered data.
 
 # Notes
 
