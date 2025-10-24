@@ -209,13 +209,13 @@ def planner_node(
             "locale": state.get("locale", "en-US"),
             "research_topic": state["clarified_question"],
         }
-        messages = apply_prompt_template("planner", clean_state, configurable)
+        messages = apply_prompt_template("planner", clean_state, configurable, state.get("locale", "en-US"))
         logger.info(
             f"Clarification mode: Using clarified question: {state['clarified_question']}"
         )
     else:
         # Normal mode: use full conversation history
-        messages = apply_prompt_template("planner", state, configurable)
+        messages = apply_prompt_template("planner", state, configurable, state.get("locale", "en-US"))
 
     if state.get("enable_background_investigation") and state.get(
         "background_investigation_results"
@@ -357,7 +357,7 @@ def coordinator_node(
     # ============================================================
     if not enable_clarification:
         # Use normal prompt with explicit instruction to skip clarification
-        messages = apply_prompt_template("coordinator", state)
+        messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
         messages.append(
             {
                 "role": "system",
@@ -410,7 +410,7 @@ def coordinator_node(
 
         # Prepare the messages for the coordinator
         state_messages = list(state.get("messages", []))
-        messages = apply_prompt_template("coordinator", state)
+        messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
 
         clarification_history = reconstruct_clarification_history(
             state_messages, clarification_history, initial_topic
@@ -618,7 +618,7 @@ def reporter_node(state: State, config: RunnableConfig):
         ],
         "locale": state.get("locale", "en-US"),
     }
-    invoke_messages = apply_prompt_template("reporter", input_, configurable)
+    invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
     observations = state.get("observations", [])
 
     # Add a reminder about the new report format, citation style, and table usage

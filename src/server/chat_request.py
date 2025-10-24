@@ -38,6 +38,9 @@ class ChatRequest(BaseModel):
     thread_id: Optional[str] = Field(
         "__default__", description="A specific conversation identifier"
     )
+    locale: Optional[str] = Field(
+        "en-US", description="Language locale for the conversation (e.g., en-US, zh-CN)"
+    )
     max_plan_iterations: Optional[int] = Field(
         1, description="The maximum number of plan iterations"
     )
