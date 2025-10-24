@@ -43,7 +43,7 @@ import {
   useLastFeedbackMessageId,
   useLastInterruptMessage,
   useMessage,
-  useMessageIds,
+  useRenderableMessageIds,
   useResearchMessage,
   useStore,
 } from "~/core/store";
@@ -63,7 +63,8 @@ export function MessageListView({
   ) => void;
 }) {
   const scrollContainerRef = useRef<ScrollContainerRef>(null);
-  const messageIds = useMessageIds();
+  // Use renderable message IDs to avoid React key warnings from duplicate or non-rendering messages
+  const messageIds = useRenderableMessageIds();
   const interruptMessage = useLastInterruptMessage();
   const waitingForFeedbackMessageId = useLastFeedbackMessageId();
   const responding = useStore((state) => state.responding);
