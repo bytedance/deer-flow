@@ -36,6 +36,7 @@ def prompt_enhancer_node(state: PromptEnhancerState):
                 "messages": [original_prompt_message],
                 "report_style": state.get("report_style"),
             },
+            locale=state.get("locale", "en-US"),
         )
 
         # Get the response from the model

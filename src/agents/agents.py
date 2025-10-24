@@ -21,6 +21,8 @@ def create_agent(
         name=agent_name,
         model=get_llm_by_type(AGENT_LLM_MAP[agent_type]),
         tools=tools,
-        prompt=lambda state: apply_prompt_template(prompt_template, state),
+        prompt=lambda state: apply_prompt_template(
+            prompt_template, state, locale=state.get("locale", "en-US")
+        ),
         pre_model_hook=pre_model_hook,
     )
