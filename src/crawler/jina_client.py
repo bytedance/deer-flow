@@ -23,4 +23,11 @@ class JinaClient:
             )
         data = {"url": url}
         response = requests.post("https://r.jina.ai/", headers=headers, json=data)
+        
+        if response.status_code != 200:
+            raise ValueError(f"Jina API returned status {response.status_code}: {response.text}")
+        
+        if not response.text or not response.text.strip():
+            raise ValueError("Jina API returned empty response")
+        
         return response.text

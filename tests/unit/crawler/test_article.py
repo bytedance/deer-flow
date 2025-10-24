@@ -71,3 +71,43 @@ def test_to_message_handles_empty_html():
     result = article.to_message()
     assert isinstance(result, list)
     assert result[0]["type"] == "text"
+
+
+def test_to_markdown_handles_none_content():
+    article = Article("Test Title", None)
+    result = article.to_markdown(including_title=True)
+    assert "# Test Title" in result
+    assert "No content available" in result
+
+
+def test_to_markdown_handles_empty_string():
+    article = Article("Test Title", "")
+    result = article.to_markdown(including_title=True)
+    assert "# Test Title" in result
+    assert "No content available" in result
+
+
+def test_to_markdown_handles_whitespace_only():
+    article = Article("Test Title", "   \n  \t  ")
+    result = article.to_markdown(including_title=True)
+    assert "# Test Title" in result
+    assert "No content available" in result
+
+
+def test_to_message_handles_none_content():
+    article = Article("Title", None)
+    article.url = "http://test/"
+    result = article.to_message()
+    assert isinstance(result, list)
+    assert len(result) > 0
+    assert result[0]["type"] == "text"
+    assert "No content available" in result[0]["text"]
+
+
+def test_to_message_handles_whitespace_only_content():
+    article = Article("Title", "   \n  ")
+    article.url = "http://test/"
+    result = article.to_message()
+    assert isinstance(result, list)
+    assert result[0]["type"] == "text"
+    assert "No content available" in result[0]["text"]
