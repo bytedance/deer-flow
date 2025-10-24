@@ -102,6 +102,7 @@
     "prettier-plugin-tailwindcss": "^0.6.11",
     "raw-loader": "^4.0.2",
     "tailwindcss": "^4.0.15",
+    "tsx": "^4.20.6",
     "typescript": "^5.8.2",
     "typescript-eslint": "^8.27.0"
   },
