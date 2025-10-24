@@ -204,7 +204,7 @@ class TestValidateAndFixPlanStepTypeRepair:
         """Test that plan without steps key is handled gracefully."""
         plan = {"locale": "en-US", "title": "Test"}
         result = validate_and_fix_plan(plan)
-        assert "steps" not in result or result.get("steps") == []
+        assert "steps" not in result
 
 
 class TestValidateAndFixPlanWebSearchEnforcement:
