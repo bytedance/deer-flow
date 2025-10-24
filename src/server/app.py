@@ -375,19 +375,19 @@ async def _process_message_chunk(message_chunk, message_metadata, thread_id, age
             
             # Emit separate events for chunks with different indices (tool call boundaries)
             if processed_chunks:
-                prev_index = None
+                prev_chunk = None
                 for chunk in processed_chunks:
                     current_index = chunk.get("index")
                     
                     # Log index transitions to detect tool call boundaries
-                    if prev_index is not None and current_index != prev_index:
+                    if prev_chunk is not None and current_index != prev_chunk.get("index"):
                         logger.debug(
                             f"Tool call boundary detected: "
-                            f"index {prev_index} ({processed_chunks[prev_index]['name']}) -> "
+                            f"index {prev_chunk.get('index')} ({prev_chunk.get('name')}) -> "
                             f"{current_index} ({chunk.get('name')})"
                         )
                     
-                    prev_index = current_index
+                    prev_chunk = chunk
                 
                 # Include all processed chunks in the event
                 event_stream_message["tool_call_chunks"] = processed_chunks
