@@ -322,7 +322,7 @@ def human_feedback_node(
 
         # Handle None or empty feedback
         if not feedback:
-            logger.warning(f"Received empty or None feedback: {feedback}. Treating as rejection, returning to planner.")
+            logger.warning(f"Received empty or None feedback: {feedback}. Returning to planner for new plan.")
             return Command(goto="planner")
 
         # Normalize feedback string
