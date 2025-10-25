@@ -20,7 +20,7 @@ lint-frontend: ## Lint frontend code, run tests, and check build
 	cd web && pnpm install --frozen-lockfile
 	cd web && pnpm lint
 	cd web && pnpm typecheck
-	cd web && npx tsx --test tests/*.test.ts
+	cd web && pnpm test:run
 	cd web && pnpm build
 
 serve: ## Start development server with reload
