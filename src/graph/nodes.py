@@ -27,7 +27,7 @@ from src.tools import (
 )
 from src.tools.search import LoggedTavilySearch
 from src.utils.context_manager import ContextManager, validate_message_content
-from src.utils.json_utils import repair_json_output
+from src.utils.json_utils import repair_json_output, sanitize_tool_response
 
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
@@ -824,6 +824,10 @@ async def _execute_agent_step(
 
     # Process the result
     response_content = result["messages"][-1].content
+    
+    # Sanitize response to remove extra tokens and truncate if needed
+    response_content = sanitize_tool_response(str(response_content))
+    
     logger.debug(f"{agent_name.capitalize()} full response: {response_content}")
 
     # Update the step with the execution result

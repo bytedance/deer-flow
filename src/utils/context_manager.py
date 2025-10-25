@@ -266,7 +266,7 @@ class ContextManager:
         pass
 
 
-def validate_message_content(messages: List[BaseMessage]) -> List[BaseMessage]:
+def validate_message_content(messages: List[BaseMessage], max_content_length: int = 100000) -> List[BaseMessage]:
     """
     Validate and fix all messages to ensure they have valid content before sending to LLM.
     
@@ -274,9 +274,11 @@ def validate_message_content(messages: List[BaseMessage]) -> List[BaseMessage]:
     1. All messages have a content field
     2. No message has None or empty string content (except for legitimate empty responses)
     3. Complex objects (lists, dicts) are converted to JSON strings
+    4. Content is truncated if too long to prevent token overflow
     
     Args:
         messages: List of messages to validate
+        max_content_length: Maximum allowed content length per message (default 100000)
     
     Returns:
         List of validated messages with fixed content
@@ -303,6 +305,11 @@ def validate_message_content(messages: List[BaseMessage]) -> List[BaseMessage]:
             elif not isinstance(msg.content, str):
                 logger.debug(f"Message {i} ({type(msg).__name__}) has non-string content type {type(msg.content).__name__}, converting to string")
                 msg.content = str(msg.content)
+            
+            # Validate content length
+            if isinstance(msg.content, str) and len(msg.content) > max_content_length:
+                logger.warning(f"Message {i} content truncated from {len(msg.content)} to {max_content_length} chars")
+                msg.content = msg.content[:max_content_length].rstrip() + "..."
             
             validated.append(msg)
         except Exception as e:
