@@ -226,7 +226,7 @@ export function InputBox({
                   </h3>
                   <p>
                     {t("deepThinkingTooltip.description", {
-                      model: config.models.reasoning[0] ?? "",
+                      model: config.models.reasoning[0],
                     })}
                   </p>
                 </div>
