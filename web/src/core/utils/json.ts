@@ -24,7 +24,7 @@ function extractValidJSON(content: string): string {
       continue;
     }
     
-    if (char === '"' && !escapeNext) {
+    if (char === '"') {
       inString = !inString;
       continue;
     }
@@ -36,16 +36,20 @@ function extractValidJSON(content: string): string {
     if (char === "{") {
       braceCount++;
     } else if (char === "}") {
-      braceCount--;
-      if (braceCount === 0) {
-        lastValidEnd = i;
+      if (braceCount > 0) {
+        braceCount--;
+        if (braceCount === 0) {
+          lastValidEnd = i;
+        }
       }
     } else if (char === "[") {
       bracketCount++;
     } else if (char === "]") {
-      bracketCount--;
-      if (bracketCount === 0) {
-        lastValidEnd = i;
+      if (bracketCount > 0) {
+        bracketCount--;
+        if (bracketCount === 0) {
+          lastValidEnd = i;
+        }
       }
     }
   }
