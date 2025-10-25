@@ -214,7 +214,7 @@ export function InputBox({
       </div>
       <div className="flex items-center px-4 py-2">
         <div className="flex grow gap-2">
-          {config?.models.reasoning?.[0] && (
+          {config?.models?.reasoning && config.models.reasoning.length > 0 && (
             <Tooltip
               className="max-w-60"
               title={
@@ -226,7 +226,7 @@ export function InputBox({
                   </h3>
                   <p>
                     {t("deepThinkingTooltip.description", {
-                      model: config.models.reasoning?.[0] ?? "",
+                      model: config.models.reasoning[0] ?? "",
                     })}
                   </p>
                 </div>
