@@ -454,12 +454,37 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base, mock_config)
 def test_human_feedback_node_invalid_interrupt(
     monkeypatch, mock_state_base, mock_config
 ):
-    # interrupt returns something else, should raise TypeError
+    # interrupt returns something else, should gracefully return to planner (not raise TypeError)
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
     with patch("src.graph.nodes.interrupt", return_value="RANDOM_FEEDBACK"):
-        with pytest.raises(TypeError):
-            human_feedback_node(state, mock_config)
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
+
+
+def test_human_feedback_node_none_feedback(
+    monkeypatch, mock_state_base, mock_config
+):
+    # interrupt returns None, should gracefully return to planner
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = False
+    with patch("src.graph.nodes.interrupt", return_value=None):
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
+
+
+def test_human_feedback_node_empty_feedback(
+    monkeypatch, mock_state_base, mock_config
+):
+    # interrupt returns empty string, should gracefully return to planner
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = False
+    with patch("src.graph.nodes.interrupt", return_value=""):
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
 
 
 def test_human_feedback_node_json_decode_error_first_iteration(
