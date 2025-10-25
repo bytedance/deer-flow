@@ -320,8 +320,17 @@ def human_feedback_node(
     if not auto_accepted_plan:
         feedback = interrupt("Please Review the Plan.")
 
+        # Handle None or empty feedback
+        if not feedback:
+            logger.warning(f"Received empty or None feedback: {feedback}. Treating as rejection, returning to planner.")
+            return Command(goto="planner")
+
+        # Normalize feedback string
+        feedback_normalized = str(feedback).strip().upper()
+
         # if the feedback is not accepted, return the planner node
-        if feedback and str(feedback).upper().startswith("[EDIT_PLAN]"):
+        if feedback_normalized.startswith("[EDIT_PLAN]"):
+            logger.info(f"Plan edit requested by user: {feedback}")
             return Command(
                 update={
                     "messages": [
@@ -330,10 +339,11 @@ def human_feedback_node(
                 },
                 goto="planner",
             )
-        elif feedback and str(feedback).upper().startswith("[ACCEPTED]"):
+        elif feedback_normalized.startswith("[ACCEPTED]"):
             logger.info("Plan is accepted by user.")
         else:
-            raise TypeError(f"Interrupt value of {feedback} is not supported.")
+            logger.warning(f"Unsupported feedback format: {feedback}. Please use '[ACCEPTED]' to accept or '[EDIT_PLAN]' to edit.")
+            return Command(goto="planner")
 
     # if the plan is accepted, run the following node
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
