@@ -157,6 +157,20 @@ class TestExtractJsonFromContent:
         result = _extract_json_from_content(content)
         assert result == '[]'
 
+    def test_extra_closing_brace_no_opening(self):
+        """Test that extra closing brace without opening is not marked as valid end"""
+        content = '} garbage data'
+        result = _extract_json_from_content(content)
+        # Should return original content since no opening brace was seen
+        assert result == content
+
+    def test_extra_closing_bracket_no_opening(self):
+        """Test that extra closing bracket without opening is not marked as valid end"""
+        content = '] garbage data'
+        result = _extract_json_from_content(content)
+        # Should return original content since no opening bracket was seen
+        assert result == content
+
 
 class TestSanitizeToolResponse:
     def test_basic_sanitization(self):
