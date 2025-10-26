@@ -914,7 +914,12 @@ async def _setup_and_execute_agent_step(
         llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
         pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
         agent = create_agent(
-            agent_type, agent_type, loaded_tools, agent_type, pre_model_hook
+            agent_type,
+            agent_type,
+            loaded_tools,
+            agent_type,
+            pre_model_hook,
+            interrupt_before_tools=configurable.interrupt_before_tools,
         )
         return await _execute_agent_step(state, agent, agent_type)
     else:
@@ -922,7 +927,12 @@ async def _setup_and_execute_agent_step(
         llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
         pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
         agent = create_agent(
-            agent_type, agent_type, default_tools, agent_type, pre_model_hook
+            agent_type,
+            agent_type,
+            default_tools,
+            agent_type,
+            pre_model_hook,
+            interrupt_before_tools=configurable.interrupt_before_tools,
         )
         return await _execute_agent_step(state, agent, agent_type)
 
