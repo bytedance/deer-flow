@@ -42,8 +42,11 @@ class TestToolInterceptorIntegration:
         tools = [search_tool, db_tool]
 
         # Create agent with interrupts on db_tool only
-        with patch("src.agents.agents.create_react_agent") as mock_create:
+        with patch("src.agents.agents.create_react_agent") as mock_create, \
+             patch("src.agents.agents.get_llm_by_type") as mock_llm:
             mock_create.return_value = MagicMock()
+            mock_llm.return_value = MagicMock()
+            
             agent = create_agent(
                 agent_name="test_agent",
                 agent_type="researcher",
