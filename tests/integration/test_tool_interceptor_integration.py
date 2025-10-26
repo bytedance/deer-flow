@@ -129,16 +129,16 @@ class TestToolInterceptorIntegration:
             # tool_a should not interrupt
             mock_interrupt.return_value = "approved"
             result_a = wrapped_tools[0].invoke("test")
-            assert not mock_interrupt.called
+            mock_interrupt.assert_not_called()
 
             # tool_b should interrupt
             result_b = wrapped_tools[1].invoke("test")
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
 
             # tool_c should not interrupt
             mock_interrupt.reset_mock()
             result_c = wrapped_tools[2].invoke("test")
-            assert not mock_interrupt.called
+            mock_interrupt.assert_not_called()
 
     def test_interrupt_with_user_approval(self):
         """Test interrupt flow with user approval."""
@@ -155,7 +155,7 @@ class TestToolInterceptorIntegration:
 
             result = wrapped.invoke("delete_data")
 
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
             assert "Executed: delete_data" in str(result)
 
     def test_interrupt_with_user_rejection(self):
@@ -173,7 +173,7 @@ class TestToolInterceptorIntegration:
 
             result = wrapped.invoke("delete_data")
 
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
             assert isinstance(result, dict)
             assert "error" in result
             assert result["status"] == "rejected"
@@ -194,7 +194,7 @@ class TestToolInterceptorIntegration:
             wrapped.invoke("SELECT * FROM users")
 
             # Verify interrupt was called with meaningful message
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
             interrupt_message = mock_interrupt.call_args[0][0]
             assert "db_query_tool" in interrupt_message
             assert "SELECT * FROM users" in interrupt_message
@@ -277,7 +277,7 @@ class TestToolInterceptorIntegration:
 
         with patch("src.agents.tool_interceptor.interrupt") as mock_interrupt:
             wrapped_tools[0].invoke("test")
-            assert not mock_interrupt.called
+            mock_interrupt.assert_not_called()
 
     def test_none_interrupt_list_no_interrupts(self):
         """Test that None interrupt list doesn't trigger interrupts."""
@@ -290,7 +290,7 @@ class TestToolInterceptorIntegration:
 
         with patch("src.agents.tool_interceptor.interrupt") as mock_interrupt:
             wrapped_tools[0].invoke("test")
-            assert not mock_interrupt.called
+            mock_interrupt.assert_not_called()
 
     def test_case_sensitive_tool_name_matching(self):
         """Test that tool name matching is case-sensitive."""
@@ -308,12 +308,12 @@ class TestToolInterceptorIntegration:
             # Case mismatch - should NOT interrupt
             wrapped_lower = ToolInterceptor.wrap_tool(MyTool, interceptor_lower)
             result_lower = wrapped_lower.invoke("test")
-            assert not mock_interrupt.called
+            mock_interrupt.assert_not_called()
 
             # Case match - should interrupt
             wrapped_exact = ToolInterceptor.wrap_tool(MyTool, interceptor_exact)
             result_exact = wrapped_exact.invoke("test")
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
 
     def test_tool_error_handling(self):
         """Test handling of tool errors during execution."""
@@ -397,7 +397,7 @@ class TestToolInterceptorIntegration:
 
             result = wrapped.invoke(complex_input)
 
-            assert mock_interrupt.called
+            mock_interrupt.assert_called()
             assert "Processed" in str(result)
 
     def test_configuration_from_runnable_config(self):
