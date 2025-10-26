@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import json
 import logging
 from typing import Any, Callable, List, Optional
 
@@ -40,6 +41,36 @@ class ToolInterceptor:
         return should_interrupt
 
     @staticmethod
+    def _format_tool_input(tool_input: Any) -> str:
+        """Format tool input for display in interrupt messages.
+
+        Attempts to format as JSON for better readability, with fallback to string representation.
+
+        Args:
+            tool_input: The tool input to format
+
+        Returns:
+            str: Formatted representation of the tool input
+        """
+        if tool_input is None:
+            return "No input"
+
+        # Try to serialize as JSON first for better readability
+        try:
+            # Handle dictionaries and other JSON-serializable objects
+            if isinstance(tool_input, (dict, list, tuple)):
+                return json.dumps(tool_input, indent=2, default=str)
+            elif isinstance(tool_input, str):
+                return tool_input
+            else:
+                # For other types, try to convert to dict if it has __dict__
+                # Otherwise fall back to string representation
+                return str(tool_input)
+        except (TypeError, ValueError):
+            # JSON serialization failed, use string representation
+            return str(tool_input)
+
+    @staticmethod
     def wrap_tool(
         tool: BaseTool, interceptor: "ToolInterceptor"
     ) -> BaseTool:
@@ -57,8 +88,9 @@ class ToolInterceptor:
         def intercepted_func(*args: Any, **kwargs: Any) -> Any:
             """Execute the tool with interrupt check."""
             tool_name = tool.name
-            # Build a string representation of the input
-            tool_input_repr = str(args[0] if args else kwargs) if (args or kwargs) else "No input"
+            # Format tool input for display
+            tool_input = args[0] if args else kwargs
+            tool_input_repr = ToolInterceptor._format_tool_input(tool_input)
 
             if interceptor.should_interrupt(tool_name):
                 logger.info(
@@ -66,7 +98,7 @@ class ToolInterceptor:
                 )
                 # Trigger interrupt and wait for user feedback
                 feedback = interrupt(
-                    f"About to execute tool: '{tool_name}'\n\nInput: {tool_input_repr}\n\nApprove execution?"
+                    f"About to execute tool: '{tool_name}'\n\nInput:\n{tool_input_repr}\n\nApprove execution?"
                 )
 
                 logger.info(f"Interrupt feedback for '{tool_name}': {feedback}")
