@@ -502,7 +502,7 @@ async def _astream_workflow_generator(
         "mcp_settings": mcp_settings,
         "report_style": report_style.value,
         "enable_deep_thinking": enable_deep_thinking,
-        "interrupt_before_tools": interrupt_before_tools or [],
+        "interrupt_before_tools": interrupt_before_tools,
         "recursion_limit": get_recursion_limit(),
     }
 

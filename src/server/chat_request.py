@@ -76,8 +76,8 @@ class ChatRequest(BaseModel):
         None,
         description="Maximum number of clarification rounds (default: None, uses State default=3)",
     )
-    interrupt_before_tools: Optional[List[str]] = Field(
-        None,
+    interrupt_before_tools: List[str] = Field(
+        default_factory=list,
         description="List of tool names to interrupt before execution (e.g., ['db_tool', 'api_tool'])",
     )
 
