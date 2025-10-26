@@ -213,3 +213,221 @@ class TestToolInterceptor:
 
         assert wrapped_tool.name == "my_tool"
         assert wrapped_tool.description == "My tool description."
+
+
+class TestFormatToolInput:
+    """Tests for tool input formatting functionality."""
+
+    def test_format_tool_input_none(self):
+        """Test formatting None input."""
+        result = ToolInterceptor._format_tool_input(None)
+        assert result == "No input"
+
+    def test_format_tool_input_string(self):
+        """Test formatting string input."""
+        input_str = "SELECT * FROM users"
+        result = ToolInterceptor._format_tool_input(input_str)
+        assert result == input_str
+
+    def test_format_tool_input_simple_dict(self):
+        """Test formatting simple dictionary."""
+        input_dict = {"query": "test", "limit": 10}
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        # Should be valid JSON
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_dict
+        # Should be indented
+        assert "\n" in result
+
+    def test_format_tool_input_nested_dict(self):
+        """Test formatting nested dictionary."""
+        input_dict = {
+            "query": "SELECT * FROM users",
+            "config": {
+                "timeout": 30,
+                "retry": True
+            }
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_dict
+        assert "timeout" in result
+        assert "retry" in result
+
+    def test_format_tool_input_list(self):
+        """Test formatting list input."""
+        input_list = ["item1", "item2", 123]
+        result = ToolInterceptor._format_tool_input(input_list)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_list
+
+    def test_format_tool_input_complex_list(self):
+        """Test formatting list with mixed types."""
+        input_list = ["text", 42, 3.14, True, {"key": "value"}]
+        result = ToolInterceptor._format_tool_input(input_list)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_list
+
+    def test_format_tool_input_tuple(self):
+        """Test formatting tuple input."""
+        input_tuple = ("item1", "item2", 123)
+        result = ToolInterceptor._format_tool_input(input_tuple)
+        
+        import json
+        parsed = json.loads(result)
+        # JSON converts tuples to lists
+        assert parsed == list(input_tuple)
+
+    def test_format_tool_input_integer(self):
+        """Test formatting integer input."""
+        result = ToolInterceptor._format_tool_input(42)
+        assert result == "42"
+
+    def test_format_tool_input_float(self):
+        """Test formatting float input."""
+        result = ToolInterceptor._format_tool_input(3.14)
+        assert result == "3.14"
+
+    def test_format_tool_input_boolean(self):
+        """Test formatting boolean input."""
+        result_true = ToolInterceptor._format_tool_input(True)
+        result_false = ToolInterceptor._format_tool_input(False)
+        assert result_true == "True"
+        assert result_false == "False"
+
+    def test_format_tool_input_deeply_nested(self):
+        """Test formatting deeply nested structure."""
+        input_dict = {
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "level4": ["a", "b", "c"],
+                        "data": {"key": "value"}
+                    }
+                }
+            }
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_dict
+
+    def test_format_tool_input_empty_dict(self):
+        """Test formatting empty dictionary."""
+        result = ToolInterceptor._format_tool_input({})
+        assert result == "{}"
+
+    def test_format_tool_input_empty_list(self):
+        """Test formatting empty list."""
+        result = ToolInterceptor._format_tool_input([])
+        assert result == "[]"
+
+    def test_format_tool_input_special_characters(self):
+        """Test formatting dict with special characters."""
+        input_dict = {
+            "query": 'SELECT * FROM users WHERE name = "John"',
+            "path": "/usr/local/bin",
+            "unicode": "你好世界"
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_dict
+
+    def test_format_tool_input_numbers_as_strings(self):
+        """Test formatting with various number types."""
+        input_dict = {
+            "int": 42,
+            "float": 3.14159,
+            "negative": -100,
+            "zero": 0,
+            "scientific": 1e-5
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed["int"] == 42
+        assert abs(parsed["float"] - 3.14159) < 0.00001
+        assert parsed["negative"] == -100
+        assert parsed["zero"] == 0
+
+    def test_format_tool_input_with_none_values(self):
+        """Test formatting dict with None values."""
+        input_dict = {
+            "key1": "value1",
+            "key2": None,
+            "key3": {"nested": None}
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed == input_dict
+
+    def test_format_tool_input_indentation(self):
+        """Test that output uses proper indentation (2 spaces)."""
+        input_dict = {"outer": {"inner": "value"}}
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        # Should have indented lines
+        assert "  " in result  # 2-space indentation
+        lines = result.split("\n")
+        # Check that indentation increases with nesting
+        assert any(line.startswith("  ") for line in lines)
+
+    def test_format_tool_input_preserves_order_insertion(self):
+        """Test that dict order is preserved in output."""
+        input_dict = {
+            "first": 1,
+            "second": 2,
+            "third": 3
+        }
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        # Verify all keys are present
+        assert set(parsed.keys()) == {"first", "second", "third"}
+
+    def test_format_tool_input_long_strings(self):
+        """Test formatting with long string values."""
+        long_string = "x" * 1000
+        input_dict = {"long": long_string}
+        result = ToolInterceptor._format_tool_input(input_dict)
+        
+        import json
+        parsed = json.loads(result)
+        assert parsed["long"] == long_string
+
+    def test_format_tool_input_mixed_types_in_list(self):
+        """Test formatting list with mixed complex types."""
+        input_list = [
+            "string",
+            42,
+            {"dict": "value"},
+            [1, 2, 3],
+            True,
+            None
+        ]
+        result = ToolInterceptor._format_tool_input(input_list)
+        
+        import json
+        parsed = json.loads(result)
+        assert len(parsed) == 6
+        assert parsed[0] == "string"
+        assert parsed[1] == 42
+        assert parsed[2] == {"dict": "value"}
+        assert parsed[3] == [1, 2, 3]
+        assert parsed[4] is True
+        assert parsed[5] is None
