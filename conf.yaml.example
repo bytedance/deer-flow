@@ -42,6 +42,23 @@ BASIC_MODEL:
 
 
 # OTHER SETTINGS:
+
+# Tool-specific interrupts configuration (Issue #572)
+# Allows interrupting execution before specific tools are called.
+# Useful for reviewing sensitive operations like database queries or API calls.
+# Note: This can be overridden per-request via the API.
+# TOOL_INTERRUPTS:
+#   # List of tool names to interrupt before execution
+#   # Example: interrupt before database tools or sensitive API calls
+#   interrupt_before: 
+#     - "db_tool"           # Database operations
+#     - "db_read_tool"      # Database reads
+#     - "db_write_tool"     # Database writes
+#     - "payment_api"       # Payment-related API calls
+#     - "admin_api"         # Administrative API calls
+#   # When interrupt is triggered, user will be prompted to approve/reject
+#   # Approved keywords: "approved", "approve", "yes", "proceed", "continue", "ok", "okay", "accepted", "accept"
+
 # Search engine configuration (Only supports Tavily currently)
 # SEARCH_ENGINE:
 #   engine: tavily
