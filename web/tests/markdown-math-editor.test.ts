@@ -212,4 +212,34 @@ describe("markdown math unescape (issue #608 fix)", () => {
     expect(unescaped.includes("\\sum")).toBeTruthy();
     expect(unescaped.includes("f[k]")).toBeTruthy();
   });
+
+  it("unescapes curly braces in LaTeX commands (issue #608)", () => {
+    // \mathcal{F} uses curly braces which get escaped by tiptap
+    const escaped = "Formula $$\\mathcal\\{F\\}\\{f * g\\}$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    expect(unescaped).toBe("Formula $$\\mathcal{F}{f * g}$$");
+  });
+
+  it("handles issue #608 edge case: Fourier transform notation", () => {
+    // Real case from issue: \mathcal{F} with escaped braces
+    const escaped = "$$\\mathcal\\{F\\}\\{f * g\\} = \\mathcal\\{F\\}\\{f\\} \\cdot \\mathcal\\{F\\}\\{g\\}$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    // Should restore curly braces for LaTeX commands
+    expect(unescaped).toBe("$$\\mathcal{F}{f * g} = \\mathcal{F}{f} \\cdot \\mathcal{F}{g}$$");
+  });
+
+  it("preserves LaTeX commands with curly braces in tables (issue #608 table case)", () => {
+    const escaped = "| Continuous | $(f \\* g)(t) = \\int_{-\\infty}^{\\infty} f(\\tau)g(t-\\tau)d\\tau$ |\n| Discrete | $(f \\* g)\\[n\\] = \\sum\\_{k=-\\infty}^{\\infty} f\\[k\\]g\\[n-k\\]$ |";
+    const unescaped = unescapeLatexInMath(escaped);
+    // Should unescape all special characters within math delimiters
+    expect(unescaped.includes("(f * g)")).toBeTruthy();
+    expect(unescaped.includes("[n]")).toBeTruthy();
+    expect(unescaped.includes("\\sum")).toBeTruthy();
+  });
+
+  it("handles mixed escaped braces and other special chars", () => {
+    const escaped = "$$f(x) = \\{x \\* y\\} + \\int_a^b g(t) dt$$";
+    const unescaped = unescapeLatexInMath(escaped);
+    expect(unescaped).toBe("$$f(x) = {x * y} + \\int_a^b g(t) dt$$");
+  });
 });
