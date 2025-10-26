@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 import os
-from typing import Annotated, Any, List, cast
+from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
@@ -127,6 +127,7 @@ async def chat_stream(request: ChatRequest):
             request.enable_clarification,
             request.max_clarification_rounds,
             request.locale,
+            request.interrupt_before_tools,
         ),
         media_type="text/event-stream",
     )
@@ -453,6 +454,7 @@ async def _astream_workflow_generator(
     enable_clarification: bool,
     max_clarification_rounds: int,
     locale: str = "en-US",
+    interrupt_before_tools: Optional[List[str]] = None,
 ):
     # Process initial messages
     for message in messages:
@@ -500,6 +502,7 @@ async def _astream_workflow_generator(
         "mcp_settings": mcp_settings,
         "report_style": report_style.value,
         "enable_deep_thinking": enable_deep_thinking,
+        "interrupt_before_tools": interrupt_before_tools or [],
         "recursion_limit": get_recursion_limit(),
     }
 

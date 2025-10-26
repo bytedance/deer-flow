@@ -54,6 +54,9 @@ class Configuration:
     enforce_web_search: bool = (
         False  # Enforce at least one web search step in every plan
     )
+    interrupt_before_tools: list[str] = field(
+        default_factory=list
+    )  # List of tool names to interrupt before execution
 
     @classmethod
     def from_runnable_config(
