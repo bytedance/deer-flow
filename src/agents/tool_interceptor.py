@@ -54,17 +54,19 @@ class ToolInterceptor:
         """
         original_func = tool.func
 
-        def intercepted_func(tool_input: Any) -> Any:
+        def intercepted_func(*args: Any, **kwargs: Any) -> Any:
             """Execute the tool with interrupt check."""
             tool_name = tool.name
+            # Build a string representation of the input
+            tool_input_repr = str(args[0] if args else kwargs) if (args or kwargs) else "No input"
 
             if interceptor.should_interrupt(tool_name):
                 logger.info(
-                    f"Interrupting before tool '{tool_name}' with input: {tool_input}"
+                    f"Interrupting before tool '{tool_name}' with input: {tool_input_repr}"
                 )
                 # Trigger interrupt and wait for user feedback
                 feedback = interrupt(
-                    f"About to execute tool: '{tool_name}'\n\nInput: {str(tool_input)}\n\nApprove execution?"
+                    f"About to execute tool: '{tool_name}'\n\nInput: {tool_input_repr}\n\nApprove execution?"
                 )
 
                 logger.info(f"Interrupt feedback for '{tool_name}': {feedback}")
@@ -82,7 +84,7 @@ class ToolInterceptor:
 
             # Execute the original tool
             try:
-                result = original_func(tool_input)
+                result = original_func(*args, **kwargs)
                 logger.debug(f"Tool '{tool_name}' execution completed")
                 return result
             except Exception as e:
