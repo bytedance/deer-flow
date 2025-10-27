@@ -39,5 +39,11 @@ class State(MessagesState):
         3  # Default: 3 rounds (only used when enable_clarification=True)
     )
 
+    # Report editing state (for issue #663 - report modification feature)
+    previous_report: str = ""  # Store last generated report for editing
+    is_editing_report: bool = False  # Flag indicating we're in report edit mode
+    report_edit_context: str = ""  # Extracted user feedback about modifications
+    report_sections_to_edit: list[str] = field(default_factory=list)  # List of sections to modify
+
     # Workflow control
     goto: str = "planner"  # Default next node

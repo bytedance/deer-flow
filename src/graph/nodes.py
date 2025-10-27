@@ -37,6 +37,12 @@ from .utils import (
     is_user_message,
     reconstruct_clarification_history,
 )
+from .report_editor import (
+    detect_edit_intent,
+    extract_edit_context,
+    parse_report_sections,
+    merge_reports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -618,7 +624,29 @@ def coordinator_node(
         # Fallback to planner to ensure workflow continues
         goto = "planner"
 
+    # ============================================================
+    # Check for report editing intent (issue #663)
+    # ============================================================
+    # Detect if user is trying to edit a previously generated report
+    has_previous_report = bool(state.get("previous_report"))
+    last_user_message = ""
+    if state.get("messages"):
+        for msg in reversed(state.get("messages")):
+            if isinstance(msg, dict):
+                if msg.get("role") == "user":
+                    last_user_message = msg.get("content", "")
+                    break
+            elif hasattr(msg, "content") and hasattr(msg, "type"):
+                if msg.type == "human":
+                    last_user_message = msg.content
+                    break
+    
+    if detect_edit_intent(last_user_message, has_previous_report):
+        logger.info("Report editing intent detected, routing to report_editor")
+        goto = "report_editor"
+
     # Apply background_investigation routing if enabled (unified logic)
+    # But skip if we're already routing to report_editor
     if goto == "planner" and state.get("enable_background_investigation"):
         goto = "background_investigator"
 
@@ -647,51 +675,120 @@ def coordinator_node(
 
 
 def reporter_node(state: State, config: RunnableConfig):
-    """Reporter node that write a final report."""
-    logger.info("Reporter write final report")
+    """Reporter node that write a final report or merge findings into existing report."""
+    logger.info("Reporter processing report generation/merge")
     configurable = Configuration.from_runnable_config(config)
     current_plan = state.get("current_plan")
-    input_ = {
-        "messages": [
-            HumanMessage(
-                f"# Research Requirements\n\n## Task\n\n{current_plan.title}\n\n## Description\n\n{current_plan.thought}"
-            )
-        ],
-        "locale": state.get("locale", "en-US"),
-    }
-    invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
-    observations = state.get("observations", [])
-
-    # Add a reminder about the new report format, citation style, and table usage
-    invoke_messages.append(
-        HumanMessage(
-            content="IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. Key Citations - List all references at the end\n\nFor citations, DO NOT include inline citations in the text. Instead, place all citations in the 'Key Citations' section at the end using the format: `- [Source Title](URL)`. Include an empty line between each citation for better readability.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |",
-            name="system",
+    is_editing_report = state.get("is_editing_report", False)
+    
+    # ============================================================
+    # MODE 1: Report Merge (Edit existing report) - Issue #663
+    # ============================================================
+    if is_editing_report:
+        logger.info("Reporter operating in MERGE MODE for report editing")
+        
+        previous_report = state.get("previous_report", "")
+        observations = state.get("observations", [])
+        edit_context_str = state.get("report_edit_context", "")
+        
+        # Collect new findings from observations
+        new_findings = "\n\n".join(observations) if observations else "No new findings gathered."
+        
+        # Prepare merge context
+        merge_context_dict = merge_reports(
+            original_report=previous_report,
+            new_findings=new_findings,
+            edit_context={
+                "sections": state.get("report_sections_to_edit", []),
+                "feedback": edit_context_str,
+                "action": "modify"
+            },
+            report_style=str(configurable.report_style) if configurable.report_style else "academic",
+            locale=state.get("locale", "en-US"),
         )
-    )
-
-    observation_messages = []
-    for observation in observations:
-        observation_messages.append(
+        
+        # Use report_editor prompt for merging
+        merge_input = {
+            "messages": [
+                HumanMessage(
+                    content=f"Original Report:\n\n{previous_report}\n\n"
+                            f"New Findings:\n\n{new_findings}\n\n"
+                            f"Edit Instructions: {merge_context_dict['merge_instructions']}"
+                )
+            ],
+            "locale": state.get("locale", "en-US"),
+        }
+        
+        invoke_messages = apply_prompt_template("report_editor", merge_input, configurable, state.get("locale", "en-US"))
+        
+        # Add merge-specific reminder
+        invoke_messages.append(
             HumanMessage(
-                content=f"Below are some observations for the research task:\n\n{observation}",
-                name="observation",
+                content="IMPORTANT: Merge the new findings seamlessly into the original report. "
+                        "Keep all sections that the user did not request changes for. "
+                        "Update only the sections mentioned in the edit instructions. "
+                        "Maintain consistent formatting, tone, and citation style throughout.",
+                name="system",
+            )
+        )
+        
+        logger.debug(f"Merge invoke messages prepared with {len(invoke_messages)} messages")
+        response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
+        merged_report = response.content
+        logger.info(f"Reporter merge completed, merged report length: {len(merged_report)}")
+        
+        return {
+            "final_report": merged_report,
+            "is_editing_report": False,  # Reset edit flag
+        }
+    
+    # ============================================================
+    # MODE 2: Normal Report Generation
+    # ============================================================
+    else:
+        logger.info("Reporter operating in NORMAL MODE for report generation")
+        
+        input_ = {
+            "messages": [
+                HumanMessage(
+                    f"# Research Requirements\n\n## Task\n\n{current_plan.title}\n\n## Description\n\n{current_plan.thought}"
+                )
+            ],
+            "locale": state.get("locale", "en-US"),
+        }
+        invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
+        observations = state.get("observations", [])
+
+        # Add a reminder about the new report format, citation style, and table usage
+        invoke_messages.append(
+            HumanMessage(
+                content="IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. Key Citations - List all references at the end\n\nFor citations, DO NOT include inline citations in the text. Instead, place all citations in the 'Key Citations' section at the end using the format: `- [Source Title](URL)`. Include an empty line between each citation for better readability.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |",
+                name="system",
             )
         )
 
-    # Context compression
-    llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP["reporter"])
-    compressed_state = ContextManager(llm_token_limit).compress_messages(
-        {"messages": observation_messages}
-    )
-    invoke_messages += compressed_state.get("messages", [])
+        observation_messages = []
+        for observation in observations:
+            observation_messages.append(
+                HumanMessage(
+                    content=f"Below are some observations for the research task:\n\n{observation}",
+                    name="observation",
+                )
+            )
 
-    logger.debug(f"Current invoke messages: {invoke_messages}")
-    response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
-    response_content = response.content
-    logger.info(f"reporter response: {response_content}")
+        # Context compression
+        llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP["reporter"])
+        compressed_state = ContextManager(llm_token_limit).compress_messages(
+            {"messages": observation_messages}
+        )
+        invoke_messages += compressed_state.get("messages", [])
 
-    return {"final_report": response_content}
+        logger.debug(f"Current invoke messages: {invoke_messages}")
+        response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
+        response_content = response.content
+        logger.info(f"reporter response: {response_content}")
+
+        return {"final_report": response_content}
 
 
 def research_team_node(state: State):
@@ -967,6 +1064,64 @@ async def researcher_node(
         config,
         "researcher",
         tools,
+    )
+
+
+def report_editor_node(state: State, config: RunnableConfig) -> Command[Literal["planner"]]:
+    """
+    Report editor node that handles report modification requests (issue #663).
+    
+    Detects when a user wants to modify a previously generated report and creates
+    a targeted research plan for only the sections that need modification.
+    """
+    logger.info("Report editor processing report modification request")
+    
+    # Extract edit context from user feedback
+    last_message = state.get("messages", [])[-1] if state.get("messages") else None
+    if not last_message:
+        logger.warning("No last message found in state, routing to planner")
+        return Command(goto="planner")
+    
+    user_feedback = last_message.get("content", "") if isinstance(last_message, dict) else (
+        last_message.content if hasattr(last_message, "content") else ""
+    )
+    
+    previous_report = state.get("previous_report", "")
+    
+    logger.debug(f"Processing report edit with feedback: {user_feedback[:100]}...")
+    
+    # Extract which sections need editing and what feedback was provided
+    edit_context = extract_edit_context(user_feedback, previous_report)
+    
+    logger.info(
+        f"Edit context extracted: action={edit_context['action']}, "
+        f"sections={len(edit_context['sections'])}"
+    )
+    
+    # Parse report sections to understand structure
+    original_sections = parse_report_sections(previous_report)
+    logger.info(f"Original report has {len(original_sections)} identifiable sections")
+    
+    # Create prompt for planner to generate targeted research plan
+    scoped_research_prompt = (
+        f"The user wants to {edit_context['action']} their research report. "
+        f"User's feedback: {user_feedback}\n\n"
+        f"Original report topics covered: {', '.join(list(original_sections.keys())[:5])}\n\n"
+        f"Create a focused research plan to address the user's requested modifications. "
+        f"Focus ONLY on the topics/sections the user mentioned. Keep this plan short and targeted."
+    )
+    
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=scoped_research_prompt, name="report_editor"),
+            ],
+            "previous_report": previous_report,
+            "is_editing_report": True,
+            "report_edit_context": edit_context["feedback"],
+            "report_sections_to_edit": edit_context["sections"],
+        },
+        goto="planner",
     )
 
 

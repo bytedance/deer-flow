@@ -13,6 +13,7 @@ from .nodes import (
     human_feedback_node,
     planner_node,
     reporter_node,
+    report_editor_node,
     research_team_node,
     researcher_node,
 )
@@ -52,6 +53,7 @@ def _build_base_graph():
     builder.add_node("background_investigator", background_investigation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("reporter", reporter_node)
+    builder.add_node("report_editor", report_editor_node)
     builder.add_node("research_team", research_team_node)
     builder.add_node("researcher", researcher_node)
     builder.add_node("coder", coder_node)
@@ -63,11 +65,11 @@ def _build_base_graph():
         ["planner", "researcher", "coder"],
     )
     builder.add_edge("reporter", END)
-    # Add conditional edges for coordinator to handle clarification flow
+    # Add conditional edges for coordinator to handle clarification flow and report editing (issue #663)
     builder.add_conditional_edges(
         "coordinator",
         lambda state: state.get("goto", "planner"),
-        ["planner", "background_investigator", "coordinator", END],
+        ["planner", "background_investigator", "report_editor", "coordinator", END],
     )
     return builder
 

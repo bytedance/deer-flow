@@ -514,6 +514,29 @@ async def _astream_workflow_generator(
     clarified_research_topic = clarified_topic or latest_message_content
     logger.debug(f"[{thread_id}] Clarified research topic: {clarified_research_topic[:100]}")
 
+    # ============================================================
+    # Retrieve previous report from state if available (issue #663)
+    # ============================================================
+    previous_report = ""
+    logger.debug(f"[{thread_id}] Attempting to retrieve previous state for report editing")
+    try:
+        # Try to get the latest state from the graph for this thread
+        # This will be available if the checkpointer is configured
+        if hasattr(graph, "get_state"):
+            config = {"configurable": {"thread_id": thread_id}}
+            last_state = graph.get_state(config)
+            if last_state and last_state.values:
+                previous_report = last_state.values.get("final_report", "")
+                if previous_report:
+                    logger.info(f"[{thread_id}] Retrieved previous report ({len(previous_report)} chars) for editing")
+                else:
+                    logger.debug(f"[{thread_id}] No previous report found in last state")
+        else:
+            logger.debug(f"[{thread_id}] Graph does not support get_state (in-memory mode)")
+    except Exception as e:
+        logger.debug(f"[{thread_id}] Could not retrieve previous state: {e}")
+        previous_report = ""
+
     # Prepare workflow input
     logger.debug(f"[{thread_id}] Preparing workflow input")
     workflow_input = {
@@ -530,6 +553,7 @@ async def _astream_workflow_generator(
         "enable_clarification": enable_clarification,
         "max_clarification_rounds": max_clarification_rounds,
         "locale": locale,
+        "previous_report": previous_report,
     }
 
     if not auto_accepted_plan and interrupt_feedback:
