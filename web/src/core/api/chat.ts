@@ -14,25 +14,27 @@ import type { ChatEvent } from "./types";
 
 function getLocaleFromCookie(): string {
   if (typeof document === "undefined") return "en-US";
-  const cookies = document.cookie.split(";");
-  let locale = "en-US";
-  for (const cookie of cookies) {
-    const [name, value] = cookie.trim().split("=");
-    if (name === "NEXT_LOCALE") {
-      locale = decodeURIComponent(value) || "en-US";
-      break;
-    }
-  }
   
   // Map frontend locale codes to backend locale format
   // Frontend uses: "en", "zh"
   // Backend expects: "en-US", "zh-CN"
-  const localeMap: Record<string, string> = {
-    "en": "en-US",
-    "zh": "zh-CN",
-  };
+  const LOCALE_MAP = { "en": "en-US", "zh": "zh-CN" } as const;
   
-  return localeMap[locale] || locale;
+  // Initialize to raw locale format (matches cookie format)
+  let rawLocale = "en";
+  
+  // Read from cookie
+  const cookies = document.cookie.split(";");
+  for (const cookie of cookies) {
+    const [name, value] = cookie.trim().split("=");
+    if (name === "NEXT_LOCALE") {
+      rawLocale = decodeURIComponent(value) || "en";
+      break;
+    }
+  }
+  
+  // Map raw locale to backend format, fallback to en-US if unmapped
+  return LOCALE_MAP[rawLocale as keyof typeof LOCALE_MAP] || "en-US";
 }
 
 export async function* chatStream(
