@@ -12,6 +12,29 @@ import { sleep } from "../utils";
 import { resolveServiceURL } from "./resolve-service-url";
 import type { ChatEvent } from "./types";
 
+function getLocaleFromCookie(): string {
+  if (typeof document === "undefined") return "en-US";
+  const cookies = document.cookie.split(";");
+  let locale = "en-US";
+  for (const cookie of cookies) {
+    const [name, value] = cookie.trim().split("=");
+    if (name === "NEXT_LOCALE") {
+      locale = decodeURIComponent(value) || "en-US";
+      break;
+    }
+  }
+  
+  // Map frontend locale codes to backend locale format
+  // Frontend uses: "en", "zh"
+  // Backend expects: "en-US", "zh-CN"
+  const localeMap: Record<string, string> = {
+    "en": "en-US",
+    "zh": "zh-CN",
+  };
+  
+  return localeMap[locale] || locale;
+}
+
 export async function* chatStream(
   userMessage: string,
   params: {
@@ -47,9 +70,11 @@ export async function* chatStream(
     return yield* chatReplayStream(userMessage, params, options);
   
   try{
+    const locale = getLocaleFromCookie();
     const stream = fetchStream(resolveServiceURL("chat/stream"), {
       body: JSON.stringify({
         messages: [{ role: "user", content: userMessage }],
+        locale,
         ...params,
       }),
       signal: options.abortSignal,
