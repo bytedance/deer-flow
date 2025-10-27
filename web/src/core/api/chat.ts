@@ -27,14 +27,14 @@ function getLocaleFromCookie(): string {
   const cookies = document.cookie.split(";");
   for (const cookie of cookies) {
     const [name, value] = cookie.trim().split("=");
-    if (name === "NEXT_LOCALE") {
-      rawLocale = decodeURIComponent(value) || "en";
+    if (name === "NEXT_LOCALE" && value) {
+      rawLocale = decodeURIComponent(value);
       break;
     }
   }
   
   // Map raw locale to backend format, fallback to en-US if unmapped
-  return LOCALE_MAP[rawLocale as keyof typeof LOCALE_MAP] || "en-US";
+  return LOCALE_MAP[rawLocale as keyof typeof LOCALE_MAP] ?? "en-US";
 }
 
 export async function* chatStream(
