@@ -11,12 +11,12 @@ Tests the complete flow of selective tool interrupts including:
 - Resume mechanism after interrupt
 """
 
-import pytest
-from unittest.mock import Mock, patch, AsyncMock, MagicMock, call
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
-from langchain_core.tools import tool
+import pytest
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
 
 from src.agents.agents import create_agent
 from src.agents.tool_interceptor import ToolInterceptor, wrap_tools_with_interceptor

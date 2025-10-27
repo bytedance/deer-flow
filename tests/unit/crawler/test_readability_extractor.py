@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from unittest.mock import patch
+
 from src.crawler.readability_extractor import ReadabilityExtractor
 
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import logging
+
 from readabilipy import simple_json_from_html_string
 
 from .article import Article
