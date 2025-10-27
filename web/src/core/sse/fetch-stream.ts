@@ -51,8 +51,8 @@ export async function* fetchStream(
       // Check buffer size to avoid memory overflow
       if (buffer.length > MAX_BUFFER_SIZE) {
         throw new Error(
-          `Buffer overflow - received ${Math.round(buffer.length / 1024 / 1024)}MB of data without proper event boundaries. ` +
-          `Max buffer size is ${Math.round(MAX_BUFFER_SIZE / 1024 / 1024)}MB. ` +
+          `Buffer overflow - received ${(buffer.length / 1024 / 1024).toFixed(2)}MB of data without proper event boundaries. ` +
+          `Max buffer size is ${(MAX_BUFFER_SIZE / 1024 / 1024).toFixed(2)}MB. ` +
           `You can increase this by setting NEXT_PUBLIC_MAX_STREAM_BUFFER_SIZE environment variable.`
         );
       }
