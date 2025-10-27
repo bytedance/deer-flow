@@ -969,7 +969,9 @@ async def test_execute_agent_step_no_unexecuted_step(
         )
         assert isinstance(result, Command)
         assert result.goto == "research_team"
-        mock_logger.warning.assert_called_with("No unexecuted step found")
+        # Updated assertion to match new debug logging format
+        mock_logger.warning.assert_called_once()
+        assert "No unexecuted step found" in mock_logger.warning.call_args[0][0]
 
 
 @pytest.mark.asyncio
