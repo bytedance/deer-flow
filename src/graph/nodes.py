@@ -697,6 +697,7 @@ def reporter_node(state: State, config: RunnableConfig):
 def research_team_node(state: State):
     """Research team node that collaborates on tasks."""
     logger.info("Research team is collaborating on tasks.")
+    logger.debug("Entering research_team_node - coordinating research and coder agents")
     pass
 
 
@@ -704,25 +705,30 @@ async def _execute_agent_step(
     state: State, agent, agent_name: str
 ) -> Command[Literal["research_team"]]:
     """Helper function to execute a step using the specified agent."""
+    logger.debug(f"[_execute_agent_step] Starting execution for agent: {agent_name}")
+    
     current_plan = state.get("current_plan")
     plan_title = current_plan.title
     observations = state.get("observations", [])
+    logger.debug(f"[_execute_agent_step] Plan title: {plan_title}, observations count: {len(observations)}")
 
     # Find the first unexecuted step
     current_step = None
     completed_steps = []
-    for step in current_plan.steps:
+    for idx, step in enumerate(current_plan.steps):
         if not step.execution_res:
             current_step = step
+            logger.debug(f"[_execute_agent_step] Found unexecuted step at index {idx}: {step.title}")
             break
         else:
             completed_steps.append(step)
 
     if not current_step:
-        logger.warning("No unexecuted step found")
+        logger.warning(f"[_execute_agent_step] No unexecuted step found in {len(current_plan.steps)} total steps")
         return Command(goto="research_team")
 
-    logger.info(f"Executing step: {current_step.title}, agent: {agent_name}")
+    logger.info(f"[_execute_agent_step] Executing step: {current_step.title}, agent: {agent_name}")
+    logger.debug(f"[_execute_agent_step] Completed steps so far: {len(completed_steps)}")
 
     # Format completed steps information
     completed_steps_info = ""
@@ -942,12 +948,20 @@ async def researcher_node(
 ) -> Command[Literal["research_team"]]:
     """Researcher node that do research"""
     logger.info("Researcher node is researching.")
+    logger.debug(f"[researcher_node] Starting researcher agent")
+    
     configurable = Configuration.from_runnable_config(config)
+    logger.debug(f"[researcher_node] Max search results: {configurable.max_search_results}")
+    
     tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
+        logger.debug(f"[researcher_node] Adding retriever tool to tools list")
         tools.insert(0, retriever_tool)
-    logger.info(f"Researcher tools: {tools}")
+    
+    logger.info(f"[researcher_node] Researcher tools count: {len(tools)}")
+    logger.debug(f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}")
+    
     return await _setup_and_execute_agent_step(
         state,
         config,
@@ -961,6 +975,8 @@ async def coder_node(
 ) -> Command[Literal["research_team"]]:
     """Coder node that do code analysis."""
     logger.info("Coder node is coding.")
+    logger.debug(f"[coder_node] Starting coder agent with python_repl_tool")
+    
     return await _setup_and_execute_agent_step(
         state,
         config,

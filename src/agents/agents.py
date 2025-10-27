@@ -36,20 +36,42 @@ def create_agent(
     Returns:
         A configured agent graph
     """
+    logger.debug(
+        f"Creating agent '{agent_name}' of type '{agent_type}' "
+        f"with {len(tools)} tools and template '{prompt_template}'"
+    )
+    
     # Wrap tools with interrupt logic if specified
     processed_tools = tools
     if interrupt_before_tools:
         logger.info(
             f"Creating agent '{agent_name}' with tool-specific interrupts: {interrupt_before_tools}"
         )
+        logger.debug(f"Wrapping {len(tools)} tools for agent '{agent_name}'")
         processed_tools = wrap_tools_with_interceptor(tools, interrupt_before_tools)
+        logger.debug(f"Agent '{agent_name}' tool wrapping completed")
+    else:
+        logger.debug(f"Agent '{agent_name}' has no interrupt-before-tools configured")
 
-    return create_react_agent(
+    if agent_type not in AGENT_LLM_MAP:
+        logger.warning(
+            f"Agent type '{agent_type}' not found in AGENT_LLM_MAP. "
+            f"Falling back to default LLM type 'basic' for agent '{agent_name}'. "
+            "This may indicate a configuration issue."
+        )
+    llm_type = AGENT_LLM_MAP.get(agent_type, "basic")
+    logger.debug(f"Agent '{agent_name}' using LLM type: {llm_type}")
+    
+    logger.debug(f"Creating ReAct agent '{agent_name}'")
+    agent = create_react_agent(
         name=agent_name,
-        model=get_llm_by_type(AGENT_LLM_MAP[agent_type]),
+        model=get_llm_by_type(llm_type),
         tools=processed_tools,
         prompt=lambda state: apply_prompt_template(
             prompt_template, state, locale=state.get("locale", "en-US")
         ),
         pre_model_hook=pre_model_hook,
     )
+    logger.info(f"Agent '{agent_name}' created successfully")
+    
+    return agent
