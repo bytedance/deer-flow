@@ -1,6 +1,8 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { env } from "~/env";
+
 import { type StreamEvent } from "./StreamEvent";
 
 export async function* fetchStream(
@@ -28,7 +30,8 @@ export async function* fetchStream(
 
   try {
     let buffer = "";
-    const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB buffer size limit
+    // Use configurable buffer size from environment, default to 1MB (1048576 bytes)
+    const MAX_BUFFER_SIZE = env.NEXT_PUBLIC_MAX_STREAM_BUFFER_SIZE ?? (1024 * 1024);
 
     while (true) {
       const { done, value } = await reader.read();
@@ -47,7 +50,11 @@ export async function* fetchStream(
 
       // Check buffer size to avoid memory overflow
       if (buffer.length > MAX_BUFFER_SIZE) {
-        throw new Error("Buffer overflow - received too much data without proper event boundaries");
+        throw new Error(
+          `Buffer overflow - received ${Math.round(buffer.length / 1024 / 1024)}MB of data without proper event boundaries. ` +
+          `Max buffer size is ${Math.round(MAX_BUFFER_SIZE / 1024 / 1024)}MB. ` +
+          `You can increase this by setting NEXT_PUBLIC_MAX_STREAM_BUFFER_SIZE environment variable.`
+        );
       }
 
       let newlineIndex;
