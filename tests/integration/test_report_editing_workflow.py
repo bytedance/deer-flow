@@ -187,7 +187,7 @@ AI is currently used primarily in:
         assert edit1
         
         context1 = extract_edit_context(message1, sample_generated_report)
-        assert context1["action"] in ["improve", "enhance", "modify"]
+        assert context1["action"] in ["enhance", "modify"]
         
         # Second edit (on same report)
         message2 = "Add more details about regulatory challenges"

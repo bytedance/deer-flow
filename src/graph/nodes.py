@@ -647,7 +647,7 @@ def coordinator_node(
 
     # Apply background_investigation routing if enabled (unified logic)
     # But skip if we're already routing to report_editor
-    if goto == "planner" and state.get("enable_background_investigation"):
+    if goto == "planner" and state.get("enable_background_investigation") and goto != "report_editor":
         goto = "background_investigator"
 
     # Set default values for state variables (in case they're not defined in legacy mode)
