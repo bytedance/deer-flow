@@ -333,9 +333,8 @@ def _process_initial_messages(message, thread_id):
 
 async def _process_message_chunk(message_chunk, message_metadata, thread_id, agent):
     """Process a single message chunk and yield appropriate events."""
-    logger.debug(f"[{thread_id}] _process_message_chunk started for agent={agent}")
-    
     agent_name = _get_agent_name(agent, message_metadata)
+    logger.debug(f"[{thread_id}] _process_message_chunk started for agent_name={agent_name}")
     logger.debug(f"[{thread_id}] Extracted agent_name: {agent_name}")
     
     event_stream_message = _create_event_stream_message(
@@ -436,8 +435,8 @@ async def _stream_graph_events(
                 if "__interrupt__" in event_data:
                     logger.debug(
                         f"[{thread_id}] Processing interrupt event: "
-                        f"ns={event_data['__interrupt__'][0].ns}, "
-                        f"value_len={len(event_data['__interrupt__'][0].value)}"
+                        f"ns={getattr(event_data['__interrupt__'][0], 'ns', 'unknown') if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 else 'unknown'}, "
+                        f"value_len={len(getattr(event_data['__interrupt__'][0], 'value', '')) if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 and hasattr(event_data['__interrupt__'][0], 'value') and hasattr(event_data['__interrupt__'][0].value, '__len__') else 'unknown'}"
                     )
                     yield _create_interrupt_event(thread_id, event_data)
                 logger.debug(f"[{thread_id}] Dict event without interrupt, skipping")

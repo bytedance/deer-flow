@@ -86,7 +86,9 @@ if __name__ == "__main__":
         # Set the appropriate logging level for the src package if debug is enabled
         if args.log_level.lower() == "debug":
             logging.getLogger("src").setLevel(logging.DEBUG)
-            logger.info("DEBUG logging enabled for src package - detailed diagnostic information will be logged")
+            logging.getLogger("langchain").setLevel(logging.DEBUG)
+            logging.getLogger("langgraph").setLevel(logging.DEBUG)
+            logger.info("DEBUG logging enabled for src, langchain, and langgraph packages - detailed diagnostic information will be logged")
         
         uvicorn.run(
             "src.server:app",

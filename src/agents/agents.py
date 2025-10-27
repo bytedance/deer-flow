@@ -53,6 +53,12 @@ def create_agent(
     else:
         logger.debug(f"Agent '{agent_name}' has no interrupt-before-tools configured")
 
+    if agent_type not in AGENT_LLM_MAP:
+        logger.warning(
+            f"Agent type '{agent_type}' not found in AGENT_LLM_MAP. "
+            f"Falling back to default LLM type 'basic' for agent '{agent_name}'. "
+            "This may indicate a configuration issue."
+        )
     llm_type = AGENT_LLM_MAP.get(agent_type, "basic")
     logger.debug(f"Agent '{agent_name}' using LLM type: {llm_type}")
     

@@ -112,7 +112,7 @@ class ToolInterceptor:
                     feedback = interrupt(
                         f"About to execute tool: '{tool_name}'\n\nInput:\n{tool_input_repr}\n\nApprove execution?"
                     )
-                    logger.debug(f"[ToolInterceptor] Interrupt returned with feedback: {feedback[:100] if feedback else 'None'}")
+                    logger.debug(f"[ToolInterceptor] Interrupt returned with feedback: {f'{feedback[:100]}...' if feedback and len(feedback) > 100 else feedback if feedback else 'None'}")
                 except Exception as e:
                     logger.error(f"[ToolInterceptor] Error during interrupt: {str(e)}")
                     raise
