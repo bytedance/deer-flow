@@ -1,9 +1,10 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock, AsyncMock
-from langchain_core.tools import tool, BaseTool
+from langchain_core.tools import BaseTool, tool
 
 from src.agents.tool_interceptor import (
     ToolInterceptor,

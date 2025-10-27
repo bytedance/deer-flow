@@ -3,7 +3,11 @@
 
 import json
 
-from src.utils.json_utils import repair_json_output, sanitize_tool_response, _extract_json_from_content
+from src.utils.json_utils import (
+    _extract_json_from_content,
+    repair_json_output,
+    sanitize_tool_response,
+)
 
 
 class TestRepairJsonOutput:

@@ -10,13 +10,14 @@ tool names from being concatenated when multiple tool calls happen in sequence.
 """
 
 import logging
-import pytest
-from unittest.mock import patch, MagicMock
+import os
 
 # Import the functions to test
 # Note: We need to import from the app module
 import sys
-import os
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../"))
