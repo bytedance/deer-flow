@@ -242,7 +242,7 @@ def planner_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["human_feedback", "reporter"]]:
     """Planner node that generate the full plan."""
-    logger.info("Planner generating full plan")
+    logger.info("Planner generating full plan with locale: %s", state.get("locale", "en-US"))
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
 
@@ -458,6 +458,7 @@ def coordinator_node(
 
         goto = "__end__"
         locale = state.get("locale", "en-US")
+        logger.info(f"Coordinator locale: {locale}")
         research_topic = state.get("research_topic", "")
 
         # Process tool calls for legacy mode
@@ -471,9 +472,8 @@ def coordinator_node(
                         logger.info("Handing off to planner")
                         goto = "planner"
 
-                        # Extract locale and research_topic if provided
-                        if tool_args.get("locale") and tool_args.get("research_topic"):
-                            locale = tool_args.get("locale")
+                        # Extract research_topic if provided
+                        if tool_args.get("research_topic"):
                             research_topic = tool_args.get("research_topic")
                         break
 
@@ -637,8 +637,6 @@ def coordinator_node(
                     logger.info("Handing off to planner")
                     goto = "planner"
 
-                    # Extract locale if provided
-                    locale = tool_args.get("locale", locale)
                     if not enable_clarification and tool_args.get("research_topic"):
                         research_topic = tool_args["research_topic"]
 

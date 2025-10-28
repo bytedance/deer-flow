@@ -106,6 +106,8 @@ async def chat_stream(request: ChatRequest):
     # Check if MCP server configuration is enabled
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
 
+    logger.debug(f"get the request locale : {request.locale}")
+
     # Validate MCP settings if provided
     if request.mcp_settings and not mcp_enabled:
         raise HTTPException(
