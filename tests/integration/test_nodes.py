@@ -675,7 +675,7 @@ def test_coordinator_node_with_tool_calls_locale_override(
     tool_calls = [
         {
             "name": "handoff_to_planner",
-            "args": {"locale": "zh-CN", "research_topic": "test topic"},
+            "args": {"locale": "auto", "research_topic": "test topic"},
         }
     ]
     with (
@@ -689,7 +689,7 @@ def test_coordinator_node_with_tool_calls_locale_override(
 
         result = coordinator_node(mock_state_coordinator, MagicMock())
         assert result.goto == "planner"
-        assert result.update["locale"] == "zh-CN"
+        assert result.update["locale"] == "en-US"
         assert result.update["research_topic"] == "test topic"
         assert result.update["resources"] == ["resource1", "resource2"]
         assert result.update["resources"] == ["resource1", "resource2"]
