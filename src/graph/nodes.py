@@ -413,13 +413,19 @@ def human_feedback_node(
                 goto="__end__"
             )
 
+    # Build update dict with safe locale handling
+    update_dict = {
+        "current_plan": Plan.model_validate(new_plan),
+        "plan_iterations": plan_iterations,
+        **preserve_state_meta_fields(state),
+    }
+    
+    # Only override locale if new_plan provides a valid value, otherwise use preserved locale
+    if new_plan.get("locale"):
+        update_dict["locale"] = new_plan["locale"]
+    
     return Command(
-        update={
-            "current_plan": Plan.model_validate(new_plan),
-            "plan_iterations": plan_iterations,
-            **preserve_state_meta_fields(state),
-            "locale": new_plan["locale"], # update locale if provided in plan
-        },
+        update=update_dict,
         goto=goto,
     )
 
