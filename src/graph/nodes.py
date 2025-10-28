@@ -84,6 +84,31 @@ def needs_clarification(state: dict) -> bool:
     )
 
 
+def preserve_state_meta_fields(state: State) -> dict:
+    """
+    Extract meta/config fields that should be preserved across state transitions.
+    
+    These fields are critical for workflow continuity and should be explicitly
+    included in all Command.update dicts to prevent them from reverting to defaults.
+    
+    Args:
+        state: Current state object
+        
+    Returns:
+        Dict of meta fields to preserve
+    """
+    return {
+        "locale": state.get("locale", "en-US"),
+        "research_topic": state.get("research_topic", ""),
+        "clarified_research_topic": state.get("clarified_research_topic", ""),
+        "clarification_history": state.get("clarification_history", []),
+        "enable_clarification": state.get("enable_clarification", False),
+        "max_clarification_rounds": state.get("max_clarification_rounds", 3),
+        "clarification_rounds": state.get("clarification_rounds", 0),
+        "resources": state.get("resources", []),
+    }
+
+
 def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
     """
     Validate and fix a plan to ensure it meets requirements.
@@ -266,7 +291,10 @@ def planner_node(
 
     # if the plan iterations is greater than the max plan iterations, return the reporter node
     if plan_iterations >= configurable.max_plan_iterations:
-        return Command(goto="reporter")
+        return Command(
+            update=preserve_state_meta_fields(state),
+            goto="reporter"
+        )
 
     full_response = ""
     if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
@@ -284,9 +312,15 @@ def planner_node(
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 0:
-            return Command(goto="reporter")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="reporter"
+            )
         else:
-            return Command(goto="__end__")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="__end__"
+            )
 
     # Validate and fix plan to ensure web search requirements are met
     if isinstance(curr_plan, dict):
@@ -299,6 +333,7 @@ def planner_node(
             update={
                 "messages": [AIMessage(content=full_response, name="planner")],
                 "current_plan": new_plan,
+                **preserve_state_meta_fields(state),
             },
             goto="reporter",
         )
@@ -306,6 +341,7 @@ def planner_node(
         update={
             "messages": [AIMessage(content=full_response, name="planner")],
             "current_plan": full_response,
+            **preserve_state_meta_fields(state),
         },
         goto="human_feedback",
     )
@@ -323,7 +359,10 @@ def human_feedback_node(
         # Handle None or empty feedback
         if not feedback:
             logger.warning(f"Received empty or None feedback: {feedback}. Returning to planner for new plan.")
-            return Command(goto="planner")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="planner"
+            )
 
         # Normalize feedback string
         feedback_normalized = str(feedback).strip().upper()
@@ -336,6 +375,7 @@ def human_feedback_node(
                     "messages": [
                         HumanMessage(content=feedback, name="feedback"),
                     ],
+                    **preserve_state_meta_fields(state),
                 },
                 goto="planner",
             )
@@ -343,7 +383,10 @@ def human_feedback_node(
             logger.info("Plan is accepted by user.")
         else:
             logger.warning(f"Unsupported feedback format: {feedback}. Please use '[ACCEPTED]' to accept or '[EDIT_PLAN]' to edit.")
-            return Command(goto="planner")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="planner"
+            )
 
     # if the plan is accepted, run the following node
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
@@ -360,15 +403,22 @@ def human_feedback_node(
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
-            return Command(goto="reporter")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="reporter"
+            )
         else:
-            return Command(goto="__end__")
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="__end__"
+            )
 
     return Command(
         update={
             "current_plan": Plan.model_validate(new_plan),
             "plan_iterations": plan_iterations,
-            "locale": new_plan["locale"],
+            **preserve_state_meta_fields(state),
+            "locale": new_plan["locale"], # update locale if provided in plan
         },
         goto=goto,
     )
@@ -725,7 +775,10 @@ async def _execute_agent_step(
 
     if not current_step:
         logger.warning(f"[_execute_agent_step] No unexecuted step found in {len(current_plan.steps)} total steps")
-        return Command(goto="research_team")
+        return Command(
+            update=preserve_state_meta_fields(state),
+            goto="research_team"
+        )
 
     logger.info(f"[_execute_agent_step] Executing step: {current_step.title}, agent: {agent_name}")
     logger.debug(f"[_execute_agent_step] Completed steps so far: {len(completed_steps)}")
@@ -834,6 +887,7 @@ async def _execute_agent_step(
                     )
                 ],
                 "observations": observations + [detailed_error],
+                **preserve_state_meta_fields(state),
             },
             goto="research_team",
         )
@@ -859,6 +913,7 @@ async def _execute_agent_step(
                 )
             ],
             "observations": observations + [response_content],
+            **preserve_state_meta_fields(state),
         },
         goto="research_team",
     )

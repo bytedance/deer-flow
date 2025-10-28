@@ -76,7 +76,7 @@ export async function* chatStream(
     const stream = fetchStream(resolveServiceURL("chat/stream"), {
       body: JSON.stringify({
         messages: [{ role: "user", content: userMessage }],
-        locale,
+        locale: locale,
         ...params,
       }),
       signal: options.abortSignal,
