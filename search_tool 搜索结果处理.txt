@@ -1,0 +1,30 @@
+search_tool 搜索结果处理
+具体实现
+在EnhancedTavilySearchAPIWrapper.clean_results_with_images()方法中利用SearchResultPostProcessor.process_results()(实现在src/tools/search_postprocessor.py)对搜索结果进行处理，剔除无效搜索结果，减少token消耗，具体优化措施如下:
+
+移除重复内容
+过滤低质内容：根据相关性过滤分数较低的结果
+清除base64编码的图像
+长度截断：对每条搜索结果根据用户配置长度进行截断
+使用方式
+上述的过滤低质内容和长度截断依赖于用户配置，SearchResultPostProcessor 初始化时提供了两个可配置参数：
+
+min_score_threshold：最低相关性分数阈值，低于此阈值的搜索结果将被过滤。 如果不设置，将不会根据相关性分数过滤；
+max_content_length_per_page：每个搜索结果内容的最长限制，大于此长度的部分会被截断。如果不设置，不会进行内容截断；
+用户可以在conf.yaml中对这两个参数进行配置，如下所示：
+
+SEARCH_ENGINE:
+  engine: tavily
+  # Only include results from these domains
+  include_domains:
+    - example.com
+    - trusted-news.com
+    - reliable-source.org
+    - gov.cn
+    - edu.cn
+  # Exclude results from these domains
+  exclude_domains:
+    - example.com
+  include_images: true
+  min_score_threshold: 0.4
+  max_content_length_per_page: 5000

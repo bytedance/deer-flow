@@ -1,0 +1,42 @@
+**Act as a Financial Profiling Agent. Conduct an open-source background check on TARGET_NAME. For this task, TARGET_NAME is Jensen Huang, CEO of NVIDIA.**
+
+**Core Instruction: You MUST use your web search capability to find information from reliable public sources. Do NOT rely solely on your internal knowledge. For every key finding, you MUST cite the source URL(s) you used to verify the information.**
+
+**Workflow:**
+
+1.  **Private Data Cross-Check (Simulated):**
+    *   *Since private data is not provided in this test, assume the following common claims for a person in this position. Your task is to verify these assumed claims against public data:*
+        *   **Claim 1 (Employment):** Current CEO and Co-Founder of NVIDIA.
+        *   **Claim 2 (Compensation):** Annual compensation is in the tens of millions of USD, primarily from stock awards.
+        *   **Claim 3 (Asset - Shares):** Holds a significant number of NVIDIA shares.
+        *   **Claim 4 (Asset - Property):** Owns high-value real estate (e.g., in Malibu, California).
+
+2.  **Public Data Verification (Via Web Search):**
+    *   Use your web search function to find information from these types of reliable sources:
+        *   **Official Company Filings:** SEC.gov (EDGAR database) for official executive titles, compensation, and stock ownership.
+        *   **Financial News & Data:** Bloomberg, Reuters, CNBC, MarketWatch for executive profiles, compensation reports, and insider transactions.
+        *   **Professional Network:** LinkedIn for professional title and career history.
+        *   **Industry Benchmarks:** Salary surveys (e.g., from Levels.fyi, Glassdoor for tech executives) to benchmark compensation.
+        *   **Property Records & News:** Real estate websites (Zillow, Redfin) or reputable news articles about celebrity real estate transactions.
+    *   **For each finding, you MUST provide the URL.**
+
+3.  **Corroboration Analysis:**
+    *   Compare your public data findings against the assumed private claims above.
+    *   Highlight any anomalies or inconsistencies. For example, does the publicly disclosed compensation differ significantly from the assumed claim? Is the property value inconsistent with the reported income?
+
+4.  **Periodic Review Alert:**
+    *   Suggest a monitoring cadence. For example, "Monitor SEC filings for insider transactions quarterly" or "Check annual proxy statements (DEF 14A) for compensation updates."
+
+**Final Report Format:**
+
+Present your findings in the table below. The "Public Data Finding" and "Anomaly/Status" cells **must contain the specific information found and the source URL**.
+
+| Check Item | Claim from Private Data | Public Data Finding | Anomaly/Status |
+| :--- | :--- | :--- | :--- |
+| **Job Title & Tenure** | CEO and Co-Founder of NVIDIA | [e.g., Title confirmed as President & CEO in NVIDIA's official SEC filing (10-K). Source: [URL]] | No Anomaly |
+| **Compensation** | Tens of millions USD | [e.g., Total compensation of $XX million as reported in NVIDIA's 2024 DEF 14A proxy statement. Source: [URL]] | [e.g., No Anomaly, or "Claim is consistent with public data"] |
+| **NVIDIA Shareholding** | Holds significant shares | [e.g., Ownership of X million shares as per latest Form 4 filing on SEC.gov. Source: [URL]] | No Anomaly |
+| **Real Estate Assets** | Owns property in Malibu, CA | [e.g., Property records/news articles confirm purchase of a property at [Address] in YYYY for $Z million. Source: [URL]] | No Anomaly |
+
+
+
