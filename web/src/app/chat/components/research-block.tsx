@@ -87,8 +87,13 @@ export function ResearchBlock({
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      try {
+        if (a.parentNode) {
+          a.parentNode.removeChild(a);
+        }
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     }, 0);
   }, [reportId]);
 
