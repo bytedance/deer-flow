@@ -100,24 +100,30 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
     }
   }, [editingServer, onChange, settings]);
 
-  const handleRefreshServers = useCallback(async () => {
+  const handleRefreshServers = useCallback(async (serverName?: string) => {
     try {
-      // Create a new array to store the updated servers
+      // Create a new array with the updated server
       const updatedServers = await Promise.all(
         settings.mcp.servers.map(async (server) => {
-          if (!server.enabled) {
-            // Return disabled servers as-is
+          // Skip if this is not the server we want to refresh
+          if (serverName && server.name !== serverName) {
+            return server;
+          }
+          
+          // Skip disabled servers unless explicitly requested
+          if (!server.enabled && server.name !== serverName) {
             return server;
           }
 
           try {
             // Get the latest metadata
             const metadata = await queryMCPServerMetadata(server);
-
-            // Return the updated server with preserved enabled state and timestamps
+            
+            // Create a new server object with preserved properties
             return {
-              ...metadata,
-              name: server.name, // Keep the original name
+              ...server, // Keep all existing properties
+              ...metadata, // Apply metadata updates
+              name: server.name, // Ensure name is preserved
               enabled: server.enabled, // Preserve the enabled state
               createdAt: server.createdAt, // Keep the original creation time
               updatedAt: Date.now(), // Update the last updated time
@@ -240,7 +246,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
                       className="h-8 w-8"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void handleRefreshServers();
+                        void handleRefreshServers(server.name);
                       }}
                     >
                       <RefreshCw className="h-4 w-4" />
