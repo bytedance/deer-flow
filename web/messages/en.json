@@ -52,6 +52,10 @@
       "learnMore": "learn more about MCP.",
       "enableDisable": "Enable/disable server",
       "deleteServer": "Delete server",
+      "editServer": "Edit server",
+      "refreshServer": "Refresh server",
+      "editServerDescription": "Edit the MCP server configuration",
+      "editServerNote": "Update the server configuration in JSON format",
       "disabled": "Disabled",
       "new": "New"
     },
@@ -81,9 +85,9 @@
   },
   "chat": {
     "page": {
-        "loading": "Loading DeerFlow...",
-        "welcomeUser": "Welcome, {username}",
-        "starOnGitHub": "Star DeerFlow on GitHub"
+      "loading": "Loading DeerFlow...",
+      "welcomeUser": "Welcome, {username}",
+      "starOnGitHub": "Star DeerFlow on GitHub"
     },
     "welcome": {
       "greeting": "👋 Hello, there!",

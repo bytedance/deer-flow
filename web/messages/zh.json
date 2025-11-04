@@ -52,6 +52,10 @@
       "learnMore": "了解更多关于 MCP 的信息。",
       "enableDisable": "启用/禁用服务器",
       "deleteServer": "删除服务器",
+      "editServer": "编辑服务器",
+      "refreshServer": "刷新服务器",
+      "editServerDescription": "编辑 MCP 服务器配置",
+      "editServerNote": "以 JSON 格式更新服务器配置",
       "disabled": "已禁用",
       "new": "新增"
     },
