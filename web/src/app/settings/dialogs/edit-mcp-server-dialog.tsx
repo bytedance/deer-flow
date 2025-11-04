@@ -16,6 +16,7 @@ import {
 } from "~/components/ui/dialog";
 import { Textarea } from "~/components/ui/textarea";
 import type { MCPServerMetadata } from "~/core/mcp";
+import { MCPConfigSchema } from "~/core/mcp";
 
 export function EditMCPServerDialog({
   server,
@@ -34,17 +35,17 @@ export function EditMCPServerDialog({
     JSON.stringify(
       {
         mcpServers: {
-          [server.name]: server.transport === 'stdio' 
+          [server.name]: server.transport === 'stdio'
             ? {
-                command: server.command,
-                args: server.args,
-                env: server.env,
-              }
+              command: server.command,
+              args: server.args,
+              env: server.env,
+            }
             : {
-                transport: server.transport,
-                url: server.url,
-                headers: server.headers,
-              },
+              transport: server.transport,
+              url: server.url,
+              headers: server.headers,
+            },
         },
       },
       null,
@@ -52,6 +53,46 @@ export function EditMCPServerDialog({
     )
   );
   const [processing, setProcessing] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const handleChange = useCallback((value: string) => {
+    setConfig(value);
+    setValidationError(null);
+
+    if (!value.trim()) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      if (!("mcpServers" in parsed)) {
+        setValidationError("Missing `mcpServers` in JSON");
+        return;
+      }
+
+      const result = MCPConfigSchema.safeParse(parsed);
+      if (!result.success) {
+        if (result.error.errors[0]) {
+          const error = result.error.errors[0];
+          if (error.code === "invalid_union") {
+            if (error.unionErrors[0]?.errors[0]) {
+              setValidationError(error.unionErrors[0].errors[0].message);
+              return;
+            }
+          }
+          setValidationError(error.message || t("validationFailed"));
+          return;
+        }
+      }
+
+      const keys = Object.keys(parsed.mcpServers);
+      if (keys.length === 0) {
+        setValidationError(t("missingServerName"));
+      }
+    } catch {
+      setValidationError(t("invalidJson"));
+    }
+  }, [t]);
 
   const handleSave = useCallback(async () => {
     setProcessing(true);
@@ -81,8 +122,13 @@ export function EditMCPServerDialog({
           <Textarea
             className="h-[360px] font-mono text-sm"
             value={config}
-            onChange={(e) => setConfig(e.target.value)}
+            onChange={(e) => handleChange(e.target.value)}
           />
+          {validationError && (
+            <div className="text-sm text-red-500 mt-2">
+              {validationError}
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -98,7 +144,10 @@ export function EditMCPServerDialog({
               >
                 {commonT("cancel")}
               </Button>
-              <Button onClick={handleSave} disabled={processing}>
+              <Button
+                onClick={handleSave}
+                disabled={processing || !!validationError}
+              >
                 {processing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {commonT("save")}
               </Button>

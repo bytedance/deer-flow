@@ -5,11 +5,11 @@ import { motion } from "framer-motion";
 import { Blocks, Edit2, PencilRuler, RefreshCw, Trash } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useState } from "react";
-import { queryMCPServerMetadata } from "~/core/api";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Button } from "~/components/ui/button";
 import { Switch } from "~/components/ui/switch";
+import { queryMCPServerMetadata } from "~/core/api";
 import type { MCPServerMetadata } from "~/core/mcp";
 import { cn } from "~/lib/utils";
 
@@ -58,7 +58,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
     if (!editingServer) return false;
 
     try {
-      const parsedConfig = JSON.parse(config) as { mcpServers?: Record<string, any> };
+      const parsedConfig = JSON.parse(config) as { mcpServers?: Record<string, MCPServerMetadata> };
 
       if (!parsedConfig.mcpServers || typeof parsedConfig.mcpServers !== 'object') {
         console.error('Invalid configuration format: mcpServers not found');
@@ -213,7 +213,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
                         id="airplane-mode"
                         checked={server.enabled}
                         onCheckedChange={(checked) => {
-                          handleToggleServer(server.name, checked);
+                          void handleToggleServer(server.name, checked);
                         }}
                       />
                     </div>
@@ -240,7 +240,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
                       className="h-8 w-8"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleRefreshServers();
+                        void handleRefreshServers();
                       }}
                     >
                       <RefreshCw className="h-4 w-4" />
