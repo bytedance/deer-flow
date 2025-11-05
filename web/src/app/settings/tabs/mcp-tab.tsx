@@ -109,7 +109,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
           if (serverName && server.name !== serverName) {
             return server;
           }
-          
+
           // Skip disabled servers unless explicitly requested
           if (!server.enabled && server.name !== serverName) {
             return server;
@@ -118,7 +118,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
           try {
             // Get the latest metadata
             const metadata = await queryMCPServerMetadata(server);
-            
+
             // Create a new server object with preserved properties
             return {
               ...server, // Keep all existing properties
@@ -159,7 +159,16 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
           if (server) {
             const metadata = await queryMCPServerMetadata(server);
             const updatedServers = merged.map(s =>
-              s.name === name ? { ...metadata, enabled: true } : s
+              s.name === name
+                ? {
+                  ...s,
+                  ...metadata,
+                  name: s.name,
+                  enabled: true,
+                  createdAt: s.createdAt,
+                  updatedAt: Date.now(),
+                }
+                : s
             );
             setServers(updatedServers);
             onChange({ ...settings, mcp: { ...settings.mcp, servers: updatedServers } });

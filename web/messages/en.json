@@ -57,7 +57,10 @@
       "editServerDescription": "Edit the MCP server configuration",
       "editServerNote": "Update the server configuration in JSON format",
       "disabled": "Disabled",
-      "new": "New"
+      "new": "New",
+      "invalidJson": "Invalid JSON format",
+      "validationFailed": "Validation failed",
+      "missingServerName": "Missing server name"
     },
     "about": {
       "title": "About"

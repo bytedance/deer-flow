@@ -57,7 +57,10 @@
       "editServerDescription": "编辑 MCP 服务器配置",
       "editServerNote": "以 JSON 格式更新服务器配置",
       "disabled": "已禁用",
-      "new": "新增"
+      "new": "新增",
+      "invalidJson": "无效的 JSON 格式",
+      "validationFailed": "验证失败",
+      "missingServerName": "缺少服务器名称"
     },
     "about": {
       "title": "关于"
