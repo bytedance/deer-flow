@@ -97,7 +97,7 @@ class QdrantProvider(Retriever):
         else:
             raise ValueError(
                 f"Unsupported embedding provider: {self.embedding_provider}. "
-                "Supported providers: openai,dashscope"
+                "Supported providers: openai, dashscope"
             )
 
     def _get_embedding_dimension(self, model_name: str) -> int:
@@ -490,8 +490,8 @@ class QdrantProvider(Retriever):
                     self.client.close()
                 self.client = None
                 self.vector_store = None
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Exception occurred while closing QdrantProvider: %s", e)
 
     def __del__(self) -> None:
         self.close()
