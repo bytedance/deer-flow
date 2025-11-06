@@ -16,6 +16,7 @@ class DifyProvider(Retriever):
 
     api_url: str
     api_key: str
+    web_url: str
 
     def __init__(self):
         api_url = os.getenv("DIFY_API_URL")
@@ -27,6 +28,22 @@ class DifyProvider(Retriever):
         if not api_key:
             raise ValueError("DIFY_API_KEY is not set")
         self.api_key = api_key
+
+        # 获取Web UI URL，如果未设置则从API URL推导
+        web_url = os.getenv("DIFY_WEB_URL")
+        if web_url:
+            self.web_url = web_url.rstrip("/")
+        else:
+            # 从API URL推导Web UI URL：移除/v1路径
+            parsed = urlparse(api_url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            self.web_url = base_url
+
+    def _get_document_url(self, dataset_id: str, doc_id: str) -> str:
+        """
+        构建指向Dify Web UI的文档URL
+        """
+        return f"{self.web_url}/datasets/{dataset_id}/documents/{doc_id}"
 
     def query_relevant_documents(
         self, query: str, resources: list[Resource] = []
@@ -82,8 +99,10 @@ class DifyProvider(Retriever):
                     continue
 
                 if doc_id not in all_documents:
+                    # 构建指向Dify Web UI的文档URL
+                    doc_url = self._get_document_url(dataset_id, doc_id)
                     all_documents[doc_id] = Document(
-                        id=doc_id, title=doc_name, chunks=[]
+                        id=doc_id, title=doc_name, url=doc_url, chunks=[]
                     )
 
                 chunk = Chunk(

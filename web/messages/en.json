@@ -114,6 +114,7 @@
         "description": "When enabled, DeerFlow will perform a quick search before planning. This is useful for researches related to ongoing events and news."
       },
       "enhancePrompt": "Enhance prompt with AI",
+      "uploadDocument": "Upload Document",
       "on": "On",
       "off": "Off"
     },
@@ -161,6 +162,24 @@
       "moveToNext": "Move to the next step",
       "toggleFullscreen": "Toggle fullscreen"
     }
+  },
+  "documentUpload": {
+    "title": "Import Document",
+    "description": "Upload documents to local storage for use in research.",
+    "selectFiles": "Select Files",
+    "clickToUpload": "Click or drag files here to upload",
+    "supportedFormats": "Supports PDF, Word, Excel, TXT, Markdown, CSV formats (max 100MB)",
+    "selectedFiles": "Selected Files",
+    "uploadProgress": "Upload Progress",
+    "uploading": "Uploading...",
+    "upload": "Upload",
+    "cancel": "Cancel",
+    "uploadSuccess": "Upload successful",
+    "uploadError": "Upload failed",
+    "uploadFileError": "Failed to upload file: {fileName}",
+    "noFilesSelected": "Please select at least one file",
+    "invalidFileType": "Unsupported file type: {fileName} ({type})",
+    "fileTooLarge": "File too large: {fileName} (max {maxSize})"
   },
   "landing": {
     "caseStudies": {

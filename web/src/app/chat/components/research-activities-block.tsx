@@ -323,7 +323,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
     return toolCall.result === undefined;
   }, [toolCall.result]);
   const documents = useMemo<
-    Array<{ id: string; title: string; content: string }>
+    Array<{ id: string; title: string; content: string; url?: string }>
   >(() => {
     return toolCall.result ? parseJSON(toolCall.result, []) : [];
   }, [toolCall.result]);
@@ -367,8 +367,22 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
                     ease: "easeOut",
                   } : undefined}
                 >
-                  <FileText size={32} />
-                  {doc.title} (chunk-{i},size-{doc.content.length})
+                  <FileText size={16} className="mt-1 flex-shrink-0" />
+                  {doc.url ? (
+                    <a
+                      className="h-full flex-grow overflow-hidden text-ellipsis whitespace-nowrap hover:underline"
+                      href={doc.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={doc.title}
+                    >
+                      {doc.title}
+                    </a>
+                  ) : (
+                    <span className="h-full flex-grow overflow-hidden text-ellipsis whitespace-nowrap">
+                      {doc.title} (chunk-{i},size-{doc.content.length})
+                    </span>
+                  )}
                 </motion.li>
               );
             })}

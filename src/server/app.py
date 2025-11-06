@@ -6,10 +6,12 @@ import base64
 import json
 import logging
 import os
+import re
+from pathlib import Path
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -53,7 +55,15 @@ from src.server.rag_request import (
     RAGConfigResponse,
     RAGResourceRequest,
     RAGResourcesResponse,
+    RAGUploadResponse,
 )
+from src.server.document_request import (
+    DocumentInfo,
+    DocumentUploadResponse,
+    DocumentListResponse,
+)
+from src.server.document_storage import document_storage
+from src.server.document_parser import extract_text_from_document
 from src.tools import VolcengineTTS
 from src.utils.json_utils import sanitize_args
 from src.utils.log_sanitizer import (
@@ -324,6 +334,81 @@ def _create_interrupt_event(thread_id, event_data):
     )
 
 
+def _process_document_references(messages: List[dict]) -> List[dict]:
+    """
+    处理消息中的文档引用，提取文档内容并添加到消息中
+    
+    Args:
+        messages: 消息列表
+        
+    Returns:
+        处理后的消息列表
+    """
+    processed_messages = []
+    for message in messages:
+        if not isinstance(message, dict) or "content" not in message:
+            processed_messages.append(message)
+            continue
+        
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            processed_messages.append(message)
+            continue
+        
+        # 检测文档引用格式：doc://{doc_id} 或 [文档名](doc://{doc_id})
+        doc_pattern = r'doc://([a-f0-9-]+)'
+        doc_refs = re.findall(doc_pattern, content)
+        
+        if not doc_refs:
+            processed_messages.append(message)
+            continue
+        
+        # 提取所有引用的文档内容
+        doc_contents = []
+        logger.info(f"Found {len(doc_refs)} document reference(s): {doc_refs}")
+        for doc_id in doc_refs:
+            try:
+                logger.info(f"Processing document reference: {doc_id}")
+                doc_info = document_storage.get_document(doc_id)
+                if doc_info:
+                    logger.info(f"Document info retrieved: {doc_info.get('name')}, path: {doc_info.get('path')}")
+                    file_path = Path(doc_info["path"])
+                    if file_path.exists():
+                        logger.info(f"Document file exists, extracting content...")
+                        doc_text = extract_text_from_document(
+                            file_path,
+                            doc_info.get("metadata", {}).get("content_type")
+                        )
+                        logger.info(f"Extracted {len(doc_text)} characters from document")
+                        doc_contents.append(
+                            f"\n\n--- 文档内容: {doc_info['name']} ---\n{doc_text}\n--- 文档结束 ---\n"
+                        )
+                        logger.info(f"Successfully extracted content from document: {doc_info['name']} ({len(doc_text)} chars)")
+                    else:
+                        logger.warning(f"Document file not found: {file_path}")
+                else:
+                    logger.warning(f"Document not found: {doc_id}")
+            except Exception as e:
+                logger.exception(f"Error processing document {doc_id}: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                doc_contents.append(f"\n\n[处理文档时出错: {str(e)}]\n")
+        
+        # 将文档内容添加到消息末尾
+        if doc_contents:
+            new_content = content + "\n" + "\n".join(doc_contents)
+            processed_message = message.copy()
+            processed_message["content"] = new_content
+            logger.info(f"Added document content to message. Original length: {len(content)}, New length: {len(new_content)}")
+            logger.debug(f"New message content preview: {new_content[:500]}...")
+            processed_messages.append(processed_message)
+        else:
+            logger.warning("No document content extracted, keeping original message")
+            processed_messages.append(message)
+    
+    return processed_messages
+
+
 def _process_initial_messages(message, thread_id):
     """Process initial messages and yield formatted events."""
     json_data = json.dumps(
@@ -526,6 +611,9 @@ async def _astream_workflow_generator(
         f"interrupt_before_tools={interrupt_before_tools}"
     )
     
+    # 处理文档引用：检测消息中的文档引用并提取内容
+    messages = _process_document_references(messages)
+    
     # Process initial messages
     logger.debug(f"[{safe_thread_id}] Processing {len(messages)} initial messages")
     for message in messages:
@@ -542,27 +630,47 @@ async def _astream_workflow_generator(
         clarification_history
     )
     latest_message_content = messages[-1]["content"] if messages else ""
-    clarified_research_topic = clarified_topic or latest_message_content
-    safe_topic = sanitize_user_content(clarified_research_topic)
-    logger.debug(f"[{safe_thread_id}] Clarified research topic: {safe_topic}")
+    # 记录最新消息内容（应该包含文档内容）
+    logger.info(f"[{safe_thread_id}] Latest message content length: {len(latest_message_content)}")
+    if len(latest_message_content) > 500:
+        logger.debug(f"[{safe_thread_id}] Latest message content preview (first 500 chars): {latest_message_content[:500]}...")
+        logger.debug(f"[{safe_thread_id}] Latest message content preview (last 500 chars): ...{latest_message_content[-500:]}")
+    else:
+        logger.debug(f"[{safe_thread_id}] Latest message content: {latest_message_content}")
+    
+    # 优先使用包含文档内容的完整消息，而不是clarified_topic（可能不包含文档内容）
+    # 如果latest_message_content包含文档内容（长度明显大于clarified_topic），使用latest_message_content
+    if latest_message_content and len(latest_message_content) > len(clarified_topic) * 2:
+        # latest_message_content明显更长，说明包含了文档内容
+        clarified_research_topic = latest_message_content
+        logger.info(f"[{safe_thread_id}] Using latest_message_content as clarified_research_topic (contains document content, length: {len(latest_message_content)})")
+    else:
+        # 使用clarified_topic（可能已经是完整的，或者没有文档内容）
+        clarified_research_topic = clarified_topic or latest_message_content
+        logger.info(f"[{safe_thread_id}] Using clarified_topic as clarified_research_topic (length: {len(clarified_research_topic)})")
+    
+    safe_topic = sanitize_user_content(clarified_research_topic[:500] if len(clarified_research_topic) > 500 else clarified_research_topic)
+    logger.debug(f"[{safe_thread_id}] Clarified research topic preview: {safe_topic}")
 
     # Prepare workflow input
     logger.debug(f"[{safe_thread_id}] Preparing workflow input")
+    # 确保使用处理后的消息（包含文档内容）
     workflow_input = {
-        "messages": messages,
+        "messages": messages,  # 这里使用的是已经处理过文档引用的消息
         "plan_iterations": 0,
         "final_report": "",
         "current_plan": None,
         "observations": [],
         "auto_accepted_plan": auto_accepted_plan,
         "enable_background_investigation": enable_background_investigation,
-        "research_topic": latest_message_content,
+        "research_topic": latest_message_content,  # 这里也应该包含文档内容
         "clarification_history": clarification_history,
         "clarified_research_topic": clarified_research_topic,
         "enable_clarification": enable_clarification,
         "max_clarification_rounds": max_clarification_rounds,
         "locale": locale,
     }
+    logger.info(f"[{safe_thread_id}] Workflow input prepared. Research topic length: {len(latest_message_content)}")
 
     if not auto_accepted_plan and interrupt_feedback:
         logger.debug(f"[{safe_thread_id}] Creating resume command with interrupt_feedback: {safe_feedback}")
@@ -888,6 +996,174 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+@app.post("/api/rag/upload", response_model=RAGUploadResponse)
+async def rag_upload(
+    file: UploadFile = File(...),
+    dataset_name: str | None = Form(None),
+    dataset_id: str | None = Form(None),
+):
+    """Upload a document to the RAG provider."""
+    try:
+        retriever = build_retriever()
+        if not retriever:
+            raise HTTPException(
+                status_code=400, detail="RAG provider is not configured"
+            )
+
+        # Check if upload is supported (only RAGFlow currently supports upload)
+        from src.rag.ragflow import RAGFlowProvider
+        
+        if not isinstance(retriever, RAGFlowProvider):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document upload is currently only supported for RAGFlow provider. Current provider: {SELECTED_RAG_PROVIDER or 'not configured'}. Please configure RAG_PROVIDER=ragflow in your .env file.",
+            )
+
+        # Read file content
+        file_content = await file.read()
+        file_name = file.filename or "document"
+
+        # Validate that either dataset_name or dataset_id is provided
+        if not dataset_name and not dataset_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Either dataset_name or dataset_id must be provided",
+            )
+
+        # Upload document
+        resource = retriever.upload_document(
+            file_content=file_content,
+            file_name=file_name,
+            dataset_name=dataset_name,
+            dataset_id=dataset_id,
+        )
+
+        return RAGUploadResponse(
+            success=True,
+            resource=resource,
+            message=f"Document '{file_name}' uploaded successfully",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error uploading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
+
+
+@app.post("/api/documents/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+):
+    """Upload a document to local storage."""
+    try:
+        # Read file content
+        file_content = await file.read()
+        file_name = file.filename or "document"
+        
+        # Validate file size (max 100MB)
+        max_size = 100 * 1024 * 1024
+        if len(file_content) > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size is 100MB. Current size: {len(file_content) / 1024 / 1024:.2f}MB",
+            )
+        
+        # Save document
+        doc_info = document_storage.save_document(
+            file_content=file_content,
+            file_name=file_name,
+            metadata={
+                "content_type": file.content_type,
+            },
+        )
+        
+        return DocumentUploadResponse(
+            success=True,
+            document=DocumentInfo(**doc_info),
+            message=f"Document '{file_name}' uploaded successfully",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error uploading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
+
+
+@app.get("/api/documents", response_model=DocumentListResponse)
+async def list_documents(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """List all uploaded documents."""
+    try:
+        documents = document_storage.list_documents(limit=limit, offset=offset)
+        total = len(document_storage.list_documents(limit=10000))
+        
+        return DocumentListResponse(
+            documents=[DocumentInfo(**doc) for doc in documents],
+            total=total,
+        )
+    except Exception as e:
+        logger.exception(f"Error listing documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+@app.get("/api/documents/{doc_id}", response_model=DocumentInfo)
+async def get_document(doc_id: str):
+    """Get document information."""
+    try:
+        doc_info = document_storage.get_document(doc_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return DocumentInfo(**doc_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error getting document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document: {str(e)}")
+
+
+@app.get("/api/documents/{doc_id}/download")
+async def download_document(doc_id: str):
+    """Download document content."""
+    try:
+        doc_info = document_storage.get_document(doc_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        file_content = document_storage.get_document_content(doc_id)
+        if not file_content:
+            raise HTTPException(status_code=404, detail="Document content not found")
+        
+        from fastapi.responses import FileResponse
+        file_path = Path(doc_info["path"])
+        return FileResponse(
+            path=file_path,
+            filename=doc_info["name"],
+            media_type=doc_info.get("metadata", {}).get("content_type", "application/octet-stream"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error downloading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to download document: {str(e)}")
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document."""
+    try:
+        success = document_storage.delete_document(doc_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"success": True, "message": "Document deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error deleting document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
 
 
 @app.get("/api/config", response_model=ConfigResponse)

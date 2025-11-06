@@ -466,6 +466,7 @@ def coordinator_node(
         locale = state.get("locale", "en-US")
         logger.info(f"Coordinator locale: {locale}")
         research_topic = state.get("research_topic", "")
+        clarified_research_topic = state.get("clarified_research_topic", "")
 
         # Process tool calls for legacy mode
         if response.tool_calls:
@@ -644,7 +645,20 @@ def coordinator_node(
                     goto = "planner"
 
                     if not enable_clarification and tool_args.get("research_topic"):
-                        research_topic = tool_args["research_topic"]
+                        tool_research_topic = tool_args["research_topic"]
+                        clarified_research_topic = state.get("clarified_research_topic", "")
+                        # 如果clarified_research_topic明显更长（包含文档内容），优先使用它
+                        if clarified_research_topic and len(clarified_research_topic) > len(tool_research_topic) * 2:
+                            logger.info(f"Using clarified_research_topic instead of tool research_topic (tool: {len(tool_research_topic)} chars, clarified: {len(clarified_research_topic)} chars)")
+                            research_topic = clarified_research_topic
+                        else:
+                            research_topic = tool_research_topic
+                    elif not enable_clarification:
+                        # 如果tool没有提供research_topic，使用clarified_research_topic
+                        clarified_research_topic = state.get("clarified_research_topic", "")
+                        if clarified_research_topic:
+                            logger.info(f"Using clarified_research_topic as research_topic (length: {len(clarified_research_topic)} chars)")
+                            research_topic = clarified_research_topic
 
                     if enable_clarification:
                         logger.info(
@@ -653,7 +667,7 @@ def coordinator_node(
                         )
                     else:
                         logger.info(
-                            "Using research topic for handoff: %s", research_topic
+                            "Using research topic for handoff: %s (length: %d chars)", research_topic, len(research_topic) if research_topic else 0
                         )
                     break
 

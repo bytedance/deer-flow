@@ -128,6 +128,71 @@ class RAGFlowProvider(Retriever):
 
         return resources
 
+    def upload_document(
+        self,
+        file_content: bytes,
+        file_name: str,
+        dataset_name: str | None = None,
+        dataset_id: str | None = None,
+    ) -> Resource:
+        """
+        Upload a document to RAGFlow.
+        If dataset_name is provided, create a new dataset.
+        If dataset_id is provided, upload to existing dataset.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        # If creating new dataset
+        if dataset_name:
+            # Create dataset first
+            create_response = requests.post(
+                f"{self.api_url}/api/v1/datasets",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"name": dataset_name},
+            )
+
+            if create_response.status_code not in [200, 201]:
+                raise Exception(
+                    f"Failed to create dataset: {create_response.text}"
+                )
+
+            create_result = create_response.json()
+            dataset_id = create_result.get("data", {}).get("id")
+            if not dataset_id:
+                raise Exception("Failed to get dataset ID from response")
+
+        if not dataset_id:
+            raise ValueError("Either dataset_name or dataset_id must be provided")
+
+        # Upload document
+        files = {"file": (file_name, file_content)}
+        data = {"dataset_id": dataset_id}
+
+        upload_response = requests.post(
+            f"{self.api_url}/api/v1/documents",
+            headers=headers,
+            files=files,
+            data=data,
+        )
+
+        if upload_response.status_code not in [200, 201]:
+            raise Exception(f"Failed to upload document: {upload_response.text}")
+
+        upload_result = upload_response.json()
+        document_data = upload_result.get("data", {})
+
+        # Return the dataset resource (not the document, as RAGFlow works with datasets)
+        return Resource(
+            uri=f"rag://dataset/{dataset_id}",
+            title=dataset_name or f"Dataset {dataset_id}",
+            description=f"Document: {file_name}",
+        )
+
 
 def parse_uri(uri: str) -> tuple[str, str]:
     parsed = urlparse(uri)

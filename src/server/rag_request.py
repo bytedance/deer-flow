@@ -26,3 +26,13 @@ class RAGResourcesResponse(BaseModel):
     """Response model for RAG resources."""
 
     resources: list[Resource] = Field(..., description="The resources of the RAG")
+
+
+class RAGUploadResponse(BaseModel):
+    """Response model for RAG document upload."""
+
+    success: bool = Field(..., description="Whether the upload was successful")
+    resource: Resource | None = Field(
+        None, description="The created resource after upload"
+    )
+    message: str | None = Field(None, description="Additional message")

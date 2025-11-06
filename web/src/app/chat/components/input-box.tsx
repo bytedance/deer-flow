@@ -3,7 +3,7 @@
 
 import { MagicWandIcon } from "@radix-ui/react-icons";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUp, Lightbulb, X } from "lucide-react";
+import { ArrowUp, Lightbulb, Upload, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useRef, useState } from "react";
 
@@ -12,12 +12,14 @@ import MessageInput, {
   type MessageInputRef,
 } from "~/components/deer-flow/message-input";
 import { ReportStyleDialog } from "~/components/deer-flow/report-style-dialog";
+import { DocumentUpload } from "~/components/deer-flow/document-upload";
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { BorderBeam } from "~/components/magicui/border-beam";
 import { Button } from "~/components/ui/button";
 import { enhancePrompt } from "~/core/api";
 import { useConfig } from "~/core/api/hooks";
-import type { Option, Resource } from "~/core/messages";
+import type { Option } from "~/core/messages";
+import type { DocumentInfo } from "~/core/api/documents";
 import {
   setEnableDeepThinking,
   setEnableBackgroundInvestigation,
@@ -65,6 +67,7 @@ export function InputBox({
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isEnhanceAnimating, setIsEnhanceAnimating] = useState(false);
   const [currentPrompt, setCurrentPrompt] = useState("");
+  const [documentUploadOpen, setDocumentUploadOpen] = useState(false);
 
   const handleSendMessage = useCallback(
     (message: string, resources: Array<Resource>) => {
@@ -123,6 +126,20 @@ export function InputBox({
       setIsEnhancing(false);
     }
   }, [currentPrompt, isEnhancing, reportStyle]);
+
+  const handleUploadSuccess = useCallback(
+    (document: DocumentInfo) => {
+      // 上传成功后，在输入框中插入文档引用
+      if (inputRef.current) {
+        // 插入文档引用格式：doc://{doc_id}
+        const reference = `请参考文档：${document.name} (doc://${document.id}) `;
+        inputRef.current.setContent(reference);
+        // 聚焦到输入框
+        inputRef.current.focus();
+      }
+    },
+    [],
+  );
 
   return (
     <div
@@ -276,6 +293,16 @@ export function InputBox({
           <ReportStyleDialog />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <Tooltip title={t("uploadDocument")}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hover:bg-accent h-10 w-10"
+              onClick={() => setDocumentUploadOpen(true)}
+            >
+              <Upload className="text-brand" />
+            </Button>
+          </Tooltip>
           <Tooltip title={t("enhancePrompt")}>
             <Button
               variant="ghost"
@@ -329,6 +356,11 @@ export function InputBox({
           />
         </>
       )}
+      <DocumentUpload
+        open={documentUploadOpen}
+        onOpenChange={setDocumentUploadOpen}
+        onUploadSuccess={handleUploadSuccess}
+      />
     </div>
   );
 }

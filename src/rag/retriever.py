@@ -79,3 +79,18 @@ class Retriever(abc.ABC):
         Query relevant documents from the resources.
         """
         pass
+
+    def upload_document(
+        self,
+        file_content: bytes,
+        file_name: str,
+        dataset_name: str | None = None,
+        dataset_id: str | None = None,
+    ) -> Resource:
+        """
+        Upload a document to the RAG provider.
+        This is an optional method - not all providers may support it.
+        """
+        raise NotImplementedError(
+            "upload_document is not implemented for this provider"
+        )

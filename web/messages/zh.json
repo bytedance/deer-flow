@@ -114,6 +114,7 @@
         "description": "启用后，DeerFlow 将在规划前进行快速搜索。这对于与时事和新闻相关的研究很有用。"
       },
       "enhancePrompt": "用 AI 增强提示",
+      "uploadDocument": "上传文档",
       "on": "开启",
       "off": "关闭"
     },
@@ -161,6 +162,24 @@
       "moveToNext": "移动到下一步",
       "toggleFullscreen": "切换全屏"
     }
+  },
+  "documentUpload": {
+    "title": "导入文档",
+    "description": "上传文档到本地存储，以便在研究中使用。",
+    "selectFiles": "选择文件",
+    "clickToUpload": "点击或拖拽文件到此处上传",
+    "supportedFormats": "支持 PDF、Word、Excel、TXT、Markdown、CSV 等格式（最大 100MB）",
+    "selectedFiles": "已选择的文件",
+    "uploadProgress": "上传进度",
+    "uploading": "上传中...",
+    "upload": "上传",
+    "cancel": "取消",
+    "uploadSuccess": "上传成功",
+    "uploadError": "上传失败",
+    "uploadFileError": "上传文件失败：{fileName}",
+    "noFilesSelected": "请至少选择一个文件",
+    "invalidFileType": "不支持的文件类型：{fileName} ({type})",
+    "fileTooLarge": "文件过大：{fileName}（最大 {maxSize}）"
   },
   "landing": {
     "caseStudies": {
