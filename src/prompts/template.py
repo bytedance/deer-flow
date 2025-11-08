@@ -75,11 +75,11 @@ def apply_prompt_template(
         # Normalize locale format
         normalized_locale = locale.replace("-", "_") if locale and locale.strip() else "en_US"
         
-        # Try locale-specific template first
+        # Try locale-specific template first 尝试加载特定语言版本
         try:
             template = env.get_template(f"{prompt_name}.{normalized_locale}.md")
         except TemplateNotFound:
-            # Fallback to English template
+            # Fallback to English template 回退到英文版本
             template = env.get_template(f"{prompt_name}.md")
         
         system_prompt = template.render(**state_vars)

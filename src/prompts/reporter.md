@@ -379,3 +379,9 @@ Structure your report in the following format:
 - The included images should **only** be from the information gathered **from the previous steps**. **Never** include images that are not from the previous steps
 - Directly output the Markdown raw content without "```markdown" or "```".
 - Always use the language specified by the locale = **{{ locale }}**.
+
+# Report Requirements
+
+- Minimum 2000 words for comprehensive reports
+- Include data visualization suggestions
+- Add references section with citations

@@ -265,6 +265,15 @@ def planner_node(
         # Normal mode: use full conversation history
         messages = apply_prompt_template("planner", state, configurable, state.get("locale", "en-US"))
 
+    # 🔍 调试日志：显示发送给 LLM 的完整提示词
+    if messages and len(messages) > 0:
+        logger.info("=" * 80)
+        logger.info("📝 [PLANNER] System Prompt 发送给 LLM:")
+        logger.info("=" * 80)
+        logger.info(f"{messages[0].get('content', '')[:500]}...")  # 显示前500字符
+        logger.debug(f"完整 System Prompt:\n{messages[0].get('content', '')}")
+        logger.info("=" * 80)
+
     if state.get("enable_background_investigation") and state.get(
         "background_investigation_results"
     ):
@@ -435,6 +444,7 @@ def coordinator_node(
 ) -> Command[Literal["planner", "background_investigator", "coordinator", "__end__"]]:
     """Coordinator node that communicate with customers and handle clarification."""
     logger.info("Coordinator talking.")
+    logger.info(f"用户消息: {state['message'][-1]}")
     configurable = Configuration.from_runnable_config(config)
 
     # Check if clarification is enabled
@@ -447,6 +457,16 @@ def coordinator_node(
     if not enable_clarification:
         # Use normal prompt with explicit instruction to skip clarification
         messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
+        
+        # 🔍 调试日志：显示发送给 LLM 的完整提示词
+        if messages and len(messages) > 0:
+            logger.info("=" * 80)
+            logger.info("📝 [COORDINATOR] System Prompt 发送给 LLM:")
+            logger.info("=" * 80)
+            logger.info(f"{messages[0].get('content', '')[:500]}...")
+            logger.debug(f"完整 System Prompt:\n{messages[0].get('content', '')}")
+            logger.info("=" * 80)
+        
         messages.append(
             {
                 "role": "system",
@@ -500,6 +520,15 @@ def coordinator_node(
         # Prepare the messages for the coordinator
         state_messages = list(state.get("messages", []))
         messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
+
+        # 🔍 调试日志：显示发送给 LLM 的完整提示词
+        if messages and len(messages) > 0:
+            logger.info("=" * 80)
+            logger.info(f"📝 [COORDINATOR] System Prompt 发送给 LLM (澄清轮次: {clarification_rounds}):")
+            logger.info("=" * 80)
+            logger.info(f"{messages[0].get('content', '')[:500]}...")
+            logger.debug(f"完整 System Prompt:\n{messages[0].get('content', '')}")
+            logger.info("=" * 80)
 
         clarification_history = reconstruct_clarification_history(
             state_messages, clarification_history, initial_topic
@@ -714,6 +743,16 @@ def reporter_node(state: State, config: RunnableConfig):
         "locale": state.get("locale", "en-US"),
     }
     invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
+    
+    # 🔍 调试日志：显示发送给 LLM 的完整提示词
+    if invoke_messages and len(invoke_messages) > 0:
+        logger.info("=" * 80)
+        logger.info("📝 [REPORTER] System Prompt 发送给 LLM:")
+        logger.info("=" * 80)
+        logger.info(f"{invoke_messages[0].get('content', '')[:500]}...")
+        logger.debug(f"完整 System Prompt:\n{invoke_messages[0].get('content', '')}")
+        logger.info("=" * 80)
+    
     observations = state.get("observations", [])
 
     # Add a reminder about the new report format, citation style, and table usage
