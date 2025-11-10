@@ -307,6 +307,20 @@ def planner_node(
     logger.debug(f"Current state messages: {state['messages']}")
     logger.info(f"Planner response: {full_response}")
 
+    # Validate explicitly that response content is valid JSON before proceeding to parse it
+    if not full_response.strip().startswith('{') and not full_response.strip().startswith('['):
+        logger.warning("Planner response does not appear to be valid JSON")
+        if plan_iterations > 0:
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="reporter"
+            )
+        else:
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="__end__"
+            )
+
     try:
         curr_plan = json.loads(repair_json_output(full_response))
     except json.JSONDecodeError:
