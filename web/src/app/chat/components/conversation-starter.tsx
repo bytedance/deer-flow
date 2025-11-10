@@ -19,11 +19,18 @@ export function ConversationStarter({
   const questions = t.raw("conversationStarters") as string[];
 
   return (
-    <div className={cn("flex flex-col items-center", className)}>
-      <div className="pointer-events-none fixed inset-0 flex items-center justify-center">
-        <Welcome className="pointer-events-auto mb-15 w-[75%] -translate-y-24" />
+    <div
+      className={cn(
+        "flex h-full flex-col items-center justify-between overflow-auto",
+        className,
+      )}
+    >
+      {/* Spacer for flex layout - pushes Welcome to center */}
+      <div />
+      <div className="pointer-events-none inset-0 flex items-center justify-center">
+        <Welcome className="pointer-events-auto mt-14 mb-5 w-[75%]" />
       </div>
-      <ul className="flex flex-wrap">
+      <ul className="mb-6 flex flex-wrap">
         {questions.map((question, index) => (
           <motion.li
             key={`${index}-${question}`}
