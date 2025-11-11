@@ -87,7 +87,7 @@ export function MessagesBlock({ className }: { className?: string }) {
   }, [fastForwarding]);
   return (
     <div className={cn("flex h-full flex-col", className)}>
-      {responding || messageCount !== 0 ? (
+      {responding || messageCount !== 0 || isReplay ? (
         <MessageListView
           className="flex flex-grow"
           onFeedback={handleFeedback}
