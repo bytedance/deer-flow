@@ -3,7 +3,9 @@
 
 from .builder import build_retriever
 from .dify import DifyProvider
+from .milvus import MilvusProvider
 from .moi import MOIProvider
+from .qdrant import QdrantProvider
 from .ragflow import RAGFlowProvider
 from .retriever import Chunk, Document, Resource, Retriever
 from .vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
@@ -15,6 +17,8 @@ __all__ = [
     DifyProvider,
     RAGFlowProvider,
     MOIProvider,
+    MilvusProvider,
+    QdrantProvider,
     VikingDBKnowledgeBaseProvider,
     Chunk,
     build_retriever,

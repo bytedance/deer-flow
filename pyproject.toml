@@ -41,6 +41,8 @@ dependencies = [
     "pymilvus>=2.3.0",
     "langchain-milvus>=0.2.1",
     "psycopg[binary]>=3.2.9",
+    "qdrant-client>=1.15.1",
+    "langchain-qdrant>=0.2.0,<1.0.0",
 ]
 
 [project.optional-dependencies]

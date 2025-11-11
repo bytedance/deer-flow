@@ -12,6 +12,7 @@ Tests that the duplicate locale assignment issue is resolved:
 """
 
 import pytest
+
 from src.graph.nodes import preserve_state_meta_fields
 from src.graph.types import State
 from src.prompts.planner_model import Plan

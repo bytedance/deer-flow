@@ -183,16 +183,29 @@ SEARCH_API=tavily
 
 ### Private Knowledgebase
 
-DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you can use your private documents to answer questions.
+DeerFlow supports private knowledgebase such as RAGFlow, Qdrant, Milvus, and VikingDB, so that you can use your private documents to answer questions.
 
-- **[RAGFlow](https://ragflow.io/docs/dev/)**：open source RAG engine
-   ```
+- **[RAGFlow](https://ragflow.io/docs/dev/)**: open source RAG engine
+   ```bash
    # examples in .env.example
    RAG_PROVIDER=ragflow
    RAGFLOW_API_URL="http://localhost:9388"
    RAGFLOW_API_KEY="ragflow-xxx"
    RAGFLOW_RETRIEVAL_SIZE=10
    RAGFLOW_CROSS_LANGUAGES=English,Chinese,Spanish,French,German,Japanese,Korean
+   ```
+
+- **[Qdrant](https://qdrant.tech/)**: open source vector database
+   ```bash
+   # Using Qdrant Cloud or self-hosted
+   RAG_PROVIDER=qdrant
+   QDRANT_LOCATION=https://xyz-example.eu-central.aws.cloud.qdrant.io:6333
+   QDRANT_API_KEY=your_qdrant_api_key
+   QDRANT_COLLECTION=documents
+   QDRANT_EMBEDDING_PROVIDER=openai
+   QDRANT_EMBEDDING_MODEL=text-embedding-ada-002
+   QDRANT_EMBEDDING_API_KEY=your_openai_api_key
+   QDRANT_AUTO_LOAD_EXAMPLES=true
    ```
 
 ## Features
@@ -215,7 +228,9 @@ DeerFlow support private knowledgebase such as ragflow and vikingdb, so that you
 
 - 📃 **RAG Integration**
 
-  - Supports mentioning files from [RAGFlow](https://github.com/infiniflow/ragflow) within the input box. [Start up RAGFlow server](https://ragflow.io/docs/dev/).
+  - Supports multiple vector databases: [Qdrant](https://qdrant.tech/), [Milvus](https://milvus.io/), [RAGFlow](https://github.com/infiniflow/ragflow), VikingDB, MOI, and Dify
+  - Supports mentioning files from RAG providers within the input box
+  - Easy switching between different vector databases through configuration
 
 - 🔗 **MCP Seamless Integration**
   - Expand capabilities for private domain access, knowledge graph, web browsing and more
