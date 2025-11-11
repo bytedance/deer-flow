@@ -120,7 +120,7 @@ class MilvusRetriever(Retriever):
         else:
             raise ValueError(
                 f"Unsupported embedding provider: {self.embedding_provider}. "
-                "Supported providers: openai,dashscope"
+                "Supported providers: openai, dashscope"
             )
 
     def _get_embedding_dimension(self, model_name: str) -> int:

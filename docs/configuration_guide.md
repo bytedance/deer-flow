@@ -263,6 +263,26 @@ DeerFlow supports multiple RAG providers for document retrieval. Configure the R
 - **RAGFlow**: Document retrieval using RAGFlow API
 - **VikingDB Knowledge Base**: ByteDance's VikingDB knowledge base service
 - **Milvus**: Open-source vector database for similarity search
+- **Qdrant**: Open-source vector search engine with cloud and self-hosted options
+- **MOI**: Hybrid database for enterprise users
+- **Dify**: AI application platform with RAG capabilities
+
+### Qdrant Configuration
+
+To use Qdrant as your RAG provider, set the following environment variables:
+
+```bash
+# RAG_PROVIDER: qdrant (using Qdrant Cloud or self-hosted)
+RAG_PROVIDER=qdrant
+QDRANT_LOCATION=https://xyz-example.eu-central.aws.cloud.qdrant.io:6333
+QDRANT_API_KEY=<your_qdrant_api_key>
+QDRANT_COLLECTION=documents
+QDRANT_EMBEDDING_PROVIDER=openai  # support openai, dashscope
+QDRANT_EMBEDDING_BASE_URL=
+QDRANT_EMBEDDING_MODEL=text-embedding-ada-002
+QDRANT_EMBEDDING_API_KEY=<your_embedding_api_key>
+QDRANT_AUTO_LOAD_EXAMPLES=true  # automatically load example markdown files
+```
 
 ### Milvus Configuration
 
