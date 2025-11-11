@@ -3,7 +3,7 @@
 
 import logging
 import os
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from langchain_community.tools import (
     BraveSearch,
@@ -43,13 +43,30 @@ def get_search_config():
 
 
 # Get the selected search tool
+def _normalize_domains(domains: Optional[Iterable[str]]) -> List[str]:
+    """将配置项中的域名规范化为列表，兼容 None、字符串与可迭代对象。"""
+
+    if domains is None:
+        return []
+
+    if isinstance(domains, str):
+        domains = domains.strip()
+        return [domains] if domains else []
+
+    try:
+        return [domain for domain in domains if isinstance(domain, str) and domain.strip()]
+    except TypeError:
+        logger.warning("Invalid domain configuration detected: %s", domains)
+        return []
+
+
 def get_web_search_tool(max_search_results: int):
     search_config = get_search_config()
 
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         # Get all Tavily search parameters from configuration with defaults
-        include_domains: Optional[List[str]] = search_config.get("include_domains", [])
-        exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
+        include_domains: List[str] = _normalize_domains(search_config.get("include_domains"))
+        exclude_domains: List[str] = _normalize_domains(search_config.get("exclude_domains"))
         include_answer: bool = search_config.get("include_answer", False)
         search_depth: str = search_config.get("search_depth", "advanced")
         include_raw_content: bool = search_config.get("include_raw_content", True)

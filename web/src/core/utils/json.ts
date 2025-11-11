@@ -1,64 +1,69 @@
 import { parse } from "best-effort-json-parser";
 
 /**
- * Extract valid JSON from content that may have extra tokens.
- * Finds the last closing brace/bracket that could be valid JSON.
+ * Extract the first balanced JSON value from the provided content.
+ * This avoids returning trailing tokens that cause the best-effort parser
+ * to emit console errors (and trigger Next.js overlays in dev mode).
  */
-function extractValidJSON(content: string): string {
-  let braceCount = 0;
-  let bracketCount = 0;
+function extractFirstJSONValue(content: string): string {
+  const trimmed = content.trimStart();
+  if (trimmed.length === 0) {
+    return trimmed;
+  }
+
+  // Ensure we start from the first structural character ({ or [)
+  const firstStructuralIndex = trimmed.search(/[\[{]/);
+  const candidate = firstStructuralIndex > 0
+    ? trimmed.slice(firstStructuralIndex)
+    : trimmed;
+
+  const stack: Array<"}" | "]"> = [];
   let inString = false;
   let escapeNext = false;
-  let lastValidEnd = -1;
 
-  for (let i = 0; i < content.length; i++) {
-    const char = content[i];
-    
-    if (escapeNext) {
-      escapeNext = false;
-      continue;
-    }
-    
-    if (char === "\\") {
-      escapeNext = true;
-      continue;
-    }
-    
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    
+  for (let i = 0; i < candidate.length; i++) {
+    const char = candidate[i];
+
     if (inString) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = false;
+      }
       continue;
     }
-    
-    if (char === "{") {
-      braceCount++;
-    } else if (char === "}") {
-      if (braceCount > 0) {
-        braceCount--;
-        if (braceCount === 0) {
-          lastValidEnd = i;
-        }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{" || char === "[") {
+      stack.push(char === "{" ? "}" : "]");
+      continue;
+    }
+
+    if (char === "}" || char === "]") {
+      const expected = stack.pop();
+      if (!expected || expected !== char) {
+        return candidate.slice(0, i + 1);
       }
-    } else if (char === "[") {
-      bracketCount++;
-    } else if (char === "]") {
-      if (bracketCount > 0) {
-        bracketCount--;
-        if (bracketCount === 0) {
-          lastValidEnd = i;
-        }
+
+      if (stack.length === 0) {
+        return candidate.slice(0, i + 1);
       }
     }
   }
-  
-  if (lastValidEnd > 0) {
-    return content.substring(0, lastValidEnd + 1);
-  }
-  
-  return content;
+
+  return candidate;
 }
 
 export function parseJSON<T>(json: string | null | undefined, fallback: T) {
@@ -74,12 +79,26 @@ export function parseJSON<T>(json: string | null | undefined, fallback: T) {
       .replace(/^```plaintext\s*/, "")
       .replace(/^```\s*/, "")
       .replace(/\s*```$/, "");
-    
-    // First attempt: try to extract valid JSON to remove extra tokens
-    if (raw.startsWith("{") || raw.startsWith("[")) {
-      raw = extractValidJSON(raw);
+
+    raw = raw.trim();
+    if (!raw) {
+      return fallback;
     }
-    
+
+    const firstChar = raw[0];
+    const isJSONObject = firstChar === "{";
+    const isJSONArray = firstChar === "[";
+    const isJSONString = firstChar === "\"";
+
+    if (!isJSONObject && !isJSONArray && !isJSONString) {
+      return fallback;
+    }
+
+    // First attempt: try to extract valid JSON to remove extra tokens.
+    if (isJSONObject || isJSONArray) {
+      raw = extractFirstJSONValue(raw);
+    }
+
     // Parse the cleaned content
     return parse(raw) as T;
   } catch {

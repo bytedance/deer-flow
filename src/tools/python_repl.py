@@ -3,7 +3,7 @@
 
 import logging
 import os
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Tuple
 
 from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
@@ -18,6 +18,35 @@ def _is_python_repl_enabled() -> bool:
     if env_enabled in ("true", "1", "yes", "on"):
         return True
     return False
+
+
+def _auto_fix_unterminated_triple_quotes(code: str) -> Tuple[str, bool]:
+    """
+    Attempt to automatically fix unterminated triple-quoted strings by appending the closing quotes.
+
+    Args:
+        code: The original Python code submitted to the REPL
+
+    Returns:
+        A tuple of (fixed_code, was_fixed)
+    """
+    fixed_code = code.rstrip()
+    was_fixed = False
+
+    for quote in ("'''", '"""'):
+        quote_count = fixed_code.count(quote)
+        if quote_count % 2 != 0:
+            logger.warning(
+                "Detected unmatched triple quotes (%s) in Python REPL input. Auto-appending closing quotes.",
+                quote,
+            )
+            fixed_code = f"{fixed_code}\n{quote}"
+            was_fixed = True
+
+    if was_fixed:
+        fixed_code = f"{fixed_code}\n"
+
+    return fixed_code, was_fixed
 
 
 # Initialize REPL and logger
@@ -54,6 +83,34 @@ def python_repl_tool(
             logger.error(result)
             return f"Error executing code:\n```python\n{code}\n```\nError: {result}"
         logger.info("Code execution successful")
+    except SyntaxError as e:
+        error_msg = repr(e)
+        if "unterminated triple-quoted string literal" in error_msg:
+            fixed_code, was_fixed = _auto_fix_unterminated_triple_quotes(code)
+            if was_fixed:
+                try:
+                    result = repl.run(fixed_code)
+                    logger.info(
+                        "Code execution successful after auto-fixing unmatched triple quotes"
+                    )
+                    return (
+                        "Successfully executed after auto-fixing unterminated triple-quoted string:\n"
+                        f"```python\n{fixed_code}\n```\nStdout: {result}"
+                    )
+                except BaseException as retry_error:
+                    retry_msg = repr(retry_error)
+                    logger.error(
+                        "Auto-fix for triple quotes failed with: %s", retry_msg
+                    )
+                    return (
+                        "Error executing code even after attempting to auto-fix unterminated triple-quoted string:\n"
+                        f"```python\n{code}\n```\n"
+                        f"Auto-fix attempt:\n```python\n{fixed_code}\n```\n"
+                        f"Original error: {error_msg}\n"
+                        f"Auto-fix error: {retry_msg}"
+                    )
+        logger.error(error_msg)
+        return f"Error executing code:\n```python\n{code}\n```\nError: {error_msg}"
     except BaseException as e:
         error_msg = repr(e)
         logger.error(error_msg)

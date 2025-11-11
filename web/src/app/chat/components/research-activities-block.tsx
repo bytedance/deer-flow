@@ -140,6 +140,14 @@ type SearchResult =
     image_description: string;
   };
 
+function sanitizeToolResult(result: string): string {
+  return result
+    .trim()
+    .replace(/^```(?:json|js|ts|plaintext)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
 function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   const t = useTranslations("chat.research");
   const searching = useMemo(() => {
@@ -322,11 +330,51 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   const searching = useMemo(() => {
     return toolCall.result === undefined;
   }, [toolCall.result]);
-  const documents = useMemo<
-    Array<{ id: string; title: string; content: string; url?: string }>
+  const { documents, statusMessage } = useMemo<
+    {
+      documents: Array<{ id: string; title: string; content: string; url?: string }>;
+      statusMessage?: string;
+    }
   >(() => {
-    return toolCall.result ? parseJSON(toolCall.result, []) : [];
+    if (!toolCall.result) {
+      return { documents: [] };
+    }
+
+    const normalized = sanitizeToolResult(toolCall.result);
+    if (!normalized) {
+      return { documents: [] };
+    }
+
+    const looksLikeJSON =
+      normalized.startsWith("{") || normalized.startsWith("[");
+
+    if (!looksLikeJSON) {
+      return { documents: [], statusMessage: normalized };
+    }
+
+    const parsed = parseJSON(toolCall.result, []);
+    let docs: Array<{ id: string; title: string; content: string; url?: string }> =
+      [];
+
+    if (Array.isArray(parsed)) {
+      docs = parsed;
+    } else if (parsed && typeof parsed === "object") {
+      const parsedDocuments = (parsed as { documents?: unknown }).documents;
+      const parsedData = (parsed as { data?: unknown }).data;
+
+      if (Array.isArray(parsedDocuments)) {
+        docs = parsedDocuments as typeof docs;
+      } else if (Array.isArray(parsedData)) {
+        docs = parsedData as typeof docs;
+      }
+    }
+
+    return {
+      documents: docs,
+      statusMessage: docs.length === 0 ? normalized : undefined,
+    };
   }, [toolCall.result]);
+  const shouldRenderList = searching || documents.length > 0;
   return (
     <section className="mt-4 pl-4">
       <div className="font-medium italic">
@@ -339,7 +387,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
         </RainbowText>
       </div>
       <div className="pr-4">
-        {documents && (
+        {shouldRenderList && (
           <ul className="mt-2 flex flex-wrap gap-4">
             {searching &&
               [...Array(2)].map((_, i) => (
@@ -357,7 +405,7 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
               const shouldAnimate = i < 4; // Only animate first 4 documents
               return (
                 <motion.li
-                  key={`search-result-${i}`}
+                  key={doc.id ?? `search-result-${i}`}
                   className="text-muted-foreground bg-accent flex max-w-40 gap-2 rounded-md px-2 py-1 text-sm"
                   initial={shouldAnimate ? { opacity: 0, y: 10 } : { opacity: 1, y: 0 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -387,6 +435,11 @@ function RetrieverToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
               );
             })}
           </ul>
+        )}
+        {!searching && !documents.length && statusMessage && (
+          <p className="text-muted-foreground mt-3 text-sm">
+            {statusMessage}
+          </p>
         )}
       </div>
     </section>
