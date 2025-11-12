@@ -27,7 +27,7 @@ export function ConversationStarter({
     >
       {/* Spacer for flex layout - pushes Welcome to center */}
       <div />
-      <div className="pointer-events-none inset-0 flex items-center justify-center">
+      <div className="pointer-events-none flex items-center justify-center">
         <Welcome className="pointer-events-auto mt-14 mb-5 w-[75%]" />
       </div>
       <ul className="mb-6 flex flex-wrap">
