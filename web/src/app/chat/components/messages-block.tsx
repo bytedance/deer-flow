@@ -87,19 +87,17 @@ export function MessagesBlock({ className }: { className?: string }) {
   }, [fastForwarding]);
   return (
     <div className={cn("flex h-full flex-col", className)}>
-      <MessageListView
-        className="flex flex-grow"
-        onFeedback={handleFeedback}
-        onSendMessage={handleSend}
-      />
+      {responding || messageCount !== 0 || isReplay ? (
+        <MessageListView
+          className="flex flex-grow"
+          onFeedback={handleFeedback}
+          onSendMessage={handleSend}
+        />
+      ) : (
+        <ConversationStarter onSend={handleSend} />
+      )}
       {!isReplay ? (
         <div className="relative flex h-42 shrink-0 pb-4">
-          {!responding && messageCount === 0 && (
-            <ConversationStarter
-              className="absolute top-[-218px] left-0"
-              onSend={handleSend}
-            />
-          )}
           <InputBox
             className="h-full w-full"
             responding={responding}
