@@ -751,7 +751,7 @@ async def generate_ppt(request: GeneratePPTRequest):
         report_content = request.content
         print(report_content)
         workflow = build_ppt_graph()
-        final_state = workflow.invoke({"input": report_content})
+        final_state = workflow.invoke({"input": report_content, "locale": request.locale})
         generated_file_path = final_state["generated_file_path"]
         with open(generated_file_path, "rb") as f:
             ppt_bytes = f.read()
