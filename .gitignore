@@ -27,3 +27,6 @@ conf.yaml
 # coverage report
 coverage.xml
 coverage/
+
+# Temporary PPT content files
+ppt_content_*.md

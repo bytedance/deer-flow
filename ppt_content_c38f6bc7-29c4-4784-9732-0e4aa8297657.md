@@ -1,1 +1,0 @@
-Mock PPT content
