@@ -18,7 +18,7 @@ GOTO END
 
 :DEV
 echo Starting DeerFlow in [DEVELOPMENT] mode...
-start uv run server.py --reload
+start uv run server.py --host 0.0.0.0 --reload
 cd web
 start pnpm dev
 REM Wait for user to close
