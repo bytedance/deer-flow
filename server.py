@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Server script for running the DeerFlow API. 222
-333
-44
-55
+Server script for running the DeerFlow API.
 """
 
 import argparse
