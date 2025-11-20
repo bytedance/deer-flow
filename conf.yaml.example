@@ -59,9 +59,8 @@ BASIC_MODEL:
 #   # When interrupt is triggered, user will be prompted to approve/reject
 #   # Approved keywords: "approved", "approve", "yes", "proceed", "continue", "ok", "okay", "accepted", "accept"
 
-# Search engine configuration (Only supports Tavily currently)
+# Search engine configuration (used by Tavily / Bocha, etc.)
 # SEARCH_ENGINE:
-#   engine: tavily
 #   # Only include results from these domains
 #   include_domains:
 #     - example.com
@@ -72,17 +71,20 @@ BASIC_MODEL:
 #   # Exclude results from these domains
 #   exclude_domains:
 #     - example.com
-#   # Include an answer in the search results
+#   # Include an answer in the search results (Tavily)
 #   include_answer: false
-#   # Search depth: "basic" or "advanced"
+#   # Search depth: "basic" or "advanced" (Tavily)
 #   search_depth: "advanced"
-#   # Include raw content from pages
+#   # Include raw content from pages (Tavily)
 #   include_raw_content: true
-#   # Include images in search results
+#   # Include images in search results (Tavily)
 #   include_images: true
-#   # Include descriptions for images
+#   # Include descriptions for images (Tavily)
 #   include_image_descriptions: true
 #   # Minimum score threshold for results (0-1)
 #   min_score_threshold: 0.0
 #   # Maximum content length per page
 #   max_content_length_per_page: 4000
+#   # Bocha-specific options
+#   freshness: "noLimit"  # oneDay | oneWeek | oneMonth | oneYear | noLimit
+#   summary: true         # Whether Bocha should return long text summary

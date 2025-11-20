@@ -16,10 +16,12 @@ class SearchEngine(enum.Enum):
     ARXIV = "arxiv"
     SEARX = "searx"
     WIKIPEDIA = "wikipedia"
+    BOCHA = "bocha"
 
 
 # Tool configuration
-SELECTED_SEARCH_ENGINE = os.getenv("SEARCH_API", SearchEngine.TAVILY.value)
+# Default to Bocha for intranet deployments; can be overridden by SEARCH_API env.
+SELECTED_SEARCH_ENGINE = os.getenv("SEARCH_API", SearchEngine.BOCHA.value)
 
 
 class RAGProvider(enum.Enum):

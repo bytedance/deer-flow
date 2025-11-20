@@ -43,6 +43,7 @@ dependencies = [
     "psycopg[binary]>=3.2.9",
     "qdrant-client>=1.15.1",
     "langchain-qdrant>=0.2.0,<1.0.0",
+    "pytest>=8.3.5",
 ]
 
 [project.optional-dependencies]

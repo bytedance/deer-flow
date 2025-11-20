@@ -155,7 +155,13 @@ Explore more details in the [`web`](./web/) directory.
 
 DeerFlow supports multiple search engines that can be configured in your `.env` file using the `SEARCH_API` variable:
 
-- **Tavily** (default): A specialized search API for AI applications
+- **Bocha** (default, recommended for internal/intranet deployments): Chinese web search API
+  - Requires `BOCHA_API_KEY` in your `.env` file
+  - Sign up at: https://www.bochaai.com/
+  - Supports freshness filtering and content summarization
+  - Optional `BOCHA_API_BASE_URL` for custom/internal gateway deployments
+
+- **Tavily**: A specialized search API for AI applications
   - Requires `TAVILY_API_KEY` in your `.env` file
   - Sign up at: https://app.tavily.com/home
 
@@ -177,8 +183,8 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 To configure your preferred search engine, set the `SEARCH_API` variable in your `.env` file:
 
 ```bash
-# Choose one: tavily, duckduckgo, brave_search, arxiv
-SEARCH_API=tavily
+# Choose one: bocha, tavily, duckduckgo, brave_search, arxiv, searx
+SEARCH_API=bocha  # Default is Bocha, suitable for internal deployments
 ```
 
 ### Private Knowledgebase
@@ -221,7 +227,7 @@ DeerFlow supports private knowledgebase such as RAGFlow, Qdrant, Milvus, and Vik
 ### Tools and MCP Integrations
 
 - 🔍 **Search and Retrieval**
-  - Web search via Tavily, Brave Search and more
+  - Web search via Bocha, Tavily, Brave Search and more
   - Crawling with Jina
   - Advanced content extraction
   - Support for private knowledgebase

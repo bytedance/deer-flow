@@ -20,6 +20,7 @@ from langchain_community.utilities import (
 )
 
 from src.config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
+from src.tools.bocha_search.bocha_search_tool import BochaSearchTool
 from src.tools.decorators import create_logged_tool
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchWithImages,
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Create logged versions of the search tools
 LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
+LoggedBochaSearch = create_logged_tool(BochaSearchTool)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
@@ -75,6 +77,24 @@ def get_web_search_tool(max_search_results: int):
             include_image_descriptions=include_image_descriptions,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.BOCHA.value:
+        # Bocha-specific configuration: freshness & summary are read from SEARCH_ENGINE section.
+        freshness: str = search_config.get("freshness", "noLimit")
+        summary: bool = search_config.get("summary", True)
+
+        logger.info(
+            "Bocha search configuration loaded: freshness=%s, summary=%s, max_results=%s",
+            freshness,
+            summary,
+            max_search_results,
+        )
+
+        return LoggedBochaSearch(
+            name="web_search",
+            max_results=max_search_results,
+            freshness=freshness,
+            summary=summary,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.DUCKDUCKGO.value:
         return LoggedDuckDuckGoSearch(

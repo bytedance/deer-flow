@@ -204,11 +204,43 @@ The context management doesn't work if the token_limit is not set.
 
 ## About Search Engine
 
+### How to configure Bocha Search?
+
+Bocha is a Chinese web search API that is particularly suitable for internal/intranet deployments where external search services like Tavily may not be accessible.
+
+#### Environment Variables
+
+Configure Bocha in your `.env` file:
+
+```bash
+SEARCH_API=bocha
+BOCHA_API_KEY=your_bocha_api_key_here
+# Optional: Override API base URL for custom/internal gateway
+BOCHA_API_BASE_URL=https://api.bochaai.com
+```
+
+#### Configuration Options
+
+You can configure Bocha search parameters in your `conf.yaml` file:
+
+```yaml
+SEARCH_ENGINE:
+  freshness: "noLimit"  # Options: "oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"
+  summary: true          # Include AI-generated summaries in results
+  min_score_threshold: 0.0  # Minimum relevance score threshold (0-1)
+  max_content_length_per_page: 4000  # Maximum content length per result
+```
+
+**Freshness Options:**
+- `oneDay`: Results from the past 24 hours
+- `oneWeek`: Results from the past week
+- `oneMonth`: Results from the past month
+- `oneYear`: Results from the past year
+- `noLimit`: No time restriction (default)
+
 ### How to control search domains for Tavily?
 
 DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.
-
-`Tips`: it only supports Tavily currently. 
 
 You can configure domain filtering and search results in your `conf.yaml` file as follows:
 
