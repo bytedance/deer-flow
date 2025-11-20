@@ -3,7 +3,7 @@
 
 import json
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 from langchain.callbacks.manager import (
     AsyncCallbackManagerForToolRun,
@@ -39,6 +39,10 @@ class BochaSearchTool(BaseTool):
     api_wrapper: BochaSearchAPIWrapper = Field(  # type: ignore[assignment]
         default_factory=BochaSearchAPIWrapper
     )
+    
+    # Match Tavily's response format: return (content, artifact) tuple
+    # where content is the cleaned JSON string and artifact is the raw API response
+    response_format: Literal["content_and_artifact"] = "content_and_artifact"
 
     def _run(
         self,
