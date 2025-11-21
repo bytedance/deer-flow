@@ -282,10 +282,7 @@ def planner_node(
     if configurable.enable_deep_thinking:
         llm = get_llm_by_type("reasoning")
     elif AGENT_LLM_MAP["planner"] == "basic":
-        llm = get_llm_by_type("basic").with_structured_output(
-            Plan,
-            method="json_mode",
-        )
+        llm = get_llm_by_type("basic")
     else:
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
 
@@ -299,13 +296,30 @@ def planner_node(
     full_response = ""
     if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
         response = llm.invoke(messages)
-        full_response = response.model_dump_json(indent=4, exclude_none=True)
+        if hasattr(response, "model_dump_json"):
+            full_response = response.model_dump_json(indent=4, exclude_none=True)
+        else:
+            full_response = get_message_content(response) or ""
     else:
         response = llm.stream(messages)
         for chunk in response:
             full_response += chunk.content
     logger.debug(f"Current state messages: {state['messages']}")
     logger.info(f"Planner response: {full_response}")
+
+    # Validate explicitly that response content is valid JSON before proceeding to parse it
+    if not full_response.strip().startswith('{') and not full_response.strip().startswith('['):
+        logger.warning("Planner response does not appear to be valid JSON")
+        if plan_iterations > 0:
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="reporter"
+            )
+        else:
+            return Command(
+                update=preserve_state_meta_fields(state),
+                goto="__end__"
+            )
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
