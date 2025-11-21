@@ -104,6 +104,9 @@ class GeneratePodcastRequest(BaseModel):
 
 class GeneratePPTRequest(BaseModel):
     content: str = Field(..., description="The content of the ppt")
+    locale: str = Field(
+        "en-US", description="Language locale for the conversation (e.g., en-US, zh-CN)"
+    )
 
 
 class GenerateProseRequest(BaseModel):
