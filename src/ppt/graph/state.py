@@ -10,7 +10,7 @@ class PPTState(MessagesState):
 
     # Input
     input: str = ""
-
+    locale: str = ""
     # Output
     generated_file_path: str = ""
 
