@@ -1124,7 +1124,7 @@ def patch_create_agent():
 
 @pytest.fixture
 def patch_execute_agent_step():
-    async def fake_execute_agent_step(state, agent, agent_type):
+    async def fake_execute_agent_step(state, agent, agent_type, config=None):
         return "EXECUTED"
 
     with patch(

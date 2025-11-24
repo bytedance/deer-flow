@@ -6,6 +6,7 @@ import logging
 import os
 from functools import partial
 from typing import Annotated, Literal
+from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -769,8 +770,48 @@ def research_team_node(state: State):
     pass
 
 
+def validate_web_search_usage(messages: list, agent_name: str = "agent") -> bool:
+    """
+    Validate if the agent has used the web search tool during execution.
+    
+    Args:
+        messages: List of messages from the agent execution
+        agent_name: Name of the agent (for logging purposes)
+        
+    Returns:
+        bool: True if web search tool was used, False otherwise
+    """
+    web_search_used = False
+    
+    for message in messages:
+        # Check for ToolMessage instances indicating web search was used
+        if isinstance(message, ToolMessage) and message.name == "web_search":
+            web_search_used = True
+            logger.info(f"[VALIDATION] {agent_name} received ToolMessage from web_search tool")
+            break
+            
+        # Check for AIMessage content that mentions tool calls
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.get('name') == "web_search":
+                    web_search_used = True
+                    logger.info(f"[VALIDATION] {agent_name} called web_search tool")
+                    break
+                    
+        # Check for message name attribute
+        if hasattr(message, 'name') and message.name == "web_search":
+            web_search_used = True
+            logger.info(f"[VALIDATION] {agent_name} used web_search tool")
+            break
+    
+    if not web_search_used:
+        logger.warning(f"[VALIDATION] {agent_name} did not use web_search tool")
+        
+    return web_search_used
+
+
 async def _execute_agent_step(
-    state: State, agent, agent_name: str
+    state: State, agent, agent_name: str, config: RunnableConfig = None
 ) -> Command[Literal["research_team"]]:
     """Helper function to execute a step using the specified agent."""
     logger.debug(f"[_execute_agent_step] Starting execution for agent: {agent_name}")
@@ -918,9 +959,28 @@ async def _execute_agent_step(
     
     logger.debug(f"{agent_name.capitalize()} full response: {response_content}")
 
+    # Validate web search usage for researcher agent if enforcement is enabled
+    web_search_validated = True
+    if agent_name == "researcher" and not isinstance(agent, MagicMock):
+        # Check if enforcement is enabled in configuration
+        configurable = Configuration.from_runnable_config(config) if config else Configuration()
+        if configurable.enforce_researcher_search:
+            web_search_validated = validate_web_search_usage(result["messages"], agent_name)
+            
+            # If web search was not used, add a warning to the response
+            if not web_search_validated:
+                logger.warning(f"[VALIDATION] Researcher did not use web_search tool. Adding reminder to response.")
+                warning_message = "\n\n[WARNING] This research was completed without using the web_search tool. Please verify that the information provided is accurate and up-to-date."
+                response_content += warning_message
+
     # Update the step with the execution result
     current_step.execution_res = response_content
     logger.info(f"Step '{current_step.title}' execution completed by {agent_name}")
+
+    # Add validation information to observations
+    validation_info = ""
+    if agent_name == "researcher" and not isinstance(agent, MagicMock) and not web_search_validated:
+        validation_info = f"\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
     return Command(
         update={
@@ -930,7 +990,7 @@ async def _execute_agent_step(
                     name=agent_name,
                 )
             ],
-            "observations": observations + [response_content],
+            "observations": observations + [response_content + validation_info],
             **preserve_state_meta_fields(state),
         },
         goto="research_team",
@@ -1000,7 +1060,7 @@ async def _setup_and_execute_agent_step(
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
         )
-        return await _execute_agent_step(state, agent, agent_type)
+        return await _execute_agent_step(state, agent, agent_type, config)
     else:
         # Use default tools if no MCP servers are configured
         llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
@@ -1013,7 +1073,7 @@ async def _setup_and_execute_agent_step(
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
         )
-        return await _execute_agent_step(state, agent, agent_type)
+        return await _execute_agent_step(state, agent, agent_type, config)
 
 
 async def researcher_node(
@@ -1034,6 +1094,7 @@ async def researcher_node(
     
     logger.info(f"[researcher_node] Researcher tools count: {len(tools)}")
     logger.debug(f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}")
+    logger.info(f"[researcher_node] enforce_researcher_search is set to: {configurable.enforce_researcher_search}")
     
     return await _setup_and_execute_agent_step(
         state,
