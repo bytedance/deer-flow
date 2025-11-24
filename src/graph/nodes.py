@@ -40,9 +40,6 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
-# At the top of the function
-is_test_environment = os.getenv('PYTEST_CURRENT_TEST') is not None
-
 
 @tool
 def handoff_to_planner(
@@ -966,7 +963,9 @@ async def _execute_agent_step(
 
     # Validate web search usage for researcher agent if enforcement is enabled
     web_search_validated = True
-    should_validate = agent_name == "researcher" and not is_test_environment
+    should_validate = agent_name == "researcher"
+    validation_info = ""
+
     if should_validate:
         # Check if enforcement is enabled in configuration
         configurable = Configuration.from_runnable_config(config) if config else Configuration()
@@ -976,17 +975,16 @@ async def _execute_agent_step(
             # If web search was not used, add a warning to the response
             if not web_search_validated:
                 logger.warning(f"[VALIDATION] Researcher did not use web_search tool. Adding reminder to response.")
-                warning_message = "\n\n[WARNING] This research was completed without using the web_search tool. Please verify that the information provided is accurate and up-to-date."
-                response_content += warning_message
+                # Add validation information to observations
+                validation_info = (
+                    "\n\n[WARNING] This research was completed without using the web_search tool. "
+                    "Please verify that the information provided is accurate and up-to-date."
+                    "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
+                )
 
     # Update the step with the execution result
     current_step.execution_res = response_content
     logger.info(f"Step '{current_step.title}' execution completed by {agent_name}")
-
-    # Add validation information to observations
-    validation_info = ""
-    if should_validate and not web_search_validated:
-        validation_info = f"\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
     return Command(
         update={
