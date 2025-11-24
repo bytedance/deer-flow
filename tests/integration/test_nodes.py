@@ -1097,7 +1097,7 @@ async def test_execute_agent_step_basic(mock_state_with_steps, mock_agent):
         assert "messages" in result.update
         assert "observations" in result.update
         # The new observation should be appended
-        assert result.update["observations"][-1] == "result content"
+        assert result.update["observations"][-1] == "result content" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
         # The step's execution_res should be updated
         assert (
             mock_state_with_steps["current_plan"].steps[1].execution_res
@@ -1151,7 +1151,7 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         result = await _execute_agent_step(state, agent, "researcher")
         assert isinstance(result, Command)
         assert result.goto == "research_team"
-        assert result.update["observations"][-1] == "resource result"
+        assert result.update["observations"][-1] == "resource result" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
 
 @pytest.mark.asyncio
@@ -1271,7 +1271,7 @@ def patch_create_agent():
 
 @pytest.fixture
 def patch_execute_agent_step():
-    async def fake_execute_agent_step(state, agent, agent_type):
+    async def fake_execute_agent_step(state, agent, agent_type, config=None):
         return "EXECUTED"
 
     with patch(
