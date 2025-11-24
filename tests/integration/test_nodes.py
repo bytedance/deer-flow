@@ -12,7 +12,154 @@ from src.graph.nodes import (
     planner_node,
     reporter_node,
     researcher_node,
+    extract_plan_content,
 )
+
+
+class TestExtractPlanContent:
+    """Test cases for the extract_plan_content function."""
+
+    def test_extract_plan_content_with_string(self):
+        """Test that extract_plan_content returns the input string as-is."""
+        plan_json_str = '{"locale": "en-US", "has_enough_context": false, "title": "Test Plan"}'
+        result = extract_plan_content(plan_json_str)
+        assert result == plan_json_str
+
+    def test_extract_plan_content_with_ai_message(self):
+        """Test that extract_plan_content extracts content from an AIMessage-like object."""
+        # Create a mock AIMessage object
+        class MockAIMessage:
+            def __init__(self, content):
+                self.content = content
+        
+        plan_content = '{"locale": "zh-CN", "has_enough_context": false, "title": "测试计划"}'
+        plan_message = MockAIMessage(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        assert result == plan_content
+
+    def test_extract_plan_content_with_dict(self):
+        """Test that extract_plan_content converts a dictionary to JSON string."""
+        plan_dict = {
+            "locale": "fr-FR",
+            "has_enough_context": True,
+            "title": "Plan de test",
+            "steps": []
+        }
+        expected_json = json.dumps(plan_dict)
+        
+        result = extract_plan_content(plan_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_with_other_type(self):
+        """Test that extract_plan_content converts other types to string."""
+        plan_value = 12345
+        expected_string = "12345"
+        
+        result = extract_plan_content(plan_value)
+        assert result == expected_string
+
+    def test_extract_plan_content_with_complex_dict(self):
+        """Test that extract_plan_content handles complex nested dictionaries."""
+        plan_dict = {
+            "locale": "zh-CN",
+            "has_enough_context": False,
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "steps": [
+                {
+                    "need_search": True,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                },
+                {
+                    "need_search": True,
+                    "title": "查找其他超高建筑作为对比基准",
+                    "description": "获取其他具有代表性的超高建筑的高度数据，以提供更全面的比较背景。",
+                    "step_type": "research"
+                }
+            ]
+        }
+        
+        result = extract_plan_content(plan_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == plan_dict
+
+    def test_extract_plan_content_with_non_string_content(self):
+        """Test that extract_plan_content handles AIMessage with non-string content."""
+        class MockAIMessageWithNonStringContent:
+            def __init__(self, content):
+                self.content = content
+        
+        # Test with non-string content (should not be extracted)
+        plan_content = 12345
+        plan_message = MockAIMessageWithNonStringContent(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        # Should convert the entire object to string since content is not a string
+        assert isinstance(result, str)
+        assert "MockAIMessageWithNonStringContent" in result
+
+    def test_extract_plan_content_with_empty_string(self):
+        """Test that extract_plan_content handles empty strings."""
+        empty_string = ""
+        result = extract_plan_content(empty_string)
+        assert result == ""
+
+    def test_extract_plan_content_with_empty_dict(self):
+        """Test that extract_plan_content handles empty dictionaries."""
+        empty_dict = {}
+        expected_json = "{}"
+        
+        result = extract_plan_content(empty_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_issue_703_case(self):
+        """Test that extract_plan_content handles the specific case from issue #703."""
+        # This is the exact structure that was causing the error in issue #703
+        class MockAIMessageFromIssue703:
+            def __init__(self, content):
+                self.content = content
+                self.additional_kwargs = {}
+                self.response_metadata = {'finish_reason': 'stop', 'model_name': 'qwen-max-latest'}
+                self.type = 'ai'
+                self.id = 'run--ebc626af-3845-472b-aeee-acddebf5a4ea'
+                self.example = False
+                self.tool_calls = []
+                self.invalid_tool_calls = []
+        
+        plan_content = '''{
+            "locale": "zh-CN",
+            "has_enough_context": false,
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "steps": [
+                {
+                    "need_search": true,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                }
+            ]
+        }'''
+        
+        plan_message = MockAIMessageFromIssue703(plan_content)
+        
+        # Extract the content
+        result = extract_plan_content(plan_message)
+        
+        # Verify the extracted content is the same as the original
+        assert result == plan_content
+        
+        # Verify the extracted content can be parsed as JSON
+        parsed_result = json.loads(result)
+        assert parsed_result["locale"] == "zh-CN"
+        assert parsed_result["title"] == "埃菲尔铁塔与世界最高建筑高度比较研究计划"
+        assert len(parsed_result["steps"]) == 1
+        assert parsed_result["steps"][0]["title"] == "收集埃菲尔铁塔和世界最高建筑的高度数据"
+
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
 with patch("src.llms.llm.get_llm_by_type", return_value=MagicMock()):
