@@ -361,6 +361,33 @@ def planner_node(
     )
 
 
+def extract_plan_content(plan_data) -> str:
+    """
+    Safely extract plan content from different types of plan data.
+    
+    Args:
+        plan_data: The plan data which can be a string, AIMessage, or dict
+        
+    Returns:
+        str: The plan content as a JSON string
+    """
+    if isinstance(plan_data, str):
+        # If it's already a string, return as is
+        return plan_data
+    elif hasattr(plan_data, 'content') and isinstance(plan_data.content, str):
+        # If it's an AIMessage or similar object with a content attribute
+        logger.debug(f"Extracting plan content from message object of type {type(plan_data).__name__}")
+        return plan_data.content
+    elif isinstance(plan_data, dict):
+        # If it's already a dictionary, convert to JSON string
+        logger.debug("Converting plan dictionary to JSON string")
+        return json.dumps(plan_data)
+    else:
+        # For any other type, try to convert to string
+        logger.warning(f"Unexpected plan data type {type(plan_data).__name__}, attempting to convert to string")
+        return str(plan_data)
+
+
 def human_feedback_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["planner", "research_team", "reporter", "__end__"]]:
@@ -406,7 +433,12 @@ def human_feedback_node(
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
     goto = "research_team"
     try:
-        current_plan = repair_json_output(current_plan)
+        # Safely extract plan content from different types (string, AIMessage, dict)
+        current_plan_content = extract_plan_content(current_plan)
+        logger.debug(f"Extracted plan content type: {type(current_plan_content).__name__}")
+        
+        # Repair the JSON output
+        current_plan = repair_json_output(current_plan_content)
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
@@ -414,8 +446,10 @@ def human_feedback_node(
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
-    except json.JSONDecodeError:
-        logger.warning("Planner response is not a valid JSON")
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
+        if isinstance(current_plan, dict) and "content" in current_plan:
+            logger.warning(f"Plan appears to be an AIMessage object with content field")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(
                 update=preserve_state_meta_fields(state),
