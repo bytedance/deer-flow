@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from functools import partial
-from typing import Annotated, Literal
+from typing import Any, Annotated, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -361,7 +361,7 @@ def planner_node(
     )
 
 
-def extract_plan_content(plan_data) -> str:
+def extract_plan_content(plan_data: str | dict | Any) -> str:
     """
     Safely extract plan content from different types of plan data.
     
@@ -369,7 +369,8 @@ def extract_plan_content(plan_data) -> str:
         plan_data: The plan data which can be a string, AIMessage, or dict
         
     Returns:
-        str: The plan content as a JSON string
+        str: The plan content as a string (JSON string for dict inputs, or 
+    extracted/original string for other types)
     """
     if isinstance(plan_data, str):
         # If it's already a string, return as is
@@ -434,6 +435,7 @@ def human_feedback_node(
     goto = "research_team"
     try:
         # Safely extract plan content from different types (string, AIMessage, dict)
+        original_plan = current_plan
         current_plan_content = extract_plan_content(current_plan)
         logger.debug(f"Extracted plan content type: {type(current_plan_content).__name__}")
         
@@ -448,7 +450,7 @@ def human_feedback_node(
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
     except (json.JSONDecodeError, AttributeError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
-        if isinstance(current_plan, dict) and "content" in current_plan:
+        if isinstance(current_plan, dict) and "content" in original_plan:
             logger.warning(f"Plan appears to be an AIMessage object with content field")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
             return Command(
