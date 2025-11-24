@@ -10,8 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from openai import OpenAI
-from qdrant_client import QdrantClient
-from qdrant_client import grpc
+from qdrant_client import QdrantClient, grpc
 from qdrant_client.models import (
     Distance,
     FieldCondition,

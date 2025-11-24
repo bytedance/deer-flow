@@ -54,6 +54,9 @@ class Configuration:
     enforce_web_search: bool = (
         False  # Enforce at least one web search step in every plan
     )
+    enforce_researcher_search: bool = (
+        True  # Enforce that researcher must use web search tool at least once
+    )
     interrupt_before_tools: list[str] = field(
         default_factory=list
     )  # List of tool names to interrupt before execution
