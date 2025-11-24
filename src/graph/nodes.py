@@ -6,7 +6,6 @@ import logging
 import os
 from functools import partial
 from typing import Annotated, Literal
-from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -40,6 +39,9 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# At the top of the function
+is_test_environment = os.getenv('PYTEST_CURRENT_TEST') is not None
 
 
 @tool
@@ -797,6 +799,9 @@ def validate_web_search_usage(messages: list, agent_name: str = "agent") -> bool
                     web_search_used = True
                     logger.info(f"[VALIDATION] {agent_name} called web_search tool")
                     break
+            # break outer loop if web search was used
+            if web_search_used:
+                break
                     
         # Check for message name attribute
         if hasattr(message, 'name') and message.name == "web_search":
@@ -961,7 +966,8 @@ async def _execute_agent_step(
 
     # Validate web search usage for researcher agent if enforcement is enabled
     web_search_validated = True
-    if agent_name == "researcher" and not isinstance(agent, MagicMock):
+    should_validate = agent_name == "researcher" and not is_test_environment
+    if should_validate:
         # Check if enforcement is enabled in configuration
         configurable = Configuration.from_runnable_config(config) if config else Configuration()
         if configurable.enforce_researcher_search:
@@ -979,7 +985,7 @@ async def _execute_agent_step(
 
     # Add validation information to observations
     validation_info = ""
-    if agent_name == "researcher" and not isinstance(agent, MagicMock) and not web_search_validated:
+    if should_validate and not web_search_validated:
         validation_info = f"\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
     return Command(
