@@ -202,3 +202,60 @@ def test_crawler_with_json_like_content(monkeypatch):
     assert article.title == "Non-HTML Content"
     assert "cannot be parsed as HTML" in article.html_content
     assert '{"title": "Some JSON"' in article.html_content  # Should include a snippet of the JSON
+
+
+def test_crawler_with_various_html_formats(monkeypatch):
+    """Test that the crawler correctly identifies various HTML formats."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    # Test case 1: HTML with DOCTYPE
+    class DummyJinaClient1:
+        def crawl(self, url, return_format=None):
+            return "<!DOCTYPE html><html><body><p>Test content</p></body></html>"
+
+    # Test case 2: HTML with leading whitespace
+    class DummyJinaClient2:
+        def crawl(self, url, return_format=None):
+            return "\n\n  <html><body><p>Test content</p></body></html>"
+
+    # Test case 3: HTML with comments
+    class DummyJinaClient3:
+        def crawl(self, url, return_format=None):
+            return "<!-- HTML comment --><html><body><p>Test content</p></body></html>"
+
+    # Test case 4: HTML with self-closing tags
+    class DummyJinaClient4:
+        def crawl(self, url, return_format=None):
+            return '<img src="test.jpg" alt="test" /><p>Test content</p>'
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            return DummyArticle("Extracted Article", "<p>Extracted content</p>")
+
+    # Test each HTML format
+    test_cases = [
+        (DummyJinaClient1, "HTML with DOCTYPE"),
+        (DummyJinaClient2, "HTML with leading whitespace"),
+        (DummyJinaClient3, "HTML with comments"),
+        (DummyJinaClient4, "HTML with self-closing tags"),
+    ]
+    
+    for JinaClientClass, description in test_cases:
+        monkeypatch.setattr("src.crawler.crawler.JinaClient", JinaClientClass)
+        monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+        
+        crawler = crawler_module.Crawler()
+        url = "http://example.com"
+        article = crawler.crawl(url)
+        
+        assert article.url == url
+        assert article.title == "Extracted Article"
+        assert "Extracted content" in article.html_content

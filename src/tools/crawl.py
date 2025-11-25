@@ -3,7 +3,7 @@
 
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 from langchain_core.tools import tool
@@ -14,8 +14,7 @@ from .decorators import log_io
 
 logger = logging.getLogger(__name__)
 
-
-def is_pdf_url(url: str) -> bool:
+def is_pdf_url(url: Optional[str]) -> bool:
     """Check if the URL points to a PDF file."""
     if not url:
         return False
