@@ -176,6 +176,29 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
                 }
             ]
 
+    # ============================================================
+    # SECTION 3: Ensure required Plan fields are present (Issue #710 fix)
+    # ============================================================
+    # Set locale from state if not present
+    if "locale" not in plan or not plan.get("locale"):
+        plan["locale"] = "en-US"  # Default locale
+        logger.info("Added missing locale field with default value 'en-US'")
+
+    # Ensure has_enough_context is present
+    if "has_enough_context" not in plan:
+        plan["has_enough_context"] = False  # Default value
+        logger.info("Added missing has_enough_context field with default value 'False'")
+
+    # Ensure title is present
+    if "title" not in plan or not plan.get("title"):
+        # Try to infer title from steps or use a default
+        if steps and len(steps) > 0 and "title" in steps[0]:
+            plan["title"] = steps[0]["title"]
+            logger.info(f"Inferred missing title from first step: {plan['title']}")
+        else:
+            plan["title"] = "Research Plan"  # Default title
+            logger.info("Added missing title field with default value 'Research Plan'")
+
     return plan
 
 

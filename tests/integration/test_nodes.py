@@ -116,6 +116,30 @@ class TestExtractPlanContent:
         result = extract_plan_content(empty_dict)
         assert result == expected_json
 
+    def test_extract_plan_content_with_content_dict(self):
+        """Test that extract_plan_content handles dictionaries with content."""
+        content_dict = {"content": {
+                "locale": "zh-CN",
+                "has_enough_context": False,
+                "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+                "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+                "steps": [
+                    {
+                        "need_search": True,
+                        "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                        "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                        "step_type": "research"
+                    }
+                ]
+            }
+        }
+
+        
+        result = extract_plan_content(content_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == content_dict
+
     def test_extract_plan_content_issue_703_case(self):
         """Test that extract_plan_content handles the specific case from issue #703."""
         # This is the exact structure that was causing the error in issue #703
