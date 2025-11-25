@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import src.crawler as crawler_module
+from src.crawler.crawler import safe_truncate
 
 
 def test_crawler_sets_article_url(monkeypatch):
@@ -68,3 +69,232 @@ def test_crawler_calls_dependencies(monkeypatch):
     assert calls["jina"][1] == "html"
     assert "extractor" in calls
     assert calls["extractor"] == "<html>dummy</html>"
+
+
+def test_crawler_handles_empty_content(monkeypatch):
+    """Test that the crawler handles empty content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return ""  # Empty content
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for empty content
+            assert False, "ReadabilityExtractor should not be called for empty content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Empty Content"
+    assert "No content could be extracted" in article.html_content
+
+
+def test_crawler_handles_non_html_content(monkeypatch):
+    """Test that the crawler handles non-HTML content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return "This is plain text content, not HTML"
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for non-HTML content
+            assert False, "ReadabilityExtractor should not be called for non-HTML content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Non-HTML Content"
+    assert "cannot be parsed as HTML" in article.html_content
+    assert "plain text content" in article.html_content  # Should include a snippet of the original content
+
+
+def test_crawler_handles_extraction_failure(monkeypatch):
+    """Test that the crawler handles readability extraction failure gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return "<html><body>Valid HTML but extraction will fail</body></html>"
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            raise Exception("Extraction failed")
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Content Extraction Failed"
+    assert "Content extraction failed" in article.html_content
+    assert "Valid HTML but extraction will fail" in article.html_content  # Should include a snippet of the HTML
+
+
+def test_crawler_with_json_like_content(monkeypatch):
+    """Test that the crawler handles JSON-like content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return '{"title": "Some JSON", "content": "This is JSON content"}'
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for JSON content
+            assert False, "ReadabilityExtractor should not be called for JSON content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com/api/data"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Non-HTML Content"
+    assert "cannot be parsed as HTML" in article.html_content
+    assert '{"title": "Some JSON"' in article.html_content  # Should include a snippet of the JSON
+
+
+def test_crawler_with_various_html_formats(monkeypatch):
+    """Test that the crawler correctly identifies various HTML formats."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    # Test case 1: HTML with DOCTYPE
+    class DummyJinaClient1:
+        def crawl(self, url, return_format=None):
+            return "<!DOCTYPE html><html><body><p>Test content</p></body></html>"
+
+    # Test case 2: HTML with leading whitespace
+    class DummyJinaClient2:
+        def crawl(self, url, return_format=None):
+            return "\n\n  <html><body><p>Test content</p></body></html>"
+
+    # Test case 3: HTML with comments
+    class DummyJinaClient3:
+        def crawl(self, url, return_format=None):
+            return "<!-- HTML comment --><html><body><p>Test content</p></body></html>"
+
+    # Test case 4: HTML with self-closing tags
+    class DummyJinaClient4:
+        def crawl(self, url, return_format=None):
+            return '<img src="test.jpg" alt="test" /><p>Test content</p>'
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            return DummyArticle("Extracted Article", "<p>Extracted content</p>")
+
+    # Test each HTML format
+    test_cases = [
+        (DummyJinaClient1, "HTML with DOCTYPE"),
+        (DummyJinaClient2, "HTML with leading whitespace"),
+        (DummyJinaClient3, "HTML with comments"),
+        (DummyJinaClient4, "HTML with self-closing tags"),
+    ]
+    
+    for JinaClientClass, description in test_cases:
+        monkeypatch.setattr("src.crawler.crawler.JinaClient", JinaClientClass)
+        monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+        
+        crawler = crawler_module.Crawler()
+        url = "http://example.com"
+        article = crawler.crawl(url)
+        
+        assert article.url == url
+        assert article.title == "Extracted Article"
+        assert "Extracted content" in article.html_content
+
+
+def test_safe_truncate_function():
+    """Test the safe_truncate function handles various character sets correctly."""
+    
+    # Test None input
+    assert safe_truncate(None) is None
+    
+    # Test empty string
+    assert safe_truncate("") == ""
+    
+    # Test string shorter than limit
+    assert safe_truncate("Short text") == "Short text"
+    
+    # Test ASCII truncation
+    result = safe_truncate("This is a longer text that needs truncation", 20)
+    assert len(result) <= 20
+    assert "..." in result
+    
+    # Test Unicode/emoji characters
+    text_with_emoji = "Hello! 🌍 Welcome to the world 🚀"
+    result = safe_truncate(text_with_emoji, 20)
+    assert len(result) <= 20
+    assert "..." in result
+    # Verify it's valid UTF-8
+    assert result.encode('utf-8').decode('utf-8') == result
+    
+    # Test very small limit
+    assert safe_truncate("Long text", 1) == "."
+    assert safe_truncate("Long text", 2) == ".."
+    assert safe_truncate("Long text", 3) == "..."
+    
+    # Test with Chinese characters
+    chinese_text = "这是一个中文测试文本"
+    result = safe_truncate(chinese_text, 10)
+    assert len(result) <= 10
+    # Verify it's valid UTF-8
+    assert result.encode('utf-8').decode('utf-8') == result
