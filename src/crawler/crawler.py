@@ -132,6 +132,8 @@ def is_html_content(content: str) -> bool:
                 return True
     
     return False
+
+
 class Crawler:
     def crawl(self, url: str) -> Article:
         # To help LLMs better understand content, we extract clean
