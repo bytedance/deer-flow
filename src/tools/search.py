@@ -48,7 +48,7 @@ def get_search_config():
 def get_web_search_tool(max_search_results: int):
     search_config = get_search_config()
 
-    if  SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
+    if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         # Get all Tavily search parameters from configuration with defaults
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
