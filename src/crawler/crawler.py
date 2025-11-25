@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 def safe_truncate(text: str, max_length: int = 500) -> str:
     """
     Safely truncate text to a maximum length without breaking multi-byte characters.
-
+    
     Args:
         text: The text to truncate
         max_length: Maximum number of characters to keep
-
+        
     Returns:
         Truncated text that is safe to use without encoding issues
     """
@@ -47,12 +47,12 @@ def safe_truncate(text: str, max_length: int = 500) -> str:
         while truncated and ord(truncated[-1]) >= 0xD800 and ord(truncated[-1]) <= 0xDFFF:
             truncated = truncated[:-1]
         return truncated + "..."
-    
+
 
 def is_html_content(content: str) -> bool:
     """
     Check if the provided content is HTML.
-
+    
     Uses a more robust detection method that checks for common HTML patterns
     including DOCTYPE declarations, HTML tags, and other HTML markers.
     """
@@ -95,7 +95,7 @@ def is_html_content(content: str) -> bool:
     for pattern in html_start_patterns:
         if re.match(pattern, content, re.IGNORECASE):
             return True
-        
+    
     # Check for any HTML-like tags in the content (more permissive)
     if re.search(r'<[^>]+>', content):
         # Additional check: ensure it's not just XML or other markup
@@ -116,7 +116,7 @@ def is_html_content(content: str) -> bool:
         for indicator in html_indicators:
             if re.search(indicator, content, re.IGNORECASE):
                 return True
-            
+        
         # Also check for self-closing HTML tags
         self_closing_tags = [
             r'<img\s+[^>]*?/>',
@@ -130,7 +130,7 @@ def is_html_content(content: str) -> bool:
         for tag in self_closing_tags:
             if re.search(tag, content, re.IGNORECASE):
                 return True
-            
+    
     return False
 class Crawler:
     def crawl(self, url: str) -> Article:
