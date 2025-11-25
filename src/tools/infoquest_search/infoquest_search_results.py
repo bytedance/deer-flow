@@ -148,7 +148,7 @@ Invoke with tool call:
         site_filter = f"'{self.site}'" if hasattr(self, 'site') and self.site else "Disabled"
         
         initialization_details = (
-            f"🔧 Tool Information:\n"
+            f"\n🔧 Tool Information:\n"
             f"├── Tool Name: {self.name}\n"
             f"├── Time Range Filter: {time_range_status}\n"
             f"└── Site Filter: {site_filter}\n"

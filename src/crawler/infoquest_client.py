@@ -7,6 +7,7 @@ In order to set this up, follow instructions at:
 https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest
 """
 
+import json
 import logging
 import os
 from typing import Dict, Any
@@ -31,7 +32,7 @@ class InfoQuestClient:
         self.api_key_set = bool(os.getenv("INFOQUEST_API_KEY"))
         
         config_details = (
-            f"📋 Configuration Details:\n"
+            f"\n📋 Configuration Details:\n"
             f"├── Fetch Timeout: {fetch_time} {'(Default: No timeout)' if fetch_time == -1 else '(Custom)'}\n"
             f"├── Timeout: {timeout} {'(Default: No timeout)' if timeout == -1 else '(Custom)'}\n"
             f"├── Navigation Timeout: {navi_timeout} {'(Default: No timeout)' if navi_timeout == -1 else '(Custom)'}\n"
@@ -40,7 +41,7 @@ class InfoQuestClient:
         
         logger.info(config_details)
         logger.info("\n" + "*" * 70 + "\n")
-
+    
     def crawl(self, url: str, return_format: str = "html") -> str:
         logger.debug("Preparing request for URL: %s", url)
         
@@ -56,30 +57,57 @@ class InfoQuestClient:
             "format=%s, has_api_key=%s",
             data.get("format"), self.api_key_set
         )
-
+        
         logger.debug("Sending crawl request to InfoQuest API")
-        response = requests.post(
-            "https://reader.infoquest.bytepluses.com",
-            headers=headers,
-            json=data
-        )
-
-        # Validate response
-        response.raise_for_status()
-
-        # Check for empty response
-        if not response.text or not response.text.strip():
-            logger.error("BytePlus InfoQuest Crawler returned empty response for URL: %s", url)
-            raise ValueError("InfoQuest Crawler API returned empty response")
-
-        # Print partial response for debugging
-        if logger.isEnabledFor(logging.DEBUG):
-            response_sample = response.text[:200] + ("..." if len(response.text) > 200 else "")
-            logger.debug(
-                "Successfully received response, content length: %d bytes, first 200 chars: %s",
-                len(response.text), response_sample
+        try:
+            response = requests.post(
+                "https://reader.infoquest.bytepluses.com",
+                headers=headers,
+                json=data
             )
-        return response.text
+            
+            # Check if status code is not 200
+            if response.status_code != 200:
+                error_message = f"InfoQuest API returned status {response.status_code}: {response.text}"
+                logger.error(error_message)
+                return f"Error: {error_message}"
+            
+            # Check for empty response
+            if not response.text or not response.text.strip():
+                error_message = "InfoQuest Crawler API returned empty response"
+                logger.error("BytePlus InfoQuest Crawler returned empty response for URL: %s", url)
+                return f"Error: {error_message}"
+                
+            # Try to parse response as JSON and extract reader_result
+            try:
+                response_data = json.loads(response.text)
+                # Extract reader_result if it exists
+                if "reader_result" in response_data:
+                    logger.debug("Successfully extracted reader_result from JSON response")
+                    return response_data["reader_result"]
+                elif "content" in response_data:
+                    # Fallback to content field if reader_result is not available
+                    logger.debug("Using content field as fallback")
+                    return response_data["content"]
+                else:
+                    # If neither field exists, return the original response
+                    logger.warning("Neither reader_result nor content field found in JSON response")
+            except json.JSONDecodeError:
+                # If response is not JSON, return the original text
+                logger.debug("Response is not in JSON format, returning as-is")
+                
+            # Print partial response for debugging
+            if logger.isEnabledFor(logging.DEBUG):
+                response_sample = response.text[:200] + ("..." if len(response.text) > 200 else "")
+                logger.debug(
+                    "Successfully received response, content length: %d bytes, first 200 chars: %s",
+                    len(response.text), response_sample
+                )
+            return response.text
+        except Exception as e:
+            error_message = f"Request to InfoQuest API failed: {str(e)}"
+            logger.error(error_message)
+            return f"Error: {error_message}"
     
     def _prepare_headers(self) -> Dict[str, str]:
         """Prepare request headers."""
@@ -95,7 +123,7 @@ class InfoQuestClient:
             logger.warning(
                 "InfoQuest API key is not set. Provide your own key for authentication."
             )
-            
+        
         return headers
     
     def _prepare_request_data(self, url: str, return_format: str) -> Dict[str, Any]:

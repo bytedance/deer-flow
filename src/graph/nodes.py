@@ -437,7 +437,6 @@ def human_feedback_node(
         # Safely extract plan content from different types (string, AIMessage, dict)
         original_plan = current_plan
         current_plan_content = extract_plan_content(current_plan)
-        logger.debug(f"Extracted plan content type: {type(current_plan_content).__name__}")
         
         # Repair the JSON output
         current_plan = repair_json_output(current_plan_content)
@@ -446,6 +445,15 @@ def human_feedback_node(
         # parse the plan
         new_plan = json.loads(current_plan)
         # Validate and fix plan to ensure web search requirements are met
+        if isinstance(new_plan, dict) and 'content' in new_plan:
+            logger.debug("Found nested plan structure, extracting from 'content' field")
+            if isinstance(new_plan['content'], str):
+                try:
+                    new_plan = json.loads(new_plan['content'])
+                except json.JSONDecodeError:
+                    logger.warning("Content field is not valid JSON, using as is")
+                    pass
+        
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
     except (json.JSONDecodeError, AttributeError) as e:

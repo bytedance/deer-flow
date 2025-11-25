@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 def safe_truncate(text: str, max_length: int = 500) -> str:
     """
     Safely truncate text to a maximum length without breaking multi-byte characters.
-    
+
     Args:
         text: The text to truncate
         max_length: Maximum number of characters to keep
-        
+
     Returns:
         Truncated text that is safe to use without encoding issues
     """
@@ -52,7 +52,7 @@ def safe_truncate(text: str, max_length: int = 500) -> str:
 def is_html_content(content: str) -> bool:
     """
     Check if the provided content is HTML.
-    
+
     Uses a more robust detection method that checks for common HTML patterns
     including DOCTYPE declarations, HTML tags, and other HTML markers.
     """
@@ -193,7 +193,7 @@ class Crawler:
         
         article.url = url
         return article
-
+    
     def _select_crawler_tool(self, crawler_config: dict):
         # Only check engine from configuration file
         engine = crawler_config.get("engine", CrawlerEngine.JINA.value)
@@ -208,7 +208,7 @@ class Crawler:
             fetch_time = crawler_config.get("fetch_time", -1)
             timeout = crawler_config.get("timeout", -1)
             navi_timeout = crawler_config.get("navi_timeout", -1)
-
+            
             # Log the configuration being used
             if fetch_time > 0 or timeout > 0 or navi_timeout > 0:
                 logger.debug(
@@ -217,7 +217,7 @@ class Crawler:
                     f"timeout={timeout}, "
                     f"navi_timeout={navi_timeout}"
                 )
-                
+            
             # Initialize InfoQuestClient with the parameters from configuration
             return InfoQuestClient(
                 fetch_time=fetch_time,
