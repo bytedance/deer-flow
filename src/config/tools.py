@@ -33,6 +33,7 @@ class RAGProvider(enum.Enum):
     VIKINGDB_KNOWLEDGE_BASE = "vikingdb_knowledge_base"
     MOI = "moi"
     MILVUS = "milvus"
+    QDRANT = "qdrant"
 
 
 SELECTED_RAG_PROVIDER = os.getenv("RAG_PROVIDER")
