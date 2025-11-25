@@ -140,7 +140,7 @@ class Crawler:
         # LLM message.
         #
         # The system supports multiple crawler engines:
-        # - Jina: An accessible and free solution, though with some limitations in readability extraction
+        # - Jina: An accessible solution, though with some limitations in readability extraction
         # - InfoQuest: A BytePlus product offering advanced capabilities with configurable parameters
         #   like fetch_time, timeout, and navi_timeout.
         #
