@@ -110,14 +110,14 @@ Invoke with tool call:
     args_schema: Type[BaseModel] = InfoQuestInput
     """The tool response format."""
 
-    time_range: int = -1,
+    time_range: int = -1
     """Time range for filtering search results, in days.
 
     If set to a positive integer (e.g., 30), only results from the last N days will be included.
     Default is -1, which means no time range filter is applied.
     """
 
-    site: str = "",
+    site: str = ""
     """Specific domain to restrict search results to (e.g., "nytimes.com").
 
     If provided, only results from the specified domain will be returned.

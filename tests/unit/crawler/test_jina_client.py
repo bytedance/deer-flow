@@ -36,11 +36,12 @@ class TestJinaClient:
 
         client = JinaClient()
 
-        # Act & Assert
-        with pytest.raises(ValueError) as exc_info:
-            client.crawl("https://example.com")
+        # Act
+        result = client.crawl("https://example.com")
 
-        assert "status 500" in str(exc_info.value)
+        # Assert
+        assert result.startswith("Error:")
+        assert "status 500" in result
 
     @patch("src.crawler.jina_client.requests.post")
     def test_crawl_empty_response(self, mock_post):
@@ -52,11 +53,12 @@ class TestJinaClient:
 
         client = JinaClient()
 
-        # Act & Assert
-        with pytest.raises(ValueError) as exc_info:
-            client.crawl("https://example.com")
+        # Act
+        result = client.crawl("https://example.com")
 
-        assert "empty response" in str(exc_info.value)
+        # Assert
+        assert result.startswith("Error:")
+        assert "empty response" in result
 
     @patch("src.crawler.jina_client.requests.post")
     def test_crawl_whitespace_only_response(self, mock_post):
@@ -68,11 +70,12 @@ class TestJinaClient:
 
         client = JinaClient()
 
-        # Act & Assert
-        with pytest.raises(ValueError) as exc_info:
-            client.crawl("https://example.com")
+        # Act
+        result = client.crawl("https://example.com")
 
-        assert "empty response" in str(exc_info.value)
+        # Assert
+        assert result.startswith("Error:")
+        assert "empty response" in result
 
     @patch("src.crawler.jina_client.requests.post")
     def test_crawl_not_found(self, mock_post):
@@ -84,11 +87,12 @@ class TestJinaClient:
 
         client = JinaClient()
 
-        # Act & Assert
-        with pytest.raises(ValueError) as exc_info:
-            client.crawl("https://example.com")
+        # Act
+        result = client.crawl("https://example.com")
 
-        assert "status 404" in str(exc_info.value)
+        # Assert
+        assert result.startswith("Error:")
+        assert "status 404" in result
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("src.crawler.jina_client.requests.post")
@@ -106,3 +110,17 @@ class TestJinaClient:
 
         # Assert
         assert result == "<html>Test</html>"
+    
+    @patch("src.crawler.jina_client.requests.post")
+    def test_crawl_exception_handling(self, mock_post):
+        # Arrange
+        mock_post.side_effect = Exception("Network error")
+
+        client = JinaClient()
+
+        # Act
+        result = client.crawl("https://example.com")
+
+        # Assert
+        assert result.startswith("Error:")
+        assert "Network error" in result

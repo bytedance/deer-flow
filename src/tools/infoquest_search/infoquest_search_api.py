@@ -211,7 +211,7 @@ class InfoQuestAPIWrapper(BaseModel):
                 for image in images["items"]:
                     clean_result = {
                         "type": "image_url",
-                        "image_url": {"url": image["url"]},
+                        "image_url": image["url"],
                         "image_description": image["alt"],
                     }
                     url = clean_result["image_url"]
