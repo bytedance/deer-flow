@@ -150,7 +150,7 @@ class Crawler:
         # Get crawler configuration
         config = load_yaml_config("conf.yaml")
         crawler_config = config.get("CRAWLER_ENGINE", {})
-        
+
         # Get the selected crawler tool based on configuration
         crawler_client = self._select_crawler_tool(crawler_config)
         html = self._crawl_with_tool(crawler_client, url)
@@ -192,7 +192,7 @@ class Crawler:
         
         article.url = url
         return article
-    
+
     def _select_crawler_tool(self, crawler_config: dict):
         # Only check engine from configuration file
         engine = crawler_config.get("engine", CrawlerEngine.JINA.value)
