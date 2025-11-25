@@ -174,7 +174,6 @@ class Crawler:
                 html_content=f"<p>This URL returned content that cannot be parsed as HTML. Raw content: {safe_truncate(html, 500)}</p>"
             )
             article.url = url
-            return article
 
         # Extract article from HTML
         try:
@@ -189,7 +188,7 @@ class Crawler:
             )
             article.url = url
             return article
-        
+
         article.url = url
         return article
 
