@@ -21,6 +21,7 @@ from langchain_community.utilities import (
 
 from src.config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
 from src.tools.decorators import create_logged_tool
+from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchWithImages,
 )
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Create logged versions of the search tools
 LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
+LoggedInfoQuestSearch = create_logged_tool(InfoQuestSearchResults)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
@@ -46,7 +48,7 @@ def get_search_config():
 def get_web_search_tool(max_search_results: int):
     search_config = get_search_config()
 
-    if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
+    if  SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         # Get all Tavily search parameters from configuration with defaults
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
@@ -75,6 +77,17 @@ def get_web_search_tool(max_search_results: int):
             include_image_descriptions=include_image_descriptions,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.INFOQUEST.value:
+        time_range = search_config.get("time_range", -1)
+        site = search_config.get("site", "")
+        logger.info(
+            f"InfoQuest search configuration loaded: time_range={time_range}, site={site}"
+        )
+        return LoggedInfoQuestSearch(
+            name="web_search",
+            time_range=time_range,
+            site=site,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.DUCKDUCKGO.value:
         return LoggedDuckDuckGoSearch(
