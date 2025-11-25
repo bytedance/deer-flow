@@ -209,7 +209,7 @@ class TestPDFHandling:
         # Assert
         # Crawler should not be instantiated for PDF URLs
         mock_crawler_class.assert_not_called()
-        mock_logger.assert_not_called()
+        mock_logger.info.assert_called_once_with(f"PDF URL detected, skipping crawling: {pdf_url}")
         
         # Should return proper PDF error structure
         result_dict = json.loads(result)

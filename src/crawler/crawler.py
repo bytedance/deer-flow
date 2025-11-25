@@ -11,6 +11,41 @@ from .readability_extractor import ReadabilityExtractor
 logger = logging.getLogger(__name__)
 
 
+def safe_truncate(text: str, max_length: int = 500) -> str:
+    """
+    Safely truncate text to a maximum length without breaking multi-byte characters.
+    
+    Args:
+        text: The text to truncate
+        max_length: Maximum number of characters to keep
+        
+    Returns:
+        Truncated text that is safe to use without encoding issues
+    """
+    if text is None:
+        return None
+    
+    if len(text) <= max_length:
+        return text
+    
+    # Ensure max_length is at least 3 to accommodate the placeholder
+    if max_length < 3:
+        return "..."[:max_length]
+    
+    # Use Python's built-in textwrap.shorten which handles unicode safely
+    try:
+        import textwrap
+        return textwrap.shorten(text, width=max_length, placeholder="...")
+    except (ImportError, TypeError):
+        # Fallback for older Python versions or if textwrap.shorten has issues
+        # Truncate to max_length - 3 to make room for "..."
+        truncated = text[:max_length - 3]
+        # Remove any incomplete Unicode surrogate pair
+        while truncated and ord(truncated[-1]) >= 0xD800 and ord(truncated[-1]) <= 0xDFFF:
+            truncated = truncated[:-1]
+        return truncated + "..."
+
+
 def is_html_content(content: str) -> bool:
     """
     Check if the provided content is HTML.
@@ -128,10 +163,10 @@ class Crawler:
         # Check if content is actually HTML using more robust detection
         if not is_html_content(html):
             logger.warning(f"Non-HTML content received from URL {url}, creating fallback article")
-            # Return a simple article with the raw content
+            # Return a simple article with the raw content (safely truncated)
             article = Article(
                 title="Non-HTML Content",
-                html_content=f"<p>This URL returned content that cannot be parsed as HTML. Raw content: {html[:500]}...</p>"
+                html_content=f"<p>This URL returned content that cannot be parsed as HTML. Raw content: {safe_truncate(html, 500)}</p>"
             )
             article.url = url
             return article
@@ -141,10 +176,10 @@ class Crawler:
             article = extractor.extract_article(html)
         except Exception as e:
             logger.error(f"Failed to extract article from {url}: {repr(e)}")
-            # Fall back to a simple article with the raw HTML
+            # Fall back to a simple article with the raw HTML (safely truncated)
             article = Article(
                 title="Content Extraction Failed",
-                html_content=f"<p>Content extraction failed. Raw content: {html[:500]}...</p>"
+                html_content=f"<p>Content extraction failed. Raw content: {safe_truncate(html, 500)}</p>"
             )
             article.url = url
             return article

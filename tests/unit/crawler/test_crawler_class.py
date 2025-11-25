@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import src.crawler as crawler_module
+from src.crawler.crawler import safe_truncate
 
 
 def test_crawler_sets_article_url(monkeypatch):
@@ -259,3 +260,41 @@ def test_crawler_with_various_html_formats(monkeypatch):
         assert article.url == url
         assert article.title == "Extracted Article"
         assert "Extracted content" in article.html_content
+
+
+def test_safe_truncate_function():
+    """Test the safe_truncate function handles various character sets correctly."""
+    
+    # Test None input
+    assert safe_truncate(None) is None
+    
+    # Test empty string
+    assert safe_truncate("") == ""
+    
+    # Test string shorter than limit
+    assert safe_truncate("Short text") == "Short text"
+    
+    # Test ASCII truncation
+    result = safe_truncate("This is a longer text that needs truncation", 20)
+    assert len(result) <= 20
+    assert "..." in result
+    
+    # Test Unicode/emoji characters
+    text_with_emoji = "Hello! 🌍 Welcome to the world 🚀"
+    result = safe_truncate(text_with_emoji, 20)
+    assert len(result) <= 20
+    assert "..." in result
+    # Verify it's valid UTF-8
+    assert result.encode('utf-8').decode('utf-8') == result
+    
+    # Test very small limit
+    assert safe_truncate("Long text", 1) == "."
+    assert safe_truncate("Long text", 2) == ".."
+    assert safe_truncate("Long text", 3) == "..."
+    
+    # Test with Chinese characters
+    chinese_text = "这是一个中文测试文本"
+    result = safe_truncate(chinese_text, 10)
+    assert len(result) <= 10
+    # Verify it's valid UTF-8
+    assert result.encode('utf-8').decode('utf-8') == result
