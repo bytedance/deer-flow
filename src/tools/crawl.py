@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 def is_pdf_url(url: str) -> bool:
     """Check if the URL points to a PDF file."""
+    if not url:
+        return False
     parsed_url = urlparse(url)
     # Check if the path ends with .pdf (case insensitive)
     return parsed_url.path.lower().endswith('.pdf')

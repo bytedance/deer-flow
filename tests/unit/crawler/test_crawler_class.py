@@ -68,3 +68,137 @@ def test_crawler_calls_dependencies(monkeypatch):
     assert calls["jina"][1] == "html"
     assert "extractor" in calls
     assert calls["extractor"] == "<html>dummy</html>"
+
+
+def test_crawler_handles_empty_content(monkeypatch):
+    """Test that the crawler handles empty content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return ""  # Empty content
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for empty content
+            assert False, "ReadabilityExtractor should not be called for empty content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Empty Content"
+    assert "No content could be extracted" in article.html_content
+
+
+def test_crawler_handles_non_html_content(monkeypatch):
+    """Test that the crawler handles non-HTML content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return "This is plain text content, not HTML"
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for non-HTML content
+            assert False, "ReadabilityExtractor should not be called for non-HTML content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Non-HTML Content"
+    assert "cannot be parsed as HTML" in article.html_content
+    assert "plain text content" in article.html_content  # Should include a snippet of the original content
+
+
+def test_crawler_handles_extraction_failure(monkeypatch):
+    """Test that the crawler handles readability extraction failure gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return "<html><body>Valid HTML but extraction will fail</body></html>"
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            raise Exception("Extraction failed")
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Content Extraction Failed"
+    assert "Content extraction failed" in article.html_content
+    assert "Valid HTML but extraction will fail" in article.html_content  # Should include a snippet of the HTML
+
+
+def test_crawler_with_json_like_content(monkeypatch):
+    """Test that the crawler handles JSON-like content gracefully."""
+    
+    class DummyArticle:
+        def __init__(self, title, html_content):
+            self.title = title
+            self.html_content = html_content
+            self.url = None
+        
+        def to_markdown(self):
+            return f"# {self.title}"
+
+    class DummyJinaClient:
+        def crawl(self, url, return_format=None):
+            return '{"title": "Some JSON", "content": "This is JSON content"}'
+
+    class DummyReadabilityExtractor:
+        def extract_article(self, html):
+            # This should not be called for JSON content
+            assert False, "ReadabilityExtractor should not be called for JSON content"
+
+    monkeypatch.setattr("src.crawler.crawler.JinaClient", DummyJinaClient)
+    monkeypatch.setattr("src.crawler.crawler.ReadabilityExtractor", DummyReadabilityExtractor)
+
+    crawler = crawler_module.Crawler()
+    url = "http://example.com/api/data"
+    article = crawler.crawl(url)
+    
+    assert article.url == url
+    assert article.title == "Non-HTML Content"
+    assert "cannot be parsed as HTML" in article.html_content
+    assert '{"title": "Some JSON"' in article.html_content  # Should include a snippet of the JSON
