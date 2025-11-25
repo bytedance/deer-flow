@@ -175,7 +175,7 @@ class Crawler:
             )
             article.url = url
             return article
-        # Extract article from HTML
+        
         try:
             extractor = ReadabilityExtractor()
             article = extractor.extract_article(html)
@@ -188,7 +188,7 @@ class Crawler:
             )
             article.url = url
             return article
-
+        
         article.url = url
         return article
 
