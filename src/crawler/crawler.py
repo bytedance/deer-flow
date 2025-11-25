@@ -27,14 +27,14 @@ def safe_truncate(text: str, max_length: int = 500) -> str:
     """
     if text is None:
         return None
-
+    
     if len(text) <= max_length:
         return text
-
+    
     # Ensure max_length is at least 3 to accommodate the placeholder
     if max_length < 3:
         return "..."[:max_length]
-
+    
     # Use Python's built-in textwrap.shorten which handles unicode safely
     try:
         import textwrap
@@ -47,7 +47,7 @@ def safe_truncate(text: str, max_length: int = 500) -> str:
         while truncated and ord(truncated[-1]) >= 0xD800 and ord(truncated[-1]) <= 0xDFFF:
             truncated = truncated[:-1]
         return truncated + "..."
-
+    
 
 def is_html_content(content: str) -> bool:
     """
@@ -58,21 +58,21 @@ def is_html_content(content: str) -> bool:
     """
     if not content or not content.strip():
         return False
-
+    
     content = content.strip()
-
+    
     # Check for HTML comments
     if content.startswith('<!--') and '-->' in content:
         return True
-
+    
     # Check for DOCTYPE declarations (case insensitive)
     if re.match(r'^<!DOCTYPE\s+html', content, re.IGNORECASE):
         return True
-
+    
     # Check for XML declarations followed by HTML
     if content.startswith('<?xml') and '<html' in content:
         return True
-
+    
     # Check for common HTML tags at the beginning
     html_start_patterns = [
         r'^<html',
@@ -91,11 +91,11 @@ def is_html_content(content: str) -> bool:
         r'^<!DOCTYPE',
         r'^<\!DOCTYPE',  # Some variations
     ]
-
+    
     for pattern in html_start_patterns:
         if re.match(pattern, content, re.IGNORECASE):
             return True
-
+        
     # Check for any HTML-like tags in the content (more permissive)
     if re.search(r'<[^>]+>', content):
         # Additional check: ensure it's not just XML or other markup
@@ -112,11 +112,11 @@ def is_html_content(content: str) -> bool:
             r'<p\s',
             r'<!DOCTYPE',
         ]
-
+        
         for indicator in html_indicators:
             if re.search(indicator, content, re.IGNORECASE):
                 return True
-
+            
         # Also check for self-closing HTML tags
         self_closing_tags = [
             r'<img\s+[^>]*?/>',
@@ -126,11 +126,11 @@ def is_html_content(content: str) -> bool:
             r'<meta\s+[^>]*?/>',
             r'<link\s+[^>]*?/>',
         ]
-
+        
         for tag in self_closing_tags:
             if re.search(tag, content, re.IGNORECASE):
                 return True
-
+            
     return False
 class Crawler:
     def crawl(self, url: str) -> Article:
@@ -150,11 +150,11 @@ class Crawler:
         # Get crawler configuration
         config = load_yaml_config("conf.yaml")
         crawler_config = config.get("CRAWLER_ENGINE", {})
-
+        
         # Get the selected crawler tool based on configuration
         crawler_client = self._select_crawler_tool(crawler_config)
         html = self._crawl_with_tool(crawler_client, url)
-
+        
         # Check if we got valid HTML content
         if not html or not html.strip():
             logger.warning(f"Empty content received from URL {url}")
@@ -164,7 +164,7 @@ class Crawler:
             )
             article.url = url
             return article
-
+        
         # Check if content is actually HTML using more robust detection
         if not is_html_content(html):
             logger.warning(f"Non-HTML content received from URL {url}, creating fallback article")
@@ -174,7 +174,7 @@ class Crawler:
                 html_content=f"<p>This URL returned content that cannot be parsed as HTML. Raw content: {safe_truncate(html, 500)}</p>"
             )
             article.url = url
-
+            
         # Extract article from HTML
         try:
             extractor = ReadabilityExtractor()
@@ -215,7 +215,7 @@ class Crawler:
                     f"timeout={timeout}, "
                     f"navi_timeout={navi_timeout}"
                 )
-
+                
             # Initialize InfoQuestClient with the parameters from configuration
             return InfoQuestClient(
                 fetch_time=fetch_time,
