@@ -151,6 +151,12 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 - **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
   - 需要在`.env`文件中设置`TAVILY_API_KEY`
   - 注册地址：<https://app.tavily.com/home>
+  
+- **InfoQuest**：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+  - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
+  - 支持时间范围过滤和站点过滤
+  - 提供高质量的搜索结果和内容提取
+  - 注册地址：<https://console.byteplus.com/infoquest/infoquests>
 
 - **DuckDuckGo**：注重隐私的搜索引擎
   - 无需 API 密钥
@@ -172,6 +178,28 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 ```bash
 # 选择一个：tavily, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### 爬取工具
+
+- **Jina**（默认）：免费可访问的网页内容爬取工具
+  - 无需 API 密钥即可使用基础功能
+  - 使用 API 密钥可获得更高的访问速率限制
+  - 访问 <https://jina.ai/reader> 了解更多信息
+
+- **InfoQuest**：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+  - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
+  - 提供可配置的爬取参数
+  - 支持自定义超时设置
+  - 提供更强大的内容提取能力
+  - 访问 <https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest> 了解更多信息
+
+要配置您首选的爬取工具，请在`conf.yaml`文件中设置：
+
+```yaml
+CRAWLER_ENGINE:
+  # 引擎类型："jina"（默认）或 "infoquest"
+  engine: infoquest
 ```
 
 ### 私域知识库引擎
