@@ -157,6 +157,7 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
   - 支持时间范围过滤和站点过滤
   - 提供高质量的搜索结果和内容提取
   - 注册地址：<https://console.byteplus.com/infoquest/infoquests>
+  - 访问 <https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest> 了解更多信息
 
 - **DuckDuckGo**：注重隐私的搜索引擎
   - 无需 API 密钥
@@ -249,8 +250,8 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
 ### 工具和 MCP 集成
 
 - 🔍 **搜索和检索**
-  - 通过 Tavily、Brave Search 等进行网络搜索
-  - 使用 Jina 进行爬取
+  - 通过 Tavily、InfoQuest、Brave Search 等进行网络搜索
+  - 使用 Jina、InfoQuest 进行爬取
   - 高级内容提取
   - 支持检索指定私有知识库
 

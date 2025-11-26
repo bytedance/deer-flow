@@ -151,6 +151,13 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
   - `.env`ファイルに`TAVILY_API_KEY`が必要
   - 登録先：<https://app.tavily.com/home>
 
+- **InfoQuest**：BytePlusが開発したAI最適化のインテリジェント検索とクローリングツールセット
+  - `.env`ファイルに`INFOQUEST_API_KEY`が必要
+  - 時間範囲フィルタリングとサイトフィルタリングをサポート
+  - 高品質な検索結果とコンテンツ抽出を提供
+  - 登録先：<https://console.byteplus.com/infoquest/infoquests>
+  - ドキュメント：<https://docs.byteplus.com/ja/docs/InfoQuest/What_is_Info_Quest>
+
 - **DuckDuckGo**：プライバシー重視の検索エンジン
   - APIキー不要
 
@@ -169,8 +176,30 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
 お好みの検索エンジンを設定するには、`.env`ファイルで`SEARCH_API`変数を設定します：
 
 ```bash
-# 選択肢: tavily, duckduckgo, brave_search, arxiv
+// 選択肢: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### クローリングツール
+
+- **Jina**（デフォルト）：無料でアクセス可能なウェブコンテンツクローリングツール
+  - 基本機能を使用するにはAPIキーは不要
+  - APIキーを使用するとより高いアクセスレート制限が適用されます
+  - 詳細については <https://jina.ai/reader> を参照してください
+
+- **InfoQuest**：BytePlusが開発したAI最適化のインテリジェント検索とクローリングツールセット
+  - `.env`ファイルに`INFOQUEST_API_KEY`が必要
+  - 設定可能なクローリングパラメータを提供
+  - カスタムタイムアウト設定をサポート
+  - より強力なコンテンツ抽出機能を提供
+  - 詳細については <https://docs.byteplus.com/ja/docs/InfoQuest/What_is_Info_Quest> を参照してください
+
+お好みのクローリングツールを設定するには、`conf.yaml`ファイルで以下を設定します：
+
+```yaml
+CRAWLER_ENGINE:
+  # エンジンタイプ："jina"（デフォルト）または "infoquest"
+  engine: infoquest
 ```
 
 ## 特徴
@@ -186,8 +215,8 @@ SEARCH_API=tavily
 ### ツールと MCP 統合
 
 - 🔍 **検索と取得**
-  - Tavily、Brave Searchなどを通じたWeb検索
-  - Jinaを使用したクローリング
+  - Tavily、InfoQuest、Brave Searchなどを通じたWeb検索
+  - JinaとInfoQuestを使用したクローリング
   - 高度なコンテンツ抽出
 
 - 🔗 **MCPシームレス統合**
@@ -546,7 +575,7 @@ DeerFlow には人間参加型ループメカニズムが含まれており、�
 
 ### コマンドライン引数
 
-アプリケーションは動作をカスタマイズするための複数のコマンドライン引数をサポートしています：
+アプリケーションは動作をカスタマイゼるための複数のコマンドライン引数をサポートしています：
 
 - **query**：処理する研究クエリ（複数の単語でも可）
 - **--interactive**：組み込み質問を使用したインタラクティブモードで実行

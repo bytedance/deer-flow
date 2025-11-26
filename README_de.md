@@ -156,6 +156,13 @@ DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die
   - Erfordert `TAVILY_API_KEY` in Ihrer `.env`-Datei
   - Registrieren Sie sich unter: https://app.tavily.com/home
 
+- **InfoQuest**: Ein KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
+  - Erfordert `INFOQUEST_API_KEY` in Ihrer `.env`-Datei
+  - Unterstützung für Zeitbereichsfilterung und Seitenfilterung
+  - Bietet qualitativ hochwertige Suchergebnisse und Inhaltsextraktion
+  - Registrieren Sie sich unter: https://console.byteplus.com/infoquest/infoquests
+  - Besuchen Sie https://docs.byteplus.com/de/docs/InfoQuest/What_is_Info_Quest für weitere Informationen
+
 - **DuckDuckGo**: Datenschutzorientierte Suchmaschine
   - Kein API-Schlüssel erforderlich
 
@@ -174,8 +181,30 @@ DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die
 Um Ihre bevorzugte Suchmaschine zu konfigurieren, setzen Sie die Variable `SEARCH_API` in Ihrer `.env`-Datei:
 
 ```bash
-# Wählen Sie eine: tavily, duckduckgo, brave_search, arxiv
+# Wählen Sie eine: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### Crawling-Tools
+
+- **Jina** (Standard): Kostenloses, zugängliches Webinhalts-Crawling-Tool
+  - Kein API-Schlüssel erforderlich für grundlegende Funktionen
+  - Mit API-Schlüssel erhalten Sie höhere Zugriffsraten
+  - Weitere Informationen unter <https://jina.ai/reader>
+
+- **InfoQuest**: KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
+  - Erfordert `INFOQUEST_API_KEY` in Ihrer `.env`-Datei
+  - Bietet konfigurierbare Crawling-Parameter
+  - Unterstützt benutzerdefinierte Timeout-Einstellungen
+  - Bietet stärkere Inhaltsextraktionsfähigkeiten
+  - Weitere Informationen unter <https://docs.byteplus.com/de/docs/InfoQuest/What_is_Info_Quest>
+
+Um Ihr bevorzugtes Crawling-Tool zu konfigurieren, setzen Sie Folgendes in Ihrer `conf.yaml`-Datei:
+
+```yaml
+CRAWLER_ENGINE:
+  # Engine-Typ: "jina" (Standard) oder "infoquest"
+  engine: infoquest
 ```
 
 ### Private Wissensbasis
@@ -205,8 +234,8 @@ DeerFlow unterstützt private Wissensbasen wie RAGFlow und VikingDB, sodass Sie 
 ### Tools und MCP-Integrationen
 
 - 🔍 **Suche und Abruf**
-  - Websuche über Tavily, Brave Search und mehr
-  - Crawling mit Jina
+  - Websuche über Tavily, InfoQuest, Brave Search und mehr
+  - Crawling mit Jina und InfoQuest
   - Fortgeschrittene Inhaltsextraktion
   - Unterstützung für private Wissensbasis
 
@@ -505,7 +534,6 @@ Die Anwendung unterstützt jetzt einen interaktiven Modus mit eingebauten Fragen
 4. Das System wird Ihre Frage verarbeiten und einen umfassenden Forschungsbericht generieren
 
 ### Mensch-in-der-Schleife
-
 DeerFlow enthält einen Mensch-in-der-Schleife-Mechanismus, der es Ihnen ermöglicht, Forschungspläne vor ihrer Ausführung zu überprüfen, zu bearbeiten und zu genehmigen:
 
 1. **Planüberprüfung**: Wenn Mensch-in-der-Schleife aktiviert ist, präsentiert das System den generierten Forschungsplan zur Überprüfung vor der Ausführung

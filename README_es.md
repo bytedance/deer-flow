@@ -155,6 +155,13 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
   - Requiere `TAVILY_API_KEY` en tu archivo `.env`
   - Regístrate en: <https://app.tavily.com/home>
 
+- **InfoQuest**: Un conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
+  - Requiere `INFOQUEST_API_KEY` en tu archivo `.env`
+  - Soporte para filtrado por rango de fecha y filtrado de sitios web
+  - Proporciona resultados de búsqueda y extracción de contenido de alta calidad
+  - Regístrate en: <https://console.byteplus.com/infoquest/infoquests>
+  - Visita https://docs.byteplus.com/es/docs/InfoQuest/What_is_Info_Quest para obtener más información
+
 - **DuckDuckGo**: Motor de búsqueda centrado en la privacidad
 
   - No requiere clave API
@@ -175,8 +182,30 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
 Para configurar tu motor de búsqueda preferido, establece la variable `SEARCH_API` en tu archivo `.env`:
 
 ```bash
-# Elige uno: tavily, duckduckgo, brave_search, arxiv
+# Elige uno: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### Herramientas de Rastreo
+
+- **Jina** (predeterminado): Herramienta gratuita de rastreo de contenido web accesible
+  - No se requiere clave API para usar funciones básicas
+  - Al usar una clave API, se obtienen límites de tasa de acceso más altos
+  - Visite <https://jina.ai/reader> para obtener más información
+
+- **InfoQuest**: Conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
+  - Requiere `INFOQUEST_API_KEY` en tu archivo `.env`
+  - Proporciona parámetros de rastreo configurables
+  - Admite configuración de tiempo de espera personalizada
+  - Ofrece capacidades más potentes de extracción de contenido
+  - Visita <https://docs.byteplus.com/es/docs/InfoQuest/What_is_Info_Quest> para obtener más información
+
+Para configurar su herramienta de rastreo preferida, establezca lo siguiente en su archivo `conf.yaml`:
+
+```yaml
+CRAWLER_ENGINE:
+  # Tipo de motor: "jina" (predeterminado) o "infoquest"
+  engine: infoquest
 ```
 
 ## Características
@@ -193,8 +222,8 @@ SEARCH_API=tavily
 
 - 🔍 **Búsqueda y Recuperación**
 
-  - Búsqueda web a través de Tavily, Brave Search y más
-  - Rastreo con Jina
+  - Búsqueda web a través de Tavily, InfoQuest, Brave Search y más
+  - Rastreo con Jina e InfoQuest
   - Extracción avanzada de contenido
 
 - 🔗 **Integración Perfecta con MCP**

@@ -159,6 +159,13 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
   - Requires `TAVILY_API_KEY` in your `.env` file
   - Sign up at: https://app.tavily.com/home
 
+- **InfoQuest**: AI-optimized intelligent search and crawling toolset developed by BytePlus
+  - Requires `INFOQUEST_API_KEY` in your `.env` file
+  - Support for time range filtering and site filtering 
+  - Provides high-quality search results and content extraction
+  - Sign up at: https://console.byteplus.com/infoquest/infoquests
+  - Visit https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest to learn more
+
 - **DuckDuckGo**: Privacy-focused search engine
   - No API key required
 
@@ -179,6 +186,27 @@ To configure your preferred search engine, set the `SEARCH_API` variable in your
 ```bash
 # Choose one: tavily, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### Crawling Tools
+
+DeerFlow supports multiple crawling tools that can be configured in your `conf.yaml` file:
+
+- **Jina** (default): Freely accessible web content crawling tool
+
+- **InfoQuest**: AI-optimized intelligent search and crawling toolset developed by BytePlus
+  - Requires `INFOQUEST_API_KEY` in your `.env` file
+  - Provides configurable crawling parameters
+  - Supports custom timeout settings
+  - Offers more powerful content extraction capabilities
+  - Visit https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest to learn more
+
+To configure your preferred crawling tool, set the following in your `conf.yaml` file:
+
+```yaml
+CRAWLER_ENGINE:
+  # Engine type: "jina" (default) or "infoquest"
+  engine: infoquest
 ```
 
 ### Private Knowledgebase
@@ -221,8 +249,8 @@ DeerFlow supports private knowledgebase such as RAGFlow, Qdrant, Milvus, and Vik
 ### Tools and MCP Integrations
 
 - 🔍 **Search and Retrieval**
-  - Web search via Tavily, Brave Search and more
-  - Crawling with Jina
+  - Web search via Tavily, InfoQuest, Brave Search and more
+  - Crawling with Jina and InfoQuest
   - Advanced content extraction
   - Support for private knowledgebase
 
