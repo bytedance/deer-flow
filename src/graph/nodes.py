@@ -1062,14 +1062,25 @@ async def _execute_agent_step(
     current_step.execution_res = response_content
     logger.info(f"Step '{current_step.title}' execution completed by {agent_name}")
 
+    # Include all messages from agent result to preserve intermediate tool calls/results
+    # This ensures multiple web_search calls all appear in the stream, not just the final result
+    agent_messages = result.get("messages", [])
+    logger.debug(
+        f"{agent_name.capitalize()} returned {len(agent_messages)} messages. "
+        f"Message types: {[type(msg).__name__ for msg in agent_messages]}"
+    )
+    
+    # Count tool messages for logging
+    tool_message_count = sum(1 for msg in agent_messages if isinstance(msg, ToolMessage))
+    if tool_message_count > 0:
+        logger.info(
+            f"{agent_name.capitalize()} agent made {tool_message_count} tool calls. "
+            f"All tool results will be preserved and streamed to frontend."
+        )
+
     return Command(
         update={
-            "messages": [
-                HumanMessage(
-                    content=response_content,
-                    name=agent_name,
-                )
-            ],
+            "messages": agent_messages,
             "observations": observations + [response_content + validation_info],
             **preserve_state_meta_fields(state),
         },
