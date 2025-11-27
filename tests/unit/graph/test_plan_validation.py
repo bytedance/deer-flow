@@ -167,8 +167,8 @@ class TestValidateAndFixPlanStepTypeRepair:
             validate_and_fix_plan(plan)
             # Should log repair operation
             mock_logger.info.assert_called()
-            call_args = str(mock_logger.info.call_args)
-            assert "Repaired missing step_type" in call_args
+            # Check that any of the info calls contains "Repaired missing step_type"
+            assert any("Repaired missing step_type" in str(call) for call in mock_logger.info.call_args_list)
 
     def test_non_dict_plan_returns_unchanged(self):
         """Test that non-dict plans are returned unchanged."""

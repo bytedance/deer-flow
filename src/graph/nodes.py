@@ -146,24 +146,29 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
     # SECTION 2: Enforce web search requirements
     # ============================================================
     if enforce_web_search:
-        # Check if any step has need_search=true
-        has_search_step = any(step.get("need_search", False) for step in steps)
+        # Check if any step has need_search=true (only check dict steps)
+        has_search_step = any(
+            step.get("need_search", False) 
+            for step in steps 
+            if isinstance(step, dict)
+        )
 
         if not has_search_step and steps:
             # Ensure first research step has web search enabled
             for idx, step in enumerate(steps):
-                if step.get("step_type") == "research":
+                if isinstance(step, dict) and step.get("step_type") == "research":
                     step["need_search"] = True
                     logger.info(f"Enforced web search on research step at index {idx}")
                     break
             else:
                 # Fallback: If no research step exists, convert the first step to a research step with web search enabled.
                 # This ensures that at least one step will perform a web search as required.
-                steps[0]["step_type"] = "research"
-                steps[0]["need_search"] = True
-                logger.info(
-                    "Converted first step to research with web search enforcement"
-                )
+                if isinstance(steps[0], dict):
+                    steps[0]["step_type"] = "research"
+                    steps[0]["need_search"] = True
+                    logger.info(
+                        "Converted first step to research with web search enforcement"
+                    )
         elif not has_search_step and not steps:
             # Add a default research step if no steps exist
             logger.warning("Plan has no steps. Adding default research step.")
@@ -192,7 +197,7 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
     # Ensure title is present
     if "title" not in plan or not plan.get("title"):
         # Try to infer title from steps or use a default
-        if steps and len(steps) > 0 and "title" in steps[0]:
+        if steps and len(steps) > 0 and isinstance(steps[0], dict) and "title" in steps[0]:
             plan["title"] = steps[0]["title"]
             logger.info(f"Inferred missing title from first step: {plan['title']}")
         else:
