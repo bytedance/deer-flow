@@ -487,6 +487,11 @@ async def _stream_graph_events(
                 yield event
         
         logger.debug(f"[{safe_thread_id}] Graph event stream completed. Total events: {event_count}")
+    except asyncio.CancelledError:
+        # User cancelled/interrupted the stream - this is normal, not an error
+        logger.info(f"[{safe_thread_id}] Graph event stream cancelled by user after {event_count} events")
+        # Re-raise to signal cancellation properly without yielding an error event
+        raise
     except Exception as e:
         logger.exception(f"[{safe_thread_id}] Error during graph execution")
         yield _make_event(
