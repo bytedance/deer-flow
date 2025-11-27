@@ -197,7 +197,7 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
     # Ensure title is present
     if "title" not in plan or not plan.get("title"):
         # Try to infer title from steps or use a default
-        if steps and len(steps) > 0 and isinstance(steps[0], dict) and "title" in steps[0]:
+        if steps and isinstance(steps[0], dict) and "title" in steps[0]:
             plan["title"] = steps[0]["title"]
             logger.info(f"Inferred missing title from first step: {plan['title']}")
         else:
@@ -410,13 +410,16 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
     elif isinstance(plan_data, dict):
         # If it's already a dictionary, convert to JSON string
         # Need to check if it's dict with content field (AIMessage-like)
-        if "content" in plan_data :
+        if "content" in plan_data:
             if isinstance(plan_data["content"], str):
                 logger.debug("Extracting plan content from dict with content field")
                 return plan_data["content"]
             if isinstance(plan_data["content"], dict):
                 logger.debug("Converting content field dict to JSON string")
                 return json.dumps(plan_data["content"], ensure_ascii=False)
+            else:
+                logger.warning(f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string")
+                return str(plan_data["content"])
         else:
             logger.debug("Converting plan dictionary to JSON string")
             return json.dumps(plan_data)

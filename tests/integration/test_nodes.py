@@ -133,12 +133,16 @@ class TestExtractPlanContent:
                 ]
             }
         }
-
         
         result = extract_plan_content(content_dict)
         # Verify the result can be parsed back to a dictionary
         parsed_result = json.loads(result)
         assert parsed_result == content_dict["content"]
+
+    def test_extract_plan_content_with_content_string(self):
+        content_dict = {"content": '{"locale": "en-US", "title": "Test"}'}
+        result = extract_plan_content(content_dict)
+        assert result == '{"locale": "en-US", "title": "Test"}'
 
     def test_extract_plan_content_issue_703_case(self):
         """Test that extract_plan_content handles the specific case from issue #703."""
