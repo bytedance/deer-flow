@@ -177,7 +177,7 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash
-# 选择一个：tavily, duckduckgo, brave_search, arxiv
+# 选择一个：tavily, infoquest,duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
 
