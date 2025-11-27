@@ -404,8 +404,17 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
         return plan_data.content
     elif isinstance(plan_data, dict):
         # If it's already a dictionary, convert to JSON string
-        logger.debug("Converting plan dictionary to JSON string")
-        return json.dumps(plan_data)
+        # Need to check if it's dict with content field (AIMessage-like)
+        if "content" in plan_data :
+            if isinstance(plan_data["content"], str):
+                logger.debug("Extracting plan content from dict with content field")
+                return plan_data["content"]
+            if isinstance(plan_data["content"], dict):
+                logger.debug("Converting content field dict to JSON string")
+                return json.dumps(plan_data["content"], ensure_ascii=False)
+        else:
+            logger.debug("Converting plan dictionary to JSON string")
+            return json.dumps(plan_data)
     else:
         # For any other type, try to convert to string
         logger.warning(f"Unexpected plan data type {type(plan_data).__name__}, attempting to convert to string")
