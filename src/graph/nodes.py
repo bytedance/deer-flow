@@ -181,29 +181,6 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
                 }
             ]
 
-    # ============================================================
-    # SECTION 3: Ensure required Plan fields are present (Issue #710 fix)
-    # ============================================================
-    # Set locale from state if not present
-    if "locale" not in plan or not plan.get("locale"):
-        plan["locale"] = "en-US"  # Default locale
-        logger.info("Added missing locale field with default value 'en-US'")
-
-    # Ensure has_enough_context is present
-    if "has_enough_context" not in plan:
-        plan["has_enough_context"] = False  # Default value
-        logger.info("Added missing has_enough_context field with default value 'False'")
-
-    # Ensure title is present
-    if "title" not in plan or not plan.get("title"):
-        # Try to infer title from steps or use a default
-        if steps and isinstance(steps[0], dict) and "title" in steps[0]:
-            plan["title"] = steps[0]["title"]
-            logger.info(f"Inferred missing title from first step: {plan['title']}")
-        else:
-            plan["title"] = "Research Plan"  # Default title
-            logger.info("Added missing title field with default value 'Research Plan'")
-
     return plan
 
 
@@ -351,6 +328,10 @@ def planner_node(
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
+        # Need to extract the plan from the full_response
+        curr_plan_content = extract_plan_content(curr_plan)
+        # load the current_plan
+        curr_plan = json.loads(repair_json_output(curr_plan_content))
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 0:
@@ -476,15 +457,17 @@ def human_feedback_node(
     try:
         # Safely extract plan content from different types (string, AIMessage, dict)
         original_plan = current_plan
-        current_plan_content = extract_plan_content(current_plan)
-        logger.debug(f"Extracted plan content type: {type(current_plan_content).__name__}")
         
         # Repair the JSON output
-        current_plan = repair_json_output(current_plan_content)
+        current_plan = repair_json_output(current_plan)
+        # parse the plan to dict
+        current_plan = json.loads(current_plan)
+        current_plan_content = extract_plan_content(current_plan)
+        
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
-        new_plan = json.loads(current_plan)
+        new_plan = json.loads(current_plan_content)
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
