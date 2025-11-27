@@ -2324,3 +2324,261 @@ def test_clarification_skips_specific_topics():
         result.update["research_topic"]
         == "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model"
     )
+
+
+# ============================================================================
+# Issue #693 Tests: Multiple web_search ToolMessages Preservation
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_preserves_multiple_tool_messages():
+    """
+    Test for Issue #693: Verify that all ToolMessages from multiple tool calls
+    (e.g., multiple web_search calls) are preserved and not just the final result.
+    
+    This test ensures that when an agent makes multiple web_search calls, each
+    ToolMessage is preserved in the Command update, allowing the frontend to
+    receive and display all search results.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    # Create test state with a plan and an unexecuted step
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    # Create a mock agent that simulates multiple web_search tool calls
+    # This mimics what a ReAct agent does internally
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate the agent making 2 web_search calls with this message sequence:
+        # 1. AIMessage with first tool call
+        # 2. ToolMessage with first tool result
+        # 3. AIMessage with second tool call
+        # 4. ToolMessage with second tool result
+        # 5. Final AIMessage with the complete response
+        
+        messages = [
+            AIMessage(
+                content="I'll search for information about this topic.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "first search query"}
+                }]
+            ),
+            ToolMessage(
+                content="First search result content here",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Let me search for more specific information.",
+                tool_calls=[{
+                    "id": "call_2",
+                    "name": "web_search",
+                    "args": {"query": "second search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Second search result content here",
+                tool_call_id="call_2",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Based on my research, here is the comprehensive answer..."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    # Execute the agent step
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify the result is a Command with correct goto
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify that ALL messages are preserved in the Command update
+    # (not just the final message content)
+    messages_in_update = result.update.get("messages", [])
+    
+    # Should have 5 messages: 2 AIMessages + 2 ToolMessages + 1 final AIMessage
+    assert len(messages_in_update) == 5, (
+        f"Expected 5 messages to be preserved, but got {len(messages_in_update)}. "
+        f"This indicates that intermediate ToolMessages are being dropped, "
+        f"which is the bug from Issue #693."
+    )
+    
+    # Verify message types
+    message_types = [type(msg).__name__ for msg in messages_in_update]
+    assert message_types.count("AIMessage") == 3, "Should have 3 AIMessages"
+    assert message_types.count("ToolMessage") == 2, "Should have 2 ToolMessages"
+    
+    # Verify that we have both ToolMessages with their content
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 2, "Should preserve both tool calls"
+    assert "First search result content here" in tool_messages[0].content
+    assert "Second search result content here" in tool_messages[1].content
+    
+    # Verify that observations still contain the final response
+    assert "observations" in result.update
+    observations = result.update["observations"]
+    assert len(observations) > 0
+    assert "Based on my research" in observations[-1]
+    
+    # Verify step execution result is set to final message
+    assert state["current_plan"].steps[0].execution_res == "Based on my research, here is the comprehensive answer..."
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_single_tool_call_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent makes only a single tool call.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate a single web_search call
+        messages = [
+            AIMessage(
+                content="I'll search for information.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Search result content",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Here is the answer based on the search result."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify all 3 messages are preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 3
+    
+    # Verify the single tool message is present
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert "Search result content" in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_no_tool_calls_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent completes without making any tool calls.
+    """
+    from langchain_core.messages import AIMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Agent responds without making any tool calls
+        messages = [
+            AIMessage(
+                content="Based on my knowledge, here is the answer without needing to search."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify the single message is preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 1
+    
+    # Verify step execution result is set
+    assert state["current_plan"].steps[0].execution_res == "Based on my knowledge, here is the answer without needing to search."
