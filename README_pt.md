@@ -14,6 +14,8 @@
 
 Atualmente, o DeerFlow entrou oficialmente no Centro de Aplicações FaaS da Volcengine. Os usuários podem experimentá-lo online através do link de experiência para sentir intuitivamente suas funções poderosas e operações convenientes. Ao mesmo tempo, para atender às necessidades de implantação de diferentes usuários, o DeerFlow suporta implantação com um clique baseada na Volcengine. Clique no link de implantação para completar rapidamente o processo de implantação e iniciar uma jornada de pesquisa eficiente.
 
+O DeerFlow recentemente integrou o conjunto de ferramentas de busca e rastreamento inteligente desenvolvido independentemente pela BytePlus — [InfoQuest oferece experiência gratuita online](https://console.byteplus.com/infoquest/infoquests)
+
 Por favor, visite [Nosso Site Oficial](https://deerflow.tech/) para maiores detalhes.
 
 ## Demo
@@ -158,7 +160,7 @@ DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no se
   - Requer `TAVILY_API_KEY` no seu arquivo `.env`
   - Inscreva-se em: <https://app.tavily.com/home>
 
-- **InfoQuest**: Um conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
+- **InfoQuest** (recomendado): Um conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
   - Requer `INFOQUEST_API_KEY` no seu arquivo `.env`
   - Suporte para filtragem por intervalo de tempo e filtragem de sites
   - Fornece resultados de busca e extração de conteúdo de alta qualidade
@@ -196,7 +198,7 @@ SEARCH_API=tavily
   - Ao usar uma chave API, você obtém limites de taxa de acesso mais altos
   - Visite <https://jina.ai/reader> para obter mais informações
 
-- **InfoQuest**: Conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
+- **InfoQuest** (recomendado): Conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
   - Requer `INFOQUEST_API_KEY` no seu arquivo `.env`
   - Fornece parâmetros de crawling configuráveis
   - Suporta configurações de timeout personalizadas

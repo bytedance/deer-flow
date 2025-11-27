@@ -13,6 +13,8 @@
 
 Derzeit ist DeerFlow offiziell in das [FaaS-Anwendungszentrum von Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market) eingezogen. Benutzer können es über den [Erfahrungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) online erleben, um seine leistungsstarken Funktionen und bequemen Operationen intuitiv zu spüren. Gleichzeitig unterstützt DeerFlow zur Erfüllung der Bereitstellungsanforderungen verschiedener Benutzer die Ein-Klick-Bereitstellung basierend auf Volcengine. Klicken Sie auf den [Bereitstellungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow), um den Bereitstellungsprozess schnell abzuschließen und eine effiziente Forschungsreise zu beginnen.
 
+DeerFlow hat neu die intelligente Such- und Crawling-Toolset von BytePlus integriert - [InfoQuest unterstützt kostenlose Online-Erfahrung](https://console.byteplus.com/infoquest/infoquests)
+
 Besuchen Sie [unsere offizielle Website](https://deerflow.tech/) für weitere Details.
 
 ## Demo
@@ -156,7 +158,7 @@ DeerFlow unterstützt mehrere Suchmaschinen, die in Ihrer `.env`-Datei über die
   - Erfordert `TAVILY_API_KEY` in Ihrer `.env`-Datei
   - Registrieren Sie sich unter: https://app.tavily.com/home
 
-- **InfoQuest**: Ein KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
+- **InfoQuest** (empfohlen): Ein KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
   - Erfordert `INFOQUEST_API_KEY` in Ihrer `.env`-Datei
   - Unterstützung für Zeitbereichsfilterung und Seitenfilterung
   - Bietet qualitativ hochwertige Suchergebnisse und Inhaltsextraktion
@@ -192,7 +194,7 @@ SEARCH_API=tavily
   - Mit API-Schlüssel erhalten Sie höhere Zugriffsraten
   - Weitere Informationen unter <https://jina.ai/reader>
 
-- **InfoQuest**: KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
+- **InfoQuest** (empfohlen): KI-optimiertes intelligentes Such- und Crawling-Toolset, entwickelt von BytePlus
   - Erfordert `INFOQUEST_API_KEY` in Ihrer `.env`-Datei
   - Bietet konfigurierbare Crawling-Parameter
   - Unterstützt benutzerdefinierte Timeout-Einstellungen

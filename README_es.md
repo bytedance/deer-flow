@@ -13,6 +13,8 @@
 
 Actualmente, DeerFlow ha ingresado oficialmente al Centro de Aplicaciones FaaS de Volcengine. Los usuarios pueden experimentarlo en línea a través del enlace de experiencia para sentir intuitivamente sus potentes funciones y operaciones convenientes. Al mismo tiempo, para satisfacer las necesidades de implementación de diferentes usuarios, DeerFlow admite la implementación con un clic basada en Volcengine. Haga clic en el enlace de implementación para completar rápidamente el proceso de implementación y comenzar un viaje de investigación eficiente.
 
+DeerFlow ha integrado recientemente el conjunto de herramientas de búsqueda y rastreo inteligente desarrollado independientemente por BytePlus - [InfoQuest admite experiencia gratuita en línea](https://console.byteplus.com/infoquest/infoquests)
+
 Por favor, visita [nuestra página web oficial](https://deerflow.tech/) para más detalles.
 
 ## Demostración
@@ -155,7 +157,7 @@ DeerFlow soporta múltiples motores de búsqueda que pueden configurarse en tu a
   - Requiere `TAVILY_API_KEY` en tu archivo `.env`
   - Regístrate en: <https://app.tavily.com/home>
 
-- **InfoQuest**: Un conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
+- **InfoQuest** (recomendado): Un conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
   - Requiere `INFOQUEST_API_KEY` en tu archivo `.env`
   - Soporte para filtrado por rango de fecha y filtrado de sitios web
   - Proporciona resultados de búsqueda y extracción de contenido de alta calidad
@@ -193,7 +195,7 @@ SEARCH_API=tavily
   - Al usar una clave API, se obtienen límites de tasa de acceso más altos
   - Visite <https://jina.ai/reader> para obtener más información
 
-- **InfoQuest**: Conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
+- **InfoQuest** (recomendado): Conjunto de herramientas inteligentes de búsqueda y rastreo optimizadas para IA, desarrollado por BytePlus
   - Requiere `INFOQUEST_API_KEY` en tu archivo `.env`
   - Proporciona parámetros de rastreo configurables
   - Admite configuración de tiempo de espera personalizada

@@ -14,6 +14,7 @@
 
 Currently, DeerFlow has officially entered the [FaaS Application Center of Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market). Users can experience it online through the [experience link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) to intuitively feel its powerful functions and convenient operations. At the same time, to meet the deployment needs of different users, DeerFlow supports one-click deployment based on Volcengine. Click the [deployment link](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow) to quickly complete the deployment process and start an efficient research journey.
 
+DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest supports free online experience](https://console.byteplus.com/infoquest/infoquests)
 
 Please visit [our official website](https://deerflow.tech/) for more details.
 
@@ -159,7 +160,7 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
   - Requires `TAVILY_API_KEY` in your `.env` file
   - Sign up at: https://app.tavily.com/home
 
-- **InfoQuest**: AI-optimized intelligent search and crawling toolset developed by BytePlus
+- **InfoQuest** (recommended): AI-optimized intelligent search and crawling toolset independently developed by BytePlus
   - Requires `INFOQUEST_API_KEY` in your `.env` file
   - Support for time range filtering and site filtering 
   - Provides high-quality search results and content extraction
@@ -194,7 +195,7 @@ DeerFlow supports multiple crawling tools that can be configured in your `conf.y
 
 - **Jina** (default): Freely accessible web content crawling tool
 
-- **InfoQuest**: AI-optimized intelligent search and crawling toolset developed by BytePlus
+- **InfoQuest** (recommended): AI-optimized intelligent search and crawling toolset developed by BytePlus
   - Requires `INFOQUEST_API_KEY` in your `.env` file
   - Provides configurable crawling parameters
   - Supports custom timeout settings
@@ -312,7 +313,6 @@ The system employs a streamlined workflow with the following components:
    - Manages the research flow and decides when to generate the final report
 
 3. **Research Team**: A collection of specialized agents that execute the plan:
-
    - **Researcher**: Conducts web searches and information gathering using tools like web search engines, crawling and even MCP services.
    - **Coder**: Handles code analysis, execution, and technical tasks using Python REPL tool.
      Each agent has access to specific tools optimized for their role and operates within the LangGraph framework
@@ -460,7 +460,6 @@ Please read the following document before using postgres:  https://www.psycopg.o
 
 BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq mannually:
 
-```bash
 pip install psycopg[binary]
 ```
 This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform : https://pypi.org/project/psycopg-binary/#files
@@ -497,7 +496,6 @@ docker build -t deer-flow-api .
 ```
 
 Final, start up a docker container running the web server:
-
 ```bash
 # Replace deer-flow-api-app with your preferred container name
 # Start the server then bind to localhost:8000

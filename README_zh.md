@@ -11,6 +11,8 @@
 
 目前，DeerFlow 已正式入驻[火山引擎的 FaaS 应用中心](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market)，用户可通过[体验链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow)进行在线体验，直观感受其强大功能与便捷操作；同时，为满足不同用户的部署需求，DeerFlow 支持基于火山引擎一键部署，点击[部署链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow)即可快速完成部署流程，开启高效研究之旅。
 
+DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQuest 支持在线免费体验](https://console.byteplus.com/infoquest/infoquests)
+
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
 
 ## 演示
@@ -152,7 +154,7 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
   - 需要在`.env`文件中设置`TAVILY_API_KEY`
   - 注册地址：<https://app.tavily.com/home>
   
-- **InfoQuest**：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+- **InfoQuest**（推荐）：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
   - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
   - 支持时间范围过滤和站点过滤
   - 提供高质量的搜索结果和内容提取
@@ -188,7 +190,7 @@ SEARCH_API=tavily
   - 使用 API 密钥可获得更高的访问速率限制
   - 访问 <https://jina.ai/reader> 了解更多信息
 
-- **InfoQuest**：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+- **InfoQuest**（推荐）：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
   - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
   - 提供可配置的爬取参数
   - 支持自定义超时设置
