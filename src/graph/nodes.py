@@ -975,6 +975,24 @@ async def _execute_agent_step(
     except Exception as validation_error:
         logger.error(f"Error validating agent input messages: {validation_error}")
     
+    # Apply context compression to prevent token overflow (Issue #721)
+    llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_name])
+    if llm_token_limit:
+        token_count_before = sum(
+            len(str(msg.content).split()) for msg in agent_input.get("messages", []) if hasattr(msg, "content")
+        )
+        compressed_state = ContextManager(llm_token_limit, preserve_prefix_message_count=3).compress_messages(
+            {"messages": agent_input["messages"]}
+        )
+        agent_input["messages"] = compressed_state.get("messages", [])
+        token_count_after = sum(
+            len(str(msg.content).split()) for msg in agent_input.get("messages", []) if hasattr(msg, "content")
+        )
+        logger.info(
+            f"Context compression for {agent_name}: {len(compressed_state.get('messages', []))} messages, "
+            f"estimated tokens before: ~{token_count_before}, after: ~{token_count_after}"
+        )
+    
     try:
         result = await agent.ainvoke(
             input=agent_input, config={"recursion_limit": recursion_limit}
