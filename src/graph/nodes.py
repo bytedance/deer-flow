@@ -135,7 +135,8 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
         # Check if step_type is missing or empty
         if "step_type" not in step or not step.get("step_type"):
             # Infer step_type based on need_search value
-            inferred_type = "research" if step.get("need_search", False) else "processing"
+            # Default to "analysis" for non-search steps (Issue #677: not all processing needs code)
+            inferred_type = "research" if step.get("need_search", False) else "analysis"
             step["step_type"] = inferred_type
             logger.info(
                 f"Repaired missing step_type for step {idx} ({step.get('title', 'Untitled')}): "
@@ -1190,4 +1191,28 @@ async def coder_node(
         config,
         "coder",
         [python_repl_tool],
+    )
+
+
+async def analyst_node(
+    state: State, config: RunnableConfig
+) -> Command[Literal["research_team"]]:
+    """Analyst node that performs reasoning and analysis without code execution.
+    
+    This node handles tasks like:
+    - Cross-validating information from multiple sources
+    - Synthesizing research findings
+    - Comparative analysis
+    - Pattern recognition and trend analysis
+    - General reasoning tasks that don't require code
+    """
+    logger.info("Analyst node is analyzing.")
+    logger.debug(f"[analyst_node] Starting analyst agent for reasoning/analysis tasks")
+    
+    # Analyst uses no tools - pure LLM reasoning
+    return await _setup_and_execute_agent_step(
+        state,
+        config,
+        "analyst",
+        [],  # No tools - pure reasoning
     )
