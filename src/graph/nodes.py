@@ -439,6 +439,9 @@ def human_feedback_node(
         
         # Repair the JSON output
         current_plan = repair_json_output(current_plan)
+        # parse the plan to dict
+        current_plan = json.loads(current_plan)
+        current_plan_content = extract_plan_content(current_plan)
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
