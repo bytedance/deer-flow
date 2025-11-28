@@ -487,6 +487,11 @@ async def _stream_graph_events(
                 yield event
         
         logger.debug(f"[{safe_thread_id}] Graph event stream completed. Total events: {event_count}")
+    except asyncio.CancelledError:
+        # User cancelled/interrupted the stream - this is normal, not an error
+        logger.info(f"[{safe_thread_id}] Graph event stream cancelled by user after {event_count} events")
+        # Re-raise to signal cancellation properly without yielding an error event
+        raise
     except Exception as e:
         logger.exception(f"[{safe_thread_id}] Error during graph execution")
         yield _make_event(
@@ -751,7 +756,7 @@ async def generate_ppt(request: GeneratePPTRequest):
         report_content = request.content
         print(report_content)
         workflow = build_ppt_graph()
-        final_state = workflow.invoke({"input": report_content})
+        final_state = workflow.invoke({"input": report_content, "locale": request.locale})
         generated_file_path = final_state["generated_file_path"]
         with open(generated_file_path, "rb") as f:
             ppt_bytes = f.read()

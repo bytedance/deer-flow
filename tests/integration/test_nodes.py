@@ -12,7 +12,182 @@ from src.graph.nodes import (
     planner_node,
     reporter_node,
     researcher_node,
+    extract_plan_content,
 )
+
+
+class TestExtractPlanContent:
+    """Test cases for the extract_plan_content function."""
+
+    def test_extract_plan_content_with_string(self):
+        """Test that extract_plan_content returns the input string as-is."""
+        plan_json_str = '{"locale": "en-US", "has_enough_context": false, "title": "Test Plan"}'
+        result = extract_plan_content(plan_json_str)
+        assert result == plan_json_str
+
+    def test_extract_plan_content_with_ai_message(self):
+        """Test that extract_plan_content extracts content from an AIMessage-like object."""
+        # Create a mock AIMessage object
+        class MockAIMessage:
+            def __init__(self, content):
+                self.content = content
+        
+        plan_content = '{"locale": "zh-CN", "has_enough_context": false, "title": "测试计划"}'
+        plan_message = MockAIMessage(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        assert result == plan_content
+
+    def test_extract_plan_content_with_dict(self):
+        """Test that extract_plan_content converts a dictionary to JSON string."""
+        plan_dict = {
+            "locale": "fr-FR",
+            "has_enough_context": True,
+            "title": "Plan de test",
+            "steps": []
+        }
+        expected_json = json.dumps(plan_dict)
+        
+        result = extract_plan_content(plan_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_with_other_type(self):
+        """Test that extract_plan_content converts other types to string."""
+        plan_value = 12345
+        expected_string = "12345"
+        
+        result = extract_plan_content(plan_value)
+        assert result == expected_string
+
+    def test_extract_plan_content_with_complex_dict(self):
+        """Test that extract_plan_content handles complex nested dictionaries."""
+        plan_dict = {
+            "locale": "zh-CN",
+            "has_enough_context": False,
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "steps": [
+                {
+                    "need_search": True,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                },
+                {
+                    "need_search": True,
+                    "title": "查找其他超高建筑作为对比基准",
+                    "description": "获取其他具有代表性的超高建筑的高度数据，以提供更全面的比较背景。",
+                    "step_type": "research"
+                }
+            ]
+        }
+        
+        result = extract_plan_content(plan_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == plan_dict
+
+    def test_extract_plan_content_with_non_string_content(self):
+        """Test that extract_plan_content handles AIMessage with non-string content."""
+        class MockAIMessageWithNonStringContent:
+            def __init__(self, content):
+                self.content = content
+        
+        # Test with non-string content (should not be extracted)
+        plan_content = 12345
+        plan_message = MockAIMessageWithNonStringContent(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        # Should convert the entire object to string since content is not a string
+        assert isinstance(result, str)
+        assert "MockAIMessageWithNonStringContent" in result
+
+    def test_extract_plan_content_with_empty_string(self):
+        """Test that extract_plan_content handles empty strings."""
+        empty_string = ""
+        result = extract_plan_content(empty_string)
+        assert result == ""
+
+    def test_extract_plan_content_with_empty_dict(self):
+        """Test that extract_plan_content handles empty dictionaries."""
+        empty_dict = {}
+        expected_json = "{}"
+        
+        result = extract_plan_content(empty_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_with_content_dict(self):
+        """Test that extract_plan_content handles dictionaries with content."""
+        content_dict = {"content": {
+                "locale": "zh-CN",
+                "has_enough_context": False,
+                "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+                "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+                "steps": [
+                    {
+                        "need_search": True,
+                        "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                        "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                        "step_type": "research"
+                    }
+                ]
+            }
+        }
+        
+        result = extract_plan_content(content_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == content_dict["content"]
+
+    def test_extract_plan_content_with_content_string(self):
+        content_dict = {"content": '{"locale": "en-US", "title": "Test"}'}
+        result = extract_plan_content(content_dict)
+        assert result == '{"locale": "en-US", "title": "Test"}'
+
+    def test_extract_plan_content_issue_703_case(self):
+        """Test that extract_plan_content handles the specific case from issue #703."""
+        # This is the exact structure that was causing the error in issue #703
+        class MockAIMessageFromIssue703:
+            def __init__(self, content):
+                self.content = content
+                self.additional_kwargs = {}
+                self.response_metadata = {'finish_reason': 'stop', 'model_name': 'qwen-max-latest'}
+                self.type = 'ai'
+                self.id = 'run--ebc626af-3845-472b-aeee-acddebf5a4ea'
+                self.example = False
+                self.tool_calls = []
+                self.invalid_tool_calls = []
+        
+        plan_content = '''{
+            "locale": "zh-CN",
+            "has_enough_context": false,
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "steps": [
+                {
+                    "need_search": true,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                }
+            ]
+        }'''
+        
+        plan_message = MockAIMessageFromIssue703(plan_content)
+        
+        # Extract the content
+        result = extract_plan_content(plan_message)
+        
+        # Verify the extracted content is the same as the original
+        assert result == plan_content
+        
+        # Verify the extracted content can be parsed as JSON
+        parsed_result = json.loads(result)
+        assert parsed_result["locale"] == "zh-CN"
+        assert parsed_result["title"] == "埃菲尔铁塔与世界最高建筑高度比较研究计划"
+        assert len(parsed_result["steps"]) == 1
+        assert parsed_result["steps"][0]["title"] == "收集埃菲尔铁塔和世界最高建筑的高度数据"
+
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
 with patch("src.llms.llm.get_llm_by_type", return_value=MagicMock()):
@@ -950,7 +1125,7 @@ async def test_execute_agent_step_basic(mock_state_with_steps, mock_agent):
         assert "messages" in result.update
         assert "observations" in result.update
         # The new observation should be appended
-        assert result.update["observations"][-1] == "result content"
+        assert result.update["observations"][-1] == "result content" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
         # The step's execution_res should be updated
         assert (
             mock_state_with_steps["current_plan"].steps[1].execution_res
@@ -1004,7 +1179,7 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         result = await _execute_agent_step(state, agent, "researcher")
         assert isinstance(result, Command)
         assert result.goto == "research_team"
-        assert result.update["observations"][-1] == "resource result"
+        assert result.update["observations"][-1] == "resource result" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1299,7 @@ def patch_create_agent():
 
 @pytest.fixture
 def patch_execute_agent_step():
-    async def fake_execute_agent_step(state, agent, agent_type):
+    async def fake_execute_agent_step(state, agent, agent_type, config=None):
         return "EXECUTED"
 
     with patch(
@@ -2149,3 +2324,261 @@ def test_clarification_skips_specific_topics():
         result.update["research_topic"]
         == "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model"
     )
+
+
+# ============================================================================
+# Issue #693 Tests: Multiple web_search ToolMessages Preservation
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_preserves_multiple_tool_messages():
+    """
+    Test for Issue #693: Verify that all ToolMessages from multiple tool calls
+    (e.g., multiple web_search calls) are preserved and not just the final result.
+    
+    This test ensures that when an agent makes multiple web_search calls, each
+    ToolMessage is preserved in the Command update, allowing the frontend to
+    receive and display all search results.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    # Create test state with a plan and an unexecuted step
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    # Create a mock agent that simulates multiple web_search tool calls
+    # This mimics what a ReAct agent does internally
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate the agent making 2 web_search calls with this message sequence:
+        # 1. AIMessage with first tool call
+        # 2. ToolMessage with first tool result
+        # 3. AIMessage with second tool call
+        # 4. ToolMessage with second tool result
+        # 5. Final AIMessage with the complete response
+        
+        messages = [
+            AIMessage(
+                content="I'll search for information about this topic.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "first search query"}
+                }]
+            ),
+            ToolMessage(
+                content="First search result content here",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Let me search for more specific information.",
+                tool_calls=[{
+                    "id": "call_2",
+                    "name": "web_search",
+                    "args": {"query": "second search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Second search result content here",
+                tool_call_id="call_2",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Based on my research, here is the comprehensive answer..."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    # Execute the agent step
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify the result is a Command with correct goto
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify that ALL messages are preserved in the Command update
+    # (not just the final message content)
+    messages_in_update = result.update.get("messages", [])
+    
+    # Should have 5 messages: 2 AIMessages + 2 ToolMessages + 1 final AIMessage
+    assert len(messages_in_update) == 5, (
+        f"Expected 5 messages to be preserved, but got {len(messages_in_update)}. "
+        f"This indicates that intermediate ToolMessages are being dropped, "
+        f"which is the bug from Issue #693."
+    )
+    
+    # Verify message types
+    message_types = [type(msg).__name__ for msg in messages_in_update]
+    assert message_types.count("AIMessage") == 3, "Should have 3 AIMessages"
+    assert message_types.count("ToolMessage") == 2, "Should have 2 ToolMessages"
+    
+    # Verify that we have both ToolMessages with their content
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 2, "Should preserve both tool calls"
+    assert "First search result content here" in tool_messages[0].content
+    assert "Second search result content here" in tool_messages[1].content
+    
+    # Verify that observations still contain the final response
+    assert "observations" in result.update
+    observations = result.update["observations"]
+    assert len(observations) > 0
+    assert "Based on my research" in observations[-1]
+    
+    # Verify step execution result is set to final message
+    assert state["current_plan"].steps[0].execution_res == "Based on my research, here is the comprehensive answer..."
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_single_tool_call_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent makes only a single tool call.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate a single web_search call
+        messages = [
+            AIMessage(
+                content="I'll search for information.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Search result content",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Here is the answer based on the search result."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify all 3 messages are preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 3
+    
+    # Verify the single tool message is present
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert "Search result content" in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_no_tool_calls_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent completes without making any tool calls.
+    """
+    from langchain_core.messages import AIMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Agent responds without making any tool calls
+        messages = [
+            AIMessage(
+                content="Based on my knowledge, here is the answer without needing to search."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify the single message is preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 1
+    
+    # Verify step execution result is set
+    assert state["current_plan"].steps[0].execution_res == "Based on my knowledge, here is the answer without needing to search."
