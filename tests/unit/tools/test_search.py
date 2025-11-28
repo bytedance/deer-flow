@@ -33,7 +33,7 @@ class TestGetWebSearchTool:
     def test_get_web_search_tool_brave(self):
         tool = get_web_search_tool(max_search_results=4)
         assert tool.name == "web_search"
-        assert tool.search_wrapper.api_key == "test_api_key"
+        assert tool.search_wrapper.api_key.get_secret_value() == "test_api_key"
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.ARXIV.value)
     def test_get_web_search_tool_arxiv(self):
@@ -54,7 +54,7 @@ class TestGetWebSearchTool:
     @patch.dict(os.environ, {}, clear=True)
     def test_get_web_search_tool_brave_no_api_key(self):
         tool = get_web_search_tool(max_search_results=1)
-        assert tool.search_wrapper.api_key == ""
+        assert tool.search_wrapper.api_key.get_secret_value() == ""
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
     @patch("src.tools.search.load_yaml_config")
