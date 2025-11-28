@@ -436,10 +436,9 @@ def human_feedback_node(
     try:
         # Safely extract plan content from different types (string, AIMessage, dict)
         original_plan = current_plan
-        current_plan_content = extract_plan_content(current_plan)
         
         # Repair the JSON output
-        current_plan = repair_json_output(current_plan_content)
+        current_plan = repair_json_output(current_plan)
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
