@@ -20,7 +20,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = expected_output
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -38,7 +38,7 @@ class TestPythonReplTool:
 
         # Act & Assert - expect ValidationError when passing invalid input
         with pytest.raises(Exception):  # Could be ValidationError or similar
-            python_repl_tool(invalid_code)
+            python_repl_tool.invoke({"code": invalid_code})
 
         mock_repl.run.assert_not_called()
 
@@ -52,7 +52,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = error_result
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -71,7 +71,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = exception_result
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -90,7 +90,7 @@ class TestPythonReplTool:
         mock_repl.run.side_effect = exception
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -109,7 +109,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = expected_output
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -128,7 +128,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = ""
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_repl.run.assert_called_once_with(code)
@@ -144,7 +144,7 @@ class TestPythonReplTool:
         mock_repl.run.return_value = ""
 
         # Act
-        python_repl_tool(code)
+        python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_logger.info.assert_any_call("Executing Python code")
@@ -158,7 +158,7 @@ class TestPythonReplTool:
         code = "print('test')"
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_logger.warning.assert_called_with(
@@ -176,7 +176,7 @@ class TestPythonReplTool:
         code = "print('test')"
 
         # Act
-        result = python_repl_tool(code)
+        result = python_repl_tool.invoke({"code": code})
 
         # Assert
         mock_logger.warning.assert_called_with(
@@ -197,7 +197,7 @@ class TestPythonReplTool:
             mock_repl.run.return_value = expected_output
 
             # Act
-            result = python_repl_tool(code)
+            result = python_repl_tool.invoke({"code": code})
 
             # Assert
             mock_repl.run.assert_called_once_with(code)
@@ -213,7 +213,7 @@ class TestPythonReplTool:
             code = "print('disabled')"
 
             # Act
-            result = python_repl_tool(code)
+            result = python_repl_tool.invoke({"code": code})
 
             # Assert
             mock_logger.warning.assert_called_with(
