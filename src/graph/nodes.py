@@ -146,24 +146,29 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
     # SECTION 2: Enforce web search requirements
     # ============================================================
     if enforce_web_search:
-        # Check if any step has need_search=true
-        has_search_step = any(step.get("need_search", False) for step in steps)
+        # Check if any step has need_search=true (only check dict steps)
+        has_search_step = any(
+            step.get("need_search", False) 
+            for step in steps 
+            if isinstance(step, dict)
+        )
 
         if not has_search_step and steps:
             # Ensure first research step has web search enabled
             for idx, step in enumerate(steps):
-                if step.get("step_type") == "research":
+                if isinstance(step, dict) and step.get("step_type") == "research":
                     step["need_search"] = True
                     logger.info(f"Enforced web search on research step at index {idx}")
                     break
             else:
                 # Fallback: If no research step exists, convert the first step to a research step with web search enabled.
                 # This ensures that at least one step will perform a web search as required.
-                steps[0]["step_type"] = "research"
-                steps[0]["need_search"] = True
-                logger.info(
-                    "Converted first step to research with web search enforcement"
-                )
+                if isinstance(steps[0], dict):
+                    steps[0]["step_type"] = "research"
+                    steps[0]["need_search"] = True
+                    logger.info(
+                        "Converted first step to research with web search enforcement"
+                    )
         elif not has_search_step and not steps:
             # Add a default research step if no steps exist
             logger.warning("Plan has no steps. Adding default research step.")
@@ -323,6 +328,10 @@ def planner_node(
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
+        # Need to extract the plan from the full_response
+        curr_plan_content = extract_plan_content(curr_plan)
+        # load the current_plan
+        curr_plan = json.loads(repair_json_output(curr_plan_content))
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 0:
@@ -381,8 +390,20 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
         return plan_data.content
     elif isinstance(plan_data, dict):
         # If it's already a dictionary, convert to JSON string
-        logger.debug("Converting plan dictionary to JSON string")
-        return json.dumps(plan_data)
+        # Need to check if it's dict with content field (AIMessage-like)
+        if "content" in plan_data:
+            if isinstance(plan_data["content"], str):
+                logger.debug("Extracting plan content from dict with content field")
+                return plan_data["content"]
+            if isinstance(plan_data["content"], dict):
+                logger.debug("Converting content field dict to JSON string")
+                return json.dumps(plan_data["content"], ensure_ascii=False)
+            else:
+                logger.warning(f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string")
+                return str(plan_data["content"])
+        else:
+            logger.debug("Converting plan dictionary to JSON string")
+            return json.dumps(plan_data)
     else:
         # For any other type, try to convert to string
         logger.warning(f"Unexpected plan data type {type(plan_data).__name__}, attempting to convert to string")
@@ -1024,14 +1045,25 @@ async def _execute_agent_step(
     current_step.execution_res = response_content
     logger.info(f"Step '{current_step.title}' execution completed by {agent_name}")
 
+    # Include all messages from agent result to preserve intermediate tool calls/results
+    # This ensures multiple web_search calls all appear in the stream, not just the final result
+    agent_messages = result.get("messages", [])
+    logger.debug(
+        f"{agent_name.capitalize()} returned {len(agent_messages)} messages. "
+        f"Message types: {[type(msg).__name__ for msg in agent_messages]}"
+    )
+    
+    # Count tool messages for logging
+    tool_message_count = sum(1 for msg in agent_messages if isinstance(msg, ToolMessage))
+    if tool_message_count > 0:
+        logger.info(
+            f"{agent_name.capitalize()} agent made {tool_message_count} tool calls. "
+            f"All tool results will be preserved and streamed to frontend."
+        )
+
     return Command(
         update={
-            "messages": [
-                HumanMessage(
-                    content=response_content,
-                    name=agent_name,
-                )
-            ],
+            "messages": agent_messages,
             "observations": observations + [response_content + validation_info],
             **preserve_state_meta_fields(state),
         },
