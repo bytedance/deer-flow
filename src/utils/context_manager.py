@@ -166,13 +166,17 @@ class ContextManager:
         messages = state["messages"]
 
         if not self.is_over_limit(messages):
+            logger.debug(f"Messages within limit ({self.count_tokens(messages)} <= {self.token_limit} tokens)")
             return state
 
-        # 2. Compress messages
+        # Compress messages
+        original_token_count = self.count_tokens(messages)
         compressed_messages = self._compress_messages(messages)
+        compressed_token_count = self.count_tokens(compressed_messages)
 
-        logger.info(
-            f"Message compression completed: {self.count_tokens(messages)} -> {self.count_tokens(compressed_messages)} tokens"
+        logger.warning(
+            f"Message compression executed (Issue #721): {original_token_count} -> {compressed_token_count} tokens "
+            f"(limit: {self.token_limit}), {len(messages)} -> {len(compressed_messages)} messages"
         )
 
         state["messages"] = compressed_messages
