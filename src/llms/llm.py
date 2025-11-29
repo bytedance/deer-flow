@@ -118,11 +118,12 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     # Filter out unexpected parameters to prevent LangChain warnings (Issue #411)
     # This prevents configuration keys like SEARCH_ENGINE from being passed to LLM constructors
-    unexpected_keys = [key for key in merged_conf.keys() if key.lower() not in {k.lower() for k in ALLOWED_LLM_CONFIG_KEYS}]
+    allowed_keys_lower = {k.lower() for k in ALLOWED_LLM_CONFIG_KEYS}
+    unexpected_keys = [key for key in merged_conf.keys() if key.lower() not in allowed_keys_lower]
     for key in unexpected_keys:
         removed_value = merged_conf.pop(key)
         logger.warning(
-            f"Removed unexpected LLM configuration key '{key}' (value: {removed_value}). "
+            f"Removed unexpected LLM configuration key '{key}'. "
             f"This key is not a valid LLM parameter and may have been placed in the wrong section of conf.yaml. "
             f"Valid LLM config keys include: model, api_key, base_url, max_retries, temperature, etc."
         )
