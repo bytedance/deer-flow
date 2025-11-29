@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, get_args
@@ -15,8 +16,56 @@ from src.config import load_yaml_config
 from src.config.agents import LLMType
 from src.llms.providers.dashscope import ChatDashscope
 
+logger = logging.getLogger(__name__)
+
 # Cache for LLM instances
 _llm_cache: dict[LLMType, BaseChatModel] = {}
+
+# Allowed LLM configuration keys to prevent unexpected parameters from being passed
+# to LLM constructors (Issue #411 - SEARCH_ENGINE warning fix)
+ALLOWED_LLM_CONFIG_KEYS = {
+    # Common LLM configuration keys
+    "model",
+    "api_key",
+    "base_url",
+    "api_base",
+    "max_retries",
+    "timeout",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "n",
+    "stream",
+    "logprobs",
+    "echo",
+    "best_of",
+    "logit_bias",
+    "user",
+    "seed",
+    # SSL and HTTP client settings
+    "verify_ssl",
+    "http_client",
+    "http_async_client",
+    # Platform-specific keys
+    "platform",
+    "google_api_key",
+    # Azure-specific keys
+    "azure_endpoint",
+    "azure_deployment",
+    "api_version",
+    "azure_ad_token",
+    "azure_ad_token_provider",
+    # Dashscope/Doubao specific keys
+    "extra_body",
+    # Token limit for context compression (removed before passing to LLM)
+    "token_limit",
+    # Default headers
+    "default_headers",
+    "default_query",
+}
 
 
 def _get_config_file_path() -> str:
@@ -66,6 +115,17 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     # Merge configurations, with environment variables taking precedence
     merged_conf = {**llm_conf, **env_conf}
+
+    # Filter out unexpected parameters to prevent LangChain warnings (Issue #411)
+    # This prevents configuration keys like SEARCH_ENGINE from being passed to LLM constructors
+    unexpected_keys = [key for key in merged_conf.keys() if key.lower() not in {k.lower() for k in ALLOWED_LLM_CONFIG_KEYS}]
+    for key in unexpected_keys:
+        removed_value = merged_conf.pop(key)
+        logger.warning(
+            f"Removed unexpected LLM configuration key '{key}' (value: {removed_value}). "
+            f"This key is not a valid LLM parameter and may have been placed in the wrong section of conf.yaml. "
+            f"Valid LLM config keys include: model, api_key, base_url, max_retries, temperature, etc."
+        )
 
     # Remove unnecessary parameters when initializing the client
     if "token_limit" in merged_conf:
