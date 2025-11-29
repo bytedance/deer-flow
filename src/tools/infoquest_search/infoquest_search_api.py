@@ -53,7 +53,7 @@ class InfoQuestAPIWrapper(BaseModel):
         query: str,
         time_range: int,
         site: str,
-        output_format: str="JSON",
+        output_format: str = "JSON",
     ) -> Dict:
         """Get results from the InfoQuest Search API synchronously."""
         if logger.isEnabledFor(logging.DEBUG):
@@ -76,7 +76,7 @@ class InfoQuestAPIWrapper(BaseModel):
             "format": output_format,
             "query": query
         }
-        if time_range >0:
+        if time_range > 0:
             params["time_range"] = time_range
             logger.debug(f"InfoQuest - Applying time range filter: time_range_days={time_range}")
 
@@ -141,7 +141,7 @@ class InfoQuestAPIWrapper(BaseModel):
                 logger.debug(f"Applying site filter in async request: {site}")
 
             async with aiohttp.ClientSession(trust_env=True) as session:
-                async with session.post(f"{INFOQUEST_API_URL}", headers = headers, json=params) as res:
+                async with session.post(f"{INFOQUEST_API_URL}", headers=headers, json=params) as res:
                     if res.status == 200:
                         data = await res.text()
                         return data
@@ -161,7 +161,7 @@ class InfoQuestAPIWrapper(BaseModel):
         return json.loads(results_json_str)["search_result"]
 
     def clean_results_with_images(
-        self, raw_results: List[Dict[str, Dict[str, Dict[str,Any]]]]
+        self, raw_results: List[Dict[str, Dict[str, Dict[str, Any]]]]
     ) -> List[Dict]:
         """Clean results from InfoQuest Search API."""
         logger.debug("Processing search results")
@@ -173,7 +173,7 @@ class InfoQuestAPIWrapper(BaseModel):
         for content_list in raw_results:
             content = content_list["content"]
             results = content["results"]
-            """Clean results from InfoQuest Search API."""
+
 
             if results.get("organic"):
                 organic_results = results["organic"]

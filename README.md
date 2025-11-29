@@ -162,7 +162,7 @@ DeerFlow supports multiple search engines that can be configured in your `.env` 
 
 - **InfoQuest** (recommended): AI-optimized intelligent search and crawling toolset independently developed by BytePlus
   - Requires `INFOQUEST_API_KEY` in your `.env` file
-  - Support for time range filtering and site filtering 
+  - Support for time range filtering and site filtering
   - Provides high-quality search results and content extraction
   - Sign up at: https://console.byteplus.com/infoquest/infoquests
   - Visit https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest to learn more
@@ -466,6 +466,7 @@ Please read the following document before using postgres:  https://www.psycopg.o
 
 BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq mannually:
 
+```bash
 pip install psycopg[binary]
 ```
 This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform : https://pypi.org/project/psycopg-binary/#files

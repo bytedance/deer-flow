@@ -21,7 +21,7 @@ class SearchEngine(enum.Enum):
 
 class CrawlerEngine(enum.Enum):
     JINA = "jina"
-    INFOQUEST ="infoquest"
+    INFOQUEST = "infoquest"
 
 
 # Tool configuration

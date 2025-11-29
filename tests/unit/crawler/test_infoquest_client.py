@@ -4,7 +4,7 @@
 from unittest.mock import Mock, patch
 import json
 
-import pytest
+
 
 from src.crawler.infoquest_client import InfoQuestClient
 

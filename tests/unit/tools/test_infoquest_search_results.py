@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 import json
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 import pytest
 
-from src.tools.infoquest_search.infoquest_search_api import InfoQuestAPIWrapper
+
 
 
 class TestInfoQuestSearchResults:

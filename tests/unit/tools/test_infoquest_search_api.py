@@ -1,8 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
-import json
-import sys
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+
+from unittest.mock import Mock, patch
 
 import pytest
 import requests
@@ -167,7 +167,7 @@ class TestInfoQuestAPIWrapper:
         assert news_result["url"] == "https://example.com/news"
         assert news_result["source"] == "Test Source"
 
-        # Test image result -
+        # Test image result
         image_result = cleaned_results[2]
         assert image_result["type"] == "image_url"
         assert image_result["image_url"] == "https://example.com/image.jpg"

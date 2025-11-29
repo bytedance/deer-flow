@@ -178,7 +178,7 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
 お好みの検索エンジンを設定するには、`.env`ファイルで`SEARCH_API`変数を設定します：
 
 ```bash
-// 選択肢: tavily, infoquest, duckduckgo, brave_search, arxiv
+# 選択肢: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
 
@@ -577,7 +577,7 @@ DeerFlow には人間参加型ループメカニズムが含まれており、�
 
 ### コマンドライン引数
 
-アプリケーションは動作をカスタマイゼるための複数のコマンドライン引数をサポートしています：
+アプリケーションは動作をカスタマイズするための複数のコマンドライン引数をサポートしています：
 
 - **query**：処理する研究クエリ（複数の単語でも可）
 - **--interactive**：組み込み質問を使用したインタラクティブモードで実行
