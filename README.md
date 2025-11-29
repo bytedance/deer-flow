@@ -346,6 +346,12 @@ curl --location 'http://localhost:8000/api/tts' \
 ## Development
 
 ### Testing
+Install development dependencies:
+
+```bash
+uv pip install -e ".[test]"
+```
+
 
 Run the test suite:
 

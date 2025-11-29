@@ -2103,7 +2103,8 @@ def test_planner_node_issue_650_missing_step_type_basic():
     # Verify all steps have step_type after fix
     assert isinstance(fixed_plan, dict)
     assert fixed_plan["steps"][0]["step_type"] == "research"
-    assert fixed_plan["steps"][1]["step_type"] == "processing"
+    # Issue #677: non-search steps now default to "analysis" instead of "processing"
+    assert fixed_plan["steps"][1]["step_type"] == "analysis"
     assert all("step_type" in step for step in fixed_plan["steps"])
 
 
@@ -2147,7 +2148,8 @@ def test_planner_node_issue_650_water_footprint_scenario():
     assert len(fixed_plan["steps"]) == 3
     assert fixed_plan["steps"][0]["step_type"] == "research"
     assert fixed_plan["steps"][1]["step_type"] == "research"
-    assert fixed_plan["steps"][2]["step_type"] == "processing"
+    # Issue #677: non-search steps now default to "analysis" instead of "processing"
+    assert fixed_plan["steps"][2]["step_type"] == "analysis"
     assert all("step_type" in step for step in fixed_plan["steps"])
 
 
@@ -2272,7 +2274,8 @@ def test_plan_validation_with_all_issue_650_error_scenarios():
         # All steps should have step_type after fix
         for step in fixed["steps"]:
             assert "step_type" in step
-            assert step["step_type"] in ["research", "processing"]
+            # Issue #677: 'analysis' is now a valid step_type
+            assert step["step_type"] in ["research", "analysis", "processing"]
 
 def test_clarification_skips_specific_topics():
     """Coordinator should skip clarification for already specific topics."""

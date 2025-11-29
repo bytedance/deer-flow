@@ -19,7 +19,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         assert isinstance(result, str)
@@ -44,7 +44,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         result_dict = json.loads(result)
@@ -61,7 +61,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         assert isinstance(result, str)
@@ -80,7 +80,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         assert isinstance(result, str)
@@ -103,7 +103,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         assert isinstance(result, str)
@@ -123,7 +123,7 @@ class TestCrawlTool:
         url = "https://example.com"
 
         # Act
-        result = crawl_tool(url)
+        result = crawl_tool.invoke({"url": url})
 
         # Assert
         assert isinstance(result, str)
@@ -171,7 +171,7 @@ class TestPDFHandling:
         pdf_url = "https://example.com/document.pdf"
         
         # Act
-        result = crawl_tool(pdf_url)
+        result = crawl_tool.invoke({"url": pdf_url})
         
         # Assert
         assert isinstance(result, str)
@@ -189,7 +189,7 @@ class TestPDFHandling:
         issue_pdf_url = "https://pdf.dfcfw.com/pdf/H3_AP202503071644153386_1.pdf"
         
         # Act
-        result = crawl_tool(issue_pdf_url)
+        result = crawl_tool.invoke({"url": issue_pdf_url})
         
         # Assert
         result_dict = json.loads(result)
@@ -204,7 +204,7 @@ class TestPDFHandling:
         pdf_url = "https://example.com/document.pdf"
         
         # Act
-        result = crawl_tool(pdf_url)
+        result = crawl_tool.invoke({"url": pdf_url})
         
         # Assert
         # Crawler should not be instantiated for PDF URLs
