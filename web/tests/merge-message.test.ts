@@ -244,6 +244,59 @@ describe("mergeMessage", () => {
       expect(result1.toolCalls?.length).toBe(1);
     });
 
+    it("should convert escaped characters and parse args end-to-end", () => {
+      const message = createBaseMessage();
+
+      // First event: tool call with escaped JSON characters
+      const event1: ToolCallsEvent = {
+        type: "tool_calls",
+        data: {
+          id: "test-msg-1",
+          thread_id: "thread-1",
+          agent: "researcher",
+          role: "assistant",
+          tool_calls: [
+            {
+              type: "tool_call",
+              id: "call-1",
+              name: "search",
+              args: { query: "test" },
+            },
+          ],
+          tool_call_chunks: [
+            {
+              type: "tool_call_chunk",
+              index: 0,
+              id: "call-1",
+              name: "search",
+              args: '&#123;"query": "test"&#125;',
+            },
+          ],
+        },
+      };
+
+      const result1 = mergeMessage(message, event1);
+      // Verify escaped chars were converted in argsChunks
+      expect(result1.toolCalls?.[0]?.argsChunks?.[0]).toBe('{"query": "test"}');
+
+      // Second event: finish reason triggers safeParseToolArgs
+      const finishEvent: ChatEvent = {
+        type: "message_chunk",
+        data: {
+          id: "test-msg-1",
+          thread_id: "thread-1",
+          agent: "researcher",
+          role: "assistant",
+          finish_reason: "tool_calls",
+        },
+      };
+
+      const result2 = mergeMessage(result1, finishEvent);
+      // Verify args were successfully parsed
+      expect(result2.toolCalls?.[0]?.args).toEqual({ query: "test" });
+      expect(result2.toolCalls?.[0]?.argsChunks).toBeUndefined();
+    });
+
     it("should convert escaped characters in args", () => {
       const message = createBaseMessage();
       message.toolCalls = [
