@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 class StepType(str, Enum):
     RESEARCH = "research"
+    ANALYSIS = "analysis"
     PROCESSING = "processing"
 
 

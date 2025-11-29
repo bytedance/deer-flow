@@ -29,7 +29,7 @@ class TestValidateAndFixPlanStepTypeRepair:
         assert result["steps"][0]["step_type"] == "research"
 
     def test_repair_missing_step_type_with_need_search_false(self):
-        """Test that missing step_type is inferred as 'processing' when need_search=false."""
+        """Test that missing step_type is inferred as 'analysis' when need_search=false (Issue #677)."""
         plan = {
             "steps": [
                 {
@@ -43,10 +43,11 @@ class TestValidateAndFixPlanStepTypeRepair:
 
         result = validate_and_fix_plan(plan)
 
-        assert result["steps"][0]["step_type"] == "processing"
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][0]["step_type"] == "analysis"
 
-    def test_repair_missing_step_type_default_to_processing(self):
-        """Test that missing step_type defaults to 'processing' when need_search is not specified."""
+    def test_repair_missing_step_type_default_to_analysis(self):
+        """Test that missing step_type defaults to 'analysis' when need_search is not specified (Issue #677)."""
         plan = {
             "steps": [
                 {
@@ -59,7 +60,8 @@ class TestValidateAndFixPlanStepTypeRepair:
 
         result = validate_and_fix_plan(plan)
 
-        assert result["steps"][0]["step_type"] == "processing"
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][0]["step_type"] == "analysis"
 
     def test_repair_empty_step_type_field(self):
         """Test that empty step_type field is repaired."""
@@ -93,7 +95,8 @@ class TestValidateAndFixPlanStepTypeRepair:
 
         result = validate_and_fix_plan(plan)
 
-        assert result["steps"][0]["step_type"] == "processing"
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][0]["step_type"] == "analysis"
 
     def test_multiple_steps_with_mixed_missing_step_types(self):
         """Test repair of multiple steps with different missing step_type scenarios."""
@@ -328,7 +331,8 @@ class TestValidateAndFixPlanIntegration:
 
         # step_type should be repaired
         assert result["steps"][0]["step_type"] == "research"
-        assert result["steps"][1]["step_type"] == "processing"
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][1]["step_type"] == "analysis"
 
         # First research step should have web search (already has it)
         assert result["steps"][0]["need_search"] is True
@@ -354,12 +358,13 @@ class TestValidateAndFixPlanIntegration:
 
         result = validate_and_fix_plan(plan, enforce_web_search=True)
 
-        # Step 1: Originally processing but converted to research with web search enforcement
+        # Step 1: Originally analysis (from auto-repair) but converted to research with web search enforcement
         assert result["steps"][0]["step_type"] == "research"
         assert result["steps"][0]["need_search"] is True
 
-        # Step 2: Should remain as processing since enforcement already satisfied by step 1
-        assert result["steps"][1]["step_type"] == "processing"
+        # Step 2: Should remain as analysis since enforcement already satisfied by step 1
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][1]["step_type"] == "analysis"
         assert result["steps"][1]["need_search"] is False
 
 class TestValidateAndFixPlanIssue650:
@@ -400,7 +405,8 @@ class TestValidateAndFixPlanIssue650:
         # All steps should now have step_type
         assert result["steps"][0]["step_type"] == "research"
         assert result["steps"][1]["step_type"] == "research"
-        assert result["steps"][2]["step_type"] == "processing"
+        # Issue #677: non-search steps now default to 'analysis' instead of 'processing'
+        assert result["steps"][2]["step_type"] == "analysis"
 
     def test_issue_650_scenario_passes_pydantic_validation(self):
         """Test that fixed plan can be validated by Pydantic schema."""
@@ -461,7 +467,8 @@ class TestValidateAndFixPlanIssue650:
         # All steps should have step_type now
         for step in result["steps"]:
             assert "step_type" in step
-            assert step["step_type"] in ["research", "processing"]
+            # Issue #677: 'analysis' is now a valid step_type
+            assert step["step_type"] in ["research", "analysis", "processing"]
 
     def test_issue_650_no_exceptions_raised(self):
         """Test that validate_and_fix_plan handles all edge cases without raising exceptions."""
