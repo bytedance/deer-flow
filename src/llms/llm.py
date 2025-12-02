@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, get_args
@@ -15,8 +16,56 @@ from src.config import load_yaml_config
 from src.config.agents import LLMType
 from src.llms.providers.dashscope import ChatDashscope
 
+logger = logging.getLogger(__name__)
+
 # Cache for LLM instances
 _llm_cache: dict[LLMType, BaseChatModel] = {}
+
+# Allowed LLM configuration keys to prevent unexpected parameters from being passed
+# to LLM constructors (Issue #411 - SEARCH_ENGINE warning fix)
+ALLOWED_LLM_CONFIG_KEYS = {
+    # Common LLM configuration keys
+    "model",
+    "api_key",
+    "base_url",
+    "api_base",
+    "max_retries",
+    "timeout",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "n",
+    "stream",
+    "logprobs",
+    "echo",
+    "best_of",
+    "logit_bias",
+    "user",
+    "seed",
+    # SSL and HTTP client settings
+    "verify_ssl",
+    "http_client",
+    "http_async_client",
+    # Platform-specific keys
+    "platform",
+    "google_api_key",
+    # Azure-specific keys
+    "azure_endpoint",
+    "azure_deployment",
+    "api_version",
+    "azure_ad_token",
+    "azure_ad_token_provider",
+    # Dashscope/Doubao specific keys
+    "extra_body",
+    # Token limit for context compression (removed before passing to LLM)
+    "token_limit",
+    # Default headers
+    "default_headers",
+    "default_query",
+}
 
 
 def _get_config_file_path() -> str:
@@ -66,6 +115,18 @@ def _create_llm_use_conf(llm_type: LLMType, conf: Dict[str, Any]) -> BaseChatMod
 
     # Merge configurations, with environment variables taking precedence
     merged_conf = {**llm_conf, **env_conf}
+
+    # Filter out unexpected parameters to prevent LangChain warnings (Issue #411)
+    # This prevents configuration keys like SEARCH_ENGINE from being passed to LLM constructors
+    allowed_keys_lower = {k.lower() for k in ALLOWED_LLM_CONFIG_KEYS}
+    unexpected_keys = [key for key in merged_conf.keys() if key.lower() not in allowed_keys_lower]
+    for key in unexpected_keys:
+        removed_value = merged_conf.pop(key)
+        logger.warning(
+            f"Removed unexpected LLM configuration key '{key}'. "
+            f"This key is not a valid LLM parameter and may have been placed in the wrong section of conf.yaml. "
+            f"Valid LLM config keys include: model, api_key, base_url, max_retries, temperature, etc."
+        )
 
     # Remove unnecessary parameters when initializing the client
     if "token_limit" in merged_conf:
@@ -178,23 +239,101 @@ def get_configured_llm_models() -> dict[str, list[str]]:
         return {}
 
 
+def _get_model_token_limit_defaults() -> dict[str, int]:
+    """
+    Get default token limits for common LLM models.
+    These are conservative limits to prevent token overflow errors (Issue #721).
+    Users can override by setting token_limit in their config.
+    """
+    return {
+        # OpenAI models
+        "gpt-4o": 120000,
+        "gpt-4-turbo": 120000,
+        "gpt-4": 8000,
+        "gpt-3.5-turbo": 4000,
+        # Anthropic Claude
+        "claude-3": 180000,
+        "claude-2": 100000,
+        # Google Gemini
+        "gemini-2": 180000,
+        "gemini-1.5-pro": 180000,
+        "gemini-1.5-flash": 180000,
+        "gemini-pro": 30000,
+        # Bytedance Doubao
+        "doubao": 200000,
+        # DeepSeek
+        "deepseek": 100000,
+        # Ollama/local
+        "qwen": 30000,
+        "llama": 4000,
+        # Default fallback for unknown models
+        "default": 100000,
+    }
+
+
+def _infer_token_limit_from_model(model_name: str) -> int:
+    """
+    Infer a reasonable token limit from the model name.
+    This helps protect against token overflow errors when token_limit is not explicitly configured.
+    
+    Args:
+        model_name: The model name from configuration
+        
+    Returns:
+        A conservative token limit based on known model capabilities
+    """
+    if not model_name:
+        return 100000  # Safe default
+    
+    model_name_lower = model_name.lower()
+    defaults = _get_model_token_limit_defaults()
+    
+    # Try exact or prefix matches
+    for key, limit in defaults.items():
+        if key in model_name_lower:
+            return limit
+    
+    # Return safe default if no match found
+    return defaults["default"]
+
+
 def get_llm_token_limit_by_type(llm_type: str) -> int:
     """
     Get the maximum token limit for a given LLM type.
+    
+    Priority order:
+    1. Explicitly configured token_limit in conf.yaml
+    2. Inferred from model name based on known model capabilities
+    3. Safe default (100,000 tokens)
+    
+    This helps prevent token overflow errors (Issue #721) even when token_limit is not configured.
 
     Args:
-        llm_type (str): The type of LLM.
+        llm_type (str): The type of LLM (e.g., 'basic', 'reasoning', 'vision', 'code').
 
     Returns:
-        int: The maximum token limit for the specified LLM type.
+        int: The maximum token limit for the specified LLM type (conservative estimate).
     """
-
     llm_type_config_keys = _get_llm_type_config_keys()
     config_key = llm_type_config_keys.get(llm_type)
 
     conf = load_yaml_config(_get_config_file_path())
-    llm_max_token = conf.get(config_key, {}).get("token_limit")
-    return llm_max_token
+    model_config = conf.get(config_key, {})
+    
+    # First priority: explicitly configured token_limit
+    if "token_limit" in model_config:
+        configured_limit = model_config["token_limit"]
+        if configured_limit is not None:
+            return configured_limit
+    
+    # Second priority: infer from model name
+    model_name = model_config.get("model")
+    if model_name:
+        inferred_limit = _infer_token_limit_from_model(model_name)
+        return inferred_limit
+    
+    # Fallback: safe default
+    return _get_model_token_limit_defaults()["default"]
 
 
 # In the future, we will use reasoning_llm and vl_llm for different purposes

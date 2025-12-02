@@ -12,6 +12,7 @@ BASIC_MODEL:
   api_key: xxxx
   # max_retries: 3 # Maximum number of retries for LLM calls
   # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
+  # token_limit: 200000 # Maximum input tokens for context compression (prevents token overflow errors)
 
 # Local model configuration example:
 
@@ -39,6 +40,7 @@ BASIC_MODEL:
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
 #   max_retries: 3 # Maximum number of retries for LLM calls
+#   token_limit: 150000 # Maximum input tokens for context compression
 
 
 # OTHER SETTINGS:
@@ -59,9 +61,13 @@ BASIC_MODEL:
 #   # When interrupt is triggered, user will be prompted to approve/reject
 #   # Approved keywords: "approved", "approve", "yes", "proceed", "continue", "ok", "okay", "accepted", "accept"
 
-# Search engine configuration (Only supports Tavily currently)
+# Search engine configuration
+# Supported engines: tavily, infoquest
 # SEARCH_ENGINE:
-#   engine: tavily
+#   # Engine type to use: "tavily" or "infoquest"
+#   engine: tavily or infoquest
+#   
+#   # The following parameters are specific to Tavily
 #   # Only include results from these domains
 #   include_domains:
 #     - example.com
@@ -86,3 +92,28 @@ BASIC_MODEL:
 #   min_score_threshold: 0.0
 #   # Maximum content length per page
 #   max_content_length_per_page: 4000
+#   
+#   # The following parameters are specific to InfoQuest
+#   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
+#   time_range: 30
+#   # Used to limit the scope of search results, only returns content from specified whitelisted domains. Set to empty string to disable site filtering
+#   site: "example.com"
+
+
+# Crawler engine configuration
+# Supported engines: jina (default), infoquest
+# Uncomment the following section to configure crawler engine
+# CRAWLER_ENGINE:
+#   # Engine type to use: "jina" (default) or "infoquest"
+#   engine: infoquest
+#
+#   # The following timeout parameters are only effective when engine is set to "infoquest"
+#   # Waiting time after page loading (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   fetch_time: 10
+#   # Overall timeout for the entire crawling process (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   timeout: 30
+#   # Timeout for navigating to the page (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   navi_timeout: 15

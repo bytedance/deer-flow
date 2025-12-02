@@ -4,7 +4,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config.report_style import ReportStyle
 from src.prompt_enhancer.graph.enhancer_node import prompt_enhancer_node

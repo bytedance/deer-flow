@@ -85,3 +85,43 @@ def test_get_llm_by_type_caches(monkeypatch, dummy_conf):
     inst2 = llm.get_llm_by_type("basic")
     assert inst1 is inst2
     assert called["called"]
+
+
+def test_create_llm_filters_unexpected_keys(monkeypatch, caplog):
+    """Test that unexpected configuration keys like SEARCH_ENGINE are filtered out (Issue #411)."""
+    import logging
+    
+    # Clear any existing environment variables that might interfere
+    monkeypatch.delenv("BASIC_MODEL__API_KEY", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__BASE_URL", raising=False)
+    monkeypatch.delenv("BASIC_MODEL__MODEL", raising=False)
+    
+    # Config with unexpected keys that should be filtered
+    conf_with_unexpected_keys = {
+        "BASIC_MODEL": {
+            "api_key": "test_key",
+            "base_url": "http://test",
+            "model": "gpt-4",
+            "SEARCH_ENGINE": {"include_domains": ["example.com"]},  # Should be filtered
+            "engine": "tavily",  # Should be filtered
+        }
+    }
+    
+    with caplog.at_level(logging.WARNING):
+        result = llm._create_llm_use_conf("basic", conf_with_unexpected_keys)
+    
+    # Verify the LLM was created
+    assert isinstance(result, DummyChatOpenAI)
+    
+    # Verify unexpected keys were not passed to the LLM
+    assert "SEARCH_ENGINE" not in result.kwargs
+    assert "engine" not in result.kwargs
+    
+    # Verify valid keys were passed
+    assert result.kwargs["api_key"] == "test_key"
+    assert result.kwargs["base_url"] == "http://test"
+    assert result.kwargs["model"] == "gpt-4"
+    
+    # Verify warnings were logged
+    assert any("SEARCH_ENGINE" in record.message for record in caplog.records)
+    assert any("engine" in record.message for record in caplog.records)

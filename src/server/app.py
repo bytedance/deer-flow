@@ -308,13 +308,16 @@ def _create_event_stream_message(
 
 def _create_interrupt_event(thread_id, event_data):
     """Create interrupt event."""
+    interrupt = event_data["__interrupt__"][0]
+    # Use the 'id' attribute (LangGraph 1.0+) instead of deprecated 'ns[0]'
+    interrupt_id = getattr(interrupt, "id", None) or thread_id
     return _make_event(
         "interrupt",
         {
             "thread_id": thread_id,
-            "id": event_data["__interrupt__"][0].ns[0],
+            "id": interrupt_id,
             "role": "assistant",
-            "content": event_data["__interrupt__"][0].value,
+            "content": interrupt.value,
             "finish_reason": "interrupt",
             "options": [
                 {"text": "Edit plan", "value": "edit_plan"},
@@ -461,7 +464,7 @@ async def _stream_graph_events(
                 if "__interrupt__" in event_data:
                     logger.debug(
                         f"[{safe_thread_id}] Processing interrupt event: "
-                        f"ns={getattr(event_data['__interrupt__'][0], 'ns', 'unknown') if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 else 'unknown'}, "
+                        f"id={getattr(event_data['__interrupt__'][0], 'id', 'unknown') if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 else 'unknown'}, "
                         f"value_len={len(getattr(event_data['__interrupt__'][0], 'value', '')) if isinstance(event_data['__interrupt__'], (list, tuple)) and len(event_data['__interrupt__']) > 0 and hasattr(event_data['__interrupt__'][0], 'value') and hasattr(event_data['__interrupt__'][0].value, '__len__') else 'unknown'}"
                     )
                     yield _create_interrupt_event(thread_id, event_data)
