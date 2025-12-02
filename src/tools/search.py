@@ -22,6 +22,7 @@ from langchain_community.utilities import (
 from src.config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
 from src.tools.bocha_search.bocha_search_tool import BochaSearchTool
 from src.tools.decorators import create_logged_tool
+from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
 from src.tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchWithImages,
 )
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Create logged versions of the search tools
 LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
 LoggedBochaSearch = create_logged_tool(BochaSearchTool)
+LoggedInfoQuestSearch = create_logged_tool(InfoQuestSearchResults)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
@@ -95,6 +97,17 @@ def get_web_search_tool(max_search_results: int):
             max_results=max_search_results,
             freshness=freshness,
             summary=summary,
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.INFOQUEST.value:
+        time_range = search_config.get("time_range", -1)
+        site = search_config.get("site", "")
+        logger.info(
+            f"InfoQuest search configuration loaded: time_range={time_range}, site={site}"
+        )
+        return LoggedInfoQuestSearch(
+            name="web_search",
+            time_range=time_range,
+            site=site,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.DUCKDUCKGO.value:
         return LoggedDuckDuckGoSearch(

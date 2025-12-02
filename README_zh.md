@@ -11,6 +11,8 @@
 
 目前，DeerFlow 已正式入驻[火山引擎的 FaaS 应用中心](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market)，用户可通过[体验链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow)进行在线体验，直观感受其强大功能与便捷操作；同时，为满足不同用户的部署需求，DeerFlow 支持基于火山引擎一键部署，点击[部署链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow)即可快速完成部署流程，开启高效研究之旅。
 
+DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQuest（支持在线免费体验）](https://console.byteplus.com/infoquest/infoquests)
+
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
 
 ## 演示
@@ -146,38 +148,61 @@ bootstrap.bat -d
 
 ### 公域搜索引擎
 
-DeerFlow 支持多种搜索引擎,可以在`.env`文件中通过`SEARCH_API`变量进行配置:
+DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`变量进行配置：
 
-- **博查搜索(Bocha)**(默认,推荐用于内网部署):国内互联网搜索 API
-  - 需要在`.env`文件中设置`BOCHA_API_KEY`
-  - 注册地址:<https://www.bochaai.com/>
-  - 支持时效性筛选(freshness)和内容摘要(summary)
-  - 可选设置`BOCHA_API_BASE_URL`用于内网部署环境
-
-- **Tavily**:专为 AI 应用设计的专业搜索 API
+- **Tavily**（默认）：专为 AI 应用设计的专业搜索 API
   - 需要在`.env`文件中设置`TAVILY_API_KEY`
-  - 注册地址:<https://app.tavily.com/home>
+  - 注册地址：<https://app.tavily.com/home>
+  
+- **InfoQuest**（推荐）：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+  - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
+  - 支持时间范围过滤和站点过滤
+  - 提供高质量的搜索结果和内容提取
+  - 注册地址：<https://console.byteplus.com/infoquest/infoquests>
+  - 访问 <https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest> 了解更多信息
 
-- **DuckDuckGo**:注重隐私的搜索引擎
+- **DuckDuckGo**：注重隐私的搜索引擎
   - 无需 API 密钥
 
-- **Brave Search**:具有高级功能的注重隐私的搜索引擎
+- **Brave Search**：具有高级功能的注重隐私的搜索引擎
   - 需要在`.env`文件中设置`BRAVE_SEARCH_API_KEY`
-  - 注册地址:<https://brave.com/search/api/>
+  - 注册地址：<https://brave.com/search/api/>
 
-- **Arxiv**:用于学术研究的科学论文搜索
+- **Arxiv**：用于学术研究的科学论文搜索
   - 无需 API 密钥
   - 专为科学和学术论文设计
 
-- **Searx/SearxNG**:自托管的元搜索引擎
+- **Searx/SearxNG**：自托管的元搜索引擎
   - 需要在`.env`文件中设置`SEARX_HOST`
   - 支持对接Searx或SearxNG
 
-要配置您首选的搜索引擎,请在`.env`文件中设置`SEARCH_API`变量:
+要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash
-# 选择一个:bocha, tavily, duckduckgo, brave_search, arxiv, searx
-SEARCH_API=bocha  # 默认使用博查搜索,适合内网部署
+# 选择一个：tavily, infoquest,duckduckgo, brave_search, arxiv
+SEARCH_API=tavily
+```
+
+### 爬取工具
+
+- **Jina**（默认）：免费可访问的网页内容爬取工具
+  - 无需 API 密钥即可使用基础功能
+  - 使用 API 密钥可获得更高的访问速率限制
+  - 访问 <https://jina.ai/reader> 了解更多信息
+
+- **InfoQuest**（推荐）：BytePlus自主研发的专为AI应用优化的智能搜索与爬取工具集
+  - 需要在`.env`文件中设置`INFOQUEST_API_KEY`
+  - 提供可配置的爬取参数
+  - 支持自定义超时设置
+  - 提供更强大的内容提取能力
+  - 访问 <https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest> 了解更多信息
+
+要配置您首选的爬取工具，请在`conf.yaml`文件中设置：
+
+```yaml
+CRAWLER_ENGINE:
+  # 引擎类型："jina"（默认）或 "infoquest"
+  engine: infoquest
 ```
 
 ### 私域知识库引擎
@@ -227,8 +252,8 @@ DeerFlow 支持基于私有域知识的检索，您可以将文档上传到多�
 ### 工具和 MCP 集成
 
 - 🔍 **搜索和检索**
-  - 通过博查搜索(Bocha)、Tavily、Brave Search 等进行网络搜索
-  - 使用 Jina 进行爬取
+  - 通过 Tavily、InfoQuest、Brave Search 等进行网络搜索
+  - 使用 Jina、InfoQuest 进行爬取
   - 高级内容提取
   - 支持检索指定私有知识库
 

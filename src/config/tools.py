@@ -11,6 +11,7 @@ load_dotenv()
 
 class SearchEngine(enum.Enum):
     TAVILY = "tavily"
+    INFOQUEST = "infoquest"
     DUCKDUCKGO = "duckduckgo"
     BRAVE_SEARCH = "brave_search"
     ARXIV = "arxiv"
@@ -19,10 +20,14 @@ class SearchEngine(enum.Enum):
     BOCHA = "bocha"
 
 
+class CrawlerEngine(enum.Enum):
+    JINA = "jina"
+    INFOQUEST = "infoquest"
+
+
 # Tool configuration
 # Default to Bocha for intranet deployments; can be overridden by SEARCH_API env.
 SELECTED_SEARCH_ENGINE = os.getenv("SEARCH_API", SearchEngine.BOCHA.value)
-
 
 class RAGProvider(enum.Enum):
     DIFY = "dify"
