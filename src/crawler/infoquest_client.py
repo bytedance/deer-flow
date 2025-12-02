@@ -54,8 +54,8 @@ class InfoQuestClient:
         # Log request details
         logger.debug(
             "InfoQuest Crawler request prepared: endpoint=https://reader.infoquest.bytepluses.com, "
-            "format=%s, has_api_key=%s",
-            data.get("format"), self.api_key_set
+            "format=%s",
+            data.get("format")
         )
         
         logger.debug("Sending crawl request to InfoQuest API")
