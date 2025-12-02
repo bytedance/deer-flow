@@ -662,9 +662,9 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_interrupt_event(self, mock_graph):
-        # Mock interrupt data
+        # Mock interrupt data with the new 'id' attribute (LangGraph 1.0+)
         mock_interrupt = MagicMock()
-        mock_interrupt.ns = ["interrupt_id"]
+        mock_interrupt.id = "interrupt_id"
         mock_interrupt.value = "Plan requires approval"
 
         interrupt_data = {"__interrupt__": [mock_interrupt]}
@@ -970,7 +970,9 @@ class TestCreateInterruptEvent:
     def test_create_interrupt_event_without_id_attribute(self):
         """Test that _create_interrupt_event handles objects without 'id' attribute (backward compatibility)."""
         # Create a mock object that doesn't have 'id' attribute at all
-        mock_interrupt = MagicMock(spec=[])  # Empty spec means no attributes
+        class MockInterrupt:
+            pass
+        mock_interrupt = MockInterrupt()
         mock_interrupt.value = "Waiting for approval"
 
         event_data = {"__interrupt__": [mock_interrupt]}
