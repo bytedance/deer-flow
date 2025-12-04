@@ -468,7 +468,7 @@ def human_feedback_node(
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
-        new_plan = json.loads(current_plan_content)
+        new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
