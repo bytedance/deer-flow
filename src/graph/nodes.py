@@ -4,8 +4,6 @@
 import json
 import logging
 import os
-import re
-
 from functools import partial
 from typing import Any, Annotated, Literal
 
@@ -384,28 +382,20 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
         str: The plan content as a string (JSON string for dict inputs, or 
     extracted/original string for other types)
     """
-    def strip_code_blocks(text: str) -> str:
-        """Remove surrounding code blocks if present."""
-        code_block_pattern = r"^```(?:json)?\s*(.*?)\s*```$"
-        match = re.match(code_block_pattern, text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return text.strip()
-    
     if isinstance(plan_data, str):
-        # If it's a raw string, try strip code blocks if present
-        return strip_code_blocks(plan_data)
+        # If it's already a string, return as is
+        return plan_data
     elif hasattr(plan_data, 'content') and isinstance(plan_data.content, str):
         # If it's an AIMessage or similar object with a content attribute
         logger.debug(f"Extracting plan content from message object of type {type(plan_data).__name__}")
-        return strip_code_blocks(plan_data.content)
+        return plan_data.content
     elif isinstance(plan_data, dict):
         # If it's already a dictionary, convert to JSON string
         # Need to check if it's dict with content field (AIMessage-like)
         if "content" in plan_data:
             if isinstance(plan_data["content"], str):
                 logger.debug("Extracting plan content from dict with content field")
-                return strip_code_blocks(plan_data["content"])
+                return plan_data["content"]
             if isinstance(plan_data["content"], dict):
                 logger.debug("Converting content field dict to JSON string")
                 return json.dumps(plan_data["content"], ensure_ascii=False)
@@ -478,7 +468,7 @@ def human_feedback_node(
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
-        new_plan = json.loads(current_plan_content)
+        new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
