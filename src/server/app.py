@@ -312,7 +312,7 @@ def _create_interrupt_event(thread_id, event_data):
         "interrupt",
         {
             "thread_id": thread_id,
-            "id": event_data["__interrupt__"][0].ns[0],
+            "id": event_data["__interrupt__"][0].id,
             "role": "assistant",
             "content": event_data["__interrupt__"][0].value,
             "finish_reason": "interrupt",
