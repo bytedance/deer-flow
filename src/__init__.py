@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 import asyncio
 import os
-import sys
+
 
 # Configure Windows event loop policy for PostgreSQL compatibility
 # On Windows, psycopg requires a selector-based event loop, not the default ProactorEventLoop
