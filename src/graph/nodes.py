@@ -1115,6 +1115,10 @@ async def _setup_and_execute_agent_step(
     configurable = Configuration.from_runnable_config(config)
     mcp_servers = {}
     enabled_tools = {}
+    
+    # Get locale from workflow state to pass to agent creation
+    # This fixes issue #743 where locale was not correctly retrieved in agent prompt
+    locale = state.get("locale", "en-US")
 
     # Extract MCP server configuration for this agent type
     if configurable.mcp_settings:
@@ -1152,6 +1156,7 @@ async def _setup_and_execute_agent_step(
             agent_type,
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
+            locale=locale,
         )
         return await _execute_agent_step(state, agent, agent_type, config)
     else:
@@ -1165,6 +1170,7 @@ async def _setup_and_execute_agent_step(
             agent_type,
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
+            locale=locale,
         )
         return await _execute_agent_step(state, agent, agent_type, config)
 
