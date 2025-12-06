@@ -22,6 +22,7 @@ def create_agent(
     prompt_template: str,
     pre_model_hook: callable = None,
     interrupt_before_tools: Optional[List[str]] = None,
+    locale: str = "en-US",
 ):
     """Factory function to create agents with consistent configuration.
 
@@ -32,6 +33,7 @@ def create_agent(
         prompt_template: Name of the prompt template to use
         pre_model_hook: Optional hook to preprocess state before model invocation
         interrupt_before_tools: Optional list of tool names to interrupt before execution
+        locale: Language locale for prompt template selection (e.g., en-US, zh-CN)
 
     Returns:
         A configured agent graph
@@ -62,13 +64,16 @@ def create_agent(
     llm_type = AGENT_LLM_MAP.get(agent_type, "basic")
     logger.debug(f"Agent '{agent_name}' using LLM type: {llm_type}")
     
-    logger.debug(f"Creating ReAct agent '{agent_name}'")
+    logger.debug(f"Creating ReAct agent '{agent_name}' with locale: {locale}")
+    # Use closure to capture locale from the workflow state instead of relying on
+    # agent state.get("locale"), which doesn't have the locale field
+    # See: https://github.com/bytedance/deer-flow/issues/743
     agent = create_react_agent(
         name=agent_name,
         model=get_llm_by_type(llm_type),
         tools=processed_tools,
-        prompt=lambda state: apply_prompt_template(
-            prompt_template, state, locale=state.get("locale", "en-US")
+        prompt=lambda state, captured_locale=locale: apply_prompt_template(
+            prompt_template, state, locale=captured_locale
         ),
         pre_model_hook=pre_model_hook,
     )
