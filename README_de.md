@@ -13,7 +13,13 @@
 
 Derzeit ist DeerFlow offiziell in das [FaaS-Anwendungszentrum von Volcengine](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market) eingezogen. Benutzer können es über den [Erfahrungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow) online erleben, um seine leistungsstarken Funktionen und bequemen Operationen intuitiv zu spüren. Gleichzeitig unterstützt DeerFlow zur Erfüllung der Bereitstellungsanforderungen verschiedener Benutzer die Ein-Klick-Bereitstellung basierend auf Volcengine. Klicken Sie auf den [Bereitstellungslink](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow), um den Bereitstellungsprozess schnell abzuschließen und eine effiziente Forschungsreise zu beginnen.
 
-DeerFlow hat neu die intelligente Such- und Crawling-Toolset von BytePlus integriert - [InfoQuest (unterstützt kostenlose Online-Erfahrung)](https://console.byteplus.com/infoquest/infoquests)
+DeerFlow hat neu die intelligente Such- und Crawling-Toolset von BytePlus integriert - [InfoQuest (unterstützt kostenlose Online-Erfahrung)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
 
 Besuchen Sie [unsere offizielle Website](https://deerflow.tech/) für weitere Details.
 

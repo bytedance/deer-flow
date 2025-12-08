@@ -11,7 +11,13 @@
 
 現在、DeerFlow は火山引擎の FaaS アプリケーションセンターに正式に入居しています。ユーザーは体験リンクを通じてオンラインで体験し、その強力な機能と便利な操作を直感的に感じることができます。同時に、さまざまなユーザーの展開ニーズを満たすため、DeerFlow は火山引擎に基づくワンクリック展開をサポートしています。展開リンクをクリックして展開プロセスを迅速に完了し、効率的な研究の旅を始めましょう。
 
-DeerFlow は新たにBytePlusが自主開発したインテリジェント検索・クローリングツールセットを統合しました--[InfoQuest (オンライン無料体験をサポート)](https://console.byteplus.com/infoquest/infoquests)
+DeerFlow は新たにBytePlusが自主開発したインテリジェント検索・クローリングツールセットを統合しました--[InfoQuest (オンライン無料体験をサポート)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
 
 詳細については[DeerFlow の公式ウェブサイト](https://deerflow.tech/)をご覧ください。
 
