@@ -15,7 +15,7 @@ DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQu
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
   <img 
-    src="https://lf3-static.bytednsdoc.com/obj/eden-cn/hubseh7bsbps/20251208-141052.png" alt="infoquest_bannar" 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-141052.png"  alt="infoquest_bannar" 
   />
 </a>
 

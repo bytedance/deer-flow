@@ -15,6 +15,12 @@
 
 DeerFlow недавно интегрировал интеллектуальный набор инструментов поиска и краулинга, разработанный самостоятельно компанией BytePlus — [InfoQuest (поддерживает бесплатное онлайн-опробование)](https://console.byteplus.com/infoquest/infoquests)
 
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 Пожалуйста, посетите [наш официальный сайт](https://deerflow.tech/) для получения дополнительной информации.
 
 ## Демонстрация

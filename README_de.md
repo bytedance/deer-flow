@@ -15,6 +15,12 @@ Derzeit ist DeerFlow offiziell in das [FaaS-Anwendungszentrum von Volcengine](ht
 
 DeerFlow hat neu die intelligente Such- und Crawling-Toolset von BytePlus integriert - [InfoQuest (unterstützt kostenlose Online-Erfahrung)](https://console.byteplus.com/infoquest/infoquests)
 
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 Besuchen Sie [unsere offizielle Website](https://deerflow.tech/) für weitere Details.
 
 ## Demo

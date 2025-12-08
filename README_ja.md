@@ -13,6 +13,12 @@
 
 DeerFlow は新たにBytePlusが自主開発したインテリジェント検索・クローリングツールセットを統合しました--[InfoQuest (オンライン無料体験をサポート)](https://console.byteplus.com/infoquest/infoquests)
 
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 詳細については[DeerFlow の公式ウェブサイト](https://deerflow.tech/)をご覧ください。
 
 ## デモ

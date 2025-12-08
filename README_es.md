@@ -15,6 +15,12 @@ Actualmente, DeerFlow ha ingresado oficialmente al Centro de Aplicaciones FaaS d
 
 DeerFlow ha integrado recientemente el conjunto de herramientas de búsqueda y rastreo inteligente desarrollado independientemente por BytePlus - [InfoQuest (admite experiencia gratuita en línea)](https://console.byteplus.com/infoquest/infoquests)
 
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 Por favor, visita [nuestra página web oficial](https://deerflow.tech/) para más detalles.
 
 ## Demostración
