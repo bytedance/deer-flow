@@ -13,8 +13,10 @@
 
 DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQuest（支持在线免费体验）](https://console.byteplus.com/infoquest/infoquests)
 
-<a href="https://console.byteplus.com/infoquest/infoquests" target="_blank">
-  <img src="https://lf3-static.bytednsdoc.com/obj/eden-cn/hubseh7bsbps/20251208-141052.png" alt="infoquest_bannar" />
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://lf3-static.bytednsdoc.com/obj/eden-cn/hubseh7bsbps/20251208-141052.png" alt="infoquest_bannar" 
+  />
 </a>
 
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
@@ -183,7 +185,7 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash
-# 选择一个：tavily, infoquest,duckduckgo, brave_search, arxiv
+# 选择一个：tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
 
