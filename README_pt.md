@@ -14,7 +14,7 @@
 
 Atualmente, o DeerFlow entrou oficialmente no Centro de Aplicações FaaS da Volcengine. Os usuários podem experimentá-lo online através do link de experiência para sentir intuitivamente suas funções poderosas e operações convenientes. Ao mesmo tempo, para atender às necessidades de implantação de diferentes usuários, o DeerFlow suporta implantação com um clique baseada na Volcengine. Clique no link de implantação para completar rapidamente o processo de implantação e iniciar uma jornada de pesquisa eficiente.
 
-O DeerFlow recentemente integrou o conjunto de ferramentas de busca e rastreamento inteligente desenvolvido independentemente pela BytePlus — [InfoQuest (oferece experiência gratuita online)](https://console.byteplus.com/infoquest/infoquests)
+O DeerFlow recentemente integrou o conjunto de ferramentas de busca e rastreamento inteligente desenvolvido independentemente pela BytePlus — [InfoQuest (oferece experiência gratuita online)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
   <img 
