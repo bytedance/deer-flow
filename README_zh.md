@@ -34,12 +34,12 @@ DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQu
 - [撰写关于南京传统美食的文章](https://deerflow.tech/chat?replay=nanjing-traditional-dishes)
 - [如何装饰租赁公寓？](https://deerflow.tech/chat?replay=rental-apartment-decoration)
 - [访问我们的官方网站探索更多回放示例。](https://deerflow.tech/#case-studies)
+---
 
 <!-- 点击图片跳转至字节跳动InfoQuest控制台 -->
 <a href="https://console.byteplus.com/infoquest/infoquests" target="_blank">
   <img src="https://lf3-static.bytednsdoc.com/obj/eden-cn/hubseh7bsbps/Slide 16_9 - 1 (1).png" alt="infoquest_bannar" />
 </a>
----
 
 ## 📑 目录
 
