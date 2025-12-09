@@ -468,7 +468,7 @@ def human_feedback_node(
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
-        new_plan = json.loads(current_plan_content)
+        new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
@@ -1115,6 +1115,10 @@ async def _setup_and_execute_agent_step(
     configurable = Configuration.from_runnable_config(config)
     mcp_servers = {}
     enabled_tools = {}
+    
+    # Get locale from workflow state to pass to agent creation
+    # This fixes issue #743 where locale was not correctly retrieved in agent prompt
+    locale = state.get("locale", "en-US")
 
     # Extract MCP server configuration for this agent type
     if configurable.mcp_settings:
@@ -1152,6 +1156,7 @@ async def _setup_and_execute_agent_step(
             agent_type,
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
+            locale=locale,
         )
         return await _execute_agent_step(state, agent, agent_type, config)
     else:
@@ -1165,6 +1170,7 @@ async def _setup_and_execute_agent_step(
             agent_type,
             pre_model_hook,
             interrupt_before_tools=configurable.interrupt_before_tools,
+            locale=locale,
         )
         return await _execute_agent_step(state, agent, agent_type, config)
 

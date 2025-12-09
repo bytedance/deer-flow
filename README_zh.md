@@ -11,7 +11,13 @@
 
 目前，DeerFlow 已正式入驻[火山引擎的 FaaS 应用中心](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market)，用户可通过[体验链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/market/deerflow/?channel=github&source=deerflow)进行在线体验，直观感受其强大功能与便捷操作；同时，为满足不同用户的部署需求，DeerFlow 支持基于火山引擎一键部署，点击[部署链接](https://console.volcengine.com/vefaas/region:vefaas+cn-beijing/application/create?templateId=683adf9e372daa0008aaed5c&channel=github&source=deerflow)即可快速完成部署流程，开启高效研究之旅。
 
-DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQuest（支持在线免费体验）](https://console.byteplus.com/infoquest/infoquests)
+DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQuest（支持在线免费体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-141052.png"  alt="infoquest_bannar" 
+  />
+</a>
 
 请访问[DeerFlow 的官方网站](https://deerflow.tech/)了解更多详情。
 
@@ -34,8 +40,8 @@ DeerFlow 新接入BytePlus自主推出的智能搜索与爬取工具集--[InfoQu
 - [撰写关于南京传统美食的文章](https://deerflow.tech/chat?replay=nanjing-traditional-dishes)
 - [如何装饰租赁公寓？](https://deerflow.tech/chat?replay=rental-apartment-decoration)
 - [访问我们的官方网站探索更多回放示例。](https://deerflow.tech/#case-studies)
-
 ---
+
 
 ## 📑 目录
 
@@ -179,7 +185,7 @@ DeerFlow 支持多种搜索引擎，可以在`.env`文件中通过`SEARCH_API`�
 要配置您首选的搜索引擎，请在`.env`文件中设置`SEARCH_API`变量：
 
 ```bash
-# 选择一个：tavily, infoquest,duckduckgo, brave_search, arxiv
+# 选择一个：tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
 ```
 
