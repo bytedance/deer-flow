@@ -5,7 +5,7 @@ import src.graph.checkpoint as checkpoint
 
 MONGO_URL = "mongodb://admin:admin@localhost:27017/checkpointing_db?authSource=admin"
 
-def test_memory_leak_check_memory_cleared_after_persistence(monkeypatch):
+def test_memory_leak_check_memory_cleared_after_persistence():
     """
     Test that InMemoryStore is cleared for a thread after successful persistence.
     This prevents memory leaks for long-running processes.
