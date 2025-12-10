@@ -63,6 +63,15 @@ def handoff_after_clarification(
     return
 
 
+@tool
+def direct_response(
+    message: Annotated[str, "The response message to send directly to user."],
+    locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
+):
+    """Respond directly to user for greetings, small talk, or polite rejections. Do NOT use this for research questions - use handoff_to_planner instead."""
+    return
+
+
 def needs_clarification(state: dict) -> bool:
     """
     Check if clarification is needed based on current state.
@@ -524,12 +533,12 @@ def coordinator_node(
         messages.append(
             {
                 "role": "system",
-                "content": "CRITICAL: Clarification is DISABLED. You MUST immediately call handoff_to_planner tool with the user's query as-is. Do NOT ask questions or mention needing more information.",
+                "content": "Clarification is DISABLED. For research questions, use handoff_to_planner. For greetings or small talk, use direct_response. Do NOT ask clarifying questions.",
             }
         )
 
-        # Only bind handoff_to_planner tool
-        tools = [handoff_to_planner]
+        # Bind both handoff_to_planner and direct_response tools
+        tools = [handoff_to_planner, direct_response]
         response = (
             get_llm_by_type(AGENT_LLM_MAP["coordinator"])
             .bind_tools(tools)
@@ -556,10 +565,41 @@ def coordinator_node(
                         if tool_args.get("research_topic"):
                             research_topic = tool_args.get("research_topic")
                         break
+                    elif tool_name == "direct_response":
+                        logger.info("Direct response to user (greeting/small talk)")
+                        goto = "__end__"
+                        # Update response content with the direct message
+                        if tool_args.get("message"):
+                            response = AIMessage(content=tool_args.get("message"))
+                        break
 
             except Exception as e:
                 logger.error(f"Error processing tool calls: {e}")
                 goto = "planner"
+
+        # BRANCH 1: Return early to avoid fallback logic overwriting goto
+        # Apply background_investigation routing if enabled
+        if goto == "planner" and state.get("enable_background_investigation"):
+            goto = "background_investigator"
+
+        messages = list(state.get("messages", []) or [])
+        if response.content:
+            messages.append(HumanMessage(content=response.content, name="coordinator"))
+
+        return Command(
+            update={
+                "messages": messages,
+                "locale": locale,
+                "research_topic": research_topic,
+                "clarified_research_topic": research_topic,
+                "resources": configurable.resources,
+                "clarification_rounds": 0,
+                "clarification_history": [],
+                "is_clarification_complete": goto != "coordinator",
+                "goto": goto,
+            },
+            goto=goto,
+        )
 
     # ============================================================
     # BRANCH 2: Clarification ENABLED (New Feature)
