@@ -159,6 +159,13 @@ class ToolInterceptor:
         # Use object.__setattr__ to bypass Pydantic validation
         logger.debug(f"Attaching intercepted function to tool '{safe_tool_name}'")
         object.__setattr__(tool, "func", intercepted_func)
+
+        # Also ensure the tool's _run method is updated if it exists
+        if hasattr(tool, '_run'):
+            logger.debug(f"Also wrapping _run method for tool '{safe_tool_name}'")
+            # Wrap _run to ensure interception is applied regardless of invocation method
+            object.__setattr__(tool, "_run", intercepted_func)
+
         return tool
 
     @staticmethod
