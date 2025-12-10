@@ -1,3 +1,5 @@
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+# SPDX-License-Identifier: MIT
 
 import unittest
 from unittest.mock import MagicMock
@@ -30,6 +32,22 @@ class TestToolInterceptorFix(unittest.TestCase):
         # Verify the original function was called
         # If interception works, intercepted_func calls original_func
         mock_func.assert_called_once()
+
+    def test_run_method_without_interrupt(self):
+        """Test that tools not in interrupt list work normally via .run()"""
+        mock_func = MagicMock(return_value="Result")
+        tool = Tool(name="other_tool", func=mock_func, description="test")
+        
+        interceptor = ToolInterceptor(interrupt_before_tools=["resolve_company_name"])
+        wrapped_tool = ToolInterceptor.wrap_tool(tool, interceptor)
+        
+        with unittest.mock.patch("src.agents.tool_interceptor.interrupt") as mock_interrupt:
+            result = wrapped_tool.run("input")
+            
+        # Verify interrupt was NOT called for non-intercepted tool
+        mock_interrupt.assert_not_called()
+        assert result == "Result"
+        mock_func.assert_called_once()
         
     def test_interceptor_resolve_company_name_example(self):
         """Test specific resolve_company_name logic capability using interceptor subclassing or custom logic simulation."""
@@ -49,6 +67,3 @@ class TestToolInterceptorFix(unittest.TestCase):
              wrapped_tool.run("query")
              
         mock_func.assert_called_once()
-
-if __name__ == "__main__":
-    unittest.main()

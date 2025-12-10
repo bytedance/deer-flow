@@ -163,11 +163,8 @@ class ToolInterceptor:
         # Also ensure the tool's _run method is updated if it exists
         if hasattr(tool, '_run'):
             logger.debug(f"Also wrapping _run method for tool '{safe_tool_name}'")
-            # We wrap it to match the signature, though intercepted_func handles *args, **kwargs
-            def intercepted_run(*args: Any, **kwargs: Any) -> Any:
-                return intercepted_func(*args, **kwargs)
-            
-            object.__setattr__(tool, "_run", intercepted_run)
+            # Wrap _run to ensure interception is applied regardless of invocation method
+            object.__setattr__(tool, "_run", intercepted_func)
 
         return tool
 
