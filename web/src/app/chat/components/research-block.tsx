@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
+import DOMPurify from "dompurify";
 import { saveAs } from "file-saver";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
@@ -9,6 +10,7 @@ import { Check, Copy, Headphones, Pencil, Undo2, X, Download, FileText, FileCode
 import { marked } from "marked";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { ScrollContainer } from "~/components/deer-flow/scroll-container";
 import { Tooltip } from "~/components/deer-flow/tooltip";
@@ -118,7 +120,8 @@ export function ResearchBlock({
     if (!reportId) return;
     const report = useStore.getState().messages.get(reportId);
     if (!report) return;
-    const htmlContent = marked(report.content) as string;
+    const rawHtml = marked(report.content) as string;
+    const htmlContent = DOMPurify.sanitize(rawHtml);
     const fullHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -228,10 +231,11 @@ ${htmlContent}
       pdf.save(`research-report-${getTimestamp()}.pdf`);
     } catch (error) {
       console.error('Failed to generate PDF:', error);
+      toast.error(t('exportFailed'));
     } finally {
       setIsDownloading(false);
     }
-  }, [reportId, getTimestamp, isDownloading]);
+  }, [reportId, getTimestamp, isDownloading, t]);
 
   // Download report as Word document
   const handleDownloadWord = useCallback(async () => {
@@ -278,10 +282,11 @@ ${htmlContent}
       saveAs(blob, `research-report-${getTimestamp()}.docx`);
     } catch (error) {
       console.error('Failed to generate Word document:', error);
+      toast.error(t('exportFailed'));
     } finally {
       setIsDownloading(false);
     }
-  }, [reportId, getTimestamp, isDownloading]);
+  }, [reportId, getTimestamp, isDownloading, t]);
 
   // Download report as Image
   const handleDownloadImage = useCallback(async () => {
@@ -290,12 +295,15 @@ ${htmlContent}
     if (!report) return;
 
     setIsDownloading(true);
+    let container: HTMLDivElement | null = null;
     try {
       // Create a temporary container with simple styles to avoid color parsing issues
-      const container = document.createElement('div');
+      container = document.createElement('div');
       container.style.cssText = 'position: absolute; left: -9999px; top: 0; width: 800px; padding: 40px; font-family: Arial, sans-serif; line-height: 1.6; background-color: #ffffff; color: #000000;';
       const styleTag = '<style>* { color: #000000; } h1,h2,h3,h4,h5,h6 { color: #333333; } a { color: #0066cc; } code { background-color: #f5f5f5; padding: 2px 4px; } pre { background-color: #f5f5f5; padding: 12px; }</style>';
-      container.innerHTML = styleTag + (marked(report.content) as string);
+      const rawHtml = marked(report.content) as string;
+      const sanitizedHtml = DOMPurify.sanitize(rawHtml);
+      container.innerHTML = styleTag + sanitizedHtml;
       document.body.appendChild(container);
 
       const canvas = await html2canvas(container, {
@@ -305,19 +313,27 @@ ${htmlContent}
         backgroundColor: '#ffffff',
       });
 
-      document.body.removeChild(container);
+      // Promisify toBlob for proper async handling
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      });
 
-      canvas.toBlob((blob) => {
-        if (blob) {
-          saveAs(blob, `research-report-${getTimestamp()}.png`);
-        }
-      }, 'image/png');
+      if (blob) {
+        saveAs(blob, `research-report-${getTimestamp()}.png`);
+      }
     } catch (error) {
       console.error('Failed to generate image:', error);
+      toast.error(t('exportFailed'));
     } finally {
+      // Ensure container is always removed
+      try {
+        container?.parentNode?.removeChild(container);
+      } catch {
+        // Ignore removal errors
+      }
       setIsDownloading(false);
     }
-  }, [reportId, getTimestamp, isDownloading]);
+  }, [reportId, getTimestamp, isDownloading, t]);
 
   const handleEdit = useCallback(() => {
     setEditing((editing) => !editing);
@@ -369,37 +385,36 @@ ${htmlContent}
                 </Button>
               </Tooltip>
               <DropdownMenu>
-                <Tooltip title={t("downloadReport")}>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      className="text-gray-400"
-                      size="icon"
-                      variant="ghost"
-                    >
-                      <Download />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </Tooltip>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="text-gray-400"
+                    size="icon"
+                    variant="ghost"
+                    title={t("downloadReport")}
+                  >
+                    <Download />
+                  </Button>
+                </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={handleDownloadMarkdown}>
                     <FileText className="mr-2 h-4 w-4" />
-                    Markdown (.md)
+                    {t("downloadMarkdown")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleDownloadHTML}>
                     <FileCode className="mr-2 h-4 w-4" />
-                    HTML (.html)
+                    {t("downloadHTML")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleDownloadPDF} disabled={isDownloading}>
                     <FileType className="mr-2 h-4 w-4" />
-                    PDF (.pdf)
+                    {t("downloadPDF")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleDownloadWord} disabled={isDownloading}>
                     <FileText className="mr-2 h-4 w-4" />
-                    Word (.docx)
+                    {t("downloadWord")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleDownloadImage} disabled={isDownloading}>
                     <FileImage className="mr-2 h-4 w-4" />
-                    Image (.png)
+                    {t("downloadImage")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
