@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from functools import partial
-from typing import Any, Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -568,38 +568,23 @@ def coordinator_node(
                     elif tool_name == "direct_response":
                         logger.info("Direct response to user (greeting/small talk)")
                         goto = "__end__"
-                        # Update response content with the direct message
+                        # Extract locale from tool_args if provided
+                        if tool_args.get("locale"):
+                            locale = tool_args.get("locale")
+                        # Append direct message to messages list instead of overwriting response
                         if tool_args.get("message"):
-                            response = AIMessage(content=tool_args.get("message"))
+                            messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
                         break
 
             except Exception as e:
                 logger.error(f"Error processing tool calls: {e}")
                 goto = "planner"
 
-        # BRANCH 1: Return early to avoid fallback logic overwriting goto
-        # Apply background_investigation routing if enabled
-        if goto == "planner" and state.get("enable_background_investigation"):
-            goto = "background_investigator"
-
-        messages = list(state.get("messages", []) or [])
-        if response.content:
-            messages.append(HumanMessage(content=response.content, name="coordinator"))
-
-        return Command(
-            update={
-                "messages": messages,
-                "locale": locale,
-                "research_topic": research_topic,
-                "clarified_research_topic": research_topic,
-                "resources": configurable.resources,
-                "clarification_rounds": 0,
-                "clarification_history": [],
-                "is_clarification_complete": goto != "coordinator",
-                "goto": goto,
-            },
-            goto=goto,
-        )
+        # Do not return early - let code flow to unified return logic below
+        # Set clarification variables for legacy mode
+        clarification_rounds = 0
+        clarification_history = []
+        clarified_topic = research_topic
 
     # ============================================================
     # BRANCH 2: Clarification ENABLED (New Feature)
