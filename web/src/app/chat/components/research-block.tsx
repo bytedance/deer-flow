@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
 import { saveAs } from "file-saver";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
@@ -8,7 +9,6 @@ import { Check, Copy, Headphones, Pencil, Undo2, X, Download, FileText, FileCode
 import { marked } from "marked";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useState } from "react";
-import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
 
 import { ScrollContainer } from "~/components/deer-flow/scroll-container";
 import { Tooltip } from "~/components/deer-flow/tooltip";
