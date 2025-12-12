@@ -568,9 +568,6 @@ def coordinator_node(
                     elif tool_name == "direct_response":
                         logger.info("Direct response to user (greeting/small talk)")
                         goto = "__end__"
-                        # Extract locale from tool_args if provided
-                        if tool_args.get("locale"):
-                            locale = tool_args.get("locale")
                         # Append direct message to messages list instead of overwriting response
                         if tool_args.get("message"):
                             messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
