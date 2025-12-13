@@ -757,16 +757,19 @@ def coordinator_node(
             logger.error(f"Error processing tool calls: {e}")
             goto = "planner"
     else:
-        # No tool calls detected - fallback to planner instead of ending
-        logger.warning(
-            "LLM didn't call any tools. This may indicate tool calling issues with the model. "
-            "Falling back to planner to ensure research proceeds."
-        )
-        # Log full response for debugging
-        logger.debug(f"Coordinator response content: {response.content}")
-        logger.debug(f"Coordinator response object: {response}")
-        # Fallback to planner to ensure workflow continues
-        goto = "planner"
+        # No tool calls detected
+        if enable_clarification:
+            # BRANCH 2: Fallback to planner to ensure research proceeds
+            logger.warning(
+                "LLM didn't call any tools. This may indicate tool calling issues with the model. "
+                "Falling back to planner to ensure research proceeds."
+            )
+            logger.debug(f"Coordinator response content: {response.content}")
+            logger.debug(f"Coordinator response object: {response}")
+            goto = "planner"
+        else:
+            # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
+            logger.info("No tool calls in legacy mode - ending workflow gracefully")
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
