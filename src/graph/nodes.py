@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from functools import partial
-from typing import Any, Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -60,6 +60,15 @@ def handoff_after_clarification(
     ],
 ):
     """Handoff to planner after clarification rounds are complete. Pass all clarification history to planner for analysis."""
+    return
+
+
+@tool
+def direct_response(
+    message: Annotated[str, "The response message to send directly to user."],
+    locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
+):
+    """Respond directly to user for greetings, small talk, or polite rejections. Do NOT use this for research questions - use handoff_to_planner instead."""
     return
 
 
@@ -524,12 +533,12 @@ def coordinator_node(
         messages.append(
             {
                 "role": "system",
-                "content": "CRITICAL: Clarification is DISABLED. You MUST immediately call handoff_to_planner tool with the user's query as-is. Do NOT ask questions or mention needing more information.",
+                "content": "Clarification is DISABLED. For research questions, use handoff_to_planner. For greetings or small talk, use direct_response. Do NOT ask clarifying questions.",
             }
         )
 
-        # Only bind handoff_to_planner tool
-        tools = [handoff_to_planner]
+        # Bind both handoff_to_planner and direct_response tools
+        tools = [handoff_to_planner, direct_response]
         response = (
             get_llm_by_type(AGENT_LLM_MAP["coordinator"])
             .bind_tools(tools)
@@ -556,10 +565,23 @@ def coordinator_node(
                         if tool_args.get("research_topic"):
                             research_topic = tool_args.get("research_topic")
                         break
+                    elif tool_name == "direct_response":
+                        logger.info("Direct response to user (greeting/small talk)")
+                        goto = "__end__"
+                        # Append direct message to messages list instead of overwriting response
+                        if tool_args.get("message"):
+                            messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
+                        break
 
             except Exception as e:
                 logger.error(f"Error processing tool calls: {e}")
                 goto = "planner"
+
+        # Do not return early - let code flow to unified return logic below
+        # Set clarification variables for legacy mode
+        clarification_rounds = 0
+        clarification_history = []
+        clarified_topic = research_topic
 
     # ============================================================
     # BRANCH 2: Clarification ENABLED (New Feature)
@@ -735,16 +757,19 @@ def coordinator_node(
             logger.error(f"Error processing tool calls: {e}")
             goto = "planner"
     else:
-        # No tool calls detected - fallback to planner instead of ending
-        logger.warning(
-            "LLM didn't call any tools. This may indicate tool calling issues with the model. "
-            "Falling back to planner to ensure research proceeds."
-        )
-        # Log full response for debugging
-        logger.debug(f"Coordinator response content: {response.content}")
-        logger.debug(f"Coordinator response object: {response}")
-        # Fallback to planner to ensure workflow continues
-        goto = "planner"
+        # No tool calls detected
+        if enable_clarification:
+            # BRANCH 2: Fallback to planner to ensure research proceeds
+            logger.warning(
+                "LLM didn't call any tools. This may indicate tool calling issues with the model. "
+                "Falling back to planner to ensure research proceeds."
+            )
+            logger.debug(f"Coordinator response content: {response.content}")
+            logger.debug(f"Coordinator response object: {response}")
+            goto = "planner"
+        else:
+            # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
+            logger.info("No tool calls in legacy mode - ending workflow gracefully")
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
