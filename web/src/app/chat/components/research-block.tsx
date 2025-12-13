@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
-import { Document, Packer, Paragraph, TextRun, HeadingLevel } from "docx";
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, ExternalHyperlink } from "docx";
 import DOMPurify from "dompurify";
 import { saveAs } from "file-saver";
 import html2canvas from "html2canvas";
@@ -104,7 +104,7 @@ export function ResearchBlock({
       } finally {
         URL.revokeObjectURL(url);
       }
-    }, 0);
+    }, 1000);
   }, []);
 
   // Download report as Markdown
@@ -198,6 +198,45 @@ ${htmlContent}
           }
           pdf.text(splitText, margin, y);
           y += splitText.length * 9 + 6;
+        } else if (line.startsWith('- ') || line.startsWith('* ')) {
+          // Unordered list item
+          pdf.setFontSize(11);
+          pdf.setFont('helvetica', 'normal');
+          const cleanText = line.substring(2)
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/`(.*?)`/g, '$1')
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1');
+          const bulletText = `• ${cleanText}`;
+          const splitText = pdf.splitTextToSize(bulletText, maxWidth - 5);
+          
+          if (y + splitText.length * 5 > pageHeight - margin) {
+            pdf.addPage();
+            y = margin;
+          }
+          pdf.text(splitText, margin + 5, y);
+          y += splitText.length * 5 + 2;
+        } else if (/^\d+\.\s/.test(line)) {
+          // Ordered list item
+          pdf.setFontSize(11);
+          pdf.setFont('helvetica', 'normal');
+          const match = /^(\d+)\.\s(.*)$/.exec(line);
+          if (match?.[1] && match[2]) {
+            const cleanText = match[2]
+              .replace(/\*\*(.*?)\*\*/g, '$1')
+              .replace(/\*(.*?)\*/g, '$1')
+              .replace(/`(.*?)`/g, '$1')
+              .replace(/\[(.*?)\]\(.*?\)/g, '$1');
+            const numberedText = `${match[1]}. ${cleanText}`;
+            const splitText = pdf.splitTextToSize(numberedText, maxWidth - 5);
+            
+            if (y + splitText.length * 5 > pageHeight - margin) {
+              pdf.addPage();
+              y = margin;
+            }
+            pdf.text(splitText, margin + 5, y);
+            y += splitText.length * 5 + 2;
+          }
         } else if (line.trim()) {
           // Normal text
           pdf.setFontSize(11);
@@ -237,6 +276,48 @@ ${htmlContent}
     }
   }, [reportId, getTimestamp, isDownloading, t]);
 
+  // Helper function to parse inline markdown formatting for Word export
+  const parseInlineMarkdown = useCallback((text: string): (TextRun | ExternalHyperlink)[] => {
+    const runs: (TextRun | ExternalHyperlink)[] = [];
+    // Pattern to match: bold (**text**), italic (*text*), inline code (`text`), links [text](url)
+    const pattern = /(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`(.+?)`)|\[(.+?)\]\((.+?)\)/g;
+    let lastIndex = 0;
+    let match;
+
+    while ((match = pattern.exec(text)) !== null) {
+      // Add plain text before the match
+      if (match.index > lastIndex) {
+        runs.push(new TextRun(text.slice(lastIndex, match.index)));
+      }
+
+      if (match[1]) {
+        // Bold: **text**
+        runs.push(new TextRun({ text: match[2], bold: true }));
+      } else if (match[3]) {
+        // Italic: *text*
+        runs.push(new TextRun({ text: match[4], italics: true }));
+      } else if (match[5]) {
+        // Inline code: `text`
+        runs.push(new TextRun({ text: match[6], font: 'Courier New' }));
+      } else if (match[7] && match[8]) {
+        // Link: [text](url)
+        runs.push(new ExternalHyperlink({
+          children: [new TextRun({ text: match[7], style: 'Hyperlink' })],
+          link: match[8],
+        }));
+      }
+
+      lastIndex = pattern.lastIndex;
+    }
+
+    // Add remaining plain text
+    if (lastIndex < text.length) {
+      runs.push(new TextRun(text.slice(lastIndex)));
+    }
+
+    return runs.length > 0 ? runs : [new TextRun(text)];
+  }, []);
+
   // Download report as Word document
   const handleDownloadWord = useCallback(async () => {
     if (!reportId || isDownloading) return;
@@ -252,22 +333,35 @@ ${htmlContent}
       for (const line of lines) {
         if (line.startsWith('# ')) {
           children.push(new Paragraph({
-            text: line.substring(2),
+            children: parseInlineMarkdown(line.substring(2)),
             heading: HeadingLevel.HEADING_1,
           }));
         } else if (line.startsWith('## ')) {
           children.push(new Paragraph({
-            text: line.substring(3),
+            children: parseInlineMarkdown(line.substring(3)),
             heading: HeadingLevel.HEADING_2,
           }));
         } else if (line.startsWith('### ')) {
           children.push(new Paragraph({
-            text: line.substring(4),
+            children: parseInlineMarkdown(line.substring(4)),
             heading: HeadingLevel.HEADING_3,
+          }));
+        } else if (line.startsWith('- ') || line.startsWith('* ')) {
+          // Unordered list item
+          children.push(new Paragraph({
+            children: parseInlineMarkdown(line.substring(2)),
+            bullet: { level: 0 },
+          }));
+        } else if (/^\d+\.\s/.test(line)) {
+          // Ordered list item
+          const text = line.replace(/^\d+\.\s/, '');
+          children.push(new Paragraph({
+            children: parseInlineMarkdown(text),
+            numbering: { reference: 'default-numbering', level: 0 },
           }));
         } else if (line.trim()) {
           children.push(new Paragraph({
-            children: [new TextRun(line)],
+            children: parseInlineMarkdown(line),
           }));
         } else {
           children.push(new Paragraph({ text: '' }));
@@ -286,7 +380,7 @@ ${htmlContent}
     } finally {
       setIsDownloading(false);
     }
-  }, [reportId, getTimestamp, isDownloading, t]);
+  }, [reportId, getTimestamp, isDownloading, t, parseInlineMarkdown]);
 
   // Download report as Image
   const handleDownloadImage = useCallback(async () => {
