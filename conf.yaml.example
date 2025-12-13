@@ -61,6 +61,12 @@ BASIC_MODEL:
 #   # When interrupt is triggered, user will be prompted to approve/reject
 #   # Approved keywords: "approved", "approve", "yes", "proceed", "continue", "ok", "okay", "accepted", "accept"
 
+# Web search toggle (Issue #681)
+# Set to false to disable web search and use only local RAG knowledge base.
+# This is useful for environments without internet access.
+# Note: This can be overridden per-request via the API parameter `enable_web_search`.
+# ENABLE_WEB_SEARCH: true
+
 # Search engine configuration
 # Supported engines: tavily, infoquest
 # SEARCH_ENGINE:

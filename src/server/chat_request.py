@@ -62,6 +62,9 @@ class ChatRequest(BaseModel):
     enable_background_investigation: Optional[bool] = Field(
         True, description="Whether to get background investigation before plan"
     )
+    enable_web_search: Optional[bool] = Field(
+        True, description="Whether to enable web search, set to False to use only local RAG"
+    )
     report_style: Optional[ReportStyle] = Field(
         ReportStyle.ACADEMIC, description="The style of the report"
     )
