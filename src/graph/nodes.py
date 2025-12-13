@@ -197,6 +197,12 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
+
+    # Skip web search if disabled (for local RAG only mode)
+    if not configurable.enable_web_search:
+        logger.info("Web search is disabled, skipping background investigation.")
+        return {"background_investigation_results": ""}
+
     query = state.get("clarified_research_topic") or state.get("research_topic")
     background_investigation_results = []
     
@@ -1210,7 +1216,16 @@ async def researcher_node(
     configurable = Configuration.from_runnable_config(config)
     logger.debug(f"[researcher_node] Max search results: {configurable.max_search_results}")
     
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+    # Build tools list based on configuration
+    tools = []
+    
+    # Add web search and crawl tools only if web search is enabled
+    if configurable.enable_web_search:
+        tools.extend([get_web_search_tool(configurable.max_search_results), crawl_tool])
+    else:
+        logger.info("[researcher_node] Web search is disabled, using only local RAG")
+    
+    # Add retriever tool if resources are available (always add, higher priority)
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         logger.debug(f"[researcher_node] Adding retriever tool to tools list")
