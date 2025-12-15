@@ -272,6 +272,39 @@ SEARCH_ENGINE:
 ```
 That's meaning that the search results will be filtered based on the minimum relevance score threshold and truncated to the maximum length limit for each search result content.
 
+## Web Search Toggle
+
+DeerFlow allows you to disable web search functionality, which is useful for environments without internet access or when you want to use only local RAG knowledge bases.
+
+### Configuration
+
+You can disable web search in your `conf.yaml` file:
+
+```yaml
+# Disable web search (use only local RAG)
+ENABLE_WEB_SEARCH: false
+```
+
+Or via API request parameter:
+
+```json
+{
+  "messages": [{"role": "user", "content": "Research topic"}],
+  "enable_web_search": false
+}
+```
+
+> [!WARNING]
+> If you disable web search, make sure to configure local RAG resources; otherwise, the researcher will operate in pure LLM reasoning mode without external data sources.
+
+### Behavior When Web Search is Disabled
+
+- **Background investigation**: Skipped entirely (relies on web search)
+- **Researcher node**: Will use only RAG retriever tools if configured
+- **Pure reasoning mode**: If no RAG resources are available, the researcher will rely solely on LLM reasoning
+
+---
+
 ## RAG (Retrieval-Augmented Generation) Configuration
 
 DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.

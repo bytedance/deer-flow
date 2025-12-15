@@ -118,13 +118,14 @@ def preserve_state_meta_fields(state: State) -> dict:
     }
 
 
-def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
+def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_web_search: bool = True) -> dict:
     """
     Validate and fix a plan to ensure it meets requirements.
 
     Args:
         plan: The plan dict to validate
         enforce_web_search: If True, ensure at least one step has need_search=true
+        enable_web_search: If False, skip web search enforcement (takes precedence)
 
     Returns:
         The validated/fixed plan dict
@@ -154,8 +155,9 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 
     # ============================================================
     # SECTION 2: Enforce web search requirements
+    # Skip enforcement if web search is disabled (enable_web_search=False takes precedence)
     # ============================================================
-    if enforce_web_search:
+    if enforce_web_search and enable_web_search:
         # Check if any step has need_search=true (only check dict steps)
         has_search_step = any(
             step.get("need_search", False) 
@@ -197,6 +199,12 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
+
+    # Background investigation relies on web search; skip entirely when web search is disabled
+    if not configurable.enable_web_search:
+        logger.info("Web search is disabled, skipping background investigation.")
+        return {"background_investigation_results": json.dumps([], ensure_ascii=False)}
+
     query = state.get("clarified_research_topic") or state.get("research_topic")
     background_investigation_results = []
     
@@ -357,7 +365,7 @@ def planner_node(
 
     # Validate and fix plan to ensure web search requirements are met
     if isinstance(curr_plan, dict):
-        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search)
+        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search, configurable.enable_web_search)
 
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
@@ -480,7 +488,7 @@ def human_feedback_node(
         new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
+        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
     except (json.JSONDecodeError, AttributeError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
         if isinstance(current_plan, dict) and "content" in original_plan:
@@ -1072,7 +1080,8 @@ async def _execute_agent_step(
     if should_validate:
         # Check if enforcement is enabled in configuration
         configurable = Configuration.from_runnable_config(config) if config else Configuration()
-        if configurable.enforce_researcher_search:
+        # Skip validation if web search is disabled (user intentionally disabled it)
+        if configurable.enforce_researcher_search and configurable.enable_web_search:
             web_search_validated = validate_web_search_usage(result["messages"], agent_name)
             
             # If web search was not used, add a warning to the response
@@ -1210,15 +1219,30 @@ async def researcher_node(
     configurable = Configuration.from_runnable_config(config)
     logger.debug(f"[researcher_node] Max search results: {configurable.max_search_results}")
     
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+    # Build tools list based on configuration
+    tools = []
+    
+    # Add web search and crawl tools only if web search is enabled
+    if configurable.enable_web_search:
+        tools.extend([get_web_search_tool(configurable.max_search_results), crawl_tool])
+    else:
+        logger.info("[researcher_node] Web search is disabled, using only local RAG")
+    
+    # Add retriever tool if resources are available (always add, higher priority)
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         logger.debug(f"[researcher_node] Adding retriever tool to tools list")
         tools.insert(0, retriever_tool)
     
+    # Warn if no tools are available
+    if not tools:
+        logger.warning("[researcher_node] No tools available (web search disabled, no resources). "
+                       "Researcher will operate in pure reasoning mode.")
+    
     logger.info(f"[researcher_node] Researcher tools count: {len(tools)}")
     logger.debug(f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}")
-    logger.info(f"[researcher_node] enforce_researcher_search is set to: {configurable.enforce_researcher_search}")
+    logger.info(f"[researcher_node] enforce_researcher_search={configurable.enforce_researcher_search}, "
+                f"enable_web_search={configurable.enable_web_search}")
     
     return await _setup_and_execute_agent_step(
         state,

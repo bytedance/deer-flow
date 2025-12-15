@@ -57,6 +57,9 @@ class Configuration:
     enforce_researcher_search: bool = (
         True  # Enforce that researcher must use web search tool at least once
     )
+    enable_web_search: bool = (
+        True  # Whether to enable web search, set to False to use only local RAG
+    )
     interrupt_before_tools: list[str] = field(
         default_factory=list
     )  # List of tool names to interrupt before execution
