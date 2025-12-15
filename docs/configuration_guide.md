@@ -204,6 +204,24 @@ The context management doesn't work if the token_limit is not set.
 
 ## About Search Engine
 
+### Supported Search Engines
+DeerFlow supports the following search engines:
+- Tavily
+- InfoQuest
+- DuckDuckGo
+- Brave Search
+- Arxiv
+- Searx
+- Serper
+- Wikipedia
+
+### How to use Serper Search?
+
+To use Serper as your search engine, you need to:
+1. Get your API key from [Serper](https://serper.dev/)
+2. Set `SEARCH_API=serper` in your `.env` file
+3. Set `SERPER_API_KEY=your_api_key` in your `.env` file
+
 ### How to control search domains for Tavily?
 
 DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.

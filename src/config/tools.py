@@ -17,6 +17,7 @@ class SearchEngine(enum.Enum):
     ARXIV = "arxiv"
     SEARX = "searx"
     WIKIPEDIA = "wikipedia"
+    SERPER = "serper"
 
 
 class CrawlerEngine(enum.Enum):
