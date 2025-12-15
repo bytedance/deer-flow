@@ -8,6 +8,7 @@ from typing import List, Optional
 from langchain_community.tools import (
     BraveSearch,
     DuckDuckGoSearchResults,
+    GoogleSerperRun,
     SearxSearchRun,
     WikipediaQueryRun,
 )
@@ -15,6 +16,7 @@ from langchain_community.tools.arxiv import ArxivQueryRun
 from langchain_community.utilities import (
     ArxivAPIWrapper,
     BraveSearchWrapper,
+    GoogleSerperAPIWrapper,
     SearxSearchWrapper,
     WikipediaAPIWrapper,
 )
@@ -33,6 +35,7 @@ LoggedTavilySearch = create_logged_tool(TavilySearchWithImages)
 LoggedInfoQuestSearch = create_logged_tool(InfoQuestSearchResults)
 LoggedDuckDuckGoSearch = create_logged_tool(DuckDuckGoSearchResults)
 LoggedBraveSearch = create_logged_tool(BraveSearch)
+LoggedSerperSearch = create_logged_tool(GoogleSerperRun)
 LoggedArxivSearch = create_logged_tool(ArxivQueryRun)
 LoggedSearxSearch = create_logged_tool(SearxSearchRun)
 LoggedWikipediaSearch = create_logged_tool(WikipediaQueryRun)
@@ -100,6 +103,14 @@ def get_web_search_tool(max_search_results: int):
             search_wrapper=BraveSearchWrapper(
                 api_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
                 search_kwargs={"count": max_search_results},
+            ),
+        )
+    elif SELECTED_SEARCH_ENGINE == SearchEngine.SERPER.value:
+        return LoggedSerperSearch(
+            name="web_search",
+            api_wrapper=GoogleSerperAPIWrapper(
+                k=max_search_results,
+                serper_api_key=os.getenv("SERPER_API_KEY", ""),
             ),
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.ARXIV.value:
