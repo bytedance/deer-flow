@@ -118,13 +118,14 @@ def preserve_state_meta_fields(state: State) -> dict:
     }
 
 
-def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
+def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_web_search: bool = True) -> dict:
     """
     Validate and fix a plan to ensure it meets requirements.
 
     Args:
         plan: The plan dict to validate
         enforce_web_search: If True, ensure at least one step has need_search=true
+        enable_web_search: If False, skip web search enforcement (takes precedence)
 
     Returns:
         The validated/fixed plan dict
@@ -154,8 +155,9 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 
     # ============================================================
     # SECTION 2: Enforce web search requirements
+    # Skip enforcement if web search is disabled (enable_web_search=False takes precedence)
     # ============================================================
-    if enforce_web_search:
+    if enforce_web_search and enable_web_search:
         # Check if any step has need_search=true (only check dict steps)
         has_search_step = any(
             step.get("need_search", False) 
@@ -198,7 +200,7 @@ def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
 
-    # Skip web search if disabled (for local RAG only mode)
+    # Background investigation relies on web search; skip entirely when web search is disabled
     if not configurable.enable_web_search:
         logger.info("Web search is disabled, skipping background investigation.")
         return {"background_investigation_results": json.dumps([], ensure_ascii=False)}
@@ -363,7 +365,7 @@ def planner_node(
 
     # Validate and fix plan to ensure web search requirements are met
     if isinstance(curr_plan, dict):
-        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search)
+        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search, configurable.enable_web_search)
 
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
@@ -486,7 +488,7 @@ def human_feedback_node(
         new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
+        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
     except (json.JSONDecodeError, AttributeError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
         if isinstance(current_plan, dict) and "content" in original_plan:
