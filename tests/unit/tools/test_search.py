@@ -5,6 +5,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.config import SearchEngine
 from src.tools.search import get_web_search_tool
@@ -63,6 +64,12 @@ class TestGetWebSearchTool:
         assert tool.name == "web_search"
         assert tool.api_wrapper.k == 6
         assert tool.api_wrapper.serper_api_key == "test_serper_key"
+
+    @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.SERPER.value)
+    @patch.dict(os.environ, {}, clear=True)
+    def test_get_web_search_tool_serper_no_api_key(self):
+        with pytest.raises(ValidationError):
+            get_web_search_tool(max_search_results=1)
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
     @patch("src.tools.search.load_yaml_config")
