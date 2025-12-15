@@ -64,6 +64,8 @@ BASIC_MODEL:
 # Web search toggle (Issue #681)
 # Set to false to disable web search and use only local RAG knowledge base.
 # This is useful for environments without internet access.
+# WARNING: If you disable web search, make sure to configure local RAG resources;
+#          otherwise, the researcher will operate in pure LLM reasoning mode without external data.
 # Note: This can be overridden per-request via the API parameter `enable_web_search`.
 # ENABLE_WEB_SEARCH: true
 
