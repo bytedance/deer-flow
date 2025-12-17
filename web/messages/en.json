@@ -44,7 +44,9 @@
       "maxStepsOfPlan": "Max steps of a research plan",
       "maxStepsDescription": "By default, each research plan has 3 steps.",
       "maxSearchResults": "Max search results",
-      "maxSearchResultsDescription": "By default, each search step has 3 results."
+      "maxSearchResultsDescription": "By default, each search step has 3 results.",
+      "enableWebSearch": "Enable web search",
+      "enableWebSearchDescription": "When disabled, only local RAG knowledge base will be used. Useful for environments without internet access."
     },
     "mcp": {
       "title": "MCP Servers",
