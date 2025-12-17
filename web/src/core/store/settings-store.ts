@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS: SettingsState = {
     maxClarificationRounds: 3,
     enableDeepThinking: false,
     enableBackgroundInvestigation: false,
+    enableWebSearch: true,
     maxPlanIterations: 1,
     maxStepNum: 3,
     maxSearchResults: 3,
@@ -31,6 +32,7 @@ export type SettingsState = {
     maxClarificationRounds: number;
     enableDeepThinking: boolean;
     enableBackgroundInvestigation: boolean;
+    enableWebSearch: boolean;
     maxPlanIterations: number;
     maxStepNum: number;
     maxSearchResults: number;
@@ -170,6 +172,16 @@ export function setEnableClarification(value: boolean) {
     general: {
       ...state.general,
       enableClarification: value,
+    },
+  }));
+  saveSettings();
+}
+
+export function setEnableWebSearch(value: boolean) {
+  useSettingsStore.setState((state) => ({
+    general: {
+      ...state.general,
+      enableWebSearch: value,
     },
   }));
   saveSettings();
