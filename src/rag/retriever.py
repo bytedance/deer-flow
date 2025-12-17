@@ -79,3 +79,9 @@ class Retriever(abc.ABC):
         Query relevant documents from the resources.
         """
         pass
+
+    def ingest_file(self, file_content: bytes, filename: str, **kwargs) -> Resource:
+        """
+        Ingest a file into the rag provider.
+        """
+        raise NotImplementedError("ingest_file is not implemented")

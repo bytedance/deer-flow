@@ -463,6 +463,46 @@ class TestRAGEndpoints:
         assert response.status_code == 200
         assert response.json()["resources"] == []
 
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_success(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.return_value = {
+            "uri": "milvus://test/file.md",
+            "title": "Test File",
+            "description": "Uploaded file",
+        }
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 200
+        assert response.json()["title"] == "Test File"
+        assert response.json()["uri"] == "milvus://test/file.md"
+        mock_retriever.ingest_file.assert_called_once()
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_no_retriever(self, mock_build_retriever, client):
+        mock_build_retriever.return_value = None
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 500
+        assert "RAG provider not configured" in response.json()["detail"]
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_not_implemented(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.side_effect = NotImplementedError
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 501
+        assert "Upload not supported" in response.json()["detail"]
+
 
 class TestChatStreamEndpoint:
     @patch("src.server.app.graph")

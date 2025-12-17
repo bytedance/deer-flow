@@ -32,6 +32,16 @@
     "addNewMCPServers": "添加新的 MCP 服务器",
     "mcpConfigDescription": "DeerFlow 使用标准 JSON MCP 配置来创建新服务器。",
     "pasteConfigBelow": "将您的配置粘贴到下面，然后点击\"添加\"来添加新服务器。",
+    "rag": {
+      "title": "资源",
+      "description": "在此管理您的知识库资源。上传 Markdown 或文本文件以供检索索引。",
+      "upload": "上传",
+      "uploading": "上传中...",
+      "uploadSuccess": "文件上传成功",
+      "uploadFailed": "文件上传失败",
+      "loading": "正在加载资源...",
+      "noResources": "未找到资源。上传文件以开始使用。"
+    },
     "add": "添加",
     "general": {
       "title": "通用",

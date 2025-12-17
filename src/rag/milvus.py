@@ -768,6 +768,43 @@ class MilvusRetriever(Retriever):
                 # Ignore errors during cleanup
                 pass
 
+    def ingest_file(self, file_content: bytes, filename: str, **kwargs) -> Resource:
+        """Ingest a file into the rag provider."""
+        # Check connection
+        if not self.client:
+            self._connect()
+
+        # Decode content (assuming text/md for now)
+        try:
+            content = file_content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("Only text/markdown files are supported")
+
+        # Generate doc_id and process content
+        # Use filename as base for doc_id
+        doc_id = hashlib.md5(f"{filename}_{len(content)}".encode()).hexdigest()[:8]
+        doc_id = f"uploaded_{filename.split('.')[0]}_{doc_id}"
+
+        title = self._extract_title_from_markdown(content, filename)
+        chunks = self._split_content(content)
+
+        # Insert chunks
+        for i, chunk in enumerate(chunks):
+            chunk_id = f"{doc_id}_chunk_{i}" if len(chunks) > 1 else doc_id
+            self._insert_document_chunk(
+                doc_id=chunk_id,
+                content=chunk,
+                title=title,
+                url=f"milvus://{self.collection_name}/{filename}",
+                metadata={"source": "uploaded", "file": filename},
+            )
+
+        return Resource(
+            uri=f"milvus://{self.collection_name}/{filename}",
+            title=title,
+            description="Uploaded file",
+        )
+
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         """Best-effort cleanup when instance is garbage collected."""
         self.close()

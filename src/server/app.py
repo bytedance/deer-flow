@@ -9,7 +9,7 @@ import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -899,6 +899,20 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+@app.post("/api/rag/upload", response_model=Resource)
+async def upload_rag_resource(file: UploadFile):
+    content = await file.read()
+    retriever = build_retriever()
+    if not retriever:
+        raise HTTPException(status_code=500, detail="RAG provider not configured")
+    try:
+        return retriever.ingest_file(content, file.filename)
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501, detail="Upload not supported by current RAG provider"
+        )
 
 
 @app.get("/api/config", response_model=ConfigResponse)

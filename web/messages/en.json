@@ -32,6 +32,16 @@
     "addNewMCPServers": "Add New MCP Servers",
     "mcpConfigDescription": "DeerFlow uses the standard JSON MCP config to create a new server.",
     "pasteConfigBelow": "Paste your config below and click \"Add\" to add new servers.",
+    "rag": {
+      "title": "Resources",
+      "description": "Manage your knowledge base resources here. Upload markdown or text files to be indexed for retrieval.",
+      "upload": "Upload",
+      "uploading": "Uploading...",
+      "uploadSuccess": "File uploaded successfully",
+      "uploadFailed": "Failed to upload file",
+      "loading": "Loading resources...",
+      "noResources": "No resources found. Upload a file to get started."
+    },
     "add": "Add",
     "general": {
       "title": "General",
