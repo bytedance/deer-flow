@@ -62,6 +62,11 @@ export function mergeMessage(message: Message, event: ChatEvent) {
           toolCall.args = safeParseToolArgs(toolCall.argsChunks.join(""));
           delete toolCall.argsChunks;
         }
+        // Handle direct_response tool: extract message content for display
+        if (toolCall.name === "direct_response" && toolCall.args?.message) {
+          message.content = toolCall.args.message as string;
+          message.contentChunks = [message.content];
+        }
       });
     }
   }
