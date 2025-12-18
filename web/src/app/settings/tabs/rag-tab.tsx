@@ -106,7 +106,7 @@ export const RAGTab: Tab = () => {
           <ul className="flex flex-col gap-2">
             {resources.map((resource, index) => (
               <li
-                key={index}
+                key={resource.uri}
                 className={cn("bg-card flex items-start gap-3 rounded-lg border p-3")}
               >
                 <div className={cn("bg-primary/10 rounded p-2")}>

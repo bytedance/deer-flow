@@ -913,6 +913,20 @@ async def upload_rag_resource(file: UploadFile):
         raise HTTPException(
             status_code=501, detail="Upload not supported by current RAG provider"
         )
+    except ValueError as exc:
+        # Invalid user input or unsupported file content; treat as a client error
+        logger.warning("Invalid RAG resource upload: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RAG resource. Please check the file and try again.",
+        )
+    except RuntimeError as exc:
+        # Internal error during ingestion; log and return a generic server error
+        logger.exception("Runtime error while ingesting RAG resource: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to ingest RAG resource due to an internal error.",
+        )
 
 
 @app.get("/api/config", response_model=ConfigResponse)
