@@ -54,7 +54,9 @@
       "maxStepsOfPlan": "研究计划的最大步骤数",
       "maxStepsDescription": "默认情况下，每个研究计划有 3 个步骤。",
       "maxSearchResults": "最大搜索结果数",
-      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。"
+      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。",
+      "enableWebSearch": "启用网络搜索",
+      "enableWebSearchDescription": "禁用后将仅使用本地 RAG 知识库。适用于无网络环境。"
     },
     "mcp": {
       "title": "MCP 服务器",
