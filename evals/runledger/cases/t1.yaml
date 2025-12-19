@@ -1,0 +1,10 @@
+id: t1
+description: triage a login ticket
+input:
+  ticket: reset password
+cassette: cassettes/t1.jsonl
+assertions:
+- type: required_fields
+  fields:
+  - category
+  - reply

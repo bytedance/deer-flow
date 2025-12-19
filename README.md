@@ -689,3 +689,14 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+
+## RunLedger CI gate
+
+This repo includes a deterministic CI gate for tool-using agents:
+
+```bash
+runledger run evals/runledger --mode replay --baseline baselines/runledger-demo.json
+```
+
+It replays recorded tool calls and fails the PR on schema/tool/budget regressions.
+

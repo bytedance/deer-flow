@@ -1,0 +1,113 @@
+{
+  "aggregates": {
+    "cases_error": 0,
+    "cases_fail": 0,
+    "cases_pass": 1,
+    "cases_total": 1,
+    "metrics": {
+      "cost_usd": {
+        "max": null,
+        "mean": null,
+        "min": null,
+        "p50": null,
+        "p95": null
+      },
+      "steps": {
+        "max": null,
+        "mean": null,
+        "min": null,
+        "p50": null,
+        "p95": null
+      },
+      "tokens_in": {
+        "max": null,
+        "mean": null,
+        "min": null,
+        "p50": null,
+        "p95": null
+      },
+      "tokens_out": {
+        "max": null,
+        "mean": null,
+        "min": null,
+        "p50": null,
+        "p95": null
+      },
+      "tool_calls": {
+        "max": 1.0,
+        "mean": 1.0,
+        "min": 1.0,
+        "p50": 1.0,
+        "p95": 1.0
+      },
+      "tool_errors": {
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "wall_ms": {
+        "max": 52.0,
+        "mean": 52.0,
+        "min": 52.0,
+        "p50": 52.0,
+        "p95": 52.0
+      }
+    },
+    "pass_rate": 1.0
+  },
+  "cases": [
+    {
+      "assertions": {
+        "failed": 0,
+        "total": 2
+      },
+      "cost_usd": null,
+      "failed_assertions": null,
+      "failure_reason": null,
+      "id": "t1",
+      "replay": {
+        "cassette_path": "evals/runledger/cassettes/t1.jsonl",
+        "cassette_sha256": "3ca88ba1cde6952e1927e83ba82cc13948f96157d200ef01a7a15b5e586883e5"
+      },
+      "status": "pass",
+      "steps": null,
+      "tokens_in": null,
+      "tokens_out": null,
+      "tool_calls": 1,
+      "tool_calls_by_name": {
+        "search_docs": 1
+      },
+      "tool_errors": 0,
+      "tool_errors_by_name": {},
+      "wall_ms": 52
+    }
+  ],
+  "generated_at": "2025-12-19T12:02:20.870345Z",
+  "policy_snapshot": {
+    "thresholds": {
+      "min_pass_rate": 1.0
+    }
+  },
+  "run": {
+    "ci": null,
+    "exit_status": "success",
+    "git_sha": null,
+    "mode": "replay",
+    "run_id": "20251219-120220-9aedcb"
+  },
+  "runledger_version": "0.1.0",
+  "schema_version": 1,
+  "suite": {
+    "agent_command": [
+      "python",
+      "evals/runledger/agent/agent.py"
+    ],
+    "cases_total": 1,
+    "name": "runledger-demo",
+    "suite_config_hash": null,
+    "suite_path": "evals/runledger/suite.yaml",
+    "tool_mode": "replay"
+  }
+}

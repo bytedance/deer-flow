@@ -1,0 +1,24 @@
+name: runledger-gate
+on:
+  pull_request:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install RunLedger
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install runledger
+      - name: Run deterministic evals (replay)
+        run: runledger run evals/runledger --mode replay --baseline baselines/runledger-demo.json
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runledger-artifacts
+          path: runledger_out/**
