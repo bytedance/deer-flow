@@ -46,10 +46,16 @@ export const useStore = create<{
   openResearchId: null,
 
   appendMessage(message: Message) {
-    set((state) => ({
-      messageIds: [...state.messageIds, message.id],
-      messages: new Map(state.messages).set(message.id, message),
-    }));
+    set((state) => {
+      // Prevent duplicate message IDs in the array to avoid React key warnings
+      const newMessageIds = state.messageIds.includes(message.id)
+        ? state.messageIds
+        : [...state.messageIds, message.id];
+      return {
+        messageIds: newMessageIds,
+        messages: new Map(state.messages).set(message.id, message),
+      };
+    });
   },
   updateMessage(message: Message) {
     set((state) => ({
@@ -109,6 +115,7 @@ export async function sendMessage(
       enable_deep_thinking: settings.enableDeepThinking ?? false,
       enable_background_investigation:
         settings.enableBackgroundInvestigation ?? true,
+      enable_web_search: settings.enableWebSearch ?? true,
       max_plan_iterations: settings.maxPlanIterations,
       max_step_num: settings.maxStepNum,
       max_search_results: settings.maxSearchResults,
@@ -120,32 +127,65 @@ export async function sendMessage(
 
   setResponding(true);
   let messageId: string | undefined;
+  const pendingUpdates = new Map<string, Message>();
+  let updateTimer: NodeJS.Timeout | undefined;
+
+  const scheduleUpdate = () => {
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = setTimeout(() => {
+      // Batch update message status
+      if (pendingUpdates.size > 0) {
+        useStore.getState().updateMessages(Array.from(pendingUpdates.values()));
+        pendingUpdates.clear();
+      }
+    }, 16); // ~60fps
+  };
+
   try {
     for await (const event of stream) {
       const { type, data } = event;
-      messageId = data.id;
       let message: Message | undefined;
+      
+      // Handle tool_call_result specially: use the message that contains the tool call
       if (type === "tool_call_result") {
         message = findMessageByToolCallId(data.tool_call_id);
-      } else if (!existsMessage(messageId)) {
-        message = {
-          id: messageId,
-          threadId: data.thread_id,
-          agent: data.agent,
-          role: data.role,
-          content: "",
-          contentChunks: [],
-          reasoningContent: "",
-          reasoningContentChunks: [],
-          isStreaming: true,
-          interruptFeedback,
-        };
-        appendMessage(message);
+        if (message) {
+          // Use the found message's ID, not data.id
+          messageId = message.id;
+        } else {
+          // Shouldn't happen, but handle gracefully
+          if (process.env.NODE_ENV === "development") {
+            console.warn(`Tool call result without matching message: ${data.tool_call_id}`);
+          }
+          continue; // Skip this event
+        }
+      } else {
+        // For other event types, use data.id
+        messageId = data.id;
+        
+        if (!existsMessage(messageId)) {
+          message = {
+            id: messageId,
+            threadId: data.thread_id,
+            agent: data.agent,
+            role: data.role,
+            content: "",
+            contentChunks: [],
+            reasoningContent: "",
+            reasoningContentChunks: [],
+            isStreaming: true,
+            interruptFeedback,
+          };
+          appendMessage(message);
+        }
       }
+      
       message ??= getMessage(messageId);
       if (message) {
         message = mergeMessage(message, event);
-        updateMessage(message);
+        // Collect pending messages for update, instead of updating immediately.
+        pendingUpdates.set(message.id, message);
+        scheduleUpdate();
       }
     }
   } catch {
@@ -162,6 +202,12 @@ export async function sendMessage(
     useStore.getState().setOngoingResearch(null);
   } finally {
     setResponding(false);
+    // Ensure all pending updates are processed.
+    if (updateTimer) clearTimeout(updateTimer);
+    if (pendingUpdates.size > 0) {
+      useStore.getState().updateMessages(Array.from(pendingUpdates.values()));
+    }
+
   }
 }
 
@@ -358,6 +404,29 @@ export function useMessage(messageId: string | null | undefined) {
 
 export function useMessageIds() {
   return useStore(useShallow((state) => state.messageIds));
+}
+
+export function useRenderableMessageIds() {
+  return useStore(
+    useShallow((state) => {
+      // Filter to only messages that will actually render in MessageListView
+      // This prevents duplicate keys and React warnings when messages change state
+      return state.messageIds.filter((messageId) => {
+        const message = state.messages.get(messageId);
+        if (!message) return false;
+        
+        // Only include messages that match MessageListItem rendering conditions
+        // These are the same conditions checked in MessageListItem component
+        return (
+          message.role === "user" ||
+          message.agent === "coordinator" ||
+          message.agent === "planner" ||
+          message.agent === "podcast" ||
+          state.researchIds.includes(messageId) // startOfResearch condition
+        );
+      });
+    }),
+  );
 }
 
 export function useLastInterruptMessage() {

@@ -1,6 +1,8 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { parse as bestEffortParse } from "best-effort-json-parser";
+
 import type {
   ChatEvent,
   InterruptEvent,
@@ -12,6 +14,34 @@ import type {
 import { deepClone } from "../utils/deep-clone";
 
 import type { Message } from "./types";
+
+/**
+ * Safely parse JSON from streamed tool call argument chunks.
+ * Uses best-effort-json-parser to handle incomplete JSON from streaming.
+ * This addresses issue #528 where MCP tool call arguments may be incomplete
+ * when using stream_mode="messages".
+ */
+function safeParseToolArgs(argsString: string): Record<string, unknown> {
+  try {
+    // First try standard JSON.parse for complete JSON
+    return JSON.parse(argsString) as Record<string, unknown>;
+  } catch {
+    // If standard parsing fails, use best-effort parser for incomplete JSON
+    try {
+      const result = bestEffortParse(argsString);
+      // Ensure we return an object
+      if (result && typeof result === "object" && !Array.isArray(result)) {
+        return result as Record<string, unknown>;
+      }
+      // If parsing returns something unexpected, wrap in an object
+      return { _parsed: result };
+    } catch {
+      // If all parsing fails, return empty object
+      console.warn("Failed to parse tool call arguments:", argsString);
+      return {};
+    }
+  }
+}
 
 export function mergeMessage(message: Message, event: ChatEvent) {
   if (event.type === "message_chunk") {
@@ -29,8 +59,13 @@ export function mergeMessage(message: Message, event: ChatEvent) {
     if (message.toolCalls) {
       message.toolCalls.forEach((toolCall) => {
         if (toolCall.argsChunks?.length) {
-          toolCall.args = JSON.parse(toolCall.argsChunks.join(""));
+          toolCall.args = safeParseToolArgs(toolCall.argsChunks.join(""));
           delete toolCall.argsChunks;
+        }
+        // Handle direct_response tool: extract message content for display
+        if (toolCall.name === "direct_response" && toolCall.args?.message) {
+          message.content = toolCall.args.message as string;
+          message.contentChunks = [message.content];
         }
       });
     }

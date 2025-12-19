@@ -12,7 +12,182 @@ from src.graph.nodes import (
     planner_node,
     reporter_node,
     researcher_node,
+    extract_plan_content,
 )
+
+
+class TestExtractPlanContent:
+    """Test cases for the extract_plan_content function."""
+
+    def test_extract_plan_content_with_string(self):
+        """Test that extract_plan_content returns the input string as-is."""
+        plan_json_str = '{"locale": "en-US", "has_enough_context": false, "title": "Test Plan"}'
+        result = extract_plan_content(plan_json_str)
+        assert result == plan_json_str
+
+    def test_extract_plan_content_with_ai_message(self):
+        """Test that extract_plan_content extracts content from an AIMessage-like object."""
+        # Create a mock AIMessage object
+        class MockAIMessage:
+            def __init__(self, content):
+                self.content = content
+        
+        plan_content = '{"locale": "zh-CN", "has_enough_context": false, "title": "测试计划"}'
+        plan_message = MockAIMessage(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        assert result == plan_content
+
+    def test_extract_plan_content_with_dict(self):
+        """Test that extract_plan_content converts a dictionary to JSON string."""
+        plan_dict = {
+            "locale": "fr-FR",
+            "has_enough_context": True,
+            "title": "Plan de test",
+            "steps": []
+        }
+        expected_json = json.dumps(plan_dict)
+        
+        result = extract_plan_content(plan_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_with_other_type(self):
+        """Test that extract_plan_content converts other types to string."""
+        plan_value = 12345
+        expected_string = "12345"
+        
+        result = extract_plan_content(plan_value)
+        assert result == expected_string
+
+    def test_extract_plan_content_with_complex_dict(self):
+        """Test that extract_plan_content handles complex nested dictionaries."""
+        plan_dict = {
+            "locale": "zh-CN",
+            "has_enough_context": False,
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "steps": [
+                {
+                    "need_search": True,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                },
+                {
+                    "need_search": True,
+                    "title": "查找其他超高建筑作为对比基准",
+                    "description": "获取其他具有代表性的超高建筑的高度数据，以提供更全面的比较背景。",
+                    "step_type": "research"
+                }
+            ]
+        }
+        
+        result = extract_plan_content(plan_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == plan_dict
+
+    def test_extract_plan_content_with_non_string_content(self):
+        """Test that extract_plan_content handles AIMessage with non-string content."""
+        class MockAIMessageWithNonStringContent:
+            def __init__(self, content):
+                self.content = content
+        
+        # Test with non-string content (should not be extracted)
+        plan_content = 12345
+        plan_message = MockAIMessageWithNonStringContent(plan_content)
+        
+        result = extract_plan_content(plan_message)
+        # Should convert the entire object to string since content is not a string
+        assert isinstance(result, str)
+        assert "MockAIMessageWithNonStringContent" in result
+
+    def test_extract_plan_content_with_empty_string(self):
+        """Test that extract_plan_content handles empty strings."""
+        empty_string = ""
+        result = extract_plan_content(empty_string)
+        assert result == ""
+
+    def test_extract_plan_content_with_empty_dict(self):
+        """Test that extract_plan_content handles empty dictionaries."""
+        empty_dict = {}
+        expected_json = "{}"
+        
+        result = extract_plan_content(empty_dict)
+        assert result == expected_json
+
+    def test_extract_plan_content_with_content_dict(self):
+        """Test that extract_plan_content handles dictionaries with content."""
+        content_dict = {"content": {
+                "locale": "zh-CN",
+                "has_enough_context": False,
+                "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+                "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+                "steps": [
+                    {
+                        "need_search": True,
+                        "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                        "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                        "step_type": "research"
+                    }
+                ]
+            }
+        }
+        
+        result = extract_plan_content(content_dict)
+        # Verify the result can be parsed back to a dictionary
+        parsed_result = json.loads(result)
+        assert parsed_result == content_dict["content"]
+
+    def test_extract_plan_content_with_content_string(self):
+        content_dict = {"content": '{"locale": "en-US", "title": "Test"}'}
+        result = extract_plan_content(content_dict)
+        assert result == '{"locale": "en-US", "title": "Test"}'
+
+    def test_extract_plan_content_issue_703_case(self):
+        """Test that extract_plan_content handles the specific case from issue #703."""
+        # This is the exact structure that was causing the error in issue #703
+        class MockAIMessageFromIssue703:
+            def __init__(self, content):
+                self.content = content
+                self.additional_kwargs = {}
+                self.response_metadata = {'finish_reason': 'stop', 'model_name': 'qwen-max-latest'}
+                self.type = 'ai'
+                self.id = 'run--ebc626af-3845-472b-aeee-acddebf5a4ea'
+                self.example = False
+                self.tool_calls = []
+                self.invalid_tool_calls = []
+        
+        plan_content = '''{
+            "locale": "zh-CN",
+            "has_enough_context": false,
+            "thought": "要回答埃菲尔铁塔比世界最高建筑高多少倍的问题，我们需要知道埃菲尔铁塔的高度以及当前世界最高建筑的高度。",
+            "title": "埃菲尔铁塔与世界最高建筑高度比较研究计划",
+            "steps": [
+                {
+                    "need_search": true,
+                    "title": "收集埃菲尔铁塔和世界最高建筑的高度数据",
+                    "description": "从可靠来源检索埃菲尔铁塔的确切高度以及目前被公认为世界最高建筑的建筑物及其高度数据。",
+                    "step_type": "research"
+                }
+            ]
+        }'''
+        
+        plan_message = MockAIMessageFromIssue703(plan_content)
+        
+        # Extract the content
+        result = extract_plan_content(plan_message)
+        
+        # Verify the extracted content is the same as the original
+        assert result == plan_content
+        
+        # Verify the extracted content can be parsed as JSON
+        parsed_result = json.loads(result)
+        assert parsed_result["locale"] == "zh-CN"
+        assert parsed_result["title"] == "埃菲尔铁塔与世界最高建筑高度比较研究计划"
+        assert len(parsed_result["steps"]) == 1
+        assert parsed_result["steps"][0]["title"] == "收集埃菲尔铁塔和世界最高建筑的高度数据"
+
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
 with patch("src.llms.llm.get_llm_by_type", return_value=MagicMock()):
@@ -136,7 +311,7 @@ def test_background_investigation_node_malformed_response(
 
         # Parse and verify the JSON content
         results = result["background_investigation_results"]
-        assert json.loads(results) is None
+        assert json.loads(results) == []
 
 
 @pytest.fixture
@@ -451,13 +626,40 @@ def test_human_feedback_node_accepted(monkeypatch, mock_state_base, mock_config)
         assert result.update["current_plan"]["has_enough_context"] is False
 
 
-def test_human_feedback_node_invalid_interrupt(monkeypatch, mock_state_base, mock_config):
-    # interrupt returns something else, should raise TypeError
+def test_human_feedback_node_invalid_interrupt(
+    monkeypatch, mock_state_base, mock_config
+):
+    # interrupt returns something else, should gracefully return to planner (not raise TypeError)
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = False
     with patch("src.graph.nodes.interrupt", return_value="RANDOM_FEEDBACK"):
-        with pytest.raises(TypeError):
-            human_feedback_node(state, mock_config)
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
+
+
+def test_human_feedback_node_none_feedback(
+    monkeypatch, mock_state_base, mock_config
+):
+    # interrupt returns None, should gracefully return to planner
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = False
+    with patch("src.graph.nodes.interrupt", return_value=None):
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
+
+
+def test_human_feedback_node_empty_feedback(
+    monkeypatch, mock_state_base, mock_config
+):
+    # interrupt returns empty string, should gracefully return to planner
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = False
+    with patch("src.graph.nodes.interrupt", return_value=""):
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
 
 
 def test_human_feedback_node_json_decode_error_first_iteration(
@@ -490,7 +692,9 @@ def test_human_feedback_node_json_decode_error_second_iteration(
         assert result.goto == "reporter"
 
 
-def test_human_feedback_node_not_enough_context(monkeypatch, mock_state_base, mock_config):
+def test_human_feedback_node_not_enough_context(
+    monkeypatch, mock_state_base, mock_config
+):
     # Plan does not have enough context, should goto research_team
     plan = {
         "has_enough_context": False,
@@ -568,7 +772,8 @@ def test_coordinator_node_no_tool_calls(
     patch_handoff_to_planner,
     patch_logger,
 ):
-    # No tool calls, should fallback to planner (fix for issue #535)
+    # No tool calls when clarification disabled - should end workflow (fix for issue #733)
+    # When LLM doesn't call any tools in BRANCH 1, workflow ends gracefully
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
         patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
@@ -579,8 +784,8 @@ def test_coordinator_node_no_tool_calls(
         mock_get_llm.return_value = mock_llm
 
         result = coordinator_node(mock_state_coordinator, MagicMock())
-        # Should fallback to planner instead of __end__ to ensure workflow continues
-        assert result.goto == "planner"
+        # With direct_response tool available, no tool calls means end workflow
+        assert result.goto == "__end__"
         assert result.update["locale"] == "en-US"
         assert result.update["resources"] == ["resource1", "resource2"]
 
@@ -646,7 +851,7 @@ def test_coordinator_node_with_tool_calls_locale_override(
     tool_calls = [
         {
             "name": "handoff_to_planner",
-            "args": {"locale": "zh-CN", "research_topic": "test topic"},
+            "args": {"locale": "auto", "research_topic": "test topic"},
         }
     ]
     with (
@@ -660,7 +865,7 @@ def test_coordinator_node_with_tool_calls_locale_override(
 
         result = coordinator_node(mock_state_coordinator, MagicMock())
         assert result.goto == "planner"
-        assert result.update["locale"] == "zh-CN"
+        assert result.update["locale"] == "en-US"
         assert result.update["research_topic"] == "test topic"
         assert result.update["resources"] == ["resource1", "resource2"]
         assert result.update["resources"] == ["resource1", "resource2"]
@@ -921,7 +1126,7 @@ async def test_execute_agent_step_basic(mock_state_with_steps, mock_agent):
         assert "messages" in result.update
         assert "observations" in result.update
         # The new observation should be appended
-        assert result.update["observations"][-1] == "result content"
+        assert result.update["observations"][-1] == "result content" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
         # The step's execution_res should be updated
         assert (
             mock_state_with_steps["current_plan"].steps[1].execution_res
@@ -940,7 +1145,9 @@ async def test_execute_agent_step_no_unexecuted_step(
         )
         assert isinstance(result, Command)
         assert result.goto == "research_team"
-        mock_logger.warning.assert_called_with("No unexecuted step found")
+        # Updated assertion to match new debug logging format
+        mock_logger.warning.assert_called_once()
+        assert "No unexecuted step found" in mock_logger.warning.call_args[0][0]
 
 
 @pytest.mark.asyncio
@@ -973,7 +1180,7 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         result = await _execute_agent_step(state, agent, "researcher")
         assert isinstance(result, Command)
         assert result.goto == "research_team"
-        assert result.update["observations"][-1] == "resource result"
+        assert result.update["observations"][-1] == "resource result" + "\n\n[WARNING] This research was completed without using the web_search tool. " + "Please verify that the information provided is accurate and up-to-date." + "\n\n[VALIDATION WARNING] Researcher did not use the web_search tool as recommended."
 
 
 @pytest.mark.asyncio
@@ -1093,7 +1300,7 @@ def patch_create_agent():
 
 @pytest.fixture
 def patch_execute_agent_step():
-    async def fake_execute_agent_step(state, agent, agent_type):
+    async def fake_execute_agent_step(state, agent, agent_type, config=None):
         return "EXECUTED"
 
     with patch(
@@ -1446,7 +1653,9 @@ def test_handoff_tools():
     assert result is None  # Tool should return None (no-op)
 
     # Test handoff_after_clarification tool - use invoke() method
-    result = handoff_after_clarification.invoke({"locale": "en-US"})
+    result = handoff_after_clarification.invoke(
+        {"locale": "en-US", "research_topic": "renewable energy research"}
+    )
     assert result is None  # Tool should return None (no-op)
 
 
@@ -1468,9 +1677,13 @@ def test_coordinator_tools_with_clarification_enabled(mock_get_llm):
         "clarification_rounds": 2,
         "max_clarification_rounds": 3,
         "is_clarification_complete": False,
-        "clarification_history": ["response 1", "response 2"],
+        "clarification_history": [
+            "Tell me about something",
+            "response 1",
+            "response 2",
+        ],
         "locale": "en-US",
-        "research_topic": "",
+        "research_topic": "Tell me about something",
     }
 
     # Mock config
@@ -1492,7 +1705,7 @@ def test_coordinator_tools_with_clarification_enabled(mock_get_llm):
 
 @patch("src.graph.nodes.get_llm_by_type")
 def test_coordinator_tools_with_clarification_disabled(mock_get_llm):
-    """Test that coordinator binds only one tool when clarification is disabled."""
+    """Test that coordinator binds two tools when clarification is disabled (fix for issue #733)."""
     # Mock LLM response with tool call
     mock_llm = MagicMock()
     mock_response = MagicMock()
@@ -1524,9 +1737,11 @@ def test_coordinator_tools_with_clarification_disabled(mock_get_llm):
     assert mock_llm.bind_tools.called
     bound_tools = mock_llm.bind_tools.call_args[0][0]
 
-    # Should bind only 1 tool when clarification is disabled
-    assert len(bound_tools) == 1
-    assert bound_tools[0].name == "handoff_to_planner"
+    # Should bind 2 tools when clarification is disabled: handoff_to_planner and direct_response
+    assert len(bound_tools) == 2
+    tool_names = {tool.name for tool in bound_tools}
+    assert "handoff_to_planner" in tool_names
+    assert "direct_response" in tool_names
 
 
 @patch("src.graph.nodes.get_llm_by_type")
@@ -1567,3 +1782,809 @@ def test_coordinator_empty_llm_response_corner_case(mock_get_llm):
     # Should gracefully handle empty response by going to planner to ensure workflow continues
     assert result.goto == "planner"
     assert result.update["locale"] == "en-US"
+
+
+# ============================================================================
+# Clarification flow tests
+# ============================================================================
+
+
+def test_clarification_handoff_combines_history():
+    """Coordinator should merge original topic with all clarification answers before handoff."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {"role": "user", "content": "Research artificial intelligence"},
+            {"role": "assistant", "content": "Which area of AI should we focus on?"},
+            {"role": "user", "content": "Machine learning applications"},
+            {"role": "assistant", "content": "What dimension of that should we cover?"},
+            {"role": "user", "content": "Technical implementation details"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Machine learning applications",
+            "Technical implementation details",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Machine learning applications, Technical implementation details",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-test"})
+
+    mock_response = AIMessage(
+        content="Understood, handing off now.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    assert update["clarification_history"] == [
+        "Research artificial intelligence",
+        "Machine learning applications",
+        "Technical implementation details",
+    ]
+    expected_topic = (
+        "Research artificial intelligence - "
+        "Machine learning applications, Technical implementation details"
+    )
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+
+
+def test_clarification_history_reconstructed_from_messages():
+    """Coordinator should rebuild clarification history from full message log when state is incomplete."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    incomplete_state = {
+        "messages": [
+            {"role": "user", "content": "Research on renewable energy"},
+            {
+                "role": "assistant",
+                "content": "Which type of renewable energy interests you?",
+            },
+            {"role": "user", "content": "Solar and wind energy"},
+            {"role": "assistant", "content": "Which aspect should we focus on?"},
+            {"role": "user", "content": "Technical implementation"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": ["Technical implementation"],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research on renewable energy",
+        "clarified_research_topic": "Research on renewable energy",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-history-rebuild"})
+
+    mock_response = AIMessage(
+        content="Understood, handing over now.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(incomplete_state, config)
+
+    update = result.update
+    assert update["clarification_history"] == [
+        "Research on renewable energy",
+        "Solar and wind energy",
+        "Technical implementation",
+    ]
+    assert update["research_topic"] == "Research on renewable energy"
+    assert (
+        update["clarified_research_topic"]
+        == "Research on renewable energy - Solar and wind energy, Technical implementation"
+    )
+
+
+def test_clarification_max_rounds_without_tool_call():
+    """Coordinator should stop asking questions after max rounds and hand off with compiled topic."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {"role": "user", "content": "Research artificial intelligence"},
+            {"role": "assistant", "content": "Which area should we focus on?"},
+            {"role": "user", "content": "Natural language processing"},
+            {"role": "assistant", "content": "Which domain matters most?"},
+            {"role": "user", "content": "Healthcare"},
+            {"role": "assistant", "content": "Any specific scenario to study?"},
+            {"role": "user", "content": "Clinical documentation"},
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 3,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Natural language processing",
+            "Healthcare",
+            "Clinical documentation",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Natural language processing, Healthcare, Clinical documentation",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-max"})
+
+    mock_response = AIMessage(
+        content="Got it, sending this to the planner.",
+        tool_calls=[],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    expected_topic = (
+        "Research artificial intelligence - "
+        "Natural language processing, Healthcare, Clinical documentation"
+    )
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+    assert result.goto == "planner"
+
+
+def test_clarification_human_message_support():
+    """Coordinator should treat HumanMessage instances from the user as user authored."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            HumanMessage(content="Research artificial intelligence"),
+            HumanMessage(content="Which area should we focus on?", name="coordinator"),
+            HumanMessage(content="Machine learning"),
+            HumanMessage(
+                content="Which dimension should we explore?", name="coordinator"
+            ),
+            HumanMessage(content="Technical feasibility"),
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 2,
+        "clarification_history": [
+            "Research artificial intelligence",
+            "Machine learning",
+            "Technical feasibility",
+        ],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research artificial intelligence",
+        "clarified_research_topic": "Research artificial intelligence - Machine learning, Technical feasibility",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-human"})
+
+    mock_response = AIMessage(
+        content="Moving to planner.",
+        tool_calls=[
+            {
+                "name": "handoff_after_clarification",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "human-message-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    update = result.update
+    expected_topic = (
+        "Research artificial intelligence - Machine learning, Technical feasibility"
+    )
+    assert update["clarification_history"] == [
+        "Research artificial intelligence",
+        "Machine learning",
+        "Technical feasibility",
+    ]
+    assert update["research_topic"] == "Research artificial intelligence"
+    assert update["clarified_research_topic"] == expected_topic
+
+
+def test_clarification_no_history_defaults_to_topic():
+    """If clarification never started, coordinator should forward the original topic."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [{"role": "user", "content": "What is quantum computing?"}],
+        "enable_clarification": True,
+        "clarification_rounds": 0,
+        "clarification_history": ["What is quantum computing?"],
+        "max_clarification_rounds": 3,
+        "research_topic": "What is quantum computing?",
+        "clarified_research_topic": "What is quantum computing?",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "clarification-none"})
+
+    mock_response = AIMessage(
+        content="Understood.",
+        tool_calls=[
+            {
+                "name": "handoff_to_planner",
+                "args": {"locale": "en-US", "research_topic": "placeholder"},
+                "id": "clarification-none",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    assert result.update["research_topic"] == "What is quantum computing?"
+    assert result.update["clarified_research_topic"] == "What is quantum computing?"
+
+
+# ============================================================================
+# Issue #650: Pydantic validation errors (missing step_type field)
+# ============================================================================
+
+
+def test_planner_node_issue_650_missing_step_type_basic():
+    """Test planner_node with missing step_type fields (Issue #650)."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # Simulate LLM response with missing step_type (Issue #650 scenario)
+    llm_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "thought": "Need to gather data",
+        "title": "Test Plan",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Research Step",
+                "description": "Gather info",
+                # step_type MISSING - this is the issue
+            },
+            {
+                "need_search": False,
+                "title": "Processing Step",
+                "description": "Analyze",
+                # step_type MISSING
+            },
+        ],
+    }
+
+    # Apply the fix
+    fixed_plan = validate_and_fix_plan(llm_response)
+
+    # Verify all steps have step_type after fix
+    assert isinstance(fixed_plan, dict)
+    assert fixed_plan["steps"][0]["step_type"] == "research"
+    # Issue #677: non-search steps now default to "analysis" instead of "processing"
+    assert fixed_plan["steps"][1]["step_type"] == "analysis"
+    assert all("step_type" in step for step in fixed_plan["steps"])
+
+
+def test_planner_node_issue_650_water_footprint_scenario():
+    """Test the exact water footprint query scenario from Issue #650."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # Approximate the exact plan structure that caused Issue #650
+    # "How many liters of water are required to produce 1 kg of beef?"
+    llm_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "thought": "You asked about water footprint of beef - need comprehensive data gathering",
+        "title": "Research Plan — Water Footprint of 1 kg of Beef",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Authoritative global estimates",
+                "description": "Collect peer-reviewed estimates",
+                # MISSING step_type
+            },
+            {
+                "need_search": True,
+                "title": "System-specific data",
+                "description": "Gather system-level variation data",
+                # MISSING step_type
+            },
+            {
+                "need_search": False,
+                "title": "Synthesize estimates",
+                "description": "Calculate scenario-based estimates",
+                # MISSING step_type
+            },
+        ],
+    }
+
+    # Apply the fix
+    fixed_plan = validate_and_fix_plan(llm_response)
+
+    # Verify structure - all steps should have step_type filled in
+    assert len(fixed_plan["steps"]) == 3
+    assert fixed_plan["steps"][0]["step_type"] == "research"
+    assert fixed_plan["steps"][1]["step_type"] == "research"
+    # Issue #677: non-search steps now default to "analysis" instead of "processing"
+    assert fixed_plan["steps"][2]["step_type"] == "analysis"
+    assert all("step_type" in step for step in fixed_plan["steps"])
+
+
+def test_planner_node_issue_650_validation_error_fixed():
+    """Test that the validation error from Issue #650 is now prevented."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    # This is the exact type of response that caused the error in Issue #650
+    malformed_response = {
+        "locale": "en-US",
+        "has_enough_context": False,
+        "title": "Test",
+        "thought": "Test",
+        "steps": [
+            {
+                "need_search": True,
+                "title": "Step 1",
+                "description": "Test description",
+                # Missing step_type - caused "Field required" error
+            },
+        ],
+    }
+
+    # Before fix would raise:
+    # ValidationError: 1 validation error for Plan
+    # steps.0.step_type Field required [type=missing, ...]
+
+    # After fix should succeed without raising exception
+    fixed = validate_and_fix_plan(malformed_response)
+
+    # Verify the fix was applied
+    assert fixed["steps"][0]["step_type"] in ["research", "processing"]
+    assert "step_type" in fixed["steps"][0]
+
+
+def test_human_feedback_node_issue_650_plan_parsing():
+    """Test human_feedback_node with Issue #650 plan that has missing step_type."""
+    from src.graph.nodes import human_feedback_node
+
+    # Plan with missing step_type fields
+    state = {
+        "current_plan": json.dumps(
+            {
+                "locale": "en-US",
+                "has_enough_context": False,
+                "title": "Test Plan",
+                "thought": "Test",
+                "steps": [
+                    {
+                        "need_search": True,
+                        "title": "Step 1",
+                        "description": "Gather",
+                        # MISSING step_type
+                    },
+                ],
+            }
+        ),
+        "plan_iterations": 0,
+        "auto_accepted_plan": True,
+    }
+
+    config = MagicMock()
+    with patch(
+        "src.graph.nodes.Configuration.from_runnable_config",
+        return_value=MagicMock(enforce_web_search=False),
+    ):
+        with patch("src.graph.nodes.Plan.model_validate", side_effect=lambda x: x):
+            with patch("src.graph.nodes.repair_json_output", side_effect=lambda x: x):
+                result = human_feedback_node(state, config)
+
+                # Should succeed without validation error
+                assert isinstance(result, Command)
+                assert result.goto == "research_team"
+
+
+def test_plan_validation_with_all_issue_650_error_scenarios():
+    """Test all variations of Issue #650 error scenarios."""
+    from src.graph.nodes import validate_and_fix_plan
+
+    test_scenarios = [
+        # Missing step_type with need_search=true
+        {
+            "steps": [
+                {"need_search": True, "title": "R", "description": "D"},
+            ]
+        },
+        # Missing step_type with need_search=false
+        {
+            "steps": [
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+        # Multiple missing step_types
+        {
+            "steps": [
+                {"need_search": True, "title": "R1", "description": "D"},
+                {"need_search": True, "title": "R2", "description": "D"},
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+        # Mix of missing and present step_type
+        {
+            "steps": [
+                {"need_search": True, "title": "R", "description": "D", "step_type": "research"},
+                {"need_search": False, "title": "P", "description": "D"},
+            ]
+        },
+    ]
+
+    for scenario in test_scenarios:
+        plan = {
+            "locale": "en-US",
+            "has_enough_context": False,
+            "title": "Test",
+            "thought": "Test",
+            **scenario,
+        }
+
+        # Should not raise exception
+        fixed = validate_and_fix_plan(plan)
+
+        # All steps should have step_type after fix
+        for step in fixed["steps"]:
+            assert "step_type" in step
+            # Issue #677: 'analysis' is now a valid step_type
+            assert step["step_type"] in ["research", "analysis", "processing"]
+
+def test_clarification_skips_specific_topics():
+    """Coordinator should skip clarification for already specific topics."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableConfig
+
+    test_state = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
+            }
+        ],
+        "enable_clarification": True,
+        "clarification_rounds": 0,
+        "clarification_history": [],
+        "max_clarification_rounds": 3,
+        "research_topic": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
+        "locale": "en-US",
+    }
+
+    config = RunnableConfig(configurable={"thread_id": "specific-topic-test"})
+
+    mock_response = AIMessage(
+        content="I understand you want to research AI e-commerce video synthesis technology. Let me hand this off to the planner.",
+        tool_calls=[
+            {
+                "name": "handoff_to_planner",
+                "args": {
+                    "locale": "en-US",
+                    "research_topic": "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model",
+                },
+                "id": "tool-call-handoff",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm:
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        result = coordinator_node(test_state, config)
+
+    assert hasattr(result, "update")
+    assert result.goto == "planner"
+    assert (
+        result.update["research_topic"]
+        == "Research Plan for Improving Efficiency of AI e-commerce Video Synthesis Technology Based on Transformer Model"
+    )
+
+
+# ============================================================================
+# Issue #693 Tests: Multiple web_search ToolMessages Preservation
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_preserves_multiple_tool_messages():
+    """
+    Test for Issue #693: Verify that all ToolMessages from multiple tool calls
+    (e.g., multiple web_search calls) are preserved and not just the final result.
+    
+    This test ensures that when an agent makes multiple web_search calls, each
+    ToolMessage is preserved in the Command update, allowing the frontend to
+    receive and display all search results.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    # Create test state with a plan and an unexecuted step
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    # Create a mock agent that simulates multiple web_search tool calls
+    # This mimics what a ReAct agent does internally
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate the agent making 2 web_search calls with this message sequence:
+        # 1. AIMessage with first tool call
+        # 2. ToolMessage with first tool result
+        # 3. AIMessage with second tool call
+        # 4. ToolMessage with second tool result
+        # 5. Final AIMessage with the complete response
+        
+        messages = [
+            AIMessage(
+                content="I'll search for information about this topic.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "first search query"}
+                }]
+            ),
+            ToolMessage(
+                content="First search result content here",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Let me search for more specific information.",
+                tool_calls=[{
+                    "id": "call_2",
+                    "name": "web_search",
+                    "args": {"query": "second search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Second search result content here",
+                tool_call_id="call_2",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Based on my research, here is the comprehensive answer..."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    # Execute the agent step
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify the result is a Command with correct goto
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify that ALL messages are preserved in the Command update
+    # (not just the final message content)
+    messages_in_update = result.update.get("messages", [])
+    
+    # Should have 5 messages: 2 AIMessages + 2 ToolMessages + 1 final AIMessage
+    assert len(messages_in_update) == 5, (
+        f"Expected 5 messages to be preserved, but got {len(messages_in_update)}. "
+        f"This indicates that intermediate ToolMessages are being dropped, "
+        f"which is the bug from Issue #693."
+    )
+    
+    # Verify message types
+    message_types = [type(msg).__name__ for msg in messages_in_update]
+    assert message_types.count("AIMessage") == 3, "Should have 3 AIMessages"
+    assert message_types.count("ToolMessage") == 2, "Should have 2 ToolMessages"
+    
+    # Verify that we have both ToolMessages with their content
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 2, "Should preserve both tool calls"
+    assert "First search result content here" in tool_messages[0].content
+    assert "Second search result content here" in tool_messages[1].content
+    
+    # Verify that observations still contain the final response
+    assert "observations" in result.update
+    observations = result.update["observations"]
+    assert len(observations) > 0
+    assert "Based on my research" in observations[-1]
+    
+    # Verify step execution result is set to final message
+    assert state["current_plan"].steps[0].execution_res == "Based on my research, here is the comprehensive answer..."
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_single_tool_call_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent makes only a single tool call.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Simulate a single web_search call
+        messages = [
+            AIMessage(
+                content="I'll search for information.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Search result content",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Here is the answer based on the search result."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify all 3 messages are preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 3
+    
+    # Verify the single tool message is present
+    tool_messages = [msg for msg in messages_in_update if isinstance(msg, ToolMessage)]
+    assert len(tool_messages) == 1
+    assert "Search result content" in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_step_no_tool_calls_still_works():
+    """
+    Test that the fix for Issue #693 doesn't break the case where
+    an agent completes without making any tool calls.
+    """
+    from langchain_core.messages import AIMessage
+    
+    class TestStep:
+        def __init__(self, title, description, execution_res=None):
+            self.title = title
+            self.description = description
+            self.execution_res = execution_res
+    
+    Plan = MagicMock()
+    Plan.title = "Test Research Plan"
+    Plan.steps = [
+        TestStep(title="Test Step", description="Test Description", execution_res=None)
+    ]
+    
+    state = {
+        "current_plan": Plan,
+        "observations": [],
+        "locale": "en-US",
+        "resources": [],
+    }
+    
+    agent = MagicMock()
+    
+    async def mock_ainvoke(input, config):
+        # Agent responds without making any tool calls
+        messages = [
+            AIMessage(
+                content="Based on my knowledge, here is the answer without needing to search."
+            ),
+        ]
+        return {"messages": messages}
+    
+    agent.ainvoke = mock_ainvoke
+    
+    with patch(
+        "src.graph.nodes.HumanMessage",
+        side_effect=lambda content, name=None: MagicMock(content=content, name=name),
+    ):
+        result = await _execute_agent_step(state, agent, "researcher")
+    
+    # Verify result structure
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    
+    # Verify the single message is preserved
+    messages_in_update = result.update.get("messages", [])
+    assert len(messages_in_update) == 1
+    
+    # Verify step execution result is set
+    assert state["current_plan"].steps[0].execution_res == "Based on my knowledge, here is the answer without needing to search."

@@ -204,6 +204,24 @@ The context management doesn't work if the token_limit is not set.
 
 ## About Search Engine
 
+### Supported Search Engines
+DeerFlow supports the following search engines:
+- Tavily
+- InfoQuest
+- DuckDuckGo
+- Brave Search
+- Arxiv
+- Searx
+- Serper
+- Wikipedia
+
+### How to use Serper Search?
+
+To use Serper as your search engine, you need to:
+1. Get your API key from [Serper](https://serper.dev/)
+2. Set `SEARCH_API=serper` in your `.env` file
+3. Set `SERPER_API_KEY=your_api_key` in your `.env` file
+
 ### How to control search domains for Tavily?
 
 DeerFlow allows you to control which domains are included or excluded in Tavily search results through the configuration file. This helps improve search result quality and reduce hallucinations by focusing on trusted sources.
@@ -254,6 +272,39 @@ SEARCH_ENGINE:
 ```
 That's meaning that the search results will be filtered based on the minimum relevance score threshold and truncated to the maximum length limit for each search result content.
 
+## Web Search Toggle
+
+DeerFlow allows you to disable web search functionality, which is useful for environments without internet access or when you want to use only local RAG knowledge bases.
+
+### Configuration
+
+You can disable web search in your `conf.yaml` file:
+
+```yaml
+# Disable web search (use only local RAG)
+ENABLE_WEB_SEARCH: false
+```
+
+Or via API request parameter:
+
+```json
+{
+  "messages": [{"role": "user", "content": "Research topic"}],
+  "enable_web_search": false
+}
+```
+
+> [!WARNING]
+> If you disable web search, make sure to configure local RAG resources; otherwise, the researcher will operate in pure LLM reasoning mode without external data sources.
+
+### Behavior When Web Search is Disabled
+
+- **Background investigation**: Skipped entirely (relies on web search)
+- **Researcher node**: Will use only RAG retriever tools if configured
+- **Pure reasoning mode**: If no RAG resources are available, the researcher will rely solely on LLM reasoning
+
+---
+
 ## RAG (Retrieval-Augmented Generation) Configuration
 
 DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.
@@ -263,6 +314,26 @@ DeerFlow supports multiple RAG providers for document retrieval. Configure the R
 - **RAGFlow**: Document retrieval using RAGFlow API
 - **VikingDB Knowledge Base**: ByteDance's VikingDB knowledge base service
 - **Milvus**: Open-source vector database for similarity search
+- **Qdrant**: Open-source vector search engine with cloud and self-hosted options
+- **MOI**: Hybrid database for enterprise users
+- **Dify**: AI application platform with RAG capabilities
+
+### Qdrant Configuration
+
+To use Qdrant as your RAG provider, set the following environment variables:
+
+```bash
+# RAG_PROVIDER: qdrant (using Qdrant Cloud or self-hosted)
+RAG_PROVIDER=qdrant
+QDRANT_LOCATION=https://xyz-example.eu-central.aws.cloud.qdrant.io:6333
+QDRANT_API_KEY=<your_qdrant_api_key>
+QDRANT_COLLECTION=documents
+QDRANT_EMBEDDING_PROVIDER=openai  # support openai, dashscope
+QDRANT_EMBEDDING_BASE_URL=
+QDRANT_EMBEDDING_MODEL=text-embedding-ada-002
+QDRANT_EMBEDDING_API_KEY=<your_embedding_api_key>
+QDRANT_AUTO_LOAD_EXAMPLES=true  # automatically load example markdown files
+```
 
 ### Milvus Configuration
 

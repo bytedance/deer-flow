@@ -1,6 +1,8 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { env } from "~/env";
+
 import { type StreamEvent } from "./StreamEvent";
 
 export async function* fetchStream(
@@ -25,26 +27,53 @@ export async function* fetchStream(
   if (!reader) {
     throw new Error("Response body is not readable");
   }
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    buffer += value;
+
+  try {
+    let buffer = "";
+    // Use configurable buffer size from environment, default to 1MB (1048576 bytes)
+    const MAX_BUFFER_SIZE = env.NEXT_PUBLIC_MAX_STREAM_BUFFER_SIZE ?? (1024 * 1024);
+
     while (true) {
-      const index = buffer.indexOf("\n\n");
-      if (index === -1) {
+      const { done, value } = await reader.read();
+      if (done) {
+        // Handle remaining buffer data
+        if (buffer.trim()) {
+          const event = parseEvent(buffer.trim());
+          if (event) {
+            yield event;
+          }
+        }
         break;
       }
-      const chunk = buffer.slice(0, index);
-      buffer = buffer.slice(index + 2);
-      const event = parseEvent(chunk);
-      if (event) {
-        yield event;
+
+      buffer += value;
+
+      // Check buffer size to avoid memory overflow
+      if (buffer.length > MAX_BUFFER_SIZE) {
+        throw new Error(
+          `Buffer overflow - received ${(buffer.length / 1024 / 1024).toFixed(2)}MB of data without proper event boundaries. ` +
+          `Max buffer size is ${(MAX_BUFFER_SIZE / 1024 / 1024).toFixed(2)}MB. ` +
+          `You can increase this by setting NEXT_PUBLIC_MAX_STREAM_BUFFER_SIZE environment variable.`
+        );
+      }
+
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf("\n\n")) !== -1) {
+        const chunk = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 2);
+
+        if (chunk.trim()) {
+          const event = parseEvent(chunk);
+          if (event) {
+            yield event;
+          }
+        }
       }
     }
+  } finally {
+    reader.releaseLock(); // Release the reader lock
   }
+
 }
 
 function parseEvent(chunk: string) {

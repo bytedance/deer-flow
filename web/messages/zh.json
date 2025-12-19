@@ -65,7 +65,9 @@
       "maxStepsOfPlan": "研究计划的最大步骤数",
       "maxStepsDescription": "默认情况下，每个研究计划有 3 个步骤。",
       "maxSearchResults": "最大搜索结果数",
-      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。"
+      "maxSearchResultsDescription": "默认情况下，每个搜索步骤有 3 个结果。",
+      "enableWebSearch": "启用网络搜索",
+      "enableWebSearchDescription": "禁用后将仅使用本地 RAG 知识库。适用于无网络环境。"
     },
     "mcp": {
       "title": "MCP 服务器",
@@ -73,8 +75,15 @@
       "learnMore": "了解更多关于 MCP 的信息。",
       "enableDisable": "启用/禁用服务器",
       "deleteServer": "删除服务器",
+      "editServer": "编辑服务器",
+      "refreshServer": "刷新服务器",
+      "editServerDescription": "编辑 MCP 服务器配置",
+      "editServerNote": "以 JSON 格式更新服务器配置",
       "disabled": "已禁用",
-      "new": "新增"
+      "new": "新增",
+      "invalidJson": "无效的 JSON 格式",
+      "validationFailed": "验证失败",
+      "missingServerName": "缺少服务器名称"
     },
     "about": {
       "title": "关于"
@@ -147,7 +156,13 @@
       "generatePodcast": "生成播客",
       "edit": "编辑",
       "copy": "复制",
-      "downloadReport": "下载报告为 Markdown",
+      "downloadReport": "下载报告",
+      "downloadMarkdown": "Markdown (.md)",
+      "downloadHTML": "HTML (.html)",
+      "downloadPDF": "PDF (.pdf)",
+      "downloadWord": "Word (.docx)",
+      "downloadImage": "图片 (.png)",
+      "exportFailed": "导出失败，请重试",
       "searchingFor": "搜索",
       "reading": "阅读中",
       "runningPythonCode": "运行 Python 代码",

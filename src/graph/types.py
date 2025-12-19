@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 
+from dataclasses import field
+
 from langgraph.graph import MessagesState
 
 from src.prompts.planner_model import Plan
@@ -14,6 +16,9 @@ class State(MessagesState):
     # Runtime Variables
     locale: str = "en-US"
     research_topic: str = ""
+    clarified_research_topic: str = (
+        ""  # Complete/final clarified topic with all clarification rounds
+    )
     observations: list[str] = []
     resources: list[Resource] = []
     plan_iterations: int = 0
@@ -28,9 +33,8 @@ class State(MessagesState):
         False  # Enable/disable clarification feature (default: False)
     )
     clarification_rounds: int = 0
-    clarification_history: list[str] = []
+    clarification_history: list[str] = field(default_factory=list)
     is_clarification_complete: bool = False
-    clarified_question: str = ""
     max_clarification_rounds: int = (
         3  # Default: 3 rounds (only used when enable_clarification=True)
     )

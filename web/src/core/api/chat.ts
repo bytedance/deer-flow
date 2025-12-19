@@ -13,6 +13,31 @@ import { sleep } from "../utils";
 import { resolveServiceURL } from "./resolve-service-url";
 import type { ChatEvent } from "./types";
 
+function getLocaleFromCookie(): string {
+  if (typeof document === "undefined") return "en-US";
+  
+  // Map frontend locale codes to backend locale format
+  // Frontend uses: "en", "zh"
+  // Backend expects: "en-US", "zh-CN"
+  const LOCALE_MAP = { "en": "en-US", "zh": "zh-CN" } as const;
+  
+  // Initialize to raw locale format (matches cookie format)
+  let rawLocale = "en";
+  
+  // Read from cookie
+  const cookies = document.cookie.split(";");
+  for (const cookie of cookies) {
+    const [name, value] = cookie.trim().split("=");
+    if (name === "NEXT_LOCALE" && value) {
+      rawLocale = decodeURIComponent(value);
+      break;
+    }
+  }
+  
+  // Map raw locale to backend format, fallback to en-US if unmapped
+  return LOCALE_MAP[rawLocale as keyof typeof LOCALE_MAP] ?? "en-US";
+}
+
 export async function* chatStream(
   userMessage: string,
   params: {
@@ -27,6 +52,7 @@ export async function* chatStream(
     interrupt_feedback?: string;
     enable_deep_thinking?: boolean;
     enable_background_investigation: boolean;
+    enable_web_search?: boolean;
     report_style?: "academic" | "popular_science" | "news" | "social_media" | "strategic_investment";
     mcp_settings?: {
       servers: Record<
@@ -48,9 +74,11 @@ export async function* chatStream(
     return yield* chatReplayStream(userMessage, params, options);
   
   try{
+    const locale = getLocaleFromCookie();
     const stream = fetchStream(resolveServiceURL("chat/stream"), {
       body: JSON.stringify({
         messages: [{ role: "user", content: userMessage }],
+        locale,
         ...params,
       }),
       headers: getAuthHeaders(),

@@ -12,7 +12,12 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from langgraph.types import Command
 
 from src.config.report_style import ReportStyle
-from src.server.app import _astream_workflow_generator, _make_event, app
+from src.server.app import (
+    _astream_workflow_generator,
+    _create_interrupt_event,
+    _make_event,
+    app,
+)
 
 
 @pytest.fixture
@@ -45,6 +50,80 @@ class TestMakeEvent:
             'event: tool_calls\ndata: {"role": "assistant", "tool_calls": []}\n\n'
         )
         assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_astream_workflow_generator_preserves_clarification_history():
+    messages = [
+        {"role": "user", "content": "Research on renewable energy"},
+        {
+            "role": "assistant",
+            "content": "What type of renewable energy would you like to know about?",
+        },
+        {"role": "user", "content": "Solar and wind energy"},
+        {
+            "role": "assistant",
+            "content": "Please tell me the research dimensions you focus on, such as technological development or market applications.",
+        },
+        {"role": "user", "content": "Technological development"},
+        {
+            "role": "assistant",
+            "content": "Please specify the time range you want to focus on, such as current status or future trends.",
+        },
+        {"role": "user", "content": "Current status and future trends"},
+    ]
+
+    captured_data = {}
+
+    def empty_async_iterator(*args, **kwargs):
+        captured_data["workflow_input"] = args[1]
+        captured_data["workflow_config"] = args[2]
+
+        class IteratorObject:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        return IteratorObject()
+
+    with (
+        patch("src.server.app._process_initial_messages"),
+        patch("src.server.app._stream_graph_events", side_effect=empty_async_iterator),
+    ):
+        generator = _astream_workflow_generator(
+            messages=messages,
+            thread_id="clarification-thread",
+            resources=[],
+            max_plan_iterations=1,
+            max_step_num=1,
+            max_search_results=5,
+            auto_accepted_plan=True,
+            interrupt_feedback="",
+            mcp_settings={},
+            enable_background_investigation=True,
+            enable_web_search=True,
+            report_style=ReportStyle.ACADEMIC,
+            enable_deep_thinking=False,
+            enable_clarification=True,
+            max_clarification_rounds=3,
+        )
+
+        with pytest.raises(StopAsyncIteration):
+            await generator.__anext__()
+
+    workflow_input = captured_data["workflow_input"]
+    assert workflow_input["clarification_history"] == [
+        "Research on renewable energy",
+        "Solar and wind energy",
+        "Technological development",
+        "Current status and future trends",
+    ]
+    assert (
+        workflow_input["clarified_research_topic"]
+        == "Research on renewable energy - Solar and wind energy, Technological development, Current status and future trends"
+    )
 
 
 class TestTTSEndpoint:
@@ -585,6 +664,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -626,6 +706,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="edit_plan",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -639,9 +720,9 @@ class TestAstreamWorkflowGenerator:
     @pytest.mark.asyncio
     @patch("src.server.app.graph")
     async def test_astream_workflow_generator_interrupt_event(self, mock_graph):
-        # Mock interrupt data
+        # Mock interrupt data with the new 'id' attribute (LangGraph 1.0+)
         mock_interrupt = MagicMock()
-        mock_interrupt.ns = ["interrupt_id"]
+        mock_interrupt.id = "interrupt_id"
         mock_interrupt.value = "Plan requires approval"
 
         interrupt_data = {"__interrupt__": [mock_interrupt]}
@@ -662,6 +743,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -700,6 +782,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -743,6 +826,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -786,6 +870,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -826,6 +911,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -902,3 +988,94 @@ class TestGenerateProseEndpoint:
         response = client.post("/api/prose/generate", json=request_data)
         assert response.status_code == 500
         assert response.json()["detail"] == "Internal Server Error"
+
+
+class TestCreateInterruptEvent:
+    """Tests for _create_interrupt_event function (Issue #730 fix)."""
+
+    def test_create_interrupt_event_with_id_attribute(self):
+        """Test that _create_interrupt_event works with LangGraph 1.0+ Interrupt objects that have 'id' attribute."""
+        # Create a mock Interrupt object with the new 'id' attribute (LangGraph 1.0+)
+        mock_interrupt = MagicMock()
+        mock_interrupt.id = "interrupt-123"
+        mock_interrupt.value = "Please review the research plan"
+
+        event_data = {"__interrupt__": [mock_interrupt]}
+        thread_id = "thread-456"
+
+        result = _create_interrupt_event(thread_id, event_data)
+
+        # Verify the result is a properly formatted SSE event
+        assert "event: interrupt\n" in result
+        assert '"thread_id": "thread-456"' in result
+        assert '"id": "interrupt-123"' in result
+        assert '"content": "Please review the research plan"' in result
+        assert '"finish_reason": "interrupt"' in result
+        assert '"role": "assistant"' in result
+
+    def test_create_interrupt_event_fallback_to_thread_id(self):
+        """Test that _create_interrupt_event falls back to thread_id when 'id' attribute is None."""
+        # Create a mock Interrupt object where id is None
+        mock_interrupt = MagicMock()
+        mock_interrupt.id = None
+        mock_interrupt.value = "Plan review needed"
+
+        event_data = {"__interrupt__": [mock_interrupt]}
+        thread_id = "thread-789"
+
+        result = _create_interrupt_event(thread_id, event_data)
+
+        # Verify it falls back to thread_id
+        assert '"id": "thread-789"' in result
+        assert '"thread_id": "thread-789"' in result
+        assert '"content": "Plan review needed"' in result
+
+    def test_create_interrupt_event_without_id_attribute(self):
+        """Test that _create_interrupt_event handles objects without 'id' attribute (backward compatibility)."""
+        # Create a mock object that doesn't have 'id' attribute at all
+        class MockInterrupt:
+            pass
+        mock_interrupt = MockInterrupt()
+        mock_interrupt.value = "Waiting for approval"
+
+        event_data = {"__interrupt__": [mock_interrupt]}
+        thread_id = "thread-abc"
+
+        result = _create_interrupt_event(thread_id, event_data)
+
+        # Verify it falls back to thread_id when id attribute doesn't exist
+        assert '"id": "thread-abc"' in result
+        assert '"content": "Waiting for approval"' in result
+
+    def test_create_interrupt_event_options(self):
+        """Test that _create_interrupt_event includes correct options."""
+        mock_interrupt = MagicMock()
+        mock_interrupt.id = "int-001"
+        mock_interrupt.value = "Review plan"
+
+        event_data = {"__interrupt__": [mock_interrupt]}
+        thread_id = "thread-xyz"
+
+        result = _create_interrupt_event(thread_id, event_data)
+
+        # Verify options are included
+        assert '"options":' in result
+        assert '"text": "Edit plan"' in result
+        assert '"value": "edit_plan"' in result
+        assert '"text": "Start research"' in result
+        assert '"value": "accepted"' in result
+
+    def test_create_interrupt_event_with_complex_value(self):
+        """Test that _create_interrupt_event handles complex content values."""
+        mock_interrupt = MagicMock()
+        mock_interrupt.id = "int-complex"
+        mock_interrupt.value = {"plan": "Research AI", "steps": ["step1", "step2"]}
+
+        event_data = {"__interrupt__": [mock_interrupt]}
+        thread_id = "thread-complex"
+
+        result = _create_interrupt_event(thread_id, event_data)
+
+        # Verify complex value is included (will be serialized as JSON)
+        assert '"id": "int-complex"' in result
+        assert "Research AI" in result or "plan" in result

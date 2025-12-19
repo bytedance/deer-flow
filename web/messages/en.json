@@ -65,7 +65,9 @@
       "maxStepsOfPlan": "Max steps of a research plan",
       "maxStepsDescription": "By default, each research plan has 3 steps.",
       "maxSearchResults": "Max search results",
-      "maxSearchResultsDescription": "By default, each search step has 3 results."
+      "maxSearchResultsDescription": "By default, each search step has 3 results.",
+      "enableWebSearch": "Enable web search",
+      "enableWebSearchDescription": "When disabled, only local RAG knowledge base will be used. Useful for environments without internet access."
     },
     "mcp": {
       "title": "MCP Servers",
@@ -73,8 +75,15 @@
       "learnMore": "learn more about MCP.",
       "enableDisable": "Enable/disable server",
       "deleteServer": "Delete server",
+      "editServer": "Edit server",
+      "refreshServer": "Refresh server",
+      "editServerDescription": "Edit the MCP server configuration",
+      "editServerNote": "Update the server configuration in JSON format",
       "disabled": "Disabled",
-      "new": "New"
+      "new": "New",
+      "invalidJson": "Invalid JSON format",
+      "validationFailed": "Validation failed",
+      "missingServerName": "Missing server name"
     },
     "about": {
       "title": "About"
@@ -102,10 +111,10 @@
   },
   "chat": {
     "page": {
-        "loading": "Loading DeerFlow...",
-        "welcomeUser": "Welcome, {username}",
-        "starOnGitHub": "Star DeerFlow on GitHub",
-        "userMenu": {
+      "loading": "Loading DeerFlow...",
+      "welcomeUser": "Welcome, {username}",
+      "starOnGitHub": "Star DeerFlow on GitHub"
+      "userMenu": {
           "logout": "Logout"
         }
     },
@@ -147,7 +156,13 @@
       "generatePodcast": "Generate podcast",
       "edit": "Edit",
       "copy": "Copy",
-      "downloadReport": "Download report as markdown",
+      "downloadReport": "Download report",
+      "downloadMarkdown": "Markdown (.md)",
+      "downloadHTML": "HTML (.html)",
+      "downloadPDF": "PDF (.pdf)",
+      "downloadWord": "Word (.docx)",
+      "downloadImage": "Image (.png)",
+      "exportFailed": "Export failed, please try again",
       "searchingFor": "Searching for",
       "reading": "Reading",
       "runningPythonCode": "Running Python code",

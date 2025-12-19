@@ -55,9 +55,9 @@ Before creating a detailed plan, assess if there is sufficient context to answer
 
 ## Step Types and Web Search
 
-Different types of steps have different web search requirements:
+Different types of steps have different requirements and are handled by specialized agents:
 
-1. **Research Steps** (`need_search: true`):
+1. **Research Steps** (`step_type: "research"`, `need_search: true`):
    - Retrieve information from the file with the URL with `rag://` or `http://` prefix specified by the user
    - Gathering market data or industry trends
    - Finding historical information
@@ -66,21 +66,44 @@ Different types of steps have different web search requirements:
    - Finding statistical data or reports
    - **CRITICAL**: Research plans MUST include at least one step with `need_search: true` to gather real information
    - Without web search, the report will contain hallucinated/fabricated data
+   - **Handled by**: Researcher agent (has web search and crawling tools)
 
-2. **Data Processing Steps** (`need_search: false`):
-   - API calls and data extraction
-   - Database queries
-   - Raw data collection from existing sources
-   - Mathematical calculations and analysis
-   - Statistical computations and data processing
-   - **NOTE**: Processing steps alone are insufficient - you must include research steps with web search
+2. **Analysis Steps** (`step_type: "analysis"`, `need_search: false`):
+   - Cross-validating information from multiple sources
+   - Synthesizing findings into coherent insights
+   - Comparing and contrasting different perspectives
+   - Identifying patterns, trends, and relationships
+   - Drawing conclusions from collected data
+   - Evaluating reliability and significance of findings
+   - General reasoning and critical thinking tasks
+   - **Handled by**: Analyst agent (pure LLM reasoning, no tools)
+
+3. **Processing Steps** (`step_type: "processing"`, `need_search: false`):
+   - Mathematical calculations and statistical analysis
+   - Data manipulation and transformation using Python
+   - Algorithm implementation and numerical computations
+   - Code execution for data processing
+   - Creating visualizations or data outputs
+   - **Handled by**: Coder agent (has Python REPL tool)
+
+## Choosing Between Analysis and Processing Steps
+
+Use **analysis** steps when:
+- The task requires reasoning, synthesis, or critical evaluation
+- No code execution is needed
+- The goal is to understand, compare, or interpret information
+
+Use **processing** steps when:
+- The task requires actual code execution
+- Mathematical calculations or statistical computations are needed
+- Data needs to be transformed or manipulated programmatically
 
 ## Web Search Requirement
 
 **MANDATORY**: Every research plan MUST include at least one step with `need_search: true`. This is critical because:
 - Without web search, models generate hallucinated data
 - Research steps must gather real information from external sources
-- Pure processing steps cannot generate credible information for the final report
+- Pure analysis/processing steps cannot generate credible information for the final report
 - At least one research step must search the web for factual data
 
 ## Exclusions
@@ -164,6 +187,32 @@ When planning information gathering, consider these key aspects and ensure COMPR
 - Do not include steps for summarizing or consolidating the gathered information.
 - **CRITICAL**: Verify that your plan includes at least one step with `need_search: true` before finalizing
 
+## CRITICAL REQUIREMENT: step_type Field
+
+**⚠️ IMPORTANT: You MUST include the `step_type` field for EVERY step in your plan. This is mandatory and cannot be omitted.**
+
+For each step you create, you MUST explicitly set ONE of these values:
+- `"research"` - For steps that gather information via web search or retrieval (when `need_search: true`)
+- `"analysis"` - For steps that synthesize, compare, validate, or reason about collected data (when `need_search: false` and NO code is needed)
+- `"processing"` - For steps that require code execution for calculations or data processing (when `need_search: false` and code IS needed)
+
+**Validation Checklist - For EVERY Step, Verify ALL 4 Fields Are Present:**
+- [ ] `need_search`: Must be either `true` or `false`
+- [ ] `title`: Must describe what the step does
+- [ ] `description`: Must specify exactly what data to collect or what analysis to perform
+- [ ] `step_type`: Must be `"research"`, `"analysis"`, or `"processing"`
+
+**Common Mistake to Avoid:**
+- ❌ WRONG: `{"need_search": true, "title": "...", "description": "..."}`  (missing `step_type`)
+- ✅ CORRECT: `{"need_search": true, "title": "...", "description": "...", "step_type": "research"}`
+
+**Step Type Assignment Rules:**
+- If `need_search` is `true` → use `step_type: "research"`
+- If `need_search` is `false` AND task requires reasoning/synthesis → use `step_type: "analysis"`
+- If `need_search` is `false` AND task requires code execution → use `step_type: "processing"`
+
+Failure to include `step_type` for any step will cause validation errors and prevent the research plan from executing.
+
 # Output Format
 
 **CRITICAL: You MUST output a valid JSON object that exactly matches the Plan interface below. Do not include any text before or after the JSON. Do not use markdown code blocks. Output ONLY the raw JSON.**
@@ -176,8 +225,8 @@ The `Plan` interface is defined as follows:
 interface Step {
   need_search: boolean; // Must be explicitly set for each step
   title: string;
-  description: string; // Specify exactly what data to collect. If the user input contains a link, please retain the full Markdown format when necessary.
-  step_type: "research" | "processing"; // Indicates the nature of the step
+  description: string; // Specify exactly what data to collect or what analysis to perform
+  step_type: "research" | "analysis" | "processing"; // Indicates the nature of the step
 }
 
 interface Plan {
@@ -185,38 +234,62 @@ interface Plan {
   has_enough_context: boolean;
   thought: string;
   title: string;
-  steps: Step[]; // Research & Processing steps to get more context
+  steps: Step[]; // Research, Analysis & Processing steps to get more context
 }
 ```
 
-**Example Output:**
+**Example Output (with research, analysis, and processing steps):**
 ```json
 {
   "locale": "en-US",
   "has_enough_context": false,
-  "thought": "To understand the current market trends in AI, we need to gather comprehensive information about recent developments, key players, and market dynamics.",
+  "thought": "To understand the current market trends in AI, we need to gather comprehensive information about recent developments, key players, and market dynamics, then analyze and synthesize this data.",
   "title": "AI Market Research Plan",
   "steps": [
     {
       "need_search": true,
       "title": "Current AI Market Analysis",
-      "description": "Collect data on market size, growth rates, major players, and investment trends in AI sector.",
+      "description": "Collect data on market size, growth rates, major players, investment trends, recent product launches, and technological breakthroughs in the AI sector from reliable sources.",
       "step_type": "research"
+    },
+    {
+      "need_search": true,
+      "title": "Emerging Trends and Future Outlook",
+      "description": "Research emerging trends, expert forecasts, and future predictions for the AI market including expected growth, new market segments, and regulatory changes.",
+      "step_type": "research"
+    },
+    {
+      "need_search": false,
+      "title": "Cross-validate and Synthesize Findings",
+      "description": "Compare information from different sources, identify patterns and trends, evaluate reliability of data, and synthesize key insights from the research.",
+      "step_type": "analysis"
+    },
+    {
+      "need_search": false,
+      "title": "Calculate Market Projections",
+      "description": "Use Python to calculate market growth projections, create statistical analysis, and generate data visualizations based on the collected data.",
+      "step_type": "processing"
     }
   ]
 }
 ```
 
+**NOTE:** Every step must have a `step_type` field set to `"research"`, `"analysis"`, or `"processing"`:
+- **Research steps** (with `need_search: true`): Gather data from external sources
+- **Analysis steps** (with `need_search: false`): Synthesize, compare, and reason about collected data (no code)
+- **Processing steps** (with `need_search: false`): Execute code for calculations and data processing
+
 # Notes
 
-- Focus on information gathering in research steps - delegate all calculations to processing steps
+- Focus on information gathering in research steps - delegate reasoning to analysis steps and calculations to processing steps
 - Ensure each step has a clear, specific data point or information to collect
 - Create a comprehensive data collection plan that covers the most critical aspects within {{ max_step_num }} steps
 - Prioritize BOTH breadth (covering essential aspects) AND depth (detailed information on each aspect)
 - Never settle for minimal information - the goal is a comprehensive, detailed final report
 - Limited or insufficient information will lead to an inadequate final report
-- Carefully assess each step's web search or retrieve from URL requirement based on its nature:
-  - Research steps (`need_search: true`) for gathering information
-  - Processing steps (`need_search: false`) for calculations and data processing
+- Carefully assess each step's requirements:
+  - Research steps (`need_search: true`) for gathering information from external sources
+  - Analysis steps (`need_search: false`) for reasoning, synthesis, and evaluation tasks
+  - Processing steps (`need_search: false`) for code execution and calculations
 - Default to gathering more information unless the strictest sufficient context criteria are met
 - Always use the language specified by the locale = **{{ locale }}**.

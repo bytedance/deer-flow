@@ -11,6 +11,14 @@
 
 現在、DeerFlow は火山引擎の FaaS アプリケーションセンターに正式に入居しています。ユーザーは体験リンクを通じてオンラインで体験し、その強力な機能と便利な操作を直感的に感じることができます。同時に、さまざまなユーザーの展開ニーズを満たすため、DeerFlow は火山引擎に基づくワンクリック展開をサポートしています。展開リンクをクリックして展開プロセスを迅速に完了し、効率的な研究の旅を始めましょう。
 
+DeerFlow は新たにBytePlusが自主開発したインテリジェント検索・クローリングツールセットを統合しました--[InfoQuest (オンライン無料体験をサポート)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 詳細については[DeerFlow の公式ウェブサイト](https://deerflow.tech/)をご覧ください。
 
 ## デモ
@@ -151,6 +159,13 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
   - `.env`ファイルに`TAVILY_API_KEY`が必要
   - 登録先：<https://app.tavily.com/home>
 
+- **InfoQuest**（推奨）：BytePlusが開発したAI最適化のインテリジェント検索とクローリングツールセット
+  - `.env`ファイルに`INFOQUEST_API_KEY`が必要
+  - 時間範囲フィルタリングとサイトフィルタリングをサポート
+  - 高品質な検索結果とコンテンツ抽出を提供
+  - 登録先：<https://console.byteplus.com/infoquest/infoquests>
+  - ドキュメント：<https://docs.byteplus.com/ja/docs/InfoQuest/What_is_Info_Quest>
+
 - **DuckDuckGo**：プライバシー重視の検索エンジン
   - APIキー不要
 
@@ -169,8 +184,30 @@ DeerFlow は複数の検索エンジンをサポートしており、`.env`フ�
 お好みの検索エンジンを設定するには、`.env`ファイルで`SEARCH_API`変数を設定します：
 
 ```bash
-# 選択肢: tavily, duckduckgo, brave_search, arxiv
+# 選択肢: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### クローリングツール
+
+- **Jina**（デフォルト）：無料でアクセス可能なウェブコンテンツクローリングツール
+  - 基本機能を使用するにはAPIキーは不要
+  - APIキーを使用するとより高いアクセスレート制限が適用されます
+  - 詳細については <https://jina.ai/reader> を参照してください
+
+- **InfoQuest**（推奨）：BytePlusが開発したAI最適化のインテリジェント検索とクローリングツールセット
+  - `.env`ファイルに`INFOQUEST_API_KEY`が必要
+  - 設定可能なクローリングパラメータを提供
+  - カスタムタイムアウト設定をサポート
+  - より強力なコンテンツ抽出機能を提供
+  - 詳細については <https://docs.byteplus.com/ja/docs/InfoQuest/What_is_Info_Quest> を参照してください
+
+お好みのクローリングツールを設定するには、`conf.yaml`ファイルで以下を設定します：
+
+```yaml
+CRAWLER_ENGINE:
+  # エンジンタイプ："jina"（デフォルト）または "infoquest"
+  engine: infoquest
 ```
 
 ## 特徴
@@ -186,8 +223,8 @@ SEARCH_API=tavily
 ### ツールと MCP 統合
 
 - 🔍 **検索と取得**
-  - Tavily、Brave Searchなどを通じたWeb検索
-  - Jinaを使用したクローリング
+  - Tavily、InfoQuest、Brave Searchなどを通じたWeb検索
+  - JinaとInfoQuestを使用したクローリング
   - 高度なコンテンツ抽出
 
 - 🔗 **MCPシームレス統合**

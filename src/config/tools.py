@@ -11,16 +11,22 @@ load_dotenv()
 
 class SearchEngine(enum.Enum):
     TAVILY = "tavily"
+    INFOQUEST = "infoquest"
     DUCKDUCKGO = "duckduckgo"
     BRAVE_SEARCH = "brave_search"
     ARXIV = "arxiv"
     SEARX = "searx"
     WIKIPEDIA = "wikipedia"
+    SERPER = "serper"
+
+
+class CrawlerEngine(enum.Enum):
+    JINA = "jina"
+    INFOQUEST = "infoquest"
 
 
 # Tool configuration
 SELECTED_SEARCH_ENGINE = os.getenv("SEARCH_API", SearchEngine.TAVILY.value)
-
 
 class RAGProvider(enum.Enum):
     DIFY = "dify"
@@ -28,6 +34,7 @@ class RAGProvider(enum.Enum):
     VIKINGDB_KNOWLEDGE_BASE = "vikingdb_knowledge_base"
     MOI = "moi"
     MILVUS = "milvus"
+    QDRANT = "qdrant"
 
 
 SELECTED_RAG_PROVIDER = os.getenv("RAG_PROVIDER")

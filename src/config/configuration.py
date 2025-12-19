@@ -51,7 +51,18 @@ class Configuration:
     mcp_settings: dict = None  # MCP settings, including dynamic loaded tools
     report_style: str = ReportStyle.ACADEMIC.value  # Report style
     enable_deep_thinking: bool = False  # Whether to enable deep thinking
-    enforce_web_search: bool = False  # Enforce at least one web search step in every plan
+    enforce_web_search: bool = (
+        False  # Enforce at least one web search step in every plan
+    )
+    enforce_researcher_search: bool = (
+        True  # Enforce that researcher must use web search tool at least once
+    )
+    enable_web_search: bool = (
+        True  # Whether to enable web search, set to False to use only local RAG
+    )
+    interrupt_before_tools: list[str] = field(
+        default_factory=list
+    )  # List of tool names to interrupt before execution
 
     @classmethod
     def from_runnable_config(

@@ -35,6 +35,8 @@ function unescapeMarkdownSpecialChars(text: string): string {
     .replace(/\\_/g, '_')       // \_ → _
     .replace(/\\\[/g, '[')      // \[ → [
     .replace(/\\\]/g, ']')      // \] → ]
+    .replace(/\\\{/g, '{')      // \{ → {
+    .replace(/\\\}/g, '}')      // \} → }
     .replace(/\\\\/g, '\\');    // \\ → \
 }
 

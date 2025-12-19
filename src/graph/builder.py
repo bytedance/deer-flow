@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from src.prompts.planner_model import StepType
 
 from .nodes import (
+    analyst_node,
     background_investigation_node,
     coder_node,
     coordinator_node,
@@ -39,6 +40,8 @@ def continue_to_running_research_team(state: State):
 
     if incomplete_step.step_type == StepType.RESEARCH:
         return "researcher"
+    if incomplete_step.step_type == StepType.ANALYSIS:
+        return "analyst"
     if incomplete_step.step_type == StepType.PROCESSING:
         return "coder"
     return "planner"
@@ -54,21 +57,16 @@ def _build_base_graph():
     builder.add_node("reporter", reporter_node)
     builder.add_node("research_team", research_team_node)
     builder.add_node("researcher", researcher_node)
+    builder.add_node("analyst", analyst_node)
     builder.add_node("coder", coder_node)
     builder.add_node("human_feedback", human_feedback_node)
     builder.add_edge("background_investigator", "planner")
     builder.add_conditional_edges(
         "research_team",
         continue_to_running_research_team,
-        ["planner", "researcher", "coder"],
+        ["planner", "researcher", "analyst", "coder"],
     )
     builder.add_edge("reporter", END)
-    # Add conditional edges for coordinator to handle clarification flow
-    builder.add_conditional_edges(
-        "coordinator",
-        lambda state: state.get("goto", "planner"),
-        ["planner", "background_investigator", "coordinator", END],
-    )
     return builder
 
 

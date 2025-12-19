@@ -12,6 +12,7 @@ BASIC_MODEL:
   api_key: xxxx
   # max_retries: 3 # Maximum number of retries for LLM calls
   # verify_ssl: false  # Uncomment this line to disable SSL certificate verification for self-signed certificates
+  # token_limit: 200000 # Maximum input tokens for context compression (prevents token overflow errors)
 
 # Local model configuration example:
 
@@ -39,12 +40,42 @@ BASIC_MODEL:
 #   model: "doubao-1-5-thinking-pro-m-250428"
 #   api_key: xxxx
 #   max_retries: 3 # Maximum number of retries for LLM calls
+#   token_limit: 150000 # Maximum input tokens for context compression
 
 
 # OTHER SETTINGS:
-# Search engine configuration (Only supports Tavily currently)
+
+# Tool-specific interrupts configuration (Issue #572)
+# Allows interrupting execution before specific tools are called.
+# Useful for reviewing sensitive operations like database queries or API calls.
+# Note: This can be overridden per-request via the API.
+# TOOL_INTERRUPTS:
+#   # List of tool names to interrupt before execution
+#   # Example: interrupt before database tools or sensitive API calls
+#   interrupt_before: 
+#     - "db_tool"           # Database operations
+#     - "db_read_tool"      # Database reads
+#     - "db_write_tool"     # Database writes
+#     - "payment_api"       # Payment-related API calls
+#     - "admin_api"         # Administrative API calls
+#   # When interrupt is triggered, user will be prompted to approve/reject
+#   # Approved keywords: "approved", "approve", "yes", "proceed", "continue", "ok", "okay", "accepted", "accept"
+
+# Web search toggle (Issue #681)
+# Set to false to disable web search and use only local RAG knowledge base.
+# This is useful for environments without internet access.
+# WARNING: If you disable web search, make sure to configure local RAG resources;
+#          otherwise, the researcher will operate in pure LLM reasoning mode without external data.
+# Note: This can be overridden per-request via the API parameter `enable_web_search`.
+# ENABLE_WEB_SEARCH: true
+
+# Search engine configuration
+# Supported engines: tavily, infoquest
 # SEARCH_ENGINE:
-#   engine: tavily
+#   # Engine type to use: "tavily" or "infoquest"
+#   engine: tavily or infoquest
+#   
+#   # The following parameters are specific to Tavily
 #   # Only include results from these domains
 #   include_domains:
 #     - example.com
@@ -55,3 +86,42 @@ BASIC_MODEL:
 #   # Exclude results from these domains
 #   exclude_domains:
 #     - example.com
+#   # Include an answer in the search results
+#   include_answer: false
+#   # Search depth: "basic" or "advanced"
+#   search_depth: "advanced"
+#   # Include raw content from pages
+#   include_raw_content: true
+#   # Include images in search results
+#   include_images: true
+#   # Include descriptions for images
+#   include_image_descriptions: true
+#   # Minimum score threshold for results (0-1)
+#   min_score_threshold: 0.0
+#   # Maximum content length per page
+#   max_content_length_per_page: 4000
+#   
+#   # The following parameters are specific to InfoQuest
+#   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
+#   time_range: 30
+#   # Used to limit the scope of search results, only returns content from specified whitelisted domains. Set to empty string to disable site filtering
+#   site: "example.com"
+
+
+# Crawler engine configuration
+# Supported engines: jina (default), infoquest
+# Uncomment the following section to configure crawler engine
+# CRAWLER_ENGINE:
+#   # Engine type to use: "jina" (default) or "infoquest"
+#   engine: infoquest
+#
+#   # The following timeout parameters are only effective when engine is set to "infoquest"
+#   # Waiting time after page loading (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   fetch_time: 10
+#   # Overall timeout for the entire crawling process (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   timeout: 30
+#   # Timeout for navigating to the page (in seconds)
+#   # Set to positive value to enable, -1 to disable
+#   navi_timeout: 15

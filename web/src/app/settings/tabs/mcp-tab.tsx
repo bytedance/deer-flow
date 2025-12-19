@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: MIT
 
 import { motion } from "framer-motion";
-import { Blocks, PencilRuler, Trash } from "lucide-react";
+import { Blocks, Edit2, PencilRuler, RefreshCw, Trash } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useCallback, useState } from "react";
 
 import { Tooltip } from "~/components/deer-flow/tooltip";
 import { Button } from "~/components/ui/button";
 import { Switch } from "~/components/ui/switch";
+import { queryMCPServerMetadata } from "~/core/api";
 import type { MCPServerMetadata } from "~/core/mcp";
 import { cn } from "~/lib/utils";
 
 import { AddMCPServerDialog } from "../dialogs/add-mcp-server-dialog";
+import { EditMCPServerDialog } from "../dialogs/edit-mcp-server-dialog";
 
 import type { Tab } from "./types";
 
@@ -22,6 +24,7 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
     settings.mcp.servers,
   );
   const [newlyAdded, setNewlyAdded] = useState(false);
+  const [editingServer, setEditingServer] = useState<MCPServerMetadata | null>(null);
   const handleAddServers = useCallback(
     (servers: MCPServerMetadata[]) => {
       const merged = mergeServers(settings.mcp.servers, servers);
@@ -50,16 +53,134 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
     },
     [onChange, settings],
   );
+
+  const handleEditServer = useCallback(async (config: string) => {
+    if (!editingServer) return false;
+
+    try {
+      const parsedConfig = JSON.parse(config) as { mcpServers?: Record<string, MCPServerMetadata> };
+
+      if (!parsedConfig.mcpServers || typeof parsedConfig.mcpServers !== 'object') {
+        console.error('Invalid configuration format: mcpServers not found');
+        return false;
+      }
+
+      const serverEntries = Object.entries(parsedConfig.mcpServers);
+      if (serverEntries.length === 0) {
+        console.error('No server configuration found in mcpServers');
+        return false;
+      }
+
+      const firstEntry = serverEntries[0];
+      if (!firstEntry) {
+        console.error('Failed to get server configuration');
+        return false;
+      }
+
+      const [serverName, serverConfig] = firstEntry;
+
+      // Update the server configuration
+      const updatedServers = settings.mcp.servers.map(server =>
+        server.name === editingServer.name
+          ? {
+            ...server,
+            ...serverConfig,
+            name: serverName, // Allow renaming the server
+            updatedAt: Date.now(),
+          }
+          : server
+      );
+
+      setServers(updatedServers);
+      onChange({ ...settings, mcp: { ...settings.mcp, servers: updatedServers } });
+      return true;
+    } catch (error) {
+      console.error('Failed to update server configuration:', error);
+      return false;
+    }
+  }, [editingServer, onChange, settings]);
+
+  const handleRefreshServers = useCallback(async (serverName?: string) => {
+    try {
+      // Create a new array with the updated server
+      const updatedServers = await Promise.all(
+        settings.mcp.servers.map(async (server) => {
+          // Skip if this is not the server we want to refresh
+          if (serverName && server.name !== serverName) {
+            return server;
+          }
+
+          // Skip disabled servers unless explicitly requested
+          if (!server.enabled && server.name !== serverName) {
+            return server;
+          }
+
+          try {
+            // Get the latest metadata
+            const metadata = await queryMCPServerMetadata(server);
+
+            // Create a new server object with preserved properties
+            return {
+              ...server, // Keep all existing properties
+              ...metadata, // Apply metadata updates
+              name: server.name, // Ensure name is preserved
+              enabled: server.enabled, // Preserve the enabled state
+              createdAt: server.createdAt, // Keep the original creation time
+              updatedAt: Date.now(), // Update the last updated time
+            };
+          } catch (error) {
+            console.error(`Failed to refresh server ${server.name}:`, error);
+            // Return the original server if refresh fails
+            return server;
+          }
+        })
+      );
+
+      // Update the servers list
+      setServers(updatedServers);
+      onChange({ ...settings, mcp: { ...settings.mcp, servers: updatedServers } });
+    } catch (error) {
+      console.error('Failed to refresh MCP servers:', error);
+    }
+  }, [onChange, settings]);
+
   const handleToggleServer = useCallback(
-    (name: string, enabled: boolean) => {
+    async (name: string, enabled: boolean) => {
       const merged = settings.mcp.servers.map((server) =>
         server.name === name ? { ...server, enabled } : server,
       );
       setServers(merged);
       onChange({ ...settings, mcp: { ...settings.mcp, servers: merged } });
+
+      // Refresh server metadata when enabling a server
+      if (enabled) {
+        try {
+          const server = merged.find(s => s.name === name);
+          if (server) {
+            const metadata = await queryMCPServerMetadata(server);
+            const updatedServers = merged.map(s =>
+              s.name === name
+                ? {
+                  ...s,
+                  ...metadata,
+                  name: s.name,
+                  enabled: true,
+                  createdAt: s.createdAt,
+                  updatedAt: Date.now(),
+                }
+                : s
+            );
+            setServers(updatedServers);
+            onChange({ ...settings, mcp: { ...settings.mcp, servers: updatedServers } });
+          }
+        } catch (error) {
+          console.error(`Failed to refresh server ${name}:`, error);
+        }
+      }
     },
     [onChange, settings],
   );
+
   const animationProps = {
     initial: { backgroundColor: "gray" },
     animate: { backgroundColor: "transparent" },
@@ -107,20 +228,50 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
                         id="airplane-mode"
                         checked={server.enabled}
                         onCheckedChange={(checked) => {
-                          handleToggleServer(server.name, checked);
+                          void handleToggleServer(server.name, checked);
                         }}
                       />
                     </div>
                   </Tooltip>
                 </div>
-                <div className="absolute top-1 right-12 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
+                <div className="absolute top-1 right-12 flex gap-1 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
+                  <Tooltip title={t("editServer")}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingServer(server);
+                      }}
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title={t("refreshServer")}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleRefreshServers(server.name);
+                      }}
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </Button>
+                  </Tooltip>
                   <Tooltip title={t("deleteServer")}>
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => handleDeleteServer(server.name)}
+                      className="h-8 w-8"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteServer(server.name);
+                      }}
                     >
-                      <Trash />
+                      <Trash className="h-4 w-4" />
                     </Button>
                   </Tooltip>
                 </div>
@@ -175,6 +326,20 @@ export const MCPTab: Tab = ({ settings, onChange }) => {
           })}
         </ul>
       </main>
+      {editingServer && (
+        <EditMCPServerDialog
+          server={editingServer}
+          open={!!editingServer}
+          onOpenChange={(open) => !open && setEditingServer(null)}
+          onSave={async (config) => {
+            const success = await handleEditServer(config);
+            if (success) {
+              setEditingServer(null);
+            }
+            return success;
+          }}
+        />
+      )}
     </div>
   );
 };

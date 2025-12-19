@@ -147,11 +147,18 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   }, [toolCall.result]);
   const searchResults = useMemo<SearchResult[]>(() => {
     let results: SearchResult[] | undefined = undefined;
+    let parseError = false;
+    
     try {
-      results = toolCall.result ? parseJSON(toolCall.result, []) : undefined;
-    } catch {
+      if (toolCall.result) {
+        results = parseJSON(toolCall.result, []);
+      }
+    } catch (error) {
+      parseError = true;
+      console.warn("Failed to parse search results:", error);
       results = undefined;
     }
+    
     if (Array.isArray(results)) {
       results.forEach((result) => {
         if (result.type === "page") {
@@ -159,8 +166,10 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
         }
       });
     } else {
+      // If parsing failed, still try to show something useful
       results = [];
     }
+    
     return results;
   }, [toolCall.result]);
   const pageResults = useMemo(

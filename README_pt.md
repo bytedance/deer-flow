@@ -14,6 +14,14 @@
 
 Atualmente, o DeerFlow entrou oficialmente no Centro de Aplicações FaaS da Volcengine. Os usuários podem experimentá-lo online através do link de experiência para sentir intuitivamente suas funções poderosas e operações convenientes. Ao mesmo tempo, para atender às necessidades de implantação de diferentes usuários, o DeerFlow suporta implantação com um clique baseada na Volcengine. Clique no link de implantação para completar rapidamente o processo de implantação e iniciar uma jornada de pesquisa eficiente.
 
+O DeerFlow recentemente integrou o conjunto de ferramentas de busca e rastreamento inteligente desenvolvido independentemente pela BytePlus — [InfoQuest (oferece experiência gratuita online)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="infoquest_bannar" 
+  />
+</a>
+
 Por favor, visite [Nosso Site Oficial](https://deerflow.tech/) para maiores detalhes.
 
 ## Demo
@@ -158,6 +166,13 @@ DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no se
   - Requer `TAVILY_API_KEY` no seu arquivo `.env`
   - Inscreva-se em: <https://app.tavily.com/home>
 
+- **InfoQuest** (recomendado): Um conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
+  - Requer `INFOQUEST_API_KEY` no seu arquivo `.env`
+  - Suporte para filtragem por intervalo de tempo e filtragem de sites
+  - Fornece resultados de busca e extração de conteúdo de alta qualidade
+  - Inscreva-se em: <https://console.byteplus.com/infoquest/infoquests>
+  - Visite https://docs.byteplus.com/pt/docs/InfoQuest/What_is_Info_Quest para obter mais informações
+
 - **DuckDuckGo**: Mecanismo de busca focado em privacidade
 
   - Não requer chave API
@@ -178,8 +193,30 @@ DeerFlow suporta múltiplos mecanismos de busca que podem ser configurados no se
 Para configurar o seu mecanismo preferido, defina a variável `SEARCH_API` no seu arquivo:
 
 ```bash
-# Escolha uma: tavily, duckduckgo, brave_search, arxiv
+# Escolha uma: tavily, infoquest, duckduckgo, brave_search, arxiv
 SEARCH_API=tavily
+```
+
+### Ferramentas de Crawling
+
+- **Jina** (padrão): Ferramenta gratuita de crawling de conteúdo web acessível
+  - Não é necessária chave API para usar recursos básicos
+  - Ao usar uma chave API, você obtém limites de taxa de acesso mais altos
+  - Visite <https://jina.ai/reader> para obter mais informações
+
+- **InfoQuest** (recomendado): Conjunto de ferramentas inteligentes de busca e crawling otimizadas para IA, desenvolvido pela BytePlus
+  - Requer `INFOQUEST_API_KEY` no seu arquivo `.env`
+  - Fornece parâmetros de crawling configuráveis
+  - Suporta configurações de timeout personalizadas
+  - Oferece capacidades mais poderosas de extração de conteúdo
+  - Visite <https://docs.byteplus.com/pt/docs/InfoQuest/What_is_Info_Quest> para obter mais informações
+
+Para configurar sua ferramenta de crawling preferida, defina o seguinte em seu arquivo `conf.yaml`:
+
+```yaml
+CRAWLER_ENGINE:
+  # Tipo de mecanismo: "jina" (padrão) ou "infoquest"
+  engine: infoquest
 ```
 
 ## Funcionalidades
@@ -197,8 +234,8 @@ SEARCH_API=tavily
 
 - 🔍 **Busca e Recuperação**
 
-  - Busca web com Tavily, Brave Search e mais
-  - Crawling com Jina
+  - Busca web com Tavily, InfoQuest, Brave Search e mais
+  - Crawling com Jina e InfoQuest
   - Extração de Conteúdo avançada
 
 - 🔗 **Integração MCP perfeita**
