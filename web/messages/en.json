@@ -39,6 +39,7 @@
       "uploading": "Uploading...",
       "uploadSuccess": "File uploaded successfully",
       "uploadFailed": "Failed to upload file",
+      "emptyFile": "Cannot upload an empty file",
       "loading": "Loading resources...",
       "noResources": "No resources found. Upload a file to get started."
     },

@@ -901,14 +901,54 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     return RAGResourcesResponse(resources=[])
 
 
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_EXTENSIONS = {".md", ".txt"}
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks."""
+    # Extract only the base filename, removing any path components
+    basename = os.path.basename(filename)
+    # Remove any null bytes or other dangerous characters
+    sanitized = basename.replace("\x00", "").strip()
+    # Ensure filename is not empty after sanitization
+    if not sanitized or sanitized in (".", ".."):
+        return "unnamed_file"
+    return sanitized
+
+
 @app.post("/api/rag/upload", response_model=Resource)
 async def upload_rag_resource(file: UploadFile):
+    # Validate filename exists
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required for upload")
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = _sanitize_filename(file.filename)
+
+    # Validate file extension
+    _, ext = os.path.splitext(safe_filename.lower())
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed.",
+        )
+
+    # Read content with size limit check
     content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Cannot upload an empty file")
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB.",
+        )
+
     retriever = build_retriever()
     if not retriever:
         raise HTTPException(status_code=500, detail="RAG provider not configured")
     try:
-        return retriever.ingest_file(content, file.filename)
+        return retriever.ingest_file(content, safe_filename)
     except NotImplementedError:
         raise HTTPException(
             status_code=501, detail="Upload not supported by current RAG provider"

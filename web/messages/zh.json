@@ -39,6 +39,7 @@
       "uploading": "上传中...",
       "uploadSuccess": "文件上传成功",
       "uploadFailed": "文件上传失败",
+      "emptyFile": "无法上传空文件",
       "loading": "正在加载资源...",
       "noResources": "未找到资源。上传文件以开始使用。"
     },

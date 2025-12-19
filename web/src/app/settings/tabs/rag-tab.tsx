@@ -3,7 +3,7 @@
 
 import { Database, FileText, Upload } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "~/components/ui/button";
@@ -18,6 +18,7 @@ export const RAGTab: Tab = () => {
   const [resources, setResources] = useState<Resource[]>([]);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchResources = useCallback(async () => {
     setLoading(true);
@@ -43,6 +44,12 @@ export const RAGTab: Tab = () => {
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    if (file.size === 0) {
+      toast.error(t("emptyFile"));
+      event.target.value = "";
+      return;
+    }
 
     setUploading(true);
     const formData = new FormData();
@@ -76,15 +83,20 @@ export const RAGTab: Tab = () => {
       <header>
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-lg font-medium">{t("title")}</h1>
-          <div className="relative">
+          <div>
             <input
+              ref={fileInputRef}
               type="file"
               accept=".md,.txt"
-              className={cn("absolute inset-0 cursor-pointer opacity-0")}
+              className="sr-only"
               onChange={handleUpload}
               disabled={uploading}
+              aria-label={t("upload")}
             />
-            <Button disabled={uploading}>
+            <Button
+              disabled={uploading}
+              onClick={() => fileInputRef.current?.click()}
+            >
               <Upload className="mr-2 h-4 w-4" />
               {uploading ? t("uploading") : t("upload")}
             </Button>
