@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { getAuthHeaders } from "~/core/auth/utils";
 import { env } from "~/env";
 
 import type { MCPServerMetadata } from "../mcp";
@@ -80,6 +81,7 @@ export async function* chatStream(
         locale,
         ...params,
       }),
+      headers: getAuthHeaders(),
       signal: options.abortSignal,
     });
     

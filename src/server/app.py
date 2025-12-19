@@ -5,13 +5,16 @@ import asyncio
 import base64
 import json
 import logging
+
 import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -56,6 +59,7 @@ from src.server.rag_request import (
 )
 from src.tools import VolcengineTTS
 from src.utils.json_utils import sanitize_args
+from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user, generate_csrf_token
 from src.utils.log_sanitizer import (
     sanitize_agent_name,
     sanitize_log_input,
@@ -71,6 +75,7 @@ logger = logging.getLogger(__name__)
 if os.name == "nt":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
 
 app = FastAPI(
@@ -78,6 +83,66 @@ app = FastAPI(
     description="API for Deer",
     version="0.1.0",
 )
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+    csrf_token: Optional[str] = None
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(form_data: dict, response: Response):
+    """Authenticate user and return JWT token"""
+    email = form_data.get("email")
+    password = form_data.get("password")
+    
+    if not email or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Email and password are required"
+        )
+    
+    user = authenticate_user(email, password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials"
+        )
+    
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"], "role": user["role"]}
+    )
+    
+    # Generate CSRF token
+    csrf_token = generate_csrf_token()
+    
+    # Set CSRF token in cookie
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        max_age=86400  # 24 hours
+    )
+    
+    login_response = LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=user
+    )
+    
+    # Add CSRF token if available (for new auth system)
+    if csrf_token:
+        login_response.csrf_token = csrf_token
+    
+    return login_response
+
+@app.post("/api/auth/logout")
+async def logout():
+    """Logout user"""
+    # In a real implementation, you might want to add the token to a blacklist
+    return {"message": "Successfully logged out"}
 
 # Add CORS middleware
 # It's recommended to load the allowed origins from an environment variable
@@ -103,7 +168,7 @@ graph = build_graph_with_memory()
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     # Check if MCP server configuration is enabled
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
 
@@ -841,7 +906,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
 
 
 @app.post("/api/mcp/server/metadata", response_model=MCPServerMetadataResponse)
-async def mcp_server_metadata(request: MCPServerMetadataRequest):
+async def mcp_server_metadata(request: MCPServerMetadataRequest, current_user: dict = Depends(require_admin_user)):
     """Get information about an MCP server."""
     # Check if MCP server configuration is enabled
     if not get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False):
