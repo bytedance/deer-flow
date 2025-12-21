@@ -6,4 +6,4 @@ As deer-flow doesn't provide an offical release yet, please use the latest versi
 
 ## Reporting a Vulnerability
 
-Please go to https://github.com/bytedance/deer-flow/security to report the vulnerability your find.
+Please go to https://github.com/bytedance/deer-flow/security to report the vulnerability you find.
