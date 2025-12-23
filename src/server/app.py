@@ -17,6 +17,7 @@ from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from src.config.configuration import get_recursion_limit
