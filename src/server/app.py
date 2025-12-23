@@ -34,6 +34,7 @@ from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
+from src.eval import ReportEvaluator
 from src.rag.builder import build_retriever
 from src.rag.milvus import load_examples as load_milvus_examples
 from src.rag.qdrant import load_examples as load_qdrant_examples
@@ -46,6 +47,7 @@ from src.server.chat_request import (
     GenerateProseRequest,
     TTSRequest,
 )
+from src.server.eval_request import EvaluateReportRequest, EvaluateReportResponse
 from src.server.config_request import ConfigResponse
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 from src.server.mcp_utils import load_mcp_tools
@@ -796,6 +798,39 @@ async def generate_prose(request: GenerateProseRequest):
         )
     except Exception as e:
         logger.exception(f"Error occurred during prose generation: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
+
+
+@app.post("/api/report/evaluate", response_model=EvaluateReportResponse)
+async def evaluate_report(request: EvaluateReportRequest):
+    """Evaluate report quality using automated metrics and optionally LLM-as-Judge."""
+    try:
+        evaluator = ReportEvaluator(use_llm=request.use_llm)
+
+        if request.use_llm:
+            result = await evaluator.evaluate(
+                request.content, request.query, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result.metrics.to_dict(),
+                score=result.final_score,
+                grade=result.grade,
+                llm_evaluation=result.llm_evaluation.to_dict()
+                if result.llm_evaluation
+                else None,
+                summary=result.summary,
+            )
+        else:
+            result = evaluator.evaluate_metrics_only(
+                request.content, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result["metrics"],
+                score=result["score"],
+                grade=result["grade"],
+            )
+    except Exception as e:
+        logger.exception(f"Error occurred during report evaluation: {str(e)}")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 

@@ -16,6 +16,7 @@ import { jsPDF } from "jspdf";
 import {
   Check,
   Copy,
+  GraduationCap,
   Headphones,
   Pencil,
   Undo2,
@@ -46,6 +47,7 @@ import { useReplay } from "~/core/replay";
 import { closeResearch, listenToPodcast, useStore } from "~/core/store";
 import { cn } from "~/lib/utils";
 
+import { EvaluationDialog } from "./evaluation-dialog";
 import { ResearchActivitiesBlock } from "./research-activities-block";
 import { ResearchReportBlock } from "./research-report-block";
 
@@ -84,6 +86,7 @@ export function ResearchBlock({
   const [editing, setEditing] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showEvaluation, setShowEvaluation] = useState(false);
   const handleCopy = useCallback(() => {
     if (!reportId) {
       return;
@@ -676,6 +679,16 @@ ${htmlContent}
                   {copied ? <Check /> : <Copy />}
                 </Button>
               </Tooltip>
+              <Tooltip title={t("evaluateReport")}>
+                <Button
+                  className="text-gray-400"
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => setShowEvaluation(true)}
+                >
+                  <GraduationCap />
+                </Button>
+              </Tooltip>
               <DropdownMenu>
                 <Tooltip title={t("downloadReport")}>
                   <DropdownMenuTrigger asChild>
@@ -796,6 +809,18 @@ ${htmlContent}
           </TabsContent>
         </Tabs>
       </Card>
+
+      {/* Evaluation Dialog */}
+      {reportId && (
+        <EvaluationDialog
+          open={showEvaluation}
+          onOpenChange={setShowEvaluation}
+          reportContent={
+            useStore.getState().messages.get(reportId)?.content ?? ""
+          }
+          query={useStore.getState().messages.get(useStore.getState().messageIds[0] ?? "")?.content ?? ""}
+        />
+      )}
     </div>
   );
 }
