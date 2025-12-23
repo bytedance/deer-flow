@@ -88,16 +88,16 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app):
     """
-    应用生命周期管理器
-    - 启动时：注册 asyncio 异常处理器并初始化全局连接池
-    - 关闭时：清理全局连接池
+    Application lifecycle manager
+    - Startup: Register asyncio exception handler and initialize global connection pools
+    - Shutdown: Clean up global connection pools
     """
     global _pg_pool, _pg_checkpointer, _mongo_client, _mongo_checkpointer
 
     # ========== STARTUP ==========
     try:
-        loop = asyncio.get_running_loop()
-        logger.info("Asyncio exception handler registered")
+        asyncio.get_running_loop()
+
     except RuntimeError as e:
         logger.warning(f"Could not register asyncio exception handler: {e}")
 
@@ -112,11 +112,12 @@ async def lifespan(app):
         if checkpoint_url.startswith("postgresql://"):
             pool_min_size = get_int_env("PG_POOL_MIN_SIZE", 5)
             pool_max_size = get_int_env("PG_POOL_MAX_SIZE", 20)
-            pool_timeout = float(get_int_env("PG_POOL_TIMEOUT", 60))
+            pool_timeout = get_int_env("PG_POOL_TIMEOUT", 60)
 
             connection_kwargs = {
                 "autocommit": True,
                 "prepare_threshold": 0,
+                "row_factory": dict_row,
             }
 
             logger.info(
@@ -142,6 +143,10 @@ async def lifespan(app):
                 logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
                 _pg_pool = None
                 _pg_checkpointer = None
+                raise RuntimeError(
+                    "Checkpoint persistence is explicitly configured with PostgreSQL, "
+                    "but initialization failed. Application will not start."
+                ) from e
 
         # Initialize MongoDB connection pool
         elif checkpoint_url.startswith("mongodb://"):
@@ -170,12 +175,10 @@ async def lifespan(app):
                 logger.info("Global MongoDB connection pool initialized successfully")
             except ImportError:
                 logger.error("motor package not installed. Please install it with: pip install motor")
-                _mongo_client = None
-                _mongo_checkpointer = None
+                raise RuntimeError("MongoDB checkpoint persistence is configured but the 'motor' package is not installed. Aborting startup.")
             except Exception as e:
                 logger.error(f"Failed to initialize MongoDB connection pool: {e}")
-                _mongo_client = None
-                _mongo_checkpointer = None
+                raise RuntimeError(f"MongoDB checkpoint persistence is configured but could not be initialized: {e}")
 
     # ========== YIELD - Application runs here ==========
     yield
@@ -185,16 +188,12 @@ async def lifespan(app):
     if _pg_pool:
         logger.info("Closing global PostgreSQL connection pool")
         await _pg_pool.close()
-        _pg_pool = None
-        _pg_checkpointer = None
         logger.info("Global PostgreSQL connection pool closed")
 
     # Close MongoDB connection
     if _mongo_client:
         logger.info("Closing global MongoDB connection")
         _mongo_client.close()
-        _mongo_client = None
-        _mongo_checkpointer = None
         logger.info("Global MongoDB connection closed")
 
 
