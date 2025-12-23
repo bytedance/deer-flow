@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import asyncio
+
 import base64
 import os
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
@@ -1218,7 +1218,7 @@ class TestLifespanFunction:
 
         mock_app = MagicMock()
         mock_pool = MagicMock()
-        mock_pool.open = MagicMock(
+        mock_pool.open = AsyncMock(
             side_effect=Exception("Connection refused")
         )
 
@@ -1597,5 +1597,5 @@ class TestGlobalConnectionPoolUsage:
 
     async def _empty_async_gen(self):
         """Helper to create an empty async generator."""
-        return
-        yield
+        if False:
+            yield
