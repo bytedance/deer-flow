@@ -3,10 +3,7 @@
 
 """Unit tests for report evaluation metrics."""
 
-import pytest
-
 from src.eval.metrics import (
-    ReportMetrics,
     compute_metrics,
     count_citations,
     count_images,

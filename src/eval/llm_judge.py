@@ -17,6 +17,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
+# Maximum characters of report content to send to the LLM for evaluation.
+# This limit prevents exceeding LLM context windows and controls token usage.
+MAX_REPORT_LENGTH = 15000
+
 EVALUATION_CRITERIA = {
     "factual_accuracy": {
         "description": "Are claims supported by cited sources? Is information accurate and verifiable?",
@@ -186,7 +190,7 @@ class LLMJudge:
 **Report Style:** {report_style}
 
 **Report to Evaluate:**
-{report[:15000]}  # Truncate if too long
+{report[:MAX_REPORT_LENGTH]}
 
 Provide your evaluation in the specified JSON format."""
 

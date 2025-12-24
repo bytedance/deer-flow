@@ -44,7 +44,7 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { useReplay } from "~/core/replay";
-import { closeResearch, listenToPodcast, useStore } from "~/core/store";
+import { closeResearch, getResearchQuery, listenToPodcast, useStore, useSettingsStore } from "~/core/store";
 import { cn } from "~/lib/utils";
 
 import { EvaluationDialog } from "./evaluation-dialog";
@@ -811,14 +811,15 @@ ${htmlContent}
       </Card>
 
       {/* Evaluation Dialog */}
-      {reportId && (
+      {reportId && researchId && (
         <EvaluationDialog
           open={showEvaluation}
           onOpenChange={setShowEvaluation}
           reportContent={
             useStore.getState().messages.get(reportId)?.content ?? ""
           }
-          query={useStore.getState().messages.get(useStore.getState().messageIds[0] ?? "")?.content ?? ""}
+          query={getResearchQuery(researchId)}
+          reportStyle={useSettingsStore.getState().general.reportStyle.toLowerCase()}
         />
       )}
     </div>
