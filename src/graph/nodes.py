@@ -1172,7 +1172,7 @@ async def _setup_and_execute_agent_step(
 
     # Create and execute agent with MCP tools if available
     if mcp_servers:
-        # add mcp tools to loaded tools if MCP servers are configured
+        # Add MCP tools to loaded tools if MCP servers are configured
         client = MultiServerMCPClient(mcp_servers)
         all_tools = await client.get_tools()
         for tool in all_tools:
