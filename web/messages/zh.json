@@ -150,6 +150,7 @@
       "downloadWord": "Word (.docx)",
       "downloadImage": "图片 (.png)",
       "exportFailed": "导出失败，请重试",
+      "evaluateReport": "评估报告质量",
       "searchingFor": "搜索",
       "reading": "阅读中",
       "runningPythonCode": "运行 Python 代码",
@@ -162,6 +163,31 @@
       "podcast": "播客",
       "errorGeneratingPodcast": "生成播客时出错。请重试。",
       "downloadPodcast": "下载播客"
+    },
+    "evaluation": {
+      "title": "报告质量评估",
+      "description": "使用自动化指标和 AI 分析评估您的报告。",
+      "evaluating": "正在评估报告...",
+      "analyzing": "正在进行深度分析...",
+      "overallScore": "总体评分",
+      "metrics": "报告指标",
+      "wordCount": "字数",
+      "citations": "引用数",
+      "sources": "独立来源",
+      "images": "图片数",
+      "sectionCoverage": "章节覆盖率",
+      "detailedAnalysis": "详细分析",
+      "deepEvaluation": "深度评估 (AI)",
+      "strengths": "优势",
+      "weaknesses": "改进建议",
+      "scores": {
+        "factual_accuracy": "事实准确性",
+        "completeness": "完整性",
+        "coherence": "连贯性",
+        "relevance": "相关性",
+        "citation_quality": "引用质量",
+        "writing_quality": "写作质量"
+      }
     },
     "messages": {
       "replaying": "回放中",

@@ -150,6 +150,7 @@
       "downloadWord": "Word (.docx)",
       "downloadImage": "Image (.png)",
       "exportFailed": "Export failed, please try again",
+      "evaluateReport": "Evaluate report quality",
       "searchingFor": "Searching for",
       "reading": "Reading",
       "runningPythonCode": "Running Python code",
@@ -162,6 +163,31 @@
       "podcast": "Podcast",
       "errorGeneratingPodcast": "Error when generating podcast. Please try again.",
       "downloadPodcast": "Download podcast"
+    },
+    "evaluation": {
+      "title": "Report Quality Evaluation",
+      "description": "Evaluate your report using automated metrics and AI analysis.",
+      "evaluating": "Evaluating report...",
+      "analyzing": "Running deep analysis...",
+      "overallScore": "Overall Score",
+      "metrics": "Report Metrics",
+      "wordCount": "Word Count",
+      "citations": "Citations",
+      "sources": "Unique Sources",
+      "images": "Images",
+      "sectionCoverage": "Section Coverage",
+      "detailedAnalysis": "Detailed Analysis",
+      "deepEvaluation": "Deep Evaluation (AI)",
+      "strengths": "Strengths",
+      "weaknesses": "Areas for Improvement",
+      "scores": {
+        "factual_accuracy": "Factual Accuracy",
+        "completeness": "Completeness",
+        "coherence": "Coherence",
+        "relevance": "Relevance",
+        "citation_quality": "Citation Quality",
+        "writing_quality": "Writing Quality"
+      }
     },
     "messages": {
       "replaying": "Replaying",
