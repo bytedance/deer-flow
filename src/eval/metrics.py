@@ -216,7 +216,7 @@ def compute_metrics(
     return metrics
 
 
-def get_word_count_target(report_style: str) -> Optional[Dict[str, int]]:
+def get_word_count_target(report_style: str) -> Dict[str, int]:
     """Get target word count range for a report style."""
     targets = {
         "strategic_investment": {"min": 10000, "max": 15000},

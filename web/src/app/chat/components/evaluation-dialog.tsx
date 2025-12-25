@@ -12,7 +12,7 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import {
@@ -51,6 +51,7 @@ function GradeBadge({ grade }: { grade: string }) {
 
   return (
     <div
+      aria-label={`Report grade: ${grade}`}
       className={cn(
         "flex h-16 w-16 items-center justify-center rounded-full text-2xl font-bold text-white",
         gradeColors[grade] ?? "bg-gray-500",
@@ -96,6 +97,7 @@ export function EvaluationDialog({
   const [deepLoading, setDeepLoading] = useState(false);
   const [result, setResult] = useState<EvaluationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hasRunInitialEvaluation = useRef(false);
 
   const runEvaluation = useCallback(
     async (useLlm: boolean) => {
@@ -125,15 +127,17 @@ export function EvaluationDialog({
   );
 
   useEffect(() => {
-    if (open && !result && !loading) {
+    if (open && !hasRunInitialEvaluation.current) {
+      hasRunInitialEvaluation.current = true;
       void runEvaluation(false);
     }
-  }, [open, result, loading, runEvaluation]);
+  }, [open, runEvaluation]);
 
   useEffect(() => {
     if (!open) {
       setResult(null);
       setError(null);
+      hasRunInitialEvaluation.current = false;
     }
   }, [open]);
 
