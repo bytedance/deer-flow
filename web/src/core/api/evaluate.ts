@@ -1,6 +1,8 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { resolveServiceURL } from "./resolve-service-url";
+
 /**
  * Report evaluation API client.
  */
@@ -68,7 +70,7 @@ export async function evaluateReport(
   reportStyle?: string,
   useLlm?: boolean,
 ): Promise<EvaluationResult> {
-  const response = await fetch("/api/report/evaluate", {
+  const response = await fetch(resolveServiceURL("report/evaluate"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
