@@ -39,10 +39,20 @@ def script_writer_node(state: PodcastState):
             )
             response = base_model.invoke(messages)
             content = response.content if hasattr(response, "content") else str(response)
-            script_dict = json.loads(repair_json_output(content))
+            try:
+                repaired = repair_json_output(content)
+                script_dict = json.loads(repaired)
+            except json.JSONDecodeError as json_err:
+                logger.error(
+                    "Failed to parse JSON from podcast script writer fallback "
+                    "response: %s; content: %r",
+                    json_err,
+                    content,
+                )
+                raise
             script = Script.model_validate(script_dict)
         else:
             raise
 
-    print(script)
+    logger.debug("Generated podcast script: %s", script)
     return {"script": script, "audio_chunks": []}
