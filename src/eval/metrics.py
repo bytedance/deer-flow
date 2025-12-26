@@ -125,7 +125,7 @@ def count_words(text: str) -> int:
 
 def count_citations(text: str) -> int:
     """Count markdown-style citations [text](url)."""
-    pattern = r"\[.+?\]\(https?://[^\s\)]+\)"
+    pattern = r"\[[^\]]*\]\(https?://[^\s\)]+\)"
     return len(re.findall(pattern, text))
 
 
@@ -148,7 +148,7 @@ def extract_domains(text: str) -> List[str]:
 
 def count_images(text: str) -> int:
     """Count markdown images ![alt](url)."""
-    pattern = r"!\[.*?\]\(.+?\)"
+    pattern = r"!\[[^\]]*\]\([^)]+\)"
     return len(re.findall(pattern, text))
 
 
