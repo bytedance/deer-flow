@@ -12,7 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     # LangChain 1.x core packages
     "langchain>=1.0.0",
-    "langchain-core>=1.0.0",
+    "langchain-core>=1.2.5",
     "langchain-community>=0.3.19",
     "langchain-experimental>=0.3.4",
     "langchain-openai>=0.3.8",
