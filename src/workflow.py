@@ -60,14 +60,12 @@ async def run_agent_workflow_async(
 
     # Use provided initial_state or create a new one
     if initial_state is None:
-        initial_state = {
-            # Runtime Variables
-            "messages": [{"role": "user", "content": user_input}],
-            "auto_accepted_plan": True,
-            "enable_background_investigation": enable_background_investigation,
-        }
-        initial_state["research_topic"] = user_input
-        initial_state["clarified_research_topic"] = user_input
+        # Runtime Variables
+        initial_state = {"messages": [{"role": "user", "content": user_input}],
+                         "auto_accepted_plan": True,
+                         "enable_background_investigation": enable_background_investigation,
+                         "research_topic": user_input,
+                         "clarified_research_topic": user_input}
 
         # Only set clarification parameter if explicitly provided
         # If None, State class default will be used (enable_clarification=False)
