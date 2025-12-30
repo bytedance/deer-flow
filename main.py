@@ -22,6 +22,7 @@ def ask(
     enable_background_investigation=True,
     enable_clarification=False,
     max_clarification_rounds=None,
+    locale=None,
 ):
     """Run the agent workflow with the given question.
 
@@ -33,6 +34,7 @@ def ask(
         enable_background_investigation: If True, performs web search before planning to enhance context
         enable_clarification: If False (default), skip clarification; if True, enable multi-turn clarification
         max_clarification_rounds: Maximum number of clarification rounds (default: None, uses State default=3)
+        locale: The locale setting (e.g., 'en-US', 'zh-CN')
     """
     asyncio.run(
         run_agent_workflow_async(
@@ -43,6 +45,7 @@ def ask(
             enable_background_investigation=enable_background_investigation,
             enable_clarification=enable_clarification,
             max_clarification_rounds=max_clarification_rounds,
+            locale=locale,
         )
     )
 
@@ -70,6 +73,9 @@ def main(
         message="Select language / 选择语言:",
         choices=["English", "中文"],
     ).execute()
+
+    # Set locale based on language
+    locale = "en-US" if language == "English" else "zh-CN"
 
     # Choose questions based on language
     questions = (
@@ -105,6 +111,7 @@ def main(
         enable_background_investigation=enable_background_investigation,
         enable_clarification=enable_clarification,
         max_clarification_rounds=max_clarification_rounds,
+        locale=locale,
     )
 
 
