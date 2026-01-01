@@ -30,3 +30,4 @@ coverage/
 
 # Temporary PPT content files
 ppt_content_*.md
+runledger_out/

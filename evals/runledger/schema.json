@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "category": {
+      "type": "string"
+    },
+    "reply": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "category",
+    "reply"
+  ]
+}

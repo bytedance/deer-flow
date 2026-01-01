@@ -1,0 +1,1 @@
+{"args": {"q": "reset password"}, "ok": true, "result": {"hits": [{"snippet": "Use the reset link.", "title": "Reset password"}]}, "tool": "search_docs"}
