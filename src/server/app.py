@@ -9,6 +9,19 @@ import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
+# Load environment variables from .env file FIRST
+# This must happen before checking DEBUG environment variable
+from dotenv import load_dotenv
+load_dotenv()
+
+# Configure logging based on DEBUG environment variable
+# This must happen early, before other modules are imported
+_debug_mode = os.getenv("DEBUG", "").lower() in ("true", "1", "yes")
+if _debug_mode:
+    logging.getLogger("src").setLevel(logging.DEBUG)
+    logging.getLogger("langchain").setLevel(logging.DEBUG)
+    logging.getLogger("langgraph").setLevel(logging.DEBUG)
+
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
