@@ -760,6 +760,13 @@ def coordinator_node(
                             "Using research topic for handoff: %s", research_topic
                         )
                     break
+                elif tool_name == "direct_response":
+                    # Handle direct_response tool: add the response message to messages
+                    logger.info("Processing direct_response tool call")
+                    goto = "__end__"
+                    if tool_args.get("message"):
+                        messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
+                    break
 
         except Exception as e:
             logger.error(f"Error processing tool calls: {e}")

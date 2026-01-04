@@ -25,7 +25,7 @@ if _debug_mode:
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
@@ -515,6 +515,15 @@ async def _process_message_chunk(message_chunk, message_metadata, thread_id, age
         
         logger.debug(f"[{safe_thread_id}] Yielding tool_call_result event")
         yield _make_event("tool_call_result", event_stream_message)
+    elif isinstance(message_chunk, AIMessage) and not isinstance(message_chunk, AIMessageChunk):
+        # AIMessage (non-streaming) - typically from direct_response or other non-streaming responses
+        content_len = len(message_chunk.content) if isinstance(message_chunk.content, str) else 0
+        logger.debug(f"[{safe_thread_id}] Processing AIMessage (non-streaming), content_len={content_len}")
+        
+        # Add finish_reason to indicate this is a complete message
+        event_stream_message["finish_reason"] = "stop"
+        
+        yield _make_event("message_chunk", event_stream_message)
     elif isinstance(message_chunk, AIMessageChunk):
         # AI Message - Raw message tokens
         has_tool_calls = bool(message_chunk.tool_calls)
