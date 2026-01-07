@@ -3,6 +3,8 @@ import copy
 import logging
 from typing import List
 
+from langgraph.runtime import Runtime 
+
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -144,7 +146,7 @@ class ContextManager:
         """
         return self.count_tokens(messages) > self.token_limit
 
-    def compress_messages(self, state: dict, runtime=None) -> List[BaseMessage]:
+    def compress_messages(self, state: dict, runtime: Runtime | None = None) -> dict:
         """
         Compress messages to fit within token limit
 
