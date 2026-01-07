@@ -1,8 +1,10 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
+import inspect
 import logging
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from langchain.agents import create_agent as langchain_create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -29,16 +31,23 @@ class DynamicPromptMiddleware(AgentMiddleware):
     
     def before_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """Apply prompt template and prepend system message to messages."""
-        # Get the rendered messages including system prompt from template
-        rendered_messages = apply_prompt_template(
-            self.prompt_template, state, locale=self.locale
-        )
-        # The first message is the system prompt, extract it
-        if rendered_messages and len(rendered_messages) > 0:
-            system_message = rendered_messages[0]
-            # Prepend system message to existing messages
-            return {"messages": [system_message]}
-        return None
+        try:
+            # Get the rendered messages including system prompt from template
+            rendered_messages = apply_prompt_template(
+                self.prompt_template, state, locale=self.locale
+            )
+            # The first message is the system prompt, extract it
+            if rendered_messages and len(rendered_messages) > 0:
+                system_message = rendered_messages[0]
+                # Prepend system message to existing messages
+                return {"messages": [system_message]}
+            return None
+        except Exception as e:
+            logger.error(
+                f"Failed to apply prompt template in before_model: {e}",
+                exc_info=True
+            )
+            return None
 
     async def abefore_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """Async version of before_model."""
@@ -52,20 +61,43 @@ class PreModelHookMiddleware(AgentMiddleware):
     as part of the middleware chain.
     """
     
-    def __init__(self, pre_model_hook: callable):
+    def __init__(self, pre_model_hook: Callable):
         self._pre_model_hook = pre_model_hook
     
     def before_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """Execute the pre-model hook."""
-        if self._pre_model_hook:
-            result = self._pre_model_hook(state)
-            if result is not None:
-                return result
-        return None
+        if not self._pre_model_hook:
+            return None
+        
+        try:
+            result = self._pre_model_hook(state, runtime)
+            return result
+        except Exception as e:
+            logger.error(
+                f"Pre-model hook execution failed in before_model: {e}",
+                exc_info=True
+            )
+            return None
 
     async def abefore_model(self, state: Any, runtime: Runtime) -> dict[str, Any] | None:
         """Async version of before_model."""
-        return self.before_model(state, runtime)
+        if not self._pre_model_hook:
+            return None
+        
+        try:
+            # Check if the hook is async
+            if inspect.iscoroutinefunction(self._pre_model_hook):
+                result = await self._pre_model_hook(state, runtime)
+            else:
+                # Run synchronous hook in thread pool to avoid blocking event loop
+                result = await asyncio.to_thread(self._pre_model_hook, state, runtime)
+            return result
+        except Exception as e:
+            logger.error(
+                f"Pre-model hook execution failed in abefore_model: {e}",
+                exc_info=True
+            )
+            return None
 
 
 # Create agents using configured LLM types
