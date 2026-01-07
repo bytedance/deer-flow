@@ -181,3 +181,29 @@ class TestContextManager:
         text = "Hello world 这是一些中文"
         token_count = context_manager._count_text_tokens(text)
         assert token_count > 6
+
+    def test_compress_messages_with_runtime_when_not_over_limit(self):
+        """compress_messages accepts runtime param when under limit"""
+        context_manager = ContextManager(token_limit=1000)
+        messages = [HumanMessage(content="Short message"), AIMessage(content="OK")] 
+        compressed = context_manager.compress_messages({"messages": messages}, runtime=object())
+        assert isinstance(compressed, dict)
+        assert "messages" in compressed
+        assert len(compressed["messages"]) == len(messages)
+
+    def test_compress_messages_with_runtime_when_over_limit(self):
+        """compress_messages accepts runtime param and still compresses"""
+        limited_cm = ContextManager(token_limit=200)
+        messages = [
+            SystemMessage(content="You are a helpful assistant."),
+            HumanMessage(content="Hello"),
+            AIMessage(content="Hi there!"),
+            HumanMessage(
+                content="Can you tell me a very long story that would exceed token limits? " * 100
+            ),
+        ]
+        compressed = limited_cm.compress_messages({"messages": messages}, runtime=object())
+        assert isinstance(compressed, dict)
+        assert "messages" in compressed
+        # Should preserve only what fits; with this setup we expect heavy compression
+        assert len(compressed["messages"]) == 1
