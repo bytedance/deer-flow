@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
-from langgraph.prebuilt.chat_agent_executor import AgentState
+from langchain.agents import AgentState
 
 from src.config.configuration import Configuration
 

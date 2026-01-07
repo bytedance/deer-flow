@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 """
-Unit tests for agent locale restoration after create_react_agent execution.
+Unit tests for agent locale restoration after agent execution.
 
 Tests that meta fields (especially locale) are properly restored after
-agent.ainvoke() returns, since create_react_agent creates a MessagesState
+agent.ainvoke() returns, since the agent creates a MessagesState
 subgraph that filters out custom fields.
 """
 
@@ -22,7 +22,7 @@ class TestAgentLocaleRestoration:
         """
         Demonstrate the problem: agent subgraph filters out locale.
         
-        When create_react_agent creates a subgraph with MessagesState,
+        When the agent creates a subgraph with MessagesState,
         it only returns messages, not custom fields.
         """
         # Simulate agent behavior: only returns messages
