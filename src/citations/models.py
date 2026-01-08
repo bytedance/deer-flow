@@ -1,0 +1,171 @@
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+# SPDX-License-Identifier: MIT
+
+"""
+Citation data models for structured source metadata.
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
+import hashlib
+
+
+@dataclass
+class CitationMetadata:
+    """Metadata extracted from a source."""
+    
+    # Core identifiers
+    url: str
+    title: str
+    
+    # Content information
+    description: Optional[str] = None
+    content_snippet: Optional[str] = None
+    raw_content: Optional[str] = None
+    
+    # Source metadata
+    domain: Optional[str] = None
+    author: Optional[str] = None
+    published_date: Optional[str] = None
+    language: Optional[str] = None
+    
+    # Media
+    images: List[str] = field(default_factory=list)
+    favicon: Optional[str] = None
+    
+    # Quality indicators
+    relevance_score: float = 0.0
+    credibility_score: float = 0.0
+    
+    # Timestamps
+    accessed_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    # Additional metadata
+    extra: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Extract domain from URL if not provided."""
+        if not self.domain and self.url:
+            try:
+                parsed = urlparse(self.url)
+                self.domain = parsed.netloc
+            except Exception:
+                pass
+    
+    @property
+    def id(self) -> str:
+        """Generate a unique ID for this citation based on URL."""
+        return hashlib.md5(self.url.encode()).hexdigest()[:12]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "url": self.url,
+            "title": self.title,
+            "description": self.description,
+            "content_snippet": self.content_snippet,
+            "domain": self.domain,
+            "author": self.author,
+            "published_date": self.published_date,
+            "language": self.language,
+            "images": self.images,
+            "favicon": self.favicon,
+            "relevance_score": self.relevance_score,
+            "credibility_score": self.credibility_score,
+            "accessed_at": self.accessed_at,
+            "extra": self.extra,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CitationMetadata":
+        """Create from dictionary."""
+        # Remove 'id' as it's computed from url
+        data = {k: v for k, v in data.items() if k != "id"}
+        return cls(**data)
+    
+    @classmethod
+    def from_search_result(cls, result: Dict[str, Any], query: str = "") -> "CitationMetadata":
+        """Create citation metadata from a search result."""
+        return cls(
+            url=result.get("url", ""),
+            title=result.get("title", "Untitled"),
+            description=result.get("content", result.get("description", "")),
+            content_snippet=result.get("content", "")[:500] if result.get("content") else None,
+            raw_content=result.get("raw_content"),
+            relevance_score=result.get("score", 0.0),
+            extra={"query": query, "result_type": result.get("type", "page")},
+        )
+
+
+@dataclass
+class Citation:
+    """
+    A citation reference that can be used in reports.
+    
+    This represents a numbered citation that links to source metadata.
+    """
+    
+    # Citation number (1-indexed for display)
+    number: int
+    
+    # Reference to the source metadata
+    metadata: CitationMetadata
+    
+    # Context where this citation is used
+    context: Optional[str] = None
+    
+    # Specific quote or fact being cited
+    cited_text: Optional[str] = None
+    
+    @property
+    def id(self) -> str:
+        """Get the citation ID from metadata."""
+        return self.metadata.id
+    
+    @property
+    def url(self) -> str:
+        """Get the URL from metadata."""
+        return self.metadata.url
+    
+    @property
+    def title(self) -> str:
+        """Get the title from metadata."""
+        return self.metadata.title
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "number": self.number,
+            "metadata": self.metadata.to_dict(),
+            "context": self.context,
+            "cited_text": self.cited_text,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Citation":
+        """Create from dictionary."""
+        return cls(
+            number=data["number"],
+            metadata=CitationMetadata.from_dict(data["metadata"]),
+            context=data.get("context"),
+            cited_text=data.get("cited_text"),
+        )
+    
+    def to_markdown_reference(self) -> str:
+        """Generate markdown reference format: [Title](URL)"""
+        return f"[{self.title}]({self.url})"
+    
+    def to_numbered_reference(self) -> str:
+        """Generate numbered reference format: [1] Title - URL"""
+        return f"[{self.number}] {self.title} - {self.url}"
+    
+    def to_inline_marker(self) -> str:
+        """Generate inline citation marker: [^1]"""
+        return f"[^{self.number}]"
+    
+    def to_footnote(self) -> str:
+        """Generate footnote definition: [^1]: Title - URL"""
+        return f"[^{self.number}]: {self.title} - {self.url}"
