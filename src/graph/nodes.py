@@ -14,6 +14,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.types import Command, interrupt
 
 from src.agents import create_agent
+from src.citations import extract_citations_from_messages, merge_citations
 from src.config.agents import AGENT_LLM_MAP
 from src.config.configuration import Configuration
 from src.llms.llm import get_llm_by_type, get_llm_token_limit_by_type
@@ -115,6 +116,7 @@ def preserve_state_meta_fields(state: State) -> dict:
         "max_clarification_rounds": state.get("max_clarification_rounds", 3),
         "clarification_rounds": state.get("clarification_rounds", 0),
         "resources": state.get("resources", []),
+        "citations": state.get("citations", []),
     }
 
 
@@ -715,6 +717,7 @@ def coordinator_node(
                         "clarified_research_topic": clarified_topic,
                         "is_clarification_complete": False,
                         "goto": goto,
+                        "citations": state.get("citations", []),
                         "__interrupt__": [("coordinator", response.content)],
                     },
                     goto=goto,
@@ -809,6 +812,7 @@ def coordinator_node(
             "clarification_history": clarification_history,
             "is_clarification_complete": goto != "coordinator",
             "goto": goto,
+            "citations": state.get("citations", []),
         },
         goto=goto,
     )
@@ -829,11 +833,32 @@ def reporter_node(state: State, config: RunnableConfig):
     }
     invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
     observations = state.get("observations", [])
+    
+    # Get collected citations for the report
+    citations = state.get("citations", [])
 
     # Add a reminder about the new report format, citation style, and table usage
+    citation_instruction = "IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. References - List all references at the end\n\nFor citations, please follow these rules:\n1. Use inline citations [n] in the text where appropriate.\n2. The number n must correspond to the source index in the 'Available Source References' list provided below.\n3. Make the inline citation a link to the reference at the bottom using the format `[[n]](#ref-n)`.\n4. In the References section at the end, list the sources using the format `[[n]](#citation-target-n) **[Title](URL)**`.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |"
+    
+    # If we have collected citations, provide them to the reporter
+    if citations:
+        citation_list = "\n\n## Available Source References (use these in References section):\n\n"
+        for i, citation in enumerate(citations, 1):
+            title = citation.get("title", "Untitled")
+            url = citation.get("url", "")
+            domain = citation.get("domain", "")
+            desc = citation.get("description", "")[:150] if citation.get("description") else ""
+            citation_list += f"{i}. **{title}**\n   - URL: {url}\n   - Domain: {domain}\n"
+            if desc:
+                citation_list += f"   - Summary: {desc}...\n"
+            citation_list += "\n"
+        
+        citation_instruction += citation_list
+        logger.info(f"Providing {len(citations)} collected citations to reporter")
+    
     invoke_messages.append(
         HumanMessage(
-            content="IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. Key Citations - List all references at the end\n\nFor citations, DO NOT include inline citations in the text. Instead, place all citations in the 'Key Citations' section at the end using the format: `- [Source Title](URL)`. Include an empty line between each citation for better readability.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |",
+            content=citation_instruction,
             name="system",
         )
     )
@@ -859,7 +884,10 @@ def reporter_node(state: State, config: RunnableConfig):
     response_content = response.content
     logger.info(f"reporter response: {response_content}")
 
-    return {"final_report": response_content}
+    return {
+        "final_report": response_content,
+        "citations": citations,  # Pass citations through to final state
+    }
 
 
 def research_team_node(state: State):
@@ -1121,11 +1149,23 @@ async def _execute_agent_step(
             f"All tool results will be preserved and streamed to frontend."
         )
 
+    # Extract citations from tool call results (web_search, crawl)
+    existing_citations = state.get("citations", [])
+    new_citations = extract_citations_from_messages(agent_messages)
+    merged_citations = merge_citations(existing_citations, new_citations)
+    
+    if new_citations:
+        logger.info(
+            f"Extracted {len(new_citations)} new citations from {agent_name} agent. "
+            f"Total citations: {len(merged_citations)}"
+        )
+
     return Command(
         update={
+            **preserve_state_meta_fields(state),
             "messages": agent_messages,
             "observations": observations + [response_content + validation_info],
-            **preserve_state_meta_fields(state),
+            "citations": merged_citations,  # Must come after preserve_state_meta_fields to override old citations
         },
         goto="research_team",
     )

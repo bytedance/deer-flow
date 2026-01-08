@@ -577,8 +577,44 @@ async def _stream_graph_events(
     """Stream events from the graph and process them."""
     safe_thread_id = sanitize_thread_id(thread_id)
     logger.debug(f"[{safe_thread_id}] Starting graph event stream with agent nodes")
+    
+    # Track citations collected during research
+    collected_citations = []
+    
+    def extract_citations_from_event(event: Any, depth: int = 0) -> list:
+        """Recursively extract citations from event data."""
+        if depth > 5:  # Prevent infinite recursion
+            return []
+        if not isinstance(event, dict):
+            return []
+        
+        # Direct citations field
+        if "citations" in event:
+            citations = event.get("citations", [])
+            if citations and isinstance(citations, list) and len(citations) > 0:
+                logger.debug(f"[{safe_thread_id}] Found {len(citations)} citations at depth {depth}")
+                return citations
+        
+        # Check nested values (for updates mode)
+        for key, value in event.items():
+            if isinstance(value, dict):
+                found = extract_citations_from_event(value, depth + 1)
+                if found:
+                    return found
+            # Also check if the value is a list of dicts (like Command updates)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        found = extract_citations_from_event(item, depth + 1)
+                        if found:
+                            return found
+        
+        return []
+    
     try:
         event_count = 0
+        last_state_update = None  # Track the last state update to get final citations
+        
         async for agent, _, event_data in graph_instance.astream(
             workflow_input,
             config=workflow_config,
@@ -590,6 +626,22 @@ async def _stream_graph_events(
             logger.debug(f"[{safe_thread_id}] Graph event #{event_count} received from agent: {safe_agent}")
             
             if isinstance(event_data, dict):
+                # Store the last state update for final citation extraction
+                last_state_update = event_data
+                
+                # Log event keys for debugging (more verbose for citations debugging)
+                event_keys = list(event_data.keys())
+                if event_keys and event_keys[0] != "__interrupt__":
+                    # Check if this might be a state update with citations
+                    if "citations" in str(event_data)[:1000]:
+                        logger.info(f"[{safe_thread_id}] Event may contain citations, keys: {event_keys}")
+                
+                # Check for citations in state updates (may be nested)
+                new_citations = extract_citations_from_event(event_data)
+                if new_citations:
+                    collected_citations = new_citations
+                    logger.info(f"[{safe_thread_id}] Collected {len(collected_citations)} citations from state update")
+                
                 if "__interrupt__" in event_data:
                     logger.debug(
                         f"[{safe_thread_id}] Processing interrupt event: "
@@ -617,6 +669,37 @@ async def _stream_graph_events(
                 message_chunk, message_metadata, thread_id, agent
             ):
                 yield event
+        
+        # After streaming completes, try to get citations
+        # First check if we collected any during streaming
+        if not collected_citations and last_state_update:
+            # Try to get citations from the last state update
+            logger.debug(f"[{safe_thread_id}] No citations collected during streaming, checking last state update")
+            collected_citations = extract_citations_from_event(last_state_update)
+        
+        # If still no citations, try to get from graph state directly
+        if not collected_citations:
+            try:
+                # Get the current state from the graph using proper config
+                state_config = {"configurable": {"thread_id": thread_id}}
+                current_state = await graph_instance.aget_state(state_config)
+                if current_state and hasattr(current_state, 'values'):
+                    state_values = current_state.values
+                    if isinstance(state_values, dict) and 'citations' in state_values:
+                        collected_citations = state_values.get('citations', [])
+                        logger.info(f"[{safe_thread_id}] Retrieved {len(collected_citations)} citations from final graph state")
+            except Exception as e:
+                logger.warning(f"[{safe_thread_id}] Could not retrieve citations from graph state: {e}")
+        
+        # Send collected citations as a separate event
+        if collected_citations:
+            logger.info(f"[{safe_thread_id}] Sending {len(collected_citations)} citations to client")
+            yield _make_event("citations", {
+                "thread_id": thread_id,
+                "citations": collected_citations,
+            })
+        else:
+            logger.debug(f"[{safe_thread_id}] No citations to send")
         
         logger.debug(f"[{safe_thread_id}] Graph event stream completed. Total events: {event_count}")
     except asyncio.CancelledError:
