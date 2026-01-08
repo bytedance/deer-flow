@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
 import { chatStream, generatePodcast } from "../api";
-import type { Message, Resource } from "../messages";
+import type { Citation, Message, Resource } from "../messages";
 import { mergeMessage } from "../messages";
 import { parseJSON } from "../utils";
 
@@ -25,6 +25,7 @@ export const useStore = create<{
   researchReportIds: Map<string, string>;
   researchActivityIds: Map<string, string[]>;
   researchQueries: Map<string, string>;
+  researchCitations: Map<string, Citation[]>;
   ongoingResearchId: string | null;
   openResearchId: string | null;
 
@@ -34,6 +35,7 @@ export const useStore = create<{
   openResearch: (researchId: string | null) => void;
   closeResearch: () => void;
   setOngoingResearch: (researchId: string | null) => void;
+  setCitations: (researchId: string, citations: Citation[]) => void;
 }>((set) => ({
   responding: false,
   threadId: THREAD_ID,
@@ -44,6 +46,7 @@ export const useStore = create<{
   researchReportIds: new Map<string, string>(),
   researchActivityIds: new Map<string, string[]>(),
   researchQueries: new Map<string, string>(),
+  researchCitations: new Map<string, Citation[]>(),
   ongoingResearchId: null,
   openResearchId: null,
 
@@ -79,6 +82,11 @@ export const useStore = create<{
   },
   setOngoingResearch(researchId: string | null) {
     set({ ongoingResearchId: researchId });
+  },
+  setCitations(researchId: string, citations: Citation[]) {
+    set((state) => ({
+      researchCitations: new Map(state.researchCitations).set(researchId, citations),
+    }));
   },
 }));
 
@@ -147,6 +155,15 @@ export async function sendMessage(
     for await (const event of stream) {
       const { type, data } = event;
       let message: Message | undefined;
+      
+      // Handle citations event: store citations for the current research
+      if (type === "citations") {
+        const ongoingResearchId = useStore.getState().ongoingResearchId;
+        if (ongoingResearchId && data.citations) {
+          useStore.getState().setCitations(ongoingResearchId, data.citations);
+        }
+        continue;
+      }
       
       // Handle tool_call_result specially: use the message that contains the tool call
       if (type === "tool_call_result") {
@@ -485,4 +502,16 @@ export function useToolCalls() {
         .flat();
     }),
   );
+}
+
+export function useCitations(researchId: string | null | undefined) {
+  return useStore(
+    useShallow((state) =>
+      researchId ? state.researchCitations.get(researchId) ?? [] : []
+    ),
+  );
+}
+
+export function getCitations(researchId: string): Citation[] {
+  return useStore.getState().researchCitations.get(researchId) ?? [];
 }

@@ -20,6 +20,7 @@ import { cn } from "~/lib/utils";
 import Image from "./image";
 import { Tooltip } from "./tooltip";
 import { Link } from "./link";
+import { CitationLink, type CitationData } from "./citation";
 
 export function Markdown({
   className,
@@ -28,6 +29,7 @@ export function Markdown({
   enableCopy,
   animated = false,
   checkLinkCredibility = false,
+  citations = [],
   ...props
 }: ReactMarkdownOptions & {
   className?: string;
@@ -35,21 +37,61 @@ export function Markdown({
   style?: React.CSSProperties;
   animated?: boolean;
   checkLinkCredibility?: boolean;
+  citations?: CitationData[];
 }) {
   const components: ReactMarkdownOptions["components"] = useMemo(() => {
     return {
-      a: ({ href, children }) => (
-        <Link href={href} checkLinkCredibility={checkLinkCredibility}>
-          {children}
-        </Link>
-      ),
+      a: ({ href, children }) => {
+        const hrefStr = href ?? "";
+
+        // Handle citation anchor targets (rendered in Reference list)
+        // Format: [[n]](#citation-target-n)
+        const targetMatch = hrefStr.match(/^#citation-target-(\d+)$/);
+        if (targetMatch) {
+            const index = targetMatch[1];
+            return <span id={`ref-${index}`} className="font-bold text-primary scroll-mt-20">[{index}]</span>;
+        }
+
+        // Handle inline citation links (rendered in text)
+        // Format: [[n]](#ref-n)
+        const linkMatch = hrefStr.match(/^#ref-(\d+)$/);
+        if (linkMatch) {
+             return (
+                <a 
+                    href={hrefStr}
+                    className="text-primary hover:underline cursor-pointer"
+                    onClick={(e) => {
+                        e.preventDefault();
+                        document.getElementById(`ref-${linkMatch[1]}`)?.scrollIntoView({ behavior: "smooth" });
+                    }}
+                >
+                    {children}
+                </a>
+             );
+        }
+
+        // If we have citation data, use CitationLink for enhanced display
+        if (citations && citations.length > 0) {
+          return (
+            <CitationLink href={hrefStr} citations={citations}>
+              {children}
+            </CitationLink>
+          );
+        }
+        // Otherwise fall back to regular Link
+        return (
+          <Link href={href} checkLinkCredibility={checkLinkCredibility}>
+            {children}
+          </Link>
+        );
+      },
       img: ({ src, alt }) => (
         <a href={src as string} target="_blank" rel="noopener noreferrer">
           <Image className="rounded" src={src as string} alt={alt ?? ""} />
         </a>
       ),
     };
-  }, [checkLinkCredibility]);
+  }, [checkLinkCredibility, citations]);
 
   const rehypePlugins = useMemo<NonNullable<ReactMarkdownOptions["rehypePlugins"]>>(() => {
     const plugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [[
