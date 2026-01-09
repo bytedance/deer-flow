@@ -7,7 +7,6 @@ Citation collector for gathering and managing citations during research.
 
 import logging
 from typing import Dict, List, Optional, Any
-from urllib.parse import urlparse
 
 from .models import Citation, CitationMetadata
 

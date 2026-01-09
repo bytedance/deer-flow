@@ -52,12 +52,15 @@ class CitationMetadata:
                 parsed = urlparse(self.url)
                 self.domain = parsed.netloc
             except Exception:
+                # If URL parsing fails for any reason, leave `domain` as None.
+                # This is a non-critical convenience field and failures here
+                # should not prevent citation metadata creation.
                 pass
     
     @property
     def id(self) -> str:
         """Generate a unique ID for this citation based on URL."""
-        return hashlib.md5(self.url.encode()).hexdigest()[:12]
+        return hashlib.sha256(self.url.encode("utf-8")).hexdigest()[:12]
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

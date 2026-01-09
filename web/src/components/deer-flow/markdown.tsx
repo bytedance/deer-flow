@@ -48,26 +48,35 @@ export function Markdown({
         // Format: [[n]](#citation-target-n)
         const targetMatch = hrefStr.match(/^#citation-target-(\d+)$/);
         if (targetMatch) {
-            const index = targetMatch[1];
-            return <span id={`ref-${index}`} className="font-bold text-primary scroll-mt-20">[{index}]</span>;
+          const index = targetMatch[1];
+          return (
+            <span
+              id={`ref-${index}`}
+              className="font-bold text-primary scroll-mt-20"
+            >
+              [{index}]
+            </span>
+          );
         }
 
         // Handle inline citation links (rendered in text)
         // Format: [[n]](#ref-n)
         const linkMatch = hrefStr.match(/^#ref-(\d+)$/);
         if (linkMatch) {
-             return (
-                <a 
-                    href={hrefStr}
-                    className="text-primary hover:underline cursor-pointer"
-                    onClick={(e) => {
-                        e.preventDefault();
-                        document.getElementById(`ref-${linkMatch[1]}`)?.scrollIntoView({ behavior: "smooth" });
-                    }}
-                >
-                    {children}
-                </a>
-             );
+          return (
+            <a
+              href={hrefStr}
+              className="text-primary hover:underline cursor-pointer"
+              onClick={(e) => {
+                e.preventDefault();
+                document
+                  .getElementById(`ref-${linkMatch[1]}`)
+                  ?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
+              {children}
+            </a>
+          );
         }
 
         // If we have citation data, use CitationLink for enhanced display

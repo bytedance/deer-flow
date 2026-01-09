@@ -595,34 +595,37 @@ async def _stream_graph_events(
     collected_citations = []
     
     def extract_citations_from_event(event: Any, depth: int = 0) -> list:
-        """Recursively extract citations from event data."""
+        """Recursively extract all citations from event data."""
         if depth > 5:  # Prevent infinite recursion
             return []
         if not isinstance(event, dict):
             return []
         
-        # Direct citations field
-        if "citations" in event:
-            citations = event.get("citations", [])
-            if citations and isinstance(citations, list) and len(citations) > 0:
-                logger.debug(f"[{safe_thread_id}] Found {len(citations)} citations at depth {depth}")
-                return citations
+        citations: list[Any] = []
+        
+        # Direct citations field at this level
+        direct_citations = event.get("citations")
+        if isinstance(direct_citations, list) and direct_citations:
+            logger.debug(
+                f"[{safe_thread_id}] Found {len(direct_citations)} citations at depth {depth}"
+            )
+            citations.extend(direct_citations)
         
         # Check nested values (for updates mode)
-        for key, value in event.items():
+        for value in event.values():
             if isinstance(value, dict):
-                found = extract_citations_from_event(value, depth + 1)
-                if found:
-                    return found
+                nested = extract_citations_from_event(value, depth + 1)
+                if nested:
+                    citations.extend(nested)
             # Also check if the value is a list of dicts (like Command updates)
             elif isinstance(value, list):
                 for item in value:
                     if isinstance(item, dict):
-                        found = extract_citations_from_event(item, depth + 1)
-                        if found:
-                            return found
+                        nested = extract_citations_from_event(item, depth + 1)
+                        if nested:
+                            citations.extend(nested)
         
-        return []
+        return citations
     
     try:
         event_count = 0

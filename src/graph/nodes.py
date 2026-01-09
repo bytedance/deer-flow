@@ -116,7 +116,7 @@ def preserve_state_meta_fields(state: State) -> dict:
         "max_clarification_rounds": state.get("max_clarification_rounds", 3),
         "clarification_rounds": state.get("clarification_rounds", 0),
         "resources": state.get("resources", []),
-        "citations": state.get("citations", []),
+        # "citations": state.get("citations", []),  # Handled explicitly where needed
     }
 
 
@@ -703,7 +703,7 @@ def coordinator_node(
                 updated_messages = list(state_messages)
                 if response.content:
                     updated_messages.append(
-                        HumanMessage(content=response.content, name="coordinator")
+                        AIMessage(content=response.content, name="coordinator")
                     )
 
                 return Command(
@@ -737,7 +737,7 @@ def coordinator_node(
     # ============================================================
     messages = list(state.get("messages", []) or [])
     if response.content:
-        messages.append(HumanMessage(content=response.content, name="coordinator"))
+        messages.append(AIMessage(content=response.content, name="coordinator"))
 
     # Process tool calls for BOTH branches (legacy and clarification)
     if response.tool_calls:
@@ -781,6 +781,14 @@ def coordinator_node(
         else:
             # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
             logger.info("No tool calls in legacy mode - ending workflow gracefully")
+            
+            # Explicit fallback if research topic is clear but LLM failed to call tool
+            if research_topic:
+                logger.warning(
+                    "No tool calls in legacy mode but research topic is present. "
+                    "Turning on fallback to planner (this may mask LLM tool calling issues)."
+                )
+                goto = "planner"
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
@@ -831,7 +839,31 @@ def reporter_node(state: State, config: RunnableConfig):
     citations = state.get("citations", [])
 
     # Add a reminder about the new report format, citation style, and table usage
-    citation_instruction = "IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. References - List all references at the end\n\nFor citations, please follow these rules:\n1. Use inline citations [n] in the text where appropriate.\n2. The number n must correspond to the source index in the 'Available Source References' list provided below.\n3. Make the inline citation a link to the reference at the bottom using the format `[[n]](#ref-n)`.\n4. In the References section at the end, list the sources using the format `[[n]](#citation-target-n) **[Title](URL)**`.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |"
+    citation_instruction = (
+        "IMPORTANT: Structure your report according to the format in the "
+        "prompt. Remember to include:\n\n"
+        "1. Key Points - A bulleted list of the most important findings\n"
+        "2. Overview - A brief introduction to the topic\n"
+        "3. Detailed Analysis - Organized into logical sections\n"
+        "4. Survey Note (optional) - For more comprehensive reports\n"
+        "5. References - List all references at the end\n\n"
+        "For citations, please follow these rules:\n"
+        "1. Use inline citations [n] in the text where appropriate.\n"
+        "2. The number n must correspond to the source index in the "
+        "'Available Source References' list provided below.\n"
+        "3. Make the inline citation a link to the reference at the bottom "
+        "using the format `[[n]](#ref-n)`.\n"
+        "4. In the References section at the end, list the sources using the "
+        "format `[[n]](#citation-target-n) **[Title](URL)**`.\n\n"
+        "PRIORITIZE USING MARKDOWN TABLES for data presentation and "
+        "comparison. Use tables whenever presenting comparative data, "
+        "statistics, features, or options. Structure tables with clear "
+        "headers and aligned columns. Example table format:\n\n"
+        "| Feature | Description | Pros | Cons |\n"
+        "|---------|-------------|------|------|\n"
+        "| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n"
+        "| Feature 2 | Description 2 | Pros 2 | Cons 2 |"
+    )
     
     # If we have collected citations, provide them to the reporter
     if citations:

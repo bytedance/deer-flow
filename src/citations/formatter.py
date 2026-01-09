@@ -6,7 +6,7 @@ Citation formatter for generating citation sections and inline references.
 """
 
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from .models import Citation, CitationMetadata
 
 
@@ -200,7 +200,6 @@ class CitationFormatter:
         # Find all markdown links and add citation numbers
         def replace_link(match):
             full_match = match.group(0)
-            link_text = match.group(1)
             url = match.group(2)
             
             if url in url_to_number:

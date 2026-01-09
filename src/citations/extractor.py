@@ -48,6 +48,9 @@ def extract_citations_from_messages(messages: List[Any]) -> List[Dict[str, Any]]
                 if tool_call.get("name") == "web_search":
                     # The query is in the args
                     query = tool_call.get("args", {}).get("query", "")
+                    logger.info(
+                        "[Citations] Found web_search tool call with query=%r", query
+                    )
                     # Note: results come in subsequent ToolMessage
     
     logger.info(f"[Citations] Extracted {len(citations)} unique citations from {len(messages)} messages")
@@ -286,7 +289,6 @@ def citations_to_markdown_references(citations: List[Dict[str, Any]]) -> str:
         title = citation.get("title", "Untitled")
         url = citation.get("url", "")
         domain = citation.get("domain", "")
-        description = citation.get("description", "")
         
         # Main reference link
         lines.append(f"- [{title}]({url})")
