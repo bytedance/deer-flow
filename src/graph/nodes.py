@@ -703,7 +703,7 @@ def coordinator_node(
                 updated_messages = list(state_messages)
                 if response.content:
                     updated_messages.append(
-                        HumanMessage(content=response.content, name="coordinator")
+                        AIMessage(content=response.content, name="coordinator")
                     )
 
                 return Command(
@@ -737,7 +737,7 @@ def coordinator_node(
     # ============================================================
     messages = list(state.get("messages", []) or [])
     if response.content:
-        messages.append(HumanMessage(content=response.content, name="coordinator"))
+        messages.append(AIMessage(content=response.content, name="coordinator"))
 
     # Process tool calls for BOTH branches (legacy and clarification)
     if response.tool_calls:
@@ -780,7 +780,14 @@ def coordinator_node(
             goto = "planner"
         else:
             # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
-            logger.info("No tool calls in legacy mode - ending workflow gracefully")
+            if research_topic:
+                logger.warning(
+                    "No tool calls in legacy mode but research topic is present. "
+                    "Falling back to planner to ensure research proceeds."
+                )
+                goto = "planner"
+            else:
+                logger.info("No tool calls in legacy mode - ending workflow gracefully")
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
@@ -1189,6 +1196,7 @@ async def _setup_and_execute_agent_step(
     configurable = Configuration.from_runnable_config(config)
     mcp_servers = {}
     enabled_tools = {}
+    loaded_tools = default_tools[:]
     
     # Get locale from workflow state to pass to agent creation
     # This fixes issue #743 where locale was not correctly retrieved in agent prompt
@@ -1211,8 +1219,8 @@ async def _setup_and_execute_agent_step(
 
     # Create and execute agent with MCP tools if available
     if mcp_servers:
+        # Add MCP tools to loaded tools if MCP servers are configured
         client = MultiServerMCPClient(mcp_servers)
-        loaded_tools = default_tools[:]
         all_tools = await client.get_tools()
         for tool in all_tools:
             if tool.name in enabled_tools:
@@ -1221,32 +1229,18 @@ async def _setup_and_execute_agent_step(
                 )
                 loaded_tools.append(tool)
 
-        llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
-        pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
-        agent = create_agent(
-            agent_type,
-            agent_type,
-            loaded_tools,
-            agent_type,
-            pre_model_hook,
-            interrupt_before_tools=configurable.interrupt_before_tools,
-            locale=locale,
-        )
-        return await _execute_agent_step(state, agent, agent_type, config)
-    else:
-        # Use default tools if no MCP servers are configured
-        llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
-        pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
-        agent = create_agent(
-            agent_type,
-            agent_type,
-            default_tools,
-            agent_type,
-            pre_model_hook,
-            interrupt_before_tools=configurable.interrupt_before_tools,
-            locale=locale,
-        )
-        return await _execute_agent_step(state, agent, agent_type, config)
+    llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_type])
+    pre_model_hook = partial(ContextManager(llm_token_limit, 3).compress_messages)
+    agent = create_agent(
+        agent_type,
+        agent_type,
+        loaded_tools,
+        agent_type,
+        pre_model_hook,
+        interrupt_before_tools=configurable.interrupt_before_tools,
+        locale=locale,
+    )
+    return await _execute_agent_step(state, agent, agent_type, config)
 
 
 async def researcher_node(
