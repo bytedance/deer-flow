@@ -431,16 +431,25 @@ export function useRenderableMessageIds() {
       return state.messageIds.filter((messageId) => {
         const message = state.messages.get(messageId);
         if (!message) return false;
-        
+
         // Only include messages that match MessageListItem rendering conditions
         // These are the same conditions checked in MessageListItem component
-        return (
-          message.role === "user" ||
-          message.agent === "coordinator" ||
-          message.agent === "planner" ||
-          message.agent === "podcast" ||
-          state.researchIds.includes(messageId) // startOfResearch condition
-        );
+        const isPlanner = message.agent === "planner";
+        const isPodcast = message.agent === "podcast";
+        const isStartOfResearch = state.researchIds.includes(messageId);
+
+        // Planner, podcast, and research cards always render (they have their own content)
+        if (isPlanner || isPodcast || isStartOfResearch) {
+          return true;
+        }
+
+        // For user and coordinator messages, only include if they have content
+        // This prevents empty dividers from appearing in the UI
+        if (message.role === "user" || message.agent === "coordinator") {
+          return !!message.content;
+        }
+
+        return false;
       });
     }),
   );

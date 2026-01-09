@@ -29,6 +29,7 @@ function appendMessageWithDuplicatePrevention(
 /**
  * Helper function to filter renderable messages
  * Simulates useRenderableMessageIds logic
+ * Updated for Issue #805: Filter out empty user and coordinator messages
  */
 function filterRenderableMessageIds(
   messageIds: string[],
@@ -38,15 +39,25 @@ function filterRenderableMessageIds(
   return messageIds.filter((messageId) => {
     const message = messages.get(messageId);
     if (!message) return false;
-    
-    // Only include messages that will actually render in MessageListView
-    return (
-      message.role === 'user' ||
-      message.agent === 'coordinator' ||
-      message.agent === 'planner' ||
-      message.agent === 'podcast' ||
-      researchIds.includes(messageId)
-    );
+
+    // Only include messages that match MessageListItem rendering conditions
+    // These are the same conditions checked in MessageListItem component
+    const isPlanner = message.agent === 'planner';
+    const isPodcast = message.agent === 'podcast';
+    const isStartOfResearch = researchIds.includes(messageId);
+
+    // Planner, podcast, and research cards always render (they have their own content)
+    if (isPlanner || isPodcast || isStartOfResearch) {
+      return true;
+    }
+
+    // For user and coordinator messages, only include if they have content
+    // This prevents empty dividers from appearing in the UI (Issue #805)
+    if (message.role === 'user' || message.agent === 'coordinator') {
+      return !!message.content;
+    }
+
+    return false;
   });
 }
 
@@ -322,6 +333,262 @@ describe('Issue #588: Message ID Management and Filtering', () => {
       expect(renderable).toEqual(['msg-1', 'msg-2', 'msg-3', 'msg-5']);
     });
 
+    it('should handle empty messages gracefully', () => {
+      const messageIds: string[] = [];
+      const messages = new Map<string, Message>();
+      const researchIds: string[] = [];
+      
+      const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+      
+      expect(renderable).toEqual([]);
+      expect(renderable).toHaveLength(0);
+    });
+
+    describe('Issue #805: Content Filtering for Empty Messages', () => {
+      it('should filter out user messages with empty content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'user',
+            content: '',
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).not.toContain('msg-1');
+        expect(renderable).toHaveLength(0);
+      });
+
+      it('should filter out coordinator messages with empty content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: '',
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).not.toContain('msg-1');
+        expect(renderable).toHaveLength(0);
+      });
+
+      it('should filter out user messages with null content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'user',
+            content: null,
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).not.toContain('msg-1');
+        expect(renderable).toHaveLength(0);
+      });
+
+      it('should filter out coordinator messages with null content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: null,
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).not.toContain('msg-1');
+        expect(renderable).toHaveLength(0);
+      });
+
+      it('should include user messages with content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'user',
+            content: 'Hello',
+            contentChunks: ['Hello'],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).toContain('msg-1');
+        expect(renderable).toHaveLength(1);
+      });
+
+      it('should include coordinator messages with content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: 'Response',
+            contentChunks: ['Response'],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).toContain('msg-1');
+        expect(renderable).toHaveLength(1);
+      });
+
+      it('should always include planner messages regardless of content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'planner',
+            content: '',
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).toContain('msg-1');
+      });
+
+      it('should always include podcast messages regardless of content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'podcast',
+            content: null,
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).toContain('msg-1');
+      });
+
+      it('should always include research messages regardless of content', () => {
+        const messageIds = ['msg-1'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'assistant',
+            agent: 'researcher',
+            content: '',
+            contentChunks: [],
+          } as Message],
+        ]);
+        const researchIds = ['msg-1'];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        expect(renderable).toContain('msg-1');
+      });
+
+      it('should handle mixed messages with empty coordinators correctly', () => {
+        const messageIds = ['msg-1', 'msg-2', 'msg-3', 'msg-4'];
+        const messages = new Map<string, Message>([
+          ['msg-1', {
+            id: 'msg-1',
+            role: 'user',
+            content: 'Question',
+            contentChunks: ['Question'],
+          } as Message],
+          ['msg-2', {
+            id: 'msg-2',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: '',
+            contentChunks: [],
+          } as Message],
+          ['msg-3', {
+            id: 'msg-3',
+            role: 'assistant',
+            agent: 'planner',
+            content: 'Plan',
+            contentChunks: ['Plan'],
+          } as Message],
+          ['msg-4', {
+            id: 'msg-4',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: 'Response',
+            contentChunks: ['Response'],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        // Should include: msg-1 (user with content), msg-3 (planner), msg-4 (coordinator with content)
+        // Should exclude: msg-2 (coordinator with empty content)
+        expect(renderable).toEqual(['msg-1', 'msg-3', 'msg-4']);
+        expect(renderable).toHaveLength(3);
+      });
+
+      it('should prevent empty dividers in realistic scenario', () => {
+        // This test simulates Issue #805: two divider lines with no content
+        const messageIds = ['user-msg', 'empty-coordinator', 'planner-msg'];
+        const messages = new Map<string, Message>([
+          ['user-msg', {
+            id: 'user-msg',
+            role: 'user',
+            content: 'Analyze this',
+            contentChunks: ['Analyze this'],
+          } as Message],
+          ['empty-coordinator', {
+            id: 'empty-coordinator',
+            role: 'assistant',
+            agent: 'coordinator',
+            content: '',
+            contentChunks: [],
+          } as Message],
+          ['planner-msg', {
+            id: 'planner-msg',
+            role: 'assistant',
+            agent: 'planner',
+            content: 'Plan',
+            contentChunks: ['Plan'],
+          } as Message],
+        ]);
+        const researchIds: string[] = [];
+
+        const renderable = filterRenderableMessageIds(messageIds, messages, researchIds);
+
+        // Should not include the empty coordinator message
+        // This prevents empty dividers (mt-10 spacing) from appearing
+        expect(renderable).toEqual(['user-msg', 'planner-msg']);
+        expect(renderable).not.toContain('empty-coordinator');
+      });
+    });
+  });
+
+  describe('Renderable Message Filtering (continued)', () => {
     it('should handle empty messages gracefully', () => {
       const messageIds: string[] = [];
       const messages = new Map<string, Message>();
