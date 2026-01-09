@@ -703,7 +703,7 @@ def coordinator_node(
                 updated_messages = list(state_messages)
                 if response.content:
                     updated_messages.append(
-                        HumanMessage(content=response.content, name="coordinator")
+                        AIMessage(content=response.content, name="coordinator")
                     )
 
                 return Command(
@@ -737,7 +737,7 @@ def coordinator_node(
     # ============================================================
     messages = list(state.get("messages", []) or [])
     if response.content:
-        messages.append(HumanMessage(content=response.content, name="coordinator"))
+        messages.append(AIMessage(content=response.content, name="coordinator"))
 
     # Process tool calls for BOTH branches (legacy and clarification)
     if response.tool_calls:
@@ -780,7 +780,14 @@ def coordinator_node(
             goto = "planner"
         else:
             # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
-            logger.info("No tool calls in legacy mode - ending workflow gracefully")
+            if research_topic:
+                logger.warning(
+                    "No tool calls in legacy mode but research topic is present. "
+                    "Falling back to planner to ensure research proceeds."
+                )
+                goto = "planner"
+            else:
+                logger.info("No tool calls in legacy mode - ending workflow gracefully")
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
