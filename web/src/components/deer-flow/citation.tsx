@@ -20,6 +20,7 @@ interface CitationLinkProps {
   children: React.ReactNode;
   citations: CitationData[];
   className?: string;
+  id?: string;
 }
 
 /**
@@ -31,27 +32,30 @@ export function CitationLink({
   children,
   citations,
   className,
+  id,
 }: CitationLinkProps) {
   // Find matching citation data for this URL
-  const citation = useMemo(() => {
-    if (!href || !citations) return null;
+  const { citation, index } = useMemo(() => {
+    if (!href || !citations) return { citation: null, index: -1 };
     
     // Try exact match first
-    let match = citations.find((c) => c.url === href);
+    let matchIndex = citations.findIndex((c) => c.url === href);
+    let match = matchIndex !== -1 ? citations[matchIndex] : null;
     
     // Try encoded/decoded match
     if (!match) {
       const decodedHref = decodeURIComponent(href);
       const encodedHref = encodeURI(href);
-      match = citations.find(
+      matchIndex = citations.findIndex(
         (c) =>
           c.url === decodedHref ||
           c.url === encodedHref ||
           decodeURIComponent(c.url) === decodedHref
       );
+      match = matchIndex !== -1 ? citations[matchIndex] : null;
     }
     
-    return match;
+    return { citation: match, index: matchIndex };
   }, [href, citations]);
 
   // If no citation data found, render as regular link
@@ -68,15 +72,32 @@ export function CitationLink({
     );
   }
 
+  const handleCitationClick = (e: React.MouseEvent) => {
+    // If it's an internal-looking citation (e.g. [1])
+    // or if the user clicks the citation number in the text
+    // we try to scroll to the reference list at the bottom
+    if (index !== -1) {
+      const targetId = `ref-${index + 1}`;
+      const element = document.getElementById(targetId);
+      if (element) {
+        e.preventDefault();
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+    // If element not found or index is -1, let the default behavior (open URL) happen
+  };
+
   return (
     <HoverCard openDelay={200} closeDelay={100}>
       <HoverCardTrigger asChild>
         <a
+          id={id}
           href={href}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={handleCitationClick}
           className={cn(
-            "text-primary hover:underline inline-flex items-center gap-0.5",
+            "text-primary hover:underline inline-flex items-center gap-0.5 cursor-pointer scroll-mt-20",
             className
           )}
         >

@@ -60,18 +60,20 @@ export function Markdown({
         }
 
         // Handle inline citation links (rendered in text)
-        // Format: [[n]](#ref-n)
-        const linkMatch = hrefStr.match(/^#ref-(\d+)$/);
+        // Format: [[n]](#ref-n), [n](#ref1), [n](#1)
+        const linkMatch = hrefStr.match(/^#(?:ref-?)?(\d+)$/);
         if (linkMatch) {
           return (
             <a
               href={hrefStr}
-              className="text-primary hover:underline cursor-pointer"
+              className="text-primary hover:underline cursor-pointer marker-link"
               onClick={(e) => {
                 e.preventDefault();
-                document
-                  .getElementById(`ref-${linkMatch[1]}`)
-                  ?.scrollIntoView({ behavior: "smooth" });
+                const targetId = `ref-${linkMatch[1]}`;
+                const element = document.getElementById(targetId);
+                if (element) {
+                  element.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
               }}
             >
               {children}
@@ -81,6 +83,34 @@ export function Markdown({
 
         // If we have citation data, use CitationLink for enhanced display
         if (citations && citations.length > 0) {
+          // Find if this URL is one of our citations
+          const citationIndex = citations.findIndex(
+            (c) =>
+              c.url === hrefStr ||
+              decodeURIComponent(c.url) === hrefStr ||
+              encodeURI(c.url) === hrefStr
+          );
+
+          if (citationIndex !== -1) {
+            // Heuristic to determine if this is a citation target (in Reference list)
+            // vs a citation link (in text).
+            // Targets are usually the full title, while links are numbers like [1].
+            const childrenText = Array.isArray(children)
+              ? children.join("")
+              : String(children);
+            const isInline = /^\s*\[?\^?\d+\^?\]?\s*$/.test(childrenText);
+
+            return (
+              <CitationLink
+                href={hrefStr}
+                citations={citations}
+                id={!isInline ? `ref-${citationIndex + 1}` : undefined}
+              >
+                {children}
+              </CitationLink>
+            );
+          }
+
           return (
             <CitationLink href={hrefStr} citations={citations}>
               {children}
