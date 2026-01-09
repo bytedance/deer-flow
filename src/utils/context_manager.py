@@ -1,5 +1,6 @@
-# src/utils/token_manager.py
+# src/utils/context_manager.py
 import copy
+import json
 import logging
 from typing import List
 
@@ -329,3 +330,4 @@ def validate_message_content(messages: List[BaseMessage], max_content_length: in
             validated.append(msg)
     
     return validated
+
