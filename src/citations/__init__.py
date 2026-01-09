@@ -8,14 +8,14 @@ This module provides structured citation/source metadata handling
 for research reports, enabling proper attribution and inline citations.
 """
 
-from .models import Citation, CitationMetadata
 from .collector import CitationCollector
-from .formatter import CitationFormatter
 from .extractor import (
+    citations_to_markdown_references,
     extract_citations_from_messages,
     merge_citations,
-    citations_to_markdown_references,
 )
+from .formatter import CitationFormatter
+from .models import Citation, CitationMetadata
 
 __all__ = [
     "Citation",
