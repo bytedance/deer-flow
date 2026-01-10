@@ -66,9 +66,9 @@ export const MCPConfigSchema = z.object({
             .int()
             .positive()
             .optional(),
-          sse_readtimeout: z
+          sse_read_timeout: z
             .number({
-              message: "`sse_readtimeout` must be a number",
+              message: "`sse_read_timeout` must be a number",
             })
             .int()
             .positive()

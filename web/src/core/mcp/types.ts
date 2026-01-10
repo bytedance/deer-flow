@@ -34,7 +34,7 @@ export interface SSEMCPServerMetadata
   extends GenericMCPServerMetadata<"sse" | "streamable_http"> {
   transport: "sse" | "streamable_http";
   url: string;
-  sse_readtimeout?: number;
+  sse_read_timeout?: number;
 }
 
 export type SimpleSSEMCPServerMetadata = Omit<

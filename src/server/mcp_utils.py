@@ -54,7 +54,7 @@ async def load_mcp_tools(
     env: Optional[Dict[str, str]] = None,
     headers: Optional[Dict[str, str]] = None,
     timeout_seconds: int = 30,  # Reasonable default timeout
-    sse_readtimeout: Optional[int] = None,
+    sse_read_timeout: Optional[int] = None,
 ) -> List:
     """
     Load tools from an MCP server.
@@ -67,7 +67,7 @@ async def load_mcp_tools(
         env: Environment variables (for stdio type)
         headers: HTTP headers (for sse/streamable_http type)
         timeout_seconds: Timeout in seconds (default: 30)
-        sse_readtimeout: SSE read timeout in seconds (for sse type, default: same as timeout_seconds)
+        sse_read_timeout: SSE read timeout in seconds (for sse type, default: same as timeout_seconds)
 
     Returns:
         List of available tools from the MCP server
@@ -98,11 +98,11 @@ async def load_mcp_tools(
                     status_code=400, detail="URL is required for sse type"
                 )
 
-            # Use sse_readtimeout if provided, otherwise use timeout_seconds
-            sse_timeout = sse_readtimeout if sse_readtimeout is not None else timeout_seconds
+            # Use sse_read_timeout if provided, otherwise use timeout_seconds
+            sse_timeout = sse_read_timeout if sse_read_timeout is not None else timeout_seconds
 
             return await _get_tools_from_client_session(
-                sse_client(url=url, headers=headers, timeout=sse_timeout),
+                sse_client(url=url, headers=headers, timeout=timeout_seconds, sse_read_timeout=sse_read_timeout),
                 timeout_seconds,
             )
 
