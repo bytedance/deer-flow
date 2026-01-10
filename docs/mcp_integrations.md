@@ -223,6 +223,75 @@ For `streamable_http` type:
 
 ---
 
+## Timeout Configuration
+
+DeerFlow provides configurable timeout settings for MCP server connections to handle various network conditions and server responsiveness scenarios.
+
+### Global Default Timeout
+
+Set the default timeout for all MCP server connections via environment variable:
+
+```bash
+# .env file
+MCP_DEFAULT_TIMEOUT_SECONDS=60
+```
+
+**Default value:** 60 seconds
+
+### Per-Request Timeout Override
+
+When querying the MCP server metadata API, you can override the default timeout for a specific request:
+
+**Example: Get MCP Server Metadata with Custom Timeout**
+
+```json
+{
+  "transport": "sse",
+  "url": "http://localhost:3000/sse",
+  "headers": {
+    "Authorization": "Bearer your-token"
+  },
+  "timeout_seconds": 45,
+  "sse_read_timeout": 20
+}
+```
+
+**Parameters:**
+
+- `timeout_seconds` (optional, integer): Overall timeout in seconds for the MCP server connection. Overrides `MCP_DEFAULT_TIMEOUT_SECONDS` environment variable.
+- `sse_read_timeout` (optional, integer): Timeout in seconds for SSE (Server-Sent Events) streaming read operations. Only applicable for `sse` transport type. When provided, allows fine-grained control over streaming timeouts.
+
+### Timeout Recommendations
+
+- **Fast, Local MCP Servers**: 10-15 seconds
+- **Standard Production Servers**: 30-60 seconds  
+- **Slow or High-Latency Servers**: 60+ seconds (use with caution)
+
+> [!NOTE]
+> The `timeout_seconds` parameter is recommended for most use cases. The `sse_read_timeout` parameter should only be used when you need separate control over SSE streaming read operations.
+
+### Example: Chat API with Custom Timeouts
+
+```json
+{
+  "messages": [{"role": "user", "content": "Research query"}],
+  "mcp_settings": {
+    "servers": {
+      "my-mcp-server": {
+        "transport": "sse",
+        "url": "http://localhost:3000/sse",
+        "timeout_seconds": 45,
+        "sse_read_timeout": 20,
+        "enabled_tools": ["tool1", "tool2"],
+        "add_to_agents": ["researcher"]
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Additional Resources
 
 - [MCP Official Documentation](https://modelcontextprotocol.io/)
