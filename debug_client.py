@@ -16,7 +16,7 @@ request_data = {
     "messages": [
         {
             "role": "user",
-            "content": "What is the latest news about AI?"
+            "content": "简单介绍下量子计算"
         }
     ],
     "auto_accepted_plan": True,  # Auto-accept the plan

@@ -151,26 +151,30 @@ The compression LLM must return exactly the following JSON:
 
 * **summary_title**
 
-  * 5–12 words
+  * 5–10 words (strict limit)
   * Human-readable
-  * Describes the semantic content of the result
+  * Identifies core topic/findings
+  * Must NOT include procedural descriptors (e.g., "Search results for")
 
 * **summary**
 
-  * 3–10 sentences
+  * 1–3 sentences (strict limit)
+  * 50–150 characters target
+  * Telegraphic style (omit filler words)
   * Strictly relevant to the current research step
-  * No speculation or filler
+  * No speculation, no background context
 
 * **extraction**
 
-  * Key factual bullets
-  * May be empty
-  * Each item should be independently useful
+  * 3–5 bullets maximum
+  * 15–40 characters per bullet
+  * Only discrete, retrievable facts (metrics, names, dates)
+  * Empty array preferred over weak bullets
 
 * **is_useful**
 
-  * `true` if the tool output contains any relevant or actionable information
-  * `false` if the output is irrelevant, empty, or pure noise
+  * `true` only if output contains information that changes research state
+  * `false` if error-only, boilerplate, or irrelevant to step
 
 ---
 
@@ -208,6 +212,8 @@ Rules:
 * Snake_case
 * No spaces
 * Deterministic
+* Maximum 100 characters total
+* Component limits: plan (30), step (30), tool (20)
 
 The filename must never be derived from `summary_title`.
 

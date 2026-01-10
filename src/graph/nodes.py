@@ -232,7 +232,7 @@ async def _compress_tool_messages(
 
     # Get compression LLM
     try:
-        compression_llm = get_llm_by_type(configurable.compression_llm_type)
+        compression_llm = get_llm_by_type("basic")
     except Exception as e:
         logger.warning(f"Failed to get compression LLM: {e}. Skipping compression.")
         return agent_messages

@@ -86,6 +86,7 @@ def generate_artifact_filename(
     Format: {plan_title}__step{step_id}_{step_title}__{tool_name}.{ext}
 
     The filename is deterministic and never depends on LLM-generated text.
+    Components are truncated to keep total filename under 100 characters.
 
     Args:
         plan_title: Title of the research plan
@@ -101,10 +102,19 @@ def generate_artifact_filename(
     sanitized_step_title = sanitize_filename_component(step_title)
     sanitized_tool_name = sanitize_filename_component(tool_name)
 
-    filename = (
-        f"{sanitized_plan}__step{step_id}_{sanitized_step_title}__"
-        f"{sanitized_tool_name}.{extension}"
-    )
+    # Apply length limits to prevent excessively long filenames
+    # Target: max 100 chars total (conservative for filesystem compatibility)
+    plan = sanitized_plan[:30]
+    step = sanitized_step_title[:30]
+    tool = sanitized_tool_name[:20]
+
+    filename = f"{plan}__s{step_id}_{step}__{tool}.{extension}"
+
+    # Fallback truncation if still too long (unlikely given limits above)
+    if len(filename) > 100:
+        step = sanitized_step_title[:20]
+        plan = sanitized_plan[:40]
+        filename = f"{plan}__s{step_id}_{step}__{tool}.{extension}"
 
     return filename
 

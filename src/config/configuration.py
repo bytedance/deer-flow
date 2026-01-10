@@ -66,9 +66,6 @@ class Configuration:
     enable_tool_result_compression: bool = (
         True  # Whether to enable tool result compression
     )
-    compression_llm_type: str = (
-        "mini"  # LLM type to use for compression (default: mini for speed/cost)
-    )
     artifact_storage_path: str = (
         "research_artifacts"  # Path to store raw tool output artifacts
     )
