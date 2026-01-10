@@ -1,0 +1,293 @@
+# Feature Specification: LLM Deep Research System with Tool Result Compression
+
+## 1. System Overview
+
+This project implements an LLM-powered deep research system composed of four components:
+
+1. **Coordinator**
+2. **Planner**
+3. **Research Team**
+4. **Reporter**
+
+The system includes a **Tool Result Compression Mechanism** designed to minimize context window usage while preserving access to complete raw data via filesystem storage.
+
+---
+
+## 2. High-Level Flow
+
+```
+User Query
+   ↓
+Coordinator
+   ↓
+Planner → Research Plan
+   ↓
+Research Team (step-by-step execution with tools)
+   ↓
+Reporter → Final Answer
+```
+
+---
+
+## 3. Component Responsibilities
+
+### 3.1 Coordinator
+
+**Purpose**
+
+* Entry point for user queries
+* Routes queries to the Planner
+
+**Input**
+
+* `user_query: string`
+
+**Behavior**
+
+* No tool calls
+* No reasoning
+* No state persistence
+
+---
+
+### 3.2 Planner
+
+**Purpose**
+
+* Convert the user query into a structured research plan
+
+**Input**
+
+* `user_query: string`
+
+**Output Schema**
+
+```json
+{
+  "plan_title": "string",
+  "steps": [
+    {
+      "step_id": "string | integer",
+      "title": "string",
+      "description": "string"
+    }
+  ]
+}
+```
+
+**Rules**
+
+* Steps must be sequential
+* Each step must be independently executable
+* Descriptions must be concrete enough for tool usage
+
+---
+
+### 3.3 Research Team
+
+**Purpose**
+
+* Execute research steps sequentially
+* Use tools and reasoning to fulfill each step
+
+**Constraint**
+
+* Tool calls may return very large outputs
+* Large raw outputs must not remain in the LLM context
+
+---
+
+## 4. Tool Result Compression Mechanism
+
+### 4.1 Motivation
+
+Raw tool outputs:
+
+* Are often large
+* Consume excessive tokens
+* Weaken reasoning performance
+
+Therefore, all tool outputs must be **compressed and offloaded**.
+
+---
+
+### 4.2 Compression Trigger
+
+After **every tool call** made by the Research Team, the compression pipeline must run.
+
+---
+
+### 4.3 Inputs to the Compression LLM
+
+The compression LLM receives (out of band, not injected into context):
+
+* Plan title
+* Step title
+* Step description
+* Tool name
+* Raw tool output
+
+These inputs are used **only to guide compression**.
+
+---
+
+### 4.4 Compression LLM Output Schema
+
+The compression LLM must return exactly the following JSON:
+
+```json
+{
+  "summary_title": "string",
+  "summary": "string",
+  "extraction": [
+    "bullet point 1",
+    "bullet point 2"
+  ],
+  "is_useful": true
+}
+```
+
+#### Field Definitions
+
+* **summary_title**
+
+  * 5–12 words
+  * Human-readable
+  * Describes the semantic content of the result
+
+* **summary**
+
+  * 3–10 sentences
+  * Strictly relevant to the current research step
+  * No speculation or filler
+
+* **extraction**
+
+  * Key factual bullets
+  * May be empty
+  * Each item should be independently useful
+
+* **is_useful**
+
+  * `true` if the tool output contains any relevant or actionable information
+  * `false` if the output is irrelevant, empty, or pure noise
+
+---
+
+## 5. File Offloading Rules
+
+### 5.1 Storage Guarantee
+
+* The **entire raw tool output** must always be written to disk
+* This applies even if `is_useful == false`
+
+---
+
+### 5.2 Directory Structure
+
+```
+/research_artifacts/
+  └── {plan_title}/
+        ├── step{step_id}_*.json
+        ├── step{step_id}_*.txt
+```
+
+---
+
+### 5.3 Filename Convention (Mandatory)
+
+Filenames must be deterministic and must not depend on LLM-generated text.
+
+```
+{plan_title}__step{step_id}_{step_title}__{tool_name}.{ext}
+```
+
+Rules:
+
+* Lowercase
+* Snake_case
+* No spaces
+* Deterministic
+
+The filename must never be derived from `summary_title`.
+
+---
+
+## 6. Conversation Context Injection Rules
+
+### 6.1 When `is_useful == true`
+
+Inject a **single assistant message** into the conversation.
+
+The assistant message content must be structured as:
+
+```json
+{
+  "summary_title": "string",
+  "summary": "string",
+  "extraction": [
+    "bullet point 1",
+    "bullet point 2"
+  ],
+  "artifact_file": "filename.ext"
+}
+```
+
+Constraints:
+
+* No plan title
+* No step title
+* No tool name
+* No raw data
+
+This message represents **working memory**, not logs.
+
+---
+
+### 6.2 When `is_useful == false`
+
+* Do not inject any message into the conversation
+* Only save the raw output file
+* Proceed with the next action
+
+---
+
+## 7. Design Invariant
+
+The conversation context must contain **only useful, compressed knowledge**.
+
+* Completeness is guaranteed by the filesystem
+* The LLM relies on summaries by default
+* Full data is accessed only via file retrieval tools when needed
+
+---
+
+## 8. Future Compatibility
+
+Later system components may have access to:
+
+* A file grep / retrieval tool
+* The artifact directory
+
+The LLM should:
+
+* Prefer summaries
+* Use file access only when deeper detail is explicitly required
+
+---
+
+## 9. Non-Goals
+
+* Vector databases
+* Embeddings or RAG
+* Automatic file re-ingestion
+* Parallel plan execution
+
+---
+
+## 10. Success Criteria
+
+* Context usage reduced by >80%
+* No degradation in reasoning quality
+* Deterministic and debuggable execution
+* Clean separation between reasoning and storage

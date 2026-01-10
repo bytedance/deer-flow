@@ -23,11 +23,16 @@ from src.tools import (
     crawl_tool,
     get_retriever_tool,
     get_web_search_tool,
+    list_artifacts,
     python_repl_tool,
+    read_artifact,
 )
 from src.tools.search import LoggedTavilySearch
 from src.utils.context_manager import ContextManager, validate_message_content
 from src.utils.json_utils import repair_json_output, sanitize_tool_response
+
+from src.compression import CompressionService, CompressionInput
+from src.llms.llm import get_llm_by_type
 
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
@@ -194,6 +199,109 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_w
             ]
 
     return plan
+
+
+async def _compress_tool_messages(
+    agent_messages: list,
+    current_step,
+    plan_title: str,
+    step_id: str,
+    config: RunnableConfig,
+    state: State,
+) -> list:
+    """
+    Compress tool results using the compression service and inject compressed summaries.
+
+    This function processes all ToolMessages in the agent messages, compresses them,
+    saves raw outputs to disk, and injects compressed summaries into the conversation.
+
+    Args:
+        agent_messages: List of messages from agent execution
+        current_step: The current step being executed
+        plan_title: Title of the research plan
+        step_id: ID of the current step
+        config: Runnable config for getting configuration
+        state: Current state
+
+    Returns:
+        List of messages with tool results compressed and replaced
+    """
+    # Check if compression is enabled
+    configurable = Configuration.from_runnable_config(config)
+    if not configurable.enable_tool_result_compression:
+        logger.debug("Tool result compression is disabled in configuration")
+        return agent_messages
+
+    # Get compression LLM
+    try:
+        compression_llm = get_llm_by_type(configurable.compression_llm_type)
+    except Exception as e:
+        logger.warning(f"Failed to get compression LLM: {e}. Skipping compression.")
+        return agent_messages
+
+    # Create compression service
+    compression_service = CompressionService(llm=compression_llm)
+
+    # Process messages and compress tool results
+    compressed_messages = []
+    tool_message_index = 0
+
+    for msg in agent_messages:
+        # If this is a tool message, compress it
+        if isinstance(msg, ToolMessage):
+            tool_message_index += 1
+
+            # Get tool name from the message
+            tool_name = msg.name if hasattr(msg, "name") else "unknown_tool"
+
+            # Get raw output content
+            raw_output = str(msg.content) if hasattr(msg, "content") else ""
+
+            # Create compression input
+            compression_input = CompressionInput(
+                plan_title=plan_title,
+                step_id=step_id,
+                step_title=current_step.title,
+                step_description=current_step.description,
+                tool_name=tool_name,
+                raw_output=raw_output,
+            )
+
+            # Compress the tool result
+            try:
+                artifact_metadata = await compression_service.compress_tool_result(
+                    input_data=compression_input
+                )
+
+                # If useful, inject compressed summary; otherwise skip injection
+                if artifact_metadata:
+                    # Create assistant message with compressed summary
+                    compressed_msg = AIMessage(
+                        content=json.dumps(
+                            {
+                                "summary_title": artifact_metadata.summary_title,
+                                "summary": artifact_metadata.summary,
+                                "extraction": artifact_metadata.extraction,
+                                "artifact_file": artifact_metadata.artifact_file,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    compressed_messages.append(compressed_msg)
+                    logger.info(
+                        f"Compressed tool result for {tool_name}: "
+                        f"{artifact_metadata.summary_title}"
+                    )
+                # If not useful, don't inject anything (raw output is still saved)
+            except Exception as e:
+                logger.error(f"Error compressing tool result for {tool_name}: {e}")
+                # On compression error, keep the original message
+                compressed_messages.append(msg)
+        else:
+            # Non-tool messages are preserved as-is
+            compressed_messages.append(msg)
+
+    return compressed_messages
 
 
 def background_investigation_node(state: State, config: RunnableConfig):
@@ -1111,8 +1219,19 @@ async def _execute_agent_step(
     if tool_message_count > 0:
         logger.info(
             f"{agent_name.capitalize()} agent made {tool_message_count} tool calls. "
-            f"All tool results will be preserved and streamed to frontend."
+            f"Compressing tool results and saving to artifacts."
         )
+
+    # Compress tool results and inject compressed summaries
+    step_id = str(current_plan.steps.index(current_step))
+    agent_messages = await _compress_tool_messages(
+        agent_messages=agent_messages,
+        current_step=current_step,
+        plan_title=plan_title,
+        step_id=step_id,
+        config=config,
+        state=state,
+    )
 
     return Command(
         update={
@@ -1208,13 +1327,18 @@ async def researcher_node(
     
     # Build tools list based on configuration
     tools = []
-    
+
+    # Add artifact retrieval tools if compression is enabled
+    if configurable.enable_tool_result_compression:
+        tools.extend([read_artifact, list_artifacts])
+        logger.debug("[researcher_node] Added artifact retrieval tools")
+
     # Add web search and crawl tools only if web search is enabled
     if configurable.enable_web_search:
         tools.extend([get_web_search_tool(configurable.max_search_results), crawl_tool])
     else:
         logger.info("[researcher_node] Web search is disabled, using only local RAG")
-    
+
     # Add retriever tool if resources are available (always add, higher priority)
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
@@ -1245,12 +1369,22 @@ async def coder_node(
     """Coder node that do code analysis."""
     logger.info("Coder node is coding.")
     logger.debug(f"[coder_node] Starting coder agent with python_repl_tool")
-    
+
+    configurable = Configuration.from_runnable_config(config)
+
+    # Build tools list
+    tools = [python_repl_tool]
+
+    # Add artifact retrieval tools if compression is enabled
+    if configurable.enable_tool_result_compression:
+        tools.extend([read_artifact, list_artifacts])
+        logger.debug("[coder_node] Added artifact retrieval tools")
+
     return await _setup_and_execute_agent_step(
         state,
         config,
         "coder",
-        [python_repl_tool],
+        tools,
     )
 
 
