@@ -53,7 +53,7 @@ async def load_mcp_tools(
     url: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     headers: Optional[Dict[str, str]] = None,
-    timeout_seconds: int = 30,  # Reasonable default timeout
+    timeout_seconds: Optional[int] = 30,  # Reasonable default timeout
     sse_read_timeout: Optional[int] = None,
 ) -> List:
     """
@@ -98,12 +98,16 @@ async def load_mcp_tools(
                     status_code=400, detail="URL is required for sse type"
                 )
 
-            # Use sse_read_timeout if provided, otherwise use timeout_seconds
-            sse_timeout = sse_read_timeout if sse_read_timeout is not None else timeout_seconds
+            # Build kwargs conditionally to avoid passing None values
+            sse_kwargs = {"url": url, "headers": headers}
+            if timeout_seconds is not None:
+                sse_kwargs["timeout"] = timeout_seconds
+            if sse_read_timeout is not None:
+                sse_kwargs["sse_read_timeout"] = sse_read_timeout
 
             return await _get_tools_from_client_session(
-                sse_client(url=url, headers=headers, timeout=timeout_seconds, sse_read_timeout=sse_read_timeout),
-                timeout_seconds,
+                sse_client(**sse_kwargs),
+                timeout_seconds if timeout_seconds is not None else 30,
             )
 
         elif server_type == "streamable_http":
@@ -112,11 +116,14 @@ async def load_mcp_tools(
                     status_code=400, detail="URL is required for streamable_http type"
                 )
 
+            # Build kwargs conditionally to avoid passing None values
+            http_kwargs = {"url": url, "headers": headers}
+            if timeout_seconds is not None:
+                http_kwargs["timeout"] = timeout_seconds
+
             return await _get_tools_from_client_session(
-                streamablehttp_client(
-                    url=url, headers=headers, timeout=timeout_seconds
-                ),
-                timeout_seconds,
+                streamablehttp_client(**http_kwargs),
+                timeout_seconds if timeout_seconds is not None else 30,
             )
 
         else:

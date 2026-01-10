@@ -91,11 +91,11 @@ async def test_load_mcp_tools_sse_success(mock_sse_client, mock_get_tools):
         timeout_seconds=7,
     )
     assert result == ["toolB"]
+    # When sse_read_timeout is None, it should not be passed
     mock_sse_client.assert_called_once_with(
         url="http://localhost:1234",
         headers={"Authorization": "Bearer 1234567890"},
         timeout=7,
-        sse_read_timeout=None,
     )
     mock_get_tools.assert_awaited_once_with(mock_client, 7)
 
@@ -143,12 +143,11 @@ async def test_load_mcp_tools_sse_without_sse_read_timeout(mock_sse_client, mock
         timeout_seconds=20,
     )
     assert result == ["toolD"]
-    # When sse_read_timeout is not provided, it should be None
+    # When sse_read_timeout is not provided, it should not be passed
     mock_sse_client.assert_called_once_with(
         url="http://localhost:1234",
         headers=None,
         timeout=20,
-        sse_read_timeout=None,
     )
     mock_get_tools.assert_awaited_once_with(mock_client, 20)
 

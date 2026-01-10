@@ -21,13 +21,6 @@ export const MCPConfigSchema = z.object({
               message: "`env` must be an object of key-value pairs",
             })
             .optional(),
-          timeout: z
-            .number({
-              message: "`timeout` must be a number",
-            })
-            .int()
-            .positive()
-            .optional(),
         }),
         z.object({
           url: z

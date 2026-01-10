@@ -30,11 +30,17 @@ class MCPServerMetadataRequest(BaseModel):
     headers: Optional[Dict[str, str]] = Field(
         None, description="HTTP headers (for sse/streamable_http type)"
     )
-    timeout_seconds: Optional[int] = Field(
-        None, description="Optional custom timeout in seconds for the operation (default: 30)"
+    timeout_seconds: Optional[int] = Field(        
+        None, 
+        ge=1,
+        le=3600,
+        description="Optional custom timeout in seconds for the operation (default: 60, range: 1-3600)"
     )
     sse_read_timeout: Optional[int] = Field(
-        None, description="Optional SSE read timeout in seconds (for sse type, default: 30)"
+        None,
+        ge=1,
+        le=3600, 
+        description="Optional SSE read timeout in seconds (for sse type, default: 30, range: 1-3600)"
     )
 
 
