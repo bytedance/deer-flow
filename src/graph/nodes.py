@@ -1157,7 +1157,7 @@ async def _execute_agent_step(
             **preserve_state_meta_fields(state),
             "messages": agent_messages,
             "observations": observations + [response_content + validation_info],
-            "citations": merged_citations,  # Must come after preserve_state_meta_fields to override old citations
+            "citations": merged_citations,  # Store merged citations based on existing state and new tool results
         },
         goto="research_team",
     )

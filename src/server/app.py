@@ -37,6 +37,7 @@ from src.config.configuration import get_recursion_limit
 from src.config.loader import get_bool_env, get_int_env, get_str_env
 from src.config.report_style import ReportStyle
 from src.config.tools import SELECTED_RAG_PROVIDER
+from src.citations import merge_citations
 from src.graph.builder import build_graph_with_memory
 from src.graph.checkpoint import chat_stream_message
 from src.graph.utils import (
@@ -594,37 +595,45 @@ async def _stream_graph_events(
     # Track citations collected during research
     collected_citations = []
     
-    def extract_citations_from_event(event: Any, depth: int = 0) -> list:
-        """Recursively extract all citations from event data."""
-        if depth > 5:  # Prevent infinite recursion
-            return []
+    def extract_citations_from_event(event: Any) -> list:
+        """Extract all citations from event data using an iterative, depth-limited traversal."""
+        # Only dict-based event structures are supported
         if not isinstance(event, dict):
             return []
-        
         citations: list[Any] = []
-        
-        # Direct citations field at this level
-        direct_citations = event.get("citations")
-        if isinstance(direct_citations, list) and direct_citations:
-            logger.debug(
-                f"[{safe_thread_id}] Found {len(direct_citations)} citations at depth {depth}"
-            )
-            citations.extend(direct_citations)
-        
-        # Check nested values (for updates mode)
-        for value in event.values():
-            if isinstance(value, dict):
-                nested = extract_citations_from_event(value, depth + 1)
-                if nested:
-                    citations.extend(nested)
-            # Also check if the value is a list of dicts (like Command updates)
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        nested = extract_citations_from_event(item, depth + 1)
-                        if nested:
-                            citations.extend(nested)
-        
+        max_depth = 5  # Prevent excessively deep traversal
+        max_nodes = 5000  # Safety cap to avoid pathological large structures
+        # Stack holds (node_dict, depth)
+        stack: list[tuple[dict[str, Any], int]] = [(event, 0)]
+        nodes_visited = 0
+        while stack:
+            current, depth = stack.pop()
+            nodes_visited += 1
+            if nodes_visited > max_nodes:
+                logger.warning(
+                    f"[{safe_thread_id}] Stopping citation extraction after visiting "
+                    f"{nodes_visited} nodes to avoid performance issues"
+                )
+                break
+            # Direct citations field at this level
+            direct_citations = current.get("citations")
+            if isinstance(direct_citations, list) and direct_citations:
+                logger.debug(
+                    f"[{safe_thread_id}] Found {len(direct_citations)} citations at depth {depth}"
+                )
+                citations.extend(direct_citations)
+            # Do not traverse deeper than max_depth
+            if depth >= max_depth:
+                continue
+            # Check nested values (for updates mode)
+            for value in current.values():
+                if isinstance(value, dict):
+                    stack.append((value, depth + 1))
+                # Also check if the value is a list of dicts (like Command updates)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            stack.append((item, depth + 1))
         return citations
     
     try:
@@ -647,16 +656,18 @@ async def _stream_graph_events(
                 
                 # Log event keys for debugging (more verbose for citations debugging)
                 event_keys = list(event_data.keys())
-                if event_keys and event_keys[0] != "__interrupt__":
-                    # Check if this might be a state update with citations
-                    if "citations" in str(event_data)[:1000]:
-                        logger.info(f"[{safe_thread_id}] Event may contain citations, keys: {event_keys}")
                 
                 # Check for citations in state updates (may be nested)
                 new_citations = extract_citations_from_event(event_data)
                 if new_citations:
-                    collected_citations = new_citations
-                    logger.info(f"[{safe_thread_id}] Collected {len(collected_citations)} citations from state update")
+                    # Accumulate citations across events instead of overwriting
+                    # using merge_citations to avoid duplicates and preserve better metadata
+                    collected_citations = merge_citations(collected_citations, new_citations)
+                    # Key difference: replace string heuristic with actual extraction count for logging
+                    logger.info(
+                        f"[{safe_thread_id}] Event contains citations, "
+                        f"keys: {event_keys}, count: {len(new_citations)}, total: {len(collected_citations)}"
+                    )
                 
                 if "__interrupt__" in event_data:
                     logger.debug(
@@ -705,7 +716,10 @@ async def _stream_graph_events(
                         collected_citations = state_values.get('citations', [])
                         logger.info(f"[{safe_thread_id}] Retrieved {len(collected_citations)} citations from final graph state")
             except Exception as e:
-                logger.warning(f"[{safe_thread_id}] Could not retrieve citations from graph state: {e}")
+                logger.warning(
+                    f"[{safe_thread_id}] Could not retrieve citations from graph state: {e}",
+                    exc_info=True,
+                )
         
         # Send collected citations as a separate event
         if collected_citations:

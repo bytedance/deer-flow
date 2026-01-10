@@ -98,7 +98,14 @@ export function Markdown({
             const childrenText = Array.isArray(children)
               ? children.join("")
               : String(children);
-            const isInline = /^\s*\[?\^?\d+\^?\]?\s*$/.test(childrenText);
+            // Heuristic: inline citation text usually looks like a numeric marker
+            // rather than a full title. We treat the following as "inline":
+            //   "1", "[1]", "^1^", "[^1]" (with optional surrounding whitespace).
+            // This pattern matches an optional "[", optional leading "^",
+            // one or more digits, optional trailing "^", optional "]",
+            // and ignores surrounding whitespace.
+            const inlineCitationPattern = /^\s*\[?\^?\d+\^?\]?\s*$/;
+            const isInline = inlineCitationPattern.test(childrenText);
 
             return (
               <CitationLink
