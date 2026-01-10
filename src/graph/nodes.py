@@ -31,15 +31,13 @@ from src.tools.search import LoggedTavilySearch
 from src.utils.context_manager import ContextManager, validate_message_content
 from src.utils.json_utils import repair_json_output, sanitize_tool_response
 
-from src.compression import CompressionService, CompressionInput
-from src.llms.llm import get_llm_by_type
+from src.utils import compress
 
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
 from .utils import (
     build_clarified_topic_from_history,
     get_message_content,
-    is_user_message,
     reconstruct_clarification_history,
 )
 
@@ -101,13 +99,13 @@ def needs_clarification(state: dict) -> bool:
 def preserve_state_meta_fields(state: State) -> dict:
     """
     Extract meta/config fields that should be preserved across state transitions.
-    
+
     These fields are critical for workflow continuity and should be explicitly
     included in all Command.update dicts to prevent them from reverting to defaults.
-    
+
     Args:
         state: Current state object
-        
+
     Returns:
         Dict of meta fields to preserve
     """
@@ -123,7 +121,9 @@ def preserve_state_meta_fields(state: State) -> dict:
     }
 
 
-def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_web_search: bool = True) -> dict:
+def validate_and_fix_plan(
+    plan: dict, enforce_web_search: bool = False, enable_web_search: bool = True
+) -> dict:
     """
     Validate and fix a plan to ensure it meets requirements.
 
@@ -146,7 +146,7 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_w
     for idx, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
-        
+
         # Check if step_type is missing or empty
         if "step_type" not in step or not step.get("step_type"):
             # Infer step_type based on need_search value
@@ -165,9 +165,7 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_w
     if enforce_web_search and enable_web_search:
         # Check if any step has need_search=true (only check dict steps)
         has_search_step = any(
-            step.get("need_search", False) 
-            for step in steps 
-            if isinstance(step, dict)
+            step.get("need_search", False) for step in steps if isinstance(step, dict)
         )
 
         if not has_search_step and steps:
@@ -210,7 +208,7 @@ async def _compress_tool_messages(
     state: State,
 ) -> list:
     """
-    Compress tool results using the compression service and inject compressed summaries.
+    Compress tool results using the compression utility and inject compressed summaries.
 
     This function processes all ToolMessages in the agent messages, compresses them,
     saves raw outputs to disk, and injects compressed summaries into the conversation.
@@ -239,58 +237,46 @@ async def _compress_tool_messages(
         logger.warning(f"Failed to get compression LLM: {e}. Skipping compression.")
         return agent_messages
 
-    # Create compression service
-    compression_service = CompressionService(llm=compression_llm)
+    # Get artifact storage path from configuration
+    artifact_path = configurable.artifact_storage_path
 
     # Process messages and compress tool results
     compressed_messages = []
-    tool_message_index = 0
 
     for msg in agent_messages:
         # If this is a tool message, compress it
         if isinstance(msg, ToolMessage):
-            tool_message_index += 1
-
             # Get tool name from the message
             tool_name = msg.name if hasattr(msg, "name") else "unknown_tool"
 
             # Get raw output content
             raw_output = str(msg.content) if hasattr(msg, "content") else ""
 
-            # Create compression input
-            compression_input = CompressionInput(
-                plan_title=plan_title,
-                step_id=step_id,
-                step_title=current_step.title,
-                step_description=current_step.description,
-                tool_name=tool_name,
-                raw_output=raw_output,
-            )
-
             # Compress the tool result
             try:
-                artifact_metadata = await compression_service.compress_tool_result(
-                    input_data=compression_input
+                result = await compress.compress_tool_result(
+                    llm=compression_llm,
+                    plan_title=plan_title,
+                    step_id=step_id,
+                    step_title=current_step.title,
+                    step_description=current_step.description,
+                    tool_name=tool_name,
+                    raw_output=raw_output,
+                    base_path=artifact_path,
                 )
 
                 # If useful, inject compressed summary; otherwise skip injection
-                if artifact_metadata:
-                    # Create assistant message with compressed summary
-                    compressed_msg = AIMessage(
-                        content=json.dumps(
-                            {
-                                "summary_title": artifact_metadata.summary_title,
-                                "summary": artifact_metadata.summary,
-                                "extraction": artifact_metadata.extraction,
-                                "artifact_file": artifact_metadata.artifact_file,
-                            },
-                            ensure_ascii=False,
-                        )
+                if result:
+                    compressed_msg = compress.create_compression_message(
+                        summary_title=result.get("summary_title", ""),
+                        summary=result.get("summary", ""),
+                        extraction=result.get("extraction", []),
+                        artifact_file=result.get("artifact_file", ""),
                     )
                     compressed_messages.append(compressed_msg)
                     logger.info(
                         f"Compressed tool result for {tool_name}: "
-                        f"{artifact_metadata.summary_title}"
+                        f"{result.get('summary_title', '')}"
                     )
                 # If not useful, don't inject anything (raw output is still saved)
             except Exception as e:
@@ -315,7 +301,7 @@ def background_investigation_node(state: State, config: RunnableConfig):
 
     query = state.get("clarified_research_topic") or state.get("research_topic")
     background_investigation_results = []
-    
+
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         searched_content = LoggedTavilySearch(
             max_results=configurable.max_search_results
@@ -323,7 +309,7 @@ def background_investigation_node(state: State, config: RunnableConfig):
         # check if the searched_content is a tuple, then we need to unpack it
         if isinstance(searched_content, tuple):
             searched_content = searched_content[0]
-        
+
         # Handle string JSON response (new format from fixed Tavily tool)
         if isinstance(searched_content, str):
             try:
@@ -333,14 +319,18 @@ def background_investigation_node(state: State, config: RunnableConfig):
                     background_investigation_results = []
                 elif isinstance(parsed, list):
                     background_investigation_results = [
-                        f"## {elem.get('title', 'Untitled')}\n\n{elem.get('content', 'No content')}" 
+                        f"## {elem.get('title', 'Untitled')}\n\n{elem.get('content', 'No content')}"
                         for elem in parsed
                     ]
                 else:
-                    logger.error(f"Unexpected Tavily response format: {searched_content}")
+                    logger.error(
+                        f"Unexpected Tavily response format: {searched_content}"
+                    )
                     background_investigation_results = []
             except json.JSONDecodeError:
-                logger.error(f"Failed to parse Tavily response as JSON: {searched_content}")
+                logger.error(
+                    f"Failed to parse Tavily response as JSON: {searched_content}"
+                )
                 background_investigation_results = []
         # Handle legacy list format
         elif isinstance(searched_content, list):
@@ -361,7 +351,7 @@ def background_investigation_node(state: State, config: RunnableConfig):
         background_investigation_results = get_web_search_tool(
             configurable.max_search_results
         ).invoke(query)
-    
+
     return {
         "background_investigation_results": json.dumps(
             background_investigation_results, ensure_ascii=False
@@ -373,7 +363,9 @@ def planner_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["human_feedback", "reporter"]]:
     """Planner node that generate the full plan."""
-    logger.info("Planner generating full plan with locale: %s", state.get("locale", "en-US"))
+    logger.info(
+        "Planner generating full plan with locale: %s", state.get("locale", "en-US")
+    )
     configurable = Configuration.from_runnable_config(config)
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
 
@@ -387,14 +379,18 @@ def planner_node(
             {"role": "user", "content": state["clarified_research_topic"]}
         ]
         modified_state["research_topic"] = state["clarified_research_topic"]
-        messages = apply_prompt_template("planner", modified_state, configurable, state.get("locale", "en-US"))
+        messages = apply_prompt_template(
+            "planner", modified_state, configurable, state.get("locale", "en-US")
+        )
 
         logger.info(
             f"Clarification mode: Using clarified research topic: {state['clarified_research_topic']}"
         )
     else:
         # Normal mode: use full conversation history
-        messages = apply_prompt_template("planner", state, configurable, state.get("locale", "en-US"))
+        messages = apply_prompt_template(
+            "planner", state, configurable, state.get("locale", "en-US")
+        )
 
     if state.get("enable_background_investigation") and state.get(
         "background_investigation_results"
@@ -419,10 +415,7 @@ def planner_node(
 
     # if the plan iterations is greater than the max plan iterations, return the reporter node
     if plan_iterations >= configurable.max_plan_iterations:
-        return Command(
-            update=preserve_state_meta_fields(state),
-            goto="reporter"
-        )
+        return Command(update=preserve_state_meta_fields(state), goto="reporter")
 
     full_response = ""
     if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
@@ -439,18 +432,14 @@ def planner_node(
     logger.info(f"Planner response: {full_response}")
 
     # Validate explicitly that response content is valid JSON before proceeding to parse it
-    if not full_response.strip().startswith('{') and not full_response.strip().startswith('['):
+    if not full_response.strip().startswith(
+        "{"
+    ) and not full_response.strip().startswith("["):
         logger.warning("Planner response does not appear to be valid JSON")
         if plan_iterations > 0:
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="reporter"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="reporter")
         else:
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="__end__"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="__end__")
 
     try:
         curr_plan = json.loads(repair_json_output(full_response))
@@ -461,19 +450,15 @@ def planner_node(
     except json.JSONDecodeError:
         logger.warning("Planner response is not a valid JSON")
         if plan_iterations > 0:
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="reporter"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="reporter")
         else:
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="__end__"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="__end__")
 
     # Validate and fix plan to ensure web search requirements are met
     if isinstance(curr_plan, dict):
-        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search, configurable.enable_web_search)
+        curr_plan = validate_and_fix_plan(
+            curr_plan, configurable.enforce_web_search, configurable.enable_web_search
+        )
 
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
@@ -499,20 +484,22 @@ def planner_node(
 def extract_plan_content(plan_data: str | dict | Any) -> str:
     """
     Safely extract plan content from different types of plan data.
-    
+
     Args:
         plan_data: The plan data which can be a string, AIMessage, or dict
-        
+
     Returns:
-        str: The plan content as a string (JSON string for dict inputs, or 
+        str: The plan content as a string (JSON string for dict inputs, or
     extracted/original string for other types)
     """
     if isinstance(plan_data, str):
         # If it's already a string, return as is
         return plan_data
-    elif hasattr(plan_data, 'content') and isinstance(plan_data.content, str):
+    elif hasattr(plan_data, "content") and isinstance(plan_data.content, str):
         # If it's an AIMessage or similar object with a content attribute
-        logger.debug(f"Extracting plan content from message object of type {type(plan_data).__name__}")
+        logger.debug(
+            f"Extracting plan content from message object of type {type(plan_data).__name__}"
+        )
         return plan_data.content
     elif isinstance(plan_data, dict):
         # If it's already a dictionary, convert to JSON string
@@ -525,14 +512,18 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
                 logger.debug("Converting content field dict to JSON string")
                 return json.dumps(plan_data["content"], ensure_ascii=False)
             else:
-                logger.warning(f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string")
+                logger.warning(
+                    f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string"
+                )
                 return str(plan_data["content"])
         else:
             logger.debug("Converting plan dictionary to JSON string")
             return json.dumps(plan_data)
     else:
         # For any other type, try to convert to string
-        logger.warning(f"Unexpected plan data type {type(plan_data).__name__}, attempting to convert to string")
+        logger.warning(
+            f"Unexpected plan data type {type(plan_data).__name__}, attempting to convert to string"
+        )
         return str(plan_data)
 
 
@@ -547,11 +538,10 @@ def human_feedback_node(
 
         # Handle None or empty feedback
         if not feedback:
-            logger.warning(f"Received empty or None feedback: {feedback}. Returning to planner for new plan.")
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="planner"
+            logger.warning(
+                f"Received empty or None feedback: {feedback}. Returning to planner for new plan."
             )
+            return Command(update=preserve_state_meta_fields(state), goto="planner")
 
         # Normalize feedback string
         feedback_normalized = str(feedback).strip().upper()
@@ -571,11 +561,10 @@ def human_feedback_node(
         elif feedback_normalized.startswith("[ACCEPTED]"):
             logger.info("Plan is accepted by user.")
         else:
-            logger.warning(f"Unsupported feedback format: {feedback}. Please use '[ACCEPTED]' to accept or '[EDIT_PLAN]' to edit.")
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="planner"
+            logger.warning(
+                f"Unsupported feedback format: {feedback}. Please use '[ACCEPTED]' to accept or '[EDIT_PLAN]' to edit."
             )
+            return Command(update=preserve_state_meta_fields(state), goto="planner")
 
     # if the plan is accepted, run the following node
     plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
@@ -583,34 +572,32 @@ def human_feedback_node(
     try:
         # Safely extract plan content from different types (string, AIMessage, dict)
         original_plan = current_plan
-        
+
         # Repair the JSON output
         current_plan = repair_json_output(current_plan)
         # parse the plan to dict
         current_plan = json.loads(current_plan)
         current_plan_content = extract_plan_content(current_plan)
-        
+
         # increment the plan iterations
         plan_iterations += 1
         # parse the plan
         new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
+        new_plan = validate_and_fix_plan(
+            new_plan, configurable.enforce_web_search, configurable.enable_web_search
+        )
     except (json.JSONDecodeError, AttributeError) as e:
-        logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
+        logger.warning(
+            f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}"
+        )
         if isinstance(current_plan, dict) and "content" in original_plan:
-            logger.warning(f"Plan appears to be an AIMessage object with content field")
+            logger.warning("Plan appears to be an AIMessage object with content field")
         if plan_iterations > 1:  # the plan_iterations is increased before this check
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="reporter"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="reporter")
         else:
-            return Command(
-                update=preserve_state_meta_fields(state),
-                goto="__end__"
-            )
+            return Command(update=preserve_state_meta_fields(state), goto="__end__")
 
     # Build update dict with safe locale handling
     update_dict = {
@@ -618,11 +605,11 @@ def human_feedback_node(
         "plan_iterations": plan_iterations,
         **preserve_state_meta_fields(state),
     }
-    
+
     # Only override locale if new_plan provides a valid value, otherwise use preserved locale
     if new_plan.get("locale"):
         update_dict["locale"] = new_plan["locale"]
-    
+
     return Command(
         update=update_dict,
         goto=goto,
@@ -645,7 +632,9 @@ def coordinator_node(
     # ============================================================
     if not enable_clarification:
         # Use normal prompt with explicit instruction to skip clarification
-        messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
+        messages = apply_prompt_template(
+            "coordinator", state, locale=state.get("locale", "en-US")
+        )
         messages.append(
             {
                 "role": "system",
@@ -686,7 +675,11 @@ def coordinator_node(
                         goto = "__end__"
                         # Append direct message to messages list instead of overwriting response
                         if tool_args.get("message"):
-                            messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
+                            messages.append(
+                                AIMessage(
+                                    content=tool_args.get("message"), name="coordinator"
+                                )
+                            )
                         break
 
             except Exception as e:
@@ -711,7 +704,9 @@ def coordinator_node(
 
         # Prepare the messages for the coordinator
         state_messages = list(state.get("messages", []))
-        messages = apply_prompt_template("coordinator", state, locale=state.get("locale", "en-US"))
+        messages = apply_prompt_template(
+            "coordinator", state, locale=state.get("locale", "en-US")
+        )
 
         clarification_history = reconstruct_clarification_history(
             state_messages, clarification_history, initial_topic
@@ -928,7 +923,9 @@ def reporter_node(state: State, config: RunnableConfig):
         ],
         "locale": state.get("locale", "en-US"),
     }
-    invoke_messages = apply_prompt_template("reporter", input_, configurable, input_.get("locale", "en-US"))
+    invoke_messages = apply_prompt_template(
+        "reporter", input_, configurable, input_.get("locale", "en-US")
+    )
     observations = state.get("observations", [])
 
     # Add a reminder about the new report format, citation style, and table usage
@@ -973,43 +970,45 @@ def research_team_node(state: State):
 def validate_web_search_usage(messages: list, agent_name: str = "agent") -> bool:
     """
     Validate if the agent has used the web search tool during execution.
-    
+
     Args:
         messages: List of messages from the agent execution
         agent_name: Name of the agent (for logging purposes)
-        
+
     Returns:
         bool: True if web search tool was used, False otherwise
     """
     web_search_used = False
-    
+
     for message in messages:
         # Check for ToolMessage instances indicating web search was used
         if isinstance(message, ToolMessage) and message.name == "web_search":
             web_search_used = True
-            logger.info(f"[VALIDATION] {agent_name} received ToolMessage from web_search tool")
+            logger.info(
+                f"[VALIDATION] {agent_name} received ToolMessage from web_search tool"
+            )
             break
-            
+
         # Check for AIMessage content that mentions tool calls
-        if hasattr(message, 'tool_calls') and message.tool_calls:
+        if hasattr(message, "tool_calls") and message.tool_calls:
             for tool_call in message.tool_calls:
-                if tool_call.get('name') == "web_search":
+                if tool_call.get("name") == "web_search":
                     web_search_used = True
                     logger.info(f"[VALIDATION] {agent_name} called web_search tool")
                     break
             # break outer loop if web search was used
             if web_search_used:
                 break
-                    
+
         # Check for message name attribute
-        if hasattr(message, 'name') and message.name == "web_search":
+        if hasattr(message, "name") and message.name == "web_search":
             web_search_used = True
             logger.info(f"[VALIDATION] {agent_name} used web_search tool")
             break
-    
+
     if not web_search_used:
         logger.warning(f"[VALIDATION] {agent_name} did not use web_search tool")
-        
+
     return web_search_used
 
 
@@ -1018,11 +1017,13 @@ async def _execute_agent_step(
 ) -> Command[Literal["research_team"]]:
     """Helper function to execute a step using the specified agent."""
     logger.debug(f"[_execute_agent_step] Starting execution for agent: {agent_name}")
-    
+
     current_plan = state.get("current_plan")
     plan_title = current_plan.title
     observations = state.get("observations", [])
-    logger.debug(f"[_execute_agent_step] Plan title: {plan_title}, observations count: {len(observations)}")
+    logger.debug(
+        f"[_execute_agent_step] Plan title: {plan_title}, observations count: {len(observations)}"
+    )
 
     # Find the first unexecuted step
     current_step = None
@@ -1030,20 +1031,25 @@ async def _execute_agent_step(
     for idx, step in enumerate(current_plan.steps):
         if not step.execution_res:
             current_step = step
-            logger.debug(f"[_execute_agent_step] Found unexecuted step at index {idx}: {step.title}")
+            logger.debug(
+                f"[_execute_agent_step] Found unexecuted step at index {idx}: {step.title}"
+            )
             break
         else:
             completed_steps.append(step)
 
     if not current_step:
-        logger.warning(f"[_execute_agent_step] No unexecuted step found in {len(current_plan.steps)} total steps")
-        return Command(
-            update=preserve_state_meta_fields(state),
-            goto="research_team"
+        logger.warning(
+            f"[_execute_agent_step] No unexecuted step found in {len(current_plan.steps)} total steps"
         )
+        return Command(update=preserve_state_meta_fields(state), goto="research_team")
 
-    logger.info(f"[_execute_agent_step] Executing step: {current_step.title}, agent: {agent_name}")
-    logger.debug(f"[_execute_agent_step] Completed steps so far: {len(completed_steps)}")
+    logger.info(
+        f"[_execute_agent_step] Executing step: {current_step.title}, agent: {agent_name}"
+    )
+    logger.debug(
+        f"[_execute_agent_step] Completed steps so far: {len(completed_steps)}"
+    )
 
     # Format completed steps information
     completed_steps_info = ""
@@ -1108,32 +1114,36 @@ async def _execute_agent_step(
         recursion_limit = default_recursion_limit
 
     logger.info(f"Agent input: {agent_input}")
-    
+
     # Validate message content before invoking agent
     try:
         validated_messages = validate_message_content(agent_input["messages"])
         agent_input["messages"] = validated_messages
     except Exception as validation_error:
         logger.error(f"Error validating agent input messages: {validation_error}")
-    
+
     # Apply context compression to prevent token overflow (Issue #721)
     llm_token_limit = get_llm_token_limit_by_type(AGENT_LLM_MAP[agent_name])
     if llm_token_limit:
         token_count_before = sum(
-            len(str(msg.content).split()) for msg in agent_input.get("messages", []) if hasattr(msg, "content")
+            len(str(msg.content).split())
+            for msg in agent_input.get("messages", [])
+            if hasattr(msg, "content")
         )
-        compressed_state = ContextManager(llm_token_limit, preserve_prefix_message_count=3).compress_messages(
-            {"messages": agent_input["messages"]}
-        )
+        compressed_state = ContextManager(
+            llm_token_limit, preserve_prefix_message_count=3
+        ).compress_messages({"messages": agent_input["messages"]})
         agent_input["messages"] = compressed_state.get("messages", [])
         token_count_after = sum(
-            len(str(msg.content).split()) for msg in agent_input.get("messages", []) if hasattr(msg, "content")
+            len(str(msg.content).split())
+            for msg in agent_input.get("messages", [])
+            if hasattr(msg, "content")
         )
         logger.info(
             f"Context compression for {agent_name}: {len(compressed_state.get('messages', []))} messages, "
             f"estimated tokens before: ~{token_count_before}, after: ~{token_count_after}"
         )
-    
+
     try:
         result = await agent.ainvoke(
             input=agent_input, config={"recursion_limit": recursion_limit}
@@ -1145,15 +1155,17 @@ async def _execute_agent_step(
         error_message = f"Error executing {agent_name} agent for step '{current_step.title}': {str(e)}"
         logger.exception(error_message)
         logger.error(f"Full traceback:\n{error_traceback}")
-        
+
         # Enhanced error diagnostics for content-related errors
         if "Field required" in str(e) and "content" in str(e):
-            logger.error(f"Message content validation error detected")
-            for i, msg in enumerate(agent_input.get('messages', [])):
-                logger.error(f"Message {i}: type={type(msg).__name__}, "
-                            f"has_content={hasattr(msg, 'content')}, "
-                            f"content_type={type(msg.content).__name__ if hasattr(msg, 'content') else 'N/A'}, "
-                            f"content_len={len(str(msg.content)) if hasattr(msg, 'content') and msg.content else 0}")
+            logger.error("Message content validation error detected")
+            for i, msg in enumerate(agent_input.get("messages", [])):
+                logger.error(
+                    f"Message {i}: type={type(msg).__name__}, "
+                    f"has_content={hasattr(msg, 'content')}, "
+                    f"content_type={type(msg.content).__name__ if hasattr(msg, 'content') else 'N/A'}, "
+                    f"content_len={len(str(msg.content)) if hasattr(msg, 'content') and msg.content else 0}"
+                )
 
         detailed_error = f"[ERROR] {agent_name.capitalize()} Agent Error\n\nStep: {current_step.title}\n\nError Details:\n{str(e)}\n\nPlease check the logs for more information."
         current_step.execution_res = detailed_error
@@ -1174,10 +1186,10 @@ async def _execute_agent_step(
 
     # Process the result
     response_content = result["messages"][-1].content
-    
+
     # Sanitize response to remove extra tokens and truncate if needed
     response_content = sanitize_tool_response(str(response_content))
-    
+
     logger.debug(f"{agent_name.capitalize()} full response: {response_content}")
 
     # Validate web search usage for researcher agent if enforcement is enabled
@@ -1187,14 +1199,20 @@ async def _execute_agent_step(
 
     if should_validate:
         # Check if enforcement is enabled in configuration
-        configurable = Configuration.from_runnable_config(config) if config else Configuration()
+        configurable = (
+            Configuration.from_runnable_config(config) if config else Configuration()
+        )
         # Skip validation if web search is disabled (user intentionally disabled it)
         if configurable.enforce_researcher_search and configurable.enable_web_search:
-            web_search_validated = validate_web_search_usage(result["messages"], agent_name)
-            
+            web_search_validated = validate_web_search_usage(
+                result["messages"], agent_name
+            )
+
             # If web search was not used, add a warning to the response
             if not web_search_validated:
-                logger.warning(f"[VALIDATION] Researcher did not use web_search tool. Adding reminder to response.")
+                logger.warning(
+                    "[VALIDATION] Researcher did not use web_search tool. Adding reminder to response."
+                )
                 # Add validation information to observations
                 validation_info = (
                     "\n\n[WARNING] This research was completed without using the web_search tool. "
@@ -1213,9 +1231,11 @@ async def _execute_agent_step(
         f"{agent_name.capitalize()} returned {len(agent_messages)} messages. "
         f"Message types: {[type(msg).__name__ for msg in agent_messages]}"
     )
-    
+
     # Count tool messages for logging
-    tool_message_count = sum(1 for msg in agent_messages if isinstance(msg, ToolMessage))
+    tool_message_count = sum(
+        1 for msg in agent_messages if isinstance(msg, ToolMessage)
+    )
     if tool_message_count > 0:
         logger.info(
             f"{agent_name.capitalize()} agent made {tool_message_count} tool calls. "
@@ -1269,7 +1289,7 @@ async def _setup_and_execute_agent_step(
     mcp_servers = {}
     enabled_tools = {}
     loaded_tools = default_tools[:]
-    
+
     # Get locale from workflow state to pass to agent creation
     # This fixes issue #743 where locale was not correctly retrieved in agent prompt
     locale = state.get("locale", "en-US")
@@ -1320,11 +1340,13 @@ async def researcher_node(
 ) -> Command[Literal["research_team"]]:
     """Researcher node that do research"""
     logger.info("Researcher node is researching.")
-    logger.debug(f"[researcher_node] Starting researcher agent")
-    
+    logger.debug("[researcher_node] Starting researcher agent")
+
     configurable = Configuration.from_runnable_config(config)
-    logger.debug(f"[researcher_node] Max search results: {configurable.max_search_results}")
-    
+    logger.debug(
+        f"[researcher_node] Max search results: {configurable.max_search_results}"
+    )
+
     # Build tools list based on configuration
     tools = []
 
@@ -1342,19 +1364,25 @@ async def researcher_node(
     # Add retriever tool if resources are available (always add, higher priority)
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
-        logger.debug(f"[researcher_node] Adding retriever tool to tools list")
+        logger.debug("[researcher_node] Adding retriever tool to tools list")
         tools.insert(0, retriever_tool)
-    
+
     # Warn if no tools are available
     if not tools:
-        logger.warning("[researcher_node] No tools available (web search disabled, no resources). "
-                       "Researcher will operate in pure reasoning mode.")
-    
+        logger.warning(
+            "[researcher_node] No tools available (web search disabled, no resources). "
+            "Researcher will operate in pure reasoning mode."
+        )
+
     logger.info(f"[researcher_node] Researcher tools count: {len(tools)}")
-    logger.debug(f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}")
-    logger.info(f"[researcher_node] enforce_researcher_search={configurable.enforce_researcher_search}, "
-                f"enable_web_search={configurable.enable_web_search}")
-    
+    logger.debug(
+        f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}"
+    )
+    logger.info(
+        f"[researcher_node] enforce_researcher_search={configurable.enforce_researcher_search}, "
+        f"enable_web_search={configurable.enable_web_search}"
+    )
+
     return await _setup_and_execute_agent_step(
         state,
         config,
@@ -1368,7 +1396,7 @@ async def coder_node(
 ) -> Command[Literal["research_team"]]:
     """Coder node that do code analysis."""
     logger.info("Coder node is coding.")
-    logger.debug(f"[coder_node] Starting coder agent with python_repl_tool")
+    logger.debug("[coder_node] Starting coder agent with python_repl_tool")
 
     configurable = Configuration.from_runnable_config(config)
 
@@ -1392,7 +1420,7 @@ async def analyst_node(
     state: State, config: RunnableConfig
 ) -> Command[Literal["research_team"]]:
     """Analyst node that performs reasoning and analysis without code execution.
-    
+
     This node handles tasks like:
     - Cross-validating information from multiple sources
     - Synthesizing research findings
@@ -1401,8 +1429,8 @@ async def analyst_node(
     - General reasoning tasks that don't require code
     """
     logger.info("Analyst node is analyzing.")
-    logger.debug(f"[analyst_node] Starting analyst agent for reasoning/analysis tasks")
-    
+    logger.debug("[analyst_node] Starting analyst agent for reasoning/analysis tasks")
+
     # Analyst uses no tools - pure LLM reasoning
     return await _setup_and_execute_agent_step(
         state,

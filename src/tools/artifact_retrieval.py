@@ -5,26 +5,21 @@
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Annotated
 
 from langchain_core.tools import tool
 
-from src.config.configuration import Configuration
-from src.config.loader import get_str_env
+from src.utils.compress import get_artifact_base_path, sanitize_filename_component
 
 logger = logging.getLogger(__name__)
-
-
-# Default artifact path from config or environment
-DEFAULT_ARTIFACT_PATH = get_str_env("ARTIFACT_STORAGE_PATH", "research_artifacts")
 
 
 @tool
 def read_artifact(
     artifact_path: Annotated[
-        str, "The relative path to the artifact file (e.g., 'research_artifacts/plan_name/stepX_title__tool_name.json')"
+        str,
+        "The relative path to the artifact file (e.g., 'research_artifacts/plan_name/stepX_title__tool_name.json')",
     ],
 ) -> str:
     """
@@ -40,23 +35,28 @@ def read_artifact(
     The artifact_path is provided in the compressed summary as 'artifact_file'.
     """
     try:
+        # Get the configured artifact base path
+        artifact_base = get_artifact_base_path()
+
         # Convert relative path to absolute if needed
-        artifact_path = Path(artifact_path)
-        if not artifact_path.is_absolute():
-            # If path doesn't start with the default artifact path, prepend it
-            if not str(artifact_path).startswith(DEFAULT_ARTIFACT_PATH):
-                artifact_path = Path(DEFAULT_ARTIFACT_PATH) / artifact_path
+        artifact_path_obj = Path(artifact_path)
+        if not artifact_path_obj.is_absolute():
+            # If path doesn't start with the artifact base path, prepend it
+            if not str(artifact_path_obj).startswith(str(artifact_base)):
+                artifact_path_obj = artifact_base / artifact_path_obj
+        else:
+            artifact_path_obj = Path(artifact_path)
 
         # Check if file exists
-        if not artifact_path.exists():
-            return f"Error: Artifact file not found at {artifact_path}"
+        if not artifact_path_obj.exists():
+            return f"Error: Artifact file not found at {artifact_path_obj}"
 
         # Read file content
-        with open(artifact_path, "r", encoding="utf-8") as f:
+        with open(artifact_path_obj, "r", encoding="utf-8") as f:
             content = f.read()
 
         # If file is JSON, return it; otherwise return as-is
-        if artifact_path.suffix == ".json":
+        if artifact_path_obj.suffix == ".json":
             try:
                 parsed = json.loads(content)
                 # Format nicely for readability
@@ -85,14 +85,14 @@ def list_artifacts(
     If plan_name is empty, lists all artifacts across all plans.
     """
     try:
-        artifact_base = Path(DEFAULT_ARTIFACT_PATH)
+        artifact_base = get_artifact_base_path()
 
         if not artifact_base.exists():
-            return f"No artifacts directory found at {DEFAULT_ARTIFACT_PATH}"
+            return f"No artifacts directory found at {artifact_base}"
 
         # If plan_name specified, list only that plan's artifacts
         if plan_name:
-            plan_dir = artifact_dir = artifact_base / _sanitize_path_component(plan_name)
+            plan_dir = artifact_base / sanitize_filename_component(plan_name)
             if not plan_dir.exists():
                 return f"No artifacts found for plan: {plan_name}"
             artifacts = list(plan_dir.glob("*"))
@@ -121,14 +121,3 @@ def list_artifacts(
     except Exception as e:
         logger.error(f"Error listing artifacts: {e}")
         return f"Error listing artifacts: {str(e)}"
-
-
-def _sanitize_path_component(component: str) -> str:
-    """Sanitize a path component for safe filesystem access."""
-    # Similar to ArtifactStorageManager._sanitize_filename_component
-    import re
-
-    component = component.lower().replace(" ", "_").replace("-", "_")
-    component = re.sub(r"[^a-z0-9_.]", "", component)
-    component = re.sub(r"_+", "_", component)
-    return component.strip("_")
