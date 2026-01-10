@@ -379,18 +379,14 @@ def planner_node(
             {"role": "user", "content": state["clarified_research_topic"]}
         ]
         modified_state["research_topic"] = state["clarified_research_topic"]
-        messages = apply_prompt_template(
-            "planner", modified_state, configurable, state.get("locale", "en-US")
-        )
+        messages = apply_prompt_template("planner", modified_state, configurable, state.get("locale", "en-US"))
 
         logger.info(
             f"Clarification mode: Using clarified research topic: {state['clarified_research_topic']}"
         )
     else:
         # Normal mode: use full conversation history
-        messages = apply_prompt_template(
-            "planner", state, configurable, state.get("locale", "en-US")
-        )
+        messages = apply_prompt_template("planner", state, configurable, state.get("locale", "en-US"))
 
     if state.get("enable_background_investigation") and state.get(
         "background_investigation_results"
@@ -415,7 +411,10 @@ def planner_node(
 
     # if the plan iterations is greater than the max plan iterations, return the reporter node
     if plan_iterations >= configurable.max_plan_iterations:
-        return Command(update=preserve_state_meta_fields(state), goto="reporter")
+        return Command(
+            update=preserve_state_meta_fields(state),
+            goto="reporter"
+        )
 
     full_response = ""
     if AGENT_LLM_MAP["planner"] == "basic" and not configurable.enable_deep_thinking:
@@ -1349,12 +1348,6 @@ async def researcher_node(
 
     # Build tools list based on configuration
     tools = []
-
-    # Add artifact retrieval tools if compression is enabled
-    if configurable.enable_tool_result_compression:
-        tools.extend([read_artifact, list_artifacts])
-        logger.debug("[researcher_node] Added artifact retrieval tools")
-
     # Add web search and crawl tools only if web search is enabled
     if configurable.enable_web_search:
         tools.extend([get_web_search_tool(configurable.max_search_results), crawl_tool])
