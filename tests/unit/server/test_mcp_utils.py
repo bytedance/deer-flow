@@ -100,6 +100,57 @@ async def test_load_mcp_tools_sse_success(mock_sse_client, mock_get_tools):
 
 
 @pytest.mark.asyncio
+@patch("src.server.mcp_utils._get_tools_from_client_session", new_callable=AsyncMock)
+@patch("src.server.mcp_utils.sse_client")
+async def test_load_mcp_tools_sse_with_sse_readtimeout(mock_sse_client, mock_get_tools):
+    """Test that sse_readtimeout parameter is used when provided."""
+    mock_get_tools.return_value = ["toolC"]
+    mock_client = MagicMock()
+    mock_sse_client.return_value = mock_client
+
+    result = await mcp_utils.load_mcp_tools(
+        server_type="sse",
+        url="http://localhost:1234",
+        headers={"Authorization": "Bearer token"},
+        timeout_seconds=10,
+        sse_readtimeout=5,
+    )
+    assert result == ["toolC"]
+    # sse_readtimeout should be used as timeout for sse_client
+    mock_sse_client.assert_called_once_with(
+        url="http://localhost:1234",
+        headers={"Authorization": "Bearer token"},
+        timeout=5,
+    )
+    # But timeout_seconds should be used for the session timeout
+    mock_get_tools.assert_awaited_once_with(mock_client, 10)
+
+
+@pytest.mark.asyncio
+@patch("src.server.mcp_utils._get_tools_from_client_session", new_callable=AsyncMock)
+@patch("src.server.mcp_utils.sse_client")
+async def test_load_mcp_tools_sse_without_sse_readtimeout(mock_sse_client, mock_get_tools):
+    """Test that timeout_seconds is used when sse_readtimeout is not provided."""
+    mock_get_tools.return_value = ["toolD"]
+    mock_client = MagicMock()
+    mock_sse_client.return_value = mock_client
+
+    result = await mcp_utils.load_mcp_tools(
+        server_type="sse",
+        url="http://localhost:1234",
+        timeout_seconds=20,
+    )
+    assert result == ["toolD"]
+    # When sse_readtimeout is not provided, timeout_seconds should be used
+    mock_sse_client.assert_called_once_with(
+        url="http://localhost:1234",
+        headers=None,
+        timeout=20,
+    )
+    mock_get_tools.assert_awaited_once_with(mock_client, 20)
+
+
+@pytest.mark.asyncio
 async def test_load_mcp_tools_sse_missing_url():
     with pytest.raises(HTTPException) as exc:
         await mcp_utils.load_mcp_tools(server_type="sse")

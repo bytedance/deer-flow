@@ -1046,12 +1046,15 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
         )
 
     try:
-        # Set default timeout with a longer value for this endpoint
-        timeout = 300  # Default to 300 seconds for this endpoint
+        # Set default timeout for this endpoint
+        timeout = 30  # Default to 30 seconds
 
         # Use custom timeout from request if provided
         if request.timeout_seconds is not None:
             timeout = request.timeout_seconds
+
+        # Get sse_readtimeout from request if provided
+        sse_readtimeout = request.sse_readtimeout
 
         # Load tools from the MCP server using the utility function
         tools = await load_mcp_tools(
@@ -1062,6 +1065,7 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
             env=request.env,
             headers=request.headers,
             timeout_seconds=timeout,
+            sse_readtimeout=sse_readtimeout,
         )
 
         # Create the response with tools

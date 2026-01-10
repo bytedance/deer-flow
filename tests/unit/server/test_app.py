@@ -376,13 +376,41 @@ class TestMCPEndpoint:
         request_data = {
             "transport": "stdio",
             "command": "test_command",
-            "timeout_seconds": 600,
+            "timeout_seconds": 60,
         }
 
         response = client.post("/api/mcp/server/metadata", json=request_data)
 
         assert response.status_code == 200
         mock_load_tools.assert_called_once()
+        # Verify timeout_seconds is passed to load_mcp_tools
+        call_kwargs = mock_load_tools.call_args[1]
+        assert call_kwargs["timeout_seconds"] == 60
+
+    @patch("src.server.app.load_mcp_tools")
+    @patch.dict(
+        os.environ,
+        {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
+    )
+    def test_mcp_server_metadata_with_sse_readtimeout(self, mock_load_tools, client):
+        """Test that sse_readtimeout is passed to load_mcp_tools."""
+        mock_load_tools.return_value = []
+
+        request_data = {
+            "transport": "sse",
+            "url": "http://localhost:3000/sse",
+            "timeout_seconds": 30,
+            "sse_readtimeout": 15,
+        }
+
+        response = client.post("/api/mcp/server/metadata", json=request_data)
+
+        assert response.status_code == 200
+        mock_load_tools.assert_called_once()
+        # Verify both timeout_seconds and sse_readtimeout are passed
+        call_kwargs = mock_load_tools.call_args[1]
+        assert call_kwargs["timeout_seconds"] == 30
+        assert call_kwargs["sse_readtimeout"] == 15
 
     @patch("src.server.app.load_mcp_tools")
     @patch.dict(

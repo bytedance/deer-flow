@@ -16,6 +16,7 @@ def test_mcp_server_metadata_request_required_fields():
     assert req.url is None
     assert req.env is None
     assert req.timeout_seconds is None
+    assert req.sse_readtimeout is None
 
 
 def test_mcp_server_metadata_request_optional_fields():
@@ -26,6 +27,7 @@ def test_mcp_server_metadata_request_optional_fields():
         url="http://localhost:8080",
         env={"FOO": "BAR"},
         timeout_seconds=30,
+        sse_readtimeout=15,
     )
     assert req.transport == "sse"
     assert req.command == "run"
@@ -33,6 +35,7 @@ def test_mcp_server_metadata_request_optional_fields():
     assert req.url == "http://localhost:8080"
     assert req.env == {"FOO": "BAR"}
     assert req.timeout_seconds == 30
+    assert req.sse_readtimeout == 15
 
 
 def test_mcp_server_metadata_request_missing_transport():
