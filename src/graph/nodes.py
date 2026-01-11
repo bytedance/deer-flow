@@ -839,10 +839,11 @@ def reporter_node(state: State, config: RunnableConfig):
             title = citation.get("title", "Untitled")
             url = citation.get("url", "")
             domain = citation.get("domain", "")
-            desc = citation.get("description", "")[:150] if citation.get("description") else ""
+            description = citation.get("description", "")
+            desc_truncated = description[:150] if description else ""
             citation_list += f"{i}. **{title}**\n   - URL: {url}\n   - Domain: {domain}\n"
-            if desc:
-                citation_list += f"   - Summary: {desc}...\n"
+            if desc_truncated:
+                citation_list += f"   - Summary: {desc_truncated}...\n"
             citation_list += "\n"
         
         citation_instruction += citation_list

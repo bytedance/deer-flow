@@ -126,7 +126,7 @@ class TestCollector:
 
         assert len(added) == 1
         assert added[0].url == "https://example.com"
-        assert len(collector._citations) == 1
+        assert collector.count == 1
 
 
 class TestFormatter:

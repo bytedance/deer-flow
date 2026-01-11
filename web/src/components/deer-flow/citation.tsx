@@ -40,20 +40,25 @@ export function CitationLink({
     
     // Try exact match first
     let matchIndex = citations.findIndex((c) => c.url === href);
-    let match = matchIndex !== -1 ? citations[matchIndex] : null;
     
-    // Try encoded/decoded match
-    if (!match) {
-      const decodedHref = decodeURIComponent(href);
-      const encodedHref = encodeURI(href);
+    // If not found, try versatile comparison using normalized URLs
+    if (matchIndex === -1) {
+      const normalizeUrl = (url: string) => {
+        try {
+          return decodeURIComponent(url).trim();
+        } catch {
+          return url.trim();
+        }
+      };
+
+      const normalizedHref = normalizeUrl(href);
+      
       matchIndex = citations.findIndex(
-        (c) =>
-          c.url === decodedHref ||
-          c.url === encodedHref ||
-          decodeURIComponent(c.url) === decodedHref
+        (c) => normalizeUrl(c.url) === normalizedHref
       );
-      match = matchIndex !== -1 ? citations[matchIndex] : null;
     }
+    
+    const match = matchIndex !== -1 ? citations[matchIndex] : null;
     
     return { citation: match, index: matchIndex };
   }, [href, citations]);

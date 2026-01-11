@@ -585,6 +585,55 @@ async def _process_message_chunk(message_chunk, message_metadata, thread_id, age
             yield _make_event("message_chunk", event_stream_message)
 
 
+def extract_citations_from_event(event: Any, safe_thread_id: str = "unknown") -> list:
+    """Extract all citations from event data using an iterative, depth-limited traversal."""
+    # Only dict-based event structures are supported
+    if not isinstance(event, dict):
+        return []
+    
+    from collections import deque
+    citations: list[Any] = []
+    max_depth = 5  # Prevent excessively deep traversal
+    max_nodes = 5000  # Safety cap to avoid pathological large structures
+    
+    # Queue holds (node_dict, depth) for BFS traversal
+    queue: deque[tuple[dict[str, Any], int]] = deque([(event, 0)])
+    nodes_visited = 0
+    
+    while queue:
+        current, depth = queue.popleft()
+        nodes_visited += 1
+        if nodes_visited > max_nodes:
+            logger.warning(
+                f"[{safe_thread_id}] Stopping citation extraction after visiting "
+                f"{nodes_visited} nodes to avoid performance issues"
+            )
+            break
+        
+        # Direct citations field at this level
+        direct_citations = current.get("citations")
+        if isinstance(direct_citations, list) and direct_citations:
+            logger.debug(
+                f"[{safe_thread_id}] Found {len(direct_citations)} citations at depth {depth}"
+            )
+            citations.extend(direct_citations)
+            
+        # Do not traverse deeper than max_depth
+        if depth >= max_depth:
+            continue
+            
+        # Check nested values (for updates mode)
+        for value in current.values():
+            if isinstance(value, dict):
+                queue.append((value, depth + 1))
+            # Also check if the value is a list of dicts (like Command updates)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        queue.append((item, depth + 1))
+    return citations
+
+
 async def _stream_graph_events(
     graph_instance, workflow_input, workflow_config, thread_id
 ):
@@ -594,47 +643,6 @@ async def _stream_graph_events(
     
     # Track citations collected during research
     collected_citations = []
-    
-    def extract_citations_from_event(event: Any) -> list:
-        """Extract all citations from event data using an iterative, depth-limited traversal."""
-        # Only dict-based event structures are supported
-        if not isinstance(event, dict):
-            return []
-        citations: list[Any] = []
-        max_depth = 5  # Prevent excessively deep traversal
-        max_nodes = 5000  # Safety cap to avoid pathological large structures
-        # Stack holds (node_dict, depth)
-        stack: list[tuple[dict[str, Any], int]] = [(event, 0)]
-        nodes_visited = 0
-        while stack:
-            current, depth = stack.pop()
-            nodes_visited += 1
-            if nodes_visited > max_nodes:
-                logger.warning(
-                    f"[{safe_thread_id}] Stopping citation extraction after visiting "
-                    f"{nodes_visited} nodes to avoid performance issues"
-                )
-                break
-            # Direct citations field at this level
-            direct_citations = current.get("citations")
-            if isinstance(direct_citations, list) and direct_citations:
-                logger.debug(
-                    f"[{safe_thread_id}] Found {len(direct_citations)} citations at depth {depth}"
-                )
-                citations.extend(direct_citations)
-            # Do not traverse deeper than max_depth
-            if depth >= max_depth:
-                continue
-            # Check nested values (for updates mode)
-            for value in current.values():
-                if isinstance(value, dict):
-                    stack.append((value, depth + 1))
-                # Also check if the value is a list of dicts (like Command updates)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            stack.append((item, depth + 1))
-        return citations
     
     try:
         event_count = 0
@@ -658,7 +666,7 @@ async def _stream_graph_events(
                 event_keys = list(event_data.keys())
                 
                 # Check for citations in state updates (may be nested)
-                new_citations = extract_citations_from_event(event_data)
+                new_citations = extract_citations_from_event(event_data, safe_thread_id)
                 if new_citations:
                     # Accumulate citations across events instead of overwriting
                     # using merge_citations to avoid duplicates and preserve better metadata
@@ -702,7 +710,7 @@ async def _stream_graph_events(
         if not collected_citations and last_state_update:
             # Try to get citations from the last state update
             logger.debug(f"[{safe_thread_id}] No citations collected during streaming, checking last state update")
-            collected_citations = extract_citations_from_event(last_state_update)
+            collected_citations = extract_citations_from_event(last_state_update, safe_thread_id)
         
         # If still no citations, try to get from graph state directly
         if not collected_citations:

@@ -39,6 +39,30 @@ export function Markdown({
   checkLinkCredibility?: boolean;
   citations?: CitationData[];
 }) {
+  // Pre-compute normalized URL map for O(1) lookup
+  const citationMap = useMemo(() => {
+    const map = new Map<string, number>();
+    citations?.forEach((c, index) => {
+      if (!c.url) return;
+      
+      // Add exact match
+      map.set(c.url, index);
+      
+      // Add decoded match
+      try {
+        const decoded = decodeURIComponent(c.url);
+        if (decoded !== c.url) map.set(decoded, index);
+      } catch {}
+      
+      // Add encoded match
+      try {
+        const encoded = encodeURI(c.url);
+        if (encoded !== c.url) map.set(encoded, index);
+      } catch {}
+    });
+    return map;
+  }, [citations]);
+
   const components: ReactMarkdownOptions["components"] = useMemo(() => {
     return {
       a: ({ href, children }) => {
@@ -84,12 +108,7 @@ export function Markdown({
         // If we have citation data, use CitationLink for enhanced display
         if (citations && citations.length > 0) {
           // Find if this URL is one of our citations
-          const citationIndex = citations.findIndex(
-            (c) =>
-              c.url === hrefStr ||
-              decodeURIComponent(c.url) === hrefStr ||
-              encodeURI(c.url) === hrefStr
-          );
+          const citationIndex = citationMap.get(hrefStr) ?? -1;
 
           if (citationIndex !== -1) {
             // Heuristic to determine if this is a citation target (in Reference list)
@@ -101,10 +120,11 @@ export function Markdown({
             // Heuristic: inline citation text usually looks like a numeric marker
             // rather than a full title. We treat the following as "inline":
             //   "1", "[1]", "^1^", "[^1]" (with optional surrounding whitespace).
-            // This pattern matches an optional "[", optional leading "^",
-            // one or more digits, optional trailing "^", optional "]",
+            // This pattern matches either:
+            //   - a bracketed number: "[1]"
+            //   - a caret-style number: "1", "^1", "1^", "^1^"
             // and ignores surrounding whitespace.
-            const inlineCitationPattern = /^\s*\[?\^?\d+\^?\]?\s*$/;
+            const inlineCitationPattern = /^\s*(?:\[\d+\]|\^?\d+\^?)\s*$/;
             const isInline = inlineCitationPattern.test(childrenText);
 
             return (
@@ -137,7 +157,7 @@ export function Markdown({
         </a>
       ),
     };
-  }, [checkLinkCredibility, citations]);
+  }, [checkLinkCredibility, citations, citationMap]);
 
   const rehypePlugins = useMemo<NonNullable<ReactMarkdownOptions["rehypePlugins"]>>(() => {
     const plugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [[

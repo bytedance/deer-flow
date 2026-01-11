@@ -288,7 +288,18 @@ def merge_citations(
                     if citation.get("relevance_score", 0) > existing_citation.get(
                         "relevance_score", 0
                     ):
-                        result[i] = {**existing_citation, **citation}
+                        # Update selectively instead of blindly merging all fields.
+                        updated = existing_citation.copy()
+                        # Always update relevance_score
+                        if "relevance_score" in citation:
+                            updated["relevance_score"] = citation["relevance_score"]
+                        # Merge other metadata only if improved (here assuming non-empty is 'better')
+                        for key in ("title", "description", "snippet"):
+                            new_value = citation.get(key)
+                            if new_value:
+                                updated[key] = new_value
+                        result[i] = updated
+                        break
                     break
 
     return result
