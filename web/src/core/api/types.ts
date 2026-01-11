@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
-import type { Option } from "../messages";
+import type { Citation, Option } from "../messages";
 
 // Tool Calls
 
@@ -76,9 +76,18 @@ export interface InterruptEvent
     }
   > {}
 
+export interface CitationsEvent {
+  type: "citations";
+  data: {
+    thread_id: string;
+    citations: Citation[];
+  };
+}
+
 export type ChatEvent =
   | MessageChunkEvent
   | ToolCallsEvent
   | ToolCallChunksEvent
   | ToolCallResultEvent
-  | InterruptEvent;
+  | InterruptEvent
+  | CitationsEvent;

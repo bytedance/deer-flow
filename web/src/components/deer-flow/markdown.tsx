@@ -20,6 +20,7 @@ import { cn } from "~/lib/utils";
 import Image from "./image";
 import { Tooltip } from "./tooltip";
 import { Link } from "./link";
+import { CitationLink, type CitationData } from "./citation";
 
 export function Markdown({
   className,
@@ -28,6 +29,7 @@ export function Markdown({
   enableCopy,
   animated = false,
   checkLinkCredibility = false,
+  citations = [],
   ...props
 }: ReactMarkdownOptions & {
   className?: string;
@@ -35,21 +37,127 @@ export function Markdown({
   style?: React.CSSProperties;
   animated?: boolean;
   checkLinkCredibility?: boolean;
+  citations?: CitationData[];
 }) {
+  // Pre-compute normalized URL map for O(1) lookup
+  const citationMap = useMemo(() => {
+    const map = new Map<string, number>();
+    citations?.forEach((c, index) => {
+      if (!c.url) return;
+      
+      // Add exact match
+      map.set(c.url, index);
+      
+      // Add decoded match
+      try {
+        const decoded = decodeURIComponent(c.url);
+        if (decoded !== c.url) map.set(decoded, index);
+      } catch {}
+      
+      // Add encoded match
+      try {
+        const encoded = encodeURI(c.url);
+        if (encoded !== c.url) map.set(encoded, index);
+      } catch {}
+    });
+    return map;
+  }, [citations]);
+
   const components: ReactMarkdownOptions["components"] = useMemo(() => {
     return {
-      a: ({ href, children }) => (
-        <Link href={href} checkLinkCredibility={checkLinkCredibility}>
-          {children}
-        </Link>
-      ),
+      a: ({ href, children }) => {
+        const hrefStr = href ?? "";
+
+        // Handle citation anchor targets (rendered in Reference list)
+        // Format: [[n]](#citation-target-n)
+        const targetMatch = hrefStr.match(/^#citation-target-(\d+)$/);
+        if (targetMatch) {
+          const index = targetMatch[1];
+          return (
+            <span
+              id={`ref-${index}`}
+              className="font-bold text-primary scroll-mt-20"
+            >
+              [{index}]
+            </span>
+          );
+        }
+
+        // Handle inline citation links (rendered in text)
+        // Format: [[n]](#ref-n), [n](#ref1), [n](#1)
+        const linkMatch = hrefStr.match(/^#(?:ref-?)?(\d+)$/);
+        if (linkMatch) {
+          return (
+            <a
+              href={hrefStr}
+              className="text-primary hover:underline cursor-pointer marker-link"
+              onClick={(e) => {
+                e.preventDefault();
+                const targetId = `ref-${linkMatch[1]}`;
+                const element = document.getElementById(targetId);
+                if (element) {
+                  element.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
+
+        // If we have citation data, use CitationLink for enhanced display
+        if (citations && citations.length > 0) {
+          // Find if this URL is one of our citations
+          const citationIndex = citationMap.get(hrefStr) ?? -1;
+
+          if (citationIndex !== -1) {
+            // Heuristic to determine if this is a citation target (in Reference list)
+            // vs a citation link (in text).
+            // Targets are usually the full title, while links are numbers like [1].
+            const childrenText = Array.isArray(children)
+              ? children.join("")
+              : String(children);
+            // Heuristic: inline citation text usually looks like a numeric marker
+            // rather than a full title. We treat the following as "inline":
+            //   "1", "[1]", "^1^", "[^1]" (with optional surrounding whitespace).
+            // This pattern matches either:
+            //   - a bracketed number: "[1]"
+            //   - a caret-style number: "1", "^1", "1^", "^1^"
+            // and ignores surrounding whitespace.
+            const inlineCitationPattern = /^\s*(?:\[\d+\]|\^?\d+\^?)\s*$/;
+            const isInline = inlineCitationPattern.test(childrenText);
+
+            return (
+              <CitationLink
+                href={hrefStr}
+                citations={citations}
+                id={!isInline ? `ref-${citationIndex + 1}` : undefined}
+              >
+                {children}
+              </CitationLink>
+            );
+          }
+
+          return (
+            <CitationLink href={hrefStr} citations={citations}>
+              {children}
+            </CitationLink>
+          );
+        }
+        // Otherwise fall back to regular Link
+        return (
+          <Link href={href} checkLinkCredibility={checkLinkCredibility}>
+            {children}
+          </Link>
+        );
+      },
       img: ({ src, alt }) => (
         <a href={src as string} target="_blank" rel="noopener noreferrer">
           <Image className="rounded" src={src as string} alt={alt ?? ""} />
         </a>
       ),
     };
-  }, [checkLinkCredibility]);
+  }, [checkLinkCredibility, citations, citationMap]);
 
   const rehypePlugins = useMemo<NonNullable<ReactMarkdownOptions["rehypePlugins"]>>(() => {
     const plugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [[
