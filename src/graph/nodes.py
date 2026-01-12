@@ -829,9 +829,6 @@ def reporter_node(state: State, config: RunnableConfig):
     # Get collected citations for the report
     citations = state.get("citations", [])
 
-    # Add a reminder about the new report format, citation style, and table usage
-    citation_instruction = "IMPORTANT: Structure your report according to the format in the prompt. Remember to include:\n\n1. Key Points - A bulleted list of the most important findings\n2. Overview - A brief introduction to the topic\n3. Detailed Analysis - Organized into logical sections\n4. Survey Note (optional) - For more comprehensive reports\n5. References - List all references at the end\n\nFor citations, please follow these rules:\n1. Use inline citations [n] in the text where appropriate.\n2. The number n must correspond to the source index in the 'Available Source References' list provided below.\n3. Make the inline citation a link to the reference at the bottom using the format `[[n]](#ref-n)`.\n4. In the References section at the end, list the sources using the format `[[n]](#citation-target-n) **[Title](URL)**`.\n\nPRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options. Structure tables with clear headers and aligned columns. Example table format:\n\n| Feature | Description | Pros | Cons |\n|---------|-------------|------|------|\n| Feature 1 | Description 1 | Pros 1 | Cons 1 |\n| Feature 2 | Description 2 | Pros 2 | Cons 2 |"
-    
     # If we have collected citations, provide them to the reporter
     if citations:
         citation_list = "\n\n## Available Source References (use these in References section):\n\n"
@@ -846,15 +843,14 @@ def reporter_node(state: State, config: RunnableConfig):
                 citation_list += f"   - Summary: {desc_truncated}...\n"
             citation_list += "\n"
         
-        citation_instruction += citation_list
         logger.info(f"Providing {len(citations)} collected citations to reporter")
-    
-    invoke_messages.append(
-        HumanMessage(
-            content=citation_instruction,
-            name="system",
+
+        invoke_messages.append(
+            HumanMessage(
+                content=citation_list,
+                name="system",
+            )
         )
-    )
 
     observation_messages = []
     for observation in observations:
