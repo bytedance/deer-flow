@@ -377,6 +377,7 @@ Structure your report in the following format:
 - The number n must correspond to the source index in the provided 'Available Source References' list.
 - Make the inline citation a link to the reference at the bottom using the format `[[n]](#ref-n)`.
 - In the References section at the end, list the sources using the format `[[n]](#citation-target-n) **[Title](URL)**`.
+- PRIORITIZE USING MARKDOWN TABLES for data presentation and comparison. Use tables whenever presenting comparative data, statistics, features, or options.
 - Include images using `![Image Description](image_url)`. The images should be in the middle of the report, not at the end or separate section.
 - The included images should **only** be from the information gathered **from the previous steps**. **Never** include images that are not from the previous steps
 - Directly output the Markdown raw content without "```markdown" or "```".
