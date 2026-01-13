@@ -16,7 +16,10 @@ logging.basicConfig(
 
 def enable_debug_logging():
     """Enable debug level logging for more detailed execution information."""
+    # Must also set root logger level to allow DEBUG messages to propagate
     logging.getLogger("src").setLevel(logging.DEBUG)
+    logging.getLogger("langchain").setLevel(logging.DEBUG)
+    logging.getLogger("langgraph").setLevel(logging.DEBUG)
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,7 @@ async def run_agent_workflow_async(
     enable_clarification: bool | None = None,
     max_clarification_rounds: int | None = None,
     initial_state: dict | None = None,
+    locale: str | None = None,
 ):
     """Run the agent workflow asynchronously with the given user input.
 
@@ -46,6 +50,7 @@ async def run_agent_workflow_async(
         enable_clarification: If None, use default from State class (False); if True/False, override
         max_clarification_rounds: Maximum number of clarification rounds allowed
         initial_state: Initial state to use (for recursive calls during clarification)
+        locale: The locale setting (e.g., 'en-US', 'zh-CN')
 
     Returns:
         The final state after the workflow completes
@@ -60,14 +65,12 @@ async def run_agent_workflow_async(
 
     # Use provided initial_state or create a new one
     if initial_state is None:
-        initial_state = {
-            # Runtime Variables
-            "messages": [{"role": "user", "content": user_input}],
-            "auto_accepted_plan": True,
-            "enable_background_investigation": enable_background_investigation,
-        }
-        initial_state["research_topic"] = user_input
-        initial_state["clarified_research_topic"] = user_input
+        # Runtime Variables
+        initial_state = {"messages": [{"role": "user", "content": user_input}],
+                         "auto_accepted_plan": True,
+                         "enable_background_investigation": enable_background_investigation,
+                         "research_topic": user_input,
+                         "clarified_research_topic": user_input}
 
         # Only set clarification parameter if explicitly provided
         # If None, State class default will be used (enable_clarification=False)
@@ -76,6 +79,9 @@ async def run_agent_workflow_async(
 
         if max_clarification_rounds is not None:
             initial_state["max_clarification_rounds"] = max_clarification_rounds
+
+        if locale is not None:
+            initial_state["locale"] = locale
 
     config = {
         "configurable": {
@@ -160,6 +166,7 @@ async def run_agent_workflow_async(
                 enable_clarification=enable_clarification,
                 max_clarification_rounds=max_clarification_rounds,
                 initial_state=current_state,
+                locale=locale,
             )
 
     logger.info("Async workflow completed successfully")

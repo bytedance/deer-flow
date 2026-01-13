@@ -24,6 +24,7 @@ export const useStore = create<{
   researchPlanIds: Map<string, string>;
   researchReportIds: Map<string, string>;
   researchActivityIds: Map<string, string[]>;
+  researchQueries: Map<string, string>;
   ongoingResearchId: string | null;
   openResearchId: string | null;
 
@@ -42,6 +43,7 @@ export const useStore = create<{
   researchPlanIds: new Map<string, string>(),
   researchReportIds: new Map<string, string>(),
   researchActivityIds: new Map<string, string[]>(),
+  researchQueries: new Map<string, string>(),
   ongoingResearchId: null,
   openResearchId: null,
 
@@ -238,7 +240,8 @@ function appendMessage(message: Message) {
   if (
     message.agent === "coder" ||
     message.agent === "reporter" ||
-    message.agent === "researcher"
+    message.agent === "researcher" ||
+    message.agent === "analyst"
   ) {
     if (!getOngoingResearchId()) {
       const id = message.id;
@@ -267,11 +270,17 @@ function getOngoingResearchId() {
 
 function appendResearch(researchId: string) {
   let planMessage: Message | undefined;
+  let userQuery: string | undefined;
   const reversedMessageIds = [...useStore.getState().messageIds].reverse();
   for (const messageId of reversedMessageIds) {
     const message = getMessage(messageId);
-    if (message?.agent === "planner") {
+    if (!planMessage && message?.agent === "planner") {
       planMessage = message;
+    }
+    if (!userQuery && message?.role === "user") {
+      userQuery = message.content;
+    }
+    if (planMessage && userQuery) {
       break;
     }
   }
@@ -287,6 +296,10 @@ function appendResearch(researchId: string) {
     researchActivityIds: new Map(useStore.getState().researchActivityIds).set(
       researchId,
       messageIds,
+    ),
+    researchQueries: new Map(useStore.getState().researchQueries).set(
+      researchId,
+      userQuery ?? "",
     ),
   });
 }
@@ -394,6 +407,10 @@ export function useResearchMessage(researchId: string) {
   );
 }
 
+export function getResearchQuery(researchId: string): string {
+  return useStore.getState().researchQueries.get(researchId) ?? "";
+}
+
 export function useMessage(messageId: string | null | undefined) {
   return useStore(
     useShallow((state) =>
@@ -414,16 +431,25 @@ export function useRenderableMessageIds() {
       return state.messageIds.filter((messageId) => {
         const message = state.messages.get(messageId);
         if (!message) return false;
-        
+
         // Only include messages that match MessageListItem rendering conditions
         // These are the same conditions checked in MessageListItem component
-        return (
-          message.role === "user" ||
-          message.agent === "coordinator" ||
-          message.agent === "planner" ||
-          message.agent === "podcast" ||
-          state.researchIds.includes(messageId) // startOfResearch condition
-        );
+        const isPlanner = message.agent === "planner";
+        const isPodcast = message.agent === "podcast";
+        const isStartOfResearch = state.researchIds.includes(messageId);
+
+        // Planner, podcast, and research cards always render (they have their own content)
+        if (isPlanner || isPodcast || isStartOfResearch) {
+          return true;
+        }
+
+        // For user and coordinator messages, only include if they have content
+        // This prevents empty dividers from appearing in the UI
+        if (message.role === "user" || message.agent === "coordinator") {
+          return !!message.content;
+        }
+
+        return false;
       });
     }),
   );

@@ -9,6 +9,19 @@ import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
+# Load environment variables from .env file FIRST
+# This must happen before checking DEBUG environment variable
+from dotenv import load_dotenv
+load_dotenv()
+
+# Configure logging based on DEBUG environment variable
+# This must happen early, before other modules are imported
+_debug_mode = os.getenv("DEBUG", "").lower() in ("true", "1", "yes")
+if _debug_mode:
+    logging.getLogger("src").setLevel(logging.DEBUG)
+    logging.getLogger("langchain").setLevel(logging.DEBUG)
+    logging.getLogger("langgraph").setLevel(logging.DEBUG)
+
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -17,6 +30,7 @@ from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from src.config.configuration import get_recursion_limit
@@ -34,6 +48,7 @@ from src.podcast.graph.builder import build_graph as build_podcast_graph
 from src.ppt.graph.builder import build_graph as build_ppt_graph
 from src.prompt_enhancer.graph.builder import build_graph as build_prompt_enhancer_graph
 from src.prose.graph.builder import build_graph as build_prose_graph
+from src.eval import ReportEvaluator
 from src.rag.builder import build_retriever
 from src.rag.milvus import load_examples as load_milvus_examples
 from src.rag.qdrant import load_examples as load_qdrant_examples
@@ -46,6 +61,7 @@ from src.server.chat_request import (
     GenerateProseRequest,
     TTSRequest,
 )
+from src.server.eval_request import EvaluateReportRequest, EvaluateReportResponse
 from src.server.config_request import ConfigResponse
 from src.server.mcp_request import MCPServerMetadataRequest, MCPServerMetadataResponse
 from src.server.mcp_utils import load_mcp_tools
@@ -945,6 +961,39 @@ async def generate_prose(request: GenerateProseRequest):
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
 
 
+@app.post("/api/report/evaluate", response_model=EvaluateReportResponse)
+async def evaluate_report(request: EvaluateReportRequest):
+    """Evaluate report quality using automated metrics and optionally LLM-as-Judge."""
+    try:
+        evaluator = ReportEvaluator(use_llm=request.use_llm)
+
+        if request.use_llm:
+            result = await evaluator.evaluate(
+                request.content, request.query, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result.metrics.to_dict(),
+                score=result.final_score,
+                grade=result.grade,
+                llm_evaluation=result.llm_evaluation.to_dict()
+                if result.llm_evaluation
+                else None,
+                summary=result.summary,
+            )
+        else:
+            result = evaluator.evaluate_metrics_only(
+                request.content, request.report_style or "default"
+            )
+            return EvaluateReportResponse(
+                metrics=result["metrics"],
+                score=result["score"],
+                grade=result["grade"],
+            )
+    except Exception as e:
+        logger.exception(f"Error occurred during report evaluation: {str(e)}")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_DETAIL)
+
+
 @app.post("/api/prompt/enhance")
 async def enhance_prompt(request: EnhancePromptRequest):
     try:
@@ -997,12 +1046,15 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
         )
 
     try:
-        # Set default timeout with a longer value for this endpoint
-        timeout = 300  # Default to 300 seconds for this endpoint
+        # Set default timeout for this endpoint (configurable via env)
+        timeout = get_int_env("MCP_DEFAULT_TIMEOUT_SECONDS", 60)
 
         # Use custom timeout from request if provided
         if request.timeout_seconds is not None:
             timeout = request.timeout_seconds
+
+        # Get sse_read_timeout from request if provided
+        sse_read_timeout = request.sse_read_timeout
 
         # Load tools from the MCP server using the utility function
         tools = await load_mcp_tools(
@@ -1013,6 +1065,7 @@ async def mcp_server_metadata(request: MCPServerMetadataRequest):
             env=request.env,
             headers=request.headers,
             timeout_seconds=timeout,
+            sse_read_timeout=sse_read_timeout,
         )
 
         # Create the response with tools

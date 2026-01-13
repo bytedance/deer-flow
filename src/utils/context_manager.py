@@ -1,7 +1,10 @@
-# src/utils/token_manager.py
+# src/utils/context_manager.py
 import copy
+import json
 import logging
 from typing import List
+
+from langgraph.runtime import Runtime 
 
 from langchain_core.messages import (
     AIMessage,
@@ -144,12 +147,13 @@ class ContextManager:
         """
         return self.count_tokens(messages) > self.token_limit
 
-    def compress_messages(self, state: dict) -> List[BaseMessage]:
+    def compress_messages(self, state: dict, runtime: Runtime | None = None) -> dict:
         """
         Compress messages to fit within token limit
 
         Args:
             state: state with original messages
+            runtime: Optional runtime parameter (not used but required for middleware compatibility)
 
         Returns:
             Compressed state with compressed messages
@@ -326,3 +330,4 @@ def validate_message_content(messages: List[BaseMessage], max_content_length: in
             validated.append(msg)
     
     return validated
+

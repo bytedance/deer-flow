@@ -99,6 +99,8 @@ export function AddMCPServerDialog({
           transport: server.transport,
           name: key,
           url: server.url,
+          env: server.env,
+          headers: server.headers,
         };
         addingServers.push(metadata);
       }

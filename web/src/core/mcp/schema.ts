@@ -47,6 +47,25 @@ export const MCPConfigSchema = z.object({
               message: "`env` must be an object of key-value pairs",
             })
             .optional(),
+          headers: z
+            .record(z.string(), {
+              message: "`headers` must be an object of key-value pairs",
+            })
+            .optional(),
+          timeout: z
+            .number({
+              message: "`timeout` must be a number",
+            })
+            .int()
+            .positive()
+            .optional(),
+          sse_read_timeout: z
+            .number({
+              message: "`sse_read_timeout` must be a number",
+            })
+            .int()
+            .positive()
+            .optional(),
           transport: z
             .enum(["sse", "streamable_http"], {
               message: "transport must be either sse or streamable_http"
