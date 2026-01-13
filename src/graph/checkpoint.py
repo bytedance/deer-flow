@@ -248,10 +248,13 @@ class ChatStreamManager:
             current_timestamp = datetime.now()
 
             if existing_document:
-                # Update existing conversation with new messages
+                # Append new messages to existing conversation
                 update_result = collection.update_one(
                     {"thread_id": thread_id},
-                    {"$set": {"messages": messages, "ts": current_timestamp}},
+                    {
+                        "$push": {"messages": {"$each": messages}},
+                        "$set": {"ts": current_timestamp}
+                    },
                 )
                 self.logger.info(
                     f"Updated conversation for thread {thread_id}: "
@@ -290,11 +293,11 @@ class ChatStreamManager:
                 messages_json = json.dumps(messages)
 
                 if existing_record:
-                    # Update existing conversation with new messages
+                    # Append new messages to existing conversation
                     cursor.execute(
                         """
-                        UPDATE chat_streams 
-                        SET messages = %s, ts = %s 
+                        UPDATE chat_streams
+                        SET messages = messages || %s::jsonb, ts = %s
                         WHERE thread_id = %s
                         """,
                         (messages_json, current_timestamp, thread_id),
