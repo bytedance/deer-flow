@@ -9,7 +9,7 @@ import os
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -88,16 +88,16 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app):
     """
-    应用生命周期管理器
-    - 启动时：注册 asyncio 异常处理器并初始化全局连接池
-    - 关闭时：清理全局连接池
+    Application lifecycle manager
+    - Startup: Register asyncio exception handler and initialize global connection pools
+    - Shutdown: Clean up global connection pools
     """
     global _pg_pool, _pg_checkpointer, _mongo_client, _mongo_checkpointer
 
     # ========== STARTUP ==========
     try:
-        loop = asyncio.get_running_loop()
-        logger.info("Asyncio exception handler registered")
+        asyncio.get_running_loop()
+
     except RuntimeError as e:
         logger.warning(f"Could not register asyncio exception handler: {e}")
 
@@ -112,11 +112,12 @@ async def lifespan(app):
         if checkpoint_url.startswith("postgresql://"):
             pool_min_size = get_int_env("PG_POOL_MIN_SIZE", 5)
             pool_max_size = get_int_env("PG_POOL_MAX_SIZE", 20)
-            pool_timeout = float(get_int_env("PG_POOL_TIMEOUT", 60))
+            pool_timeout = get_int_env("PG_POOL_TIMEOUT", 60)
 
             connection_kwargs = {
                 "autocommit": True,
                 "prepare_threshold": 0,
+                "row_factory": dict_row,
             }
 
             logger.info(
@@ -142,6 +143,10 @@ async def lifespan(app):
                 logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
                 _pg_pool = None
                 _pg_checkpointer = None
+                raise RuntimeError(
+                    "Checkpoint persistence is explicitly configured with PostgreSQL, "
+                    "but initialization failed. Application will not start."
+                ) from e
 
         # Initialize MongoDB connection pool
         elif checkpoint_url.startswith("mongodb://"):
@@ -170,12 +175,10 @@ async def lifespan(app):
                 logger.info("Global MongoDB connection pool initialized successfully")
             except ImportError:
                 logger.error("motor package not installed. Please install it with: pip install motor")
-                _mongo_client = None
-                _mongo_checkpointer = None
+                raise RuntimeError("MongoDB checkpoint persistence is configured but the 'motor' package is not installed. Aborting startup.")
             except Exception as e:
                 logger.error(f"Failed to initialize MongoDB connection pool: {e}")
-                _mongo_client = None
-                _mongo_checkpointer = None
+                raise RuntimeError(f"MongoDB checkpoint persistence is configured but could not be initialized: {e}")
 
     # ========== YIELD - Application runs here ==========
     yield
@@ -185,16 +188,12 @@ async def lifespan(app):
     if _pg_pool:
         logger.info("Closing global PostgreSQL connection pool")
         await _pg_pool.close()
-        _pg_pool = None
-        _pg_checkpointer = None
         logger.info("Global PostgreSQL connection pool closed")
 
     # Close MongoDB connection
     if _mongo_client:
         logger.info("Closing global MongoDB connection")
         _mongo_client.close()
-        _mongo_client = None
-        _mongo_checkpointer = None
         logger.info("Global MongoDB connection closed")
 
 
@@ -258,6 +257,7 @@ async def chat_stream(request: ChatRequest):
             request.interrupt_feedback,
             request.mcp_settings if mcp_enabled else {},
             request.enable_background_investigation,
+            request.enable_web_search,
             request.report_style,
             request.enable_deep_thinking,
             request.enable_clarification,
@@ -643,6 +643,7 @@ async def _astream_workflow_generator(
     interrupt_feedback: str,
     mcp_settings: dict,
     enable_background_investigation: bool,
+    enable_web_search: bool,
     report_style: ReportStyle,
     enable_deep_thinking: bool,
     enable_clarification: bool,
@@ -720,6 +721,7 @@ async def _astream_workflow_generator(
         "max_step_num": max_step_num,
         "max_search_results": max_search_results,
         "mcp_settings": mcp_settings,
+        "enable_web_search": enable_web_search,
         "report_style": report_style.value,
         "enable_deep_thinking": enable_deep_thinking,
         "interrupt_before_tools": interrupt_before_tools,
@@ -1043,6 +1045,74 @@ async def rag_resources(request: Annotated[RAGResourceRequest, Query()]):
     if retriever:
         return RAGResourcesResponse(resources=retriever.list_resources(request.query))
     return RAGResourcesResponse(resources=[])
+
+
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_EXTENSIONS = {".md", ".txt"}
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent path traversal attacks."""
+    # Extract only the base filename, removing any path components
+    basename = os.path.basename(filename)
+    # Remove any null bytes or other dangerous characters
+    sanitized = basename.replace("\x00", "").strip()
+    # Ensure filename is not empty after sanitization
+    if not sanitized or sanitized in (".", ".."):
+        return "unnamed_file"
+    return sanitized
+
+
+@app.post("/api/rag/upload", response_model=Resource)
+async def upload_rag_resource(file: UploadFile):
+    # Validate filename exists
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required for upload")
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = _sanitize_filename(file.filename)
+
+    # Validate file extension
+    _, ext = os.path.splitext(safe_filename.lower())
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed.",
+        )
+
+    # Read content with size limit check
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Cannot upload an empty file")
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB.",
+        )
+
+    retriever = build_retriever()
+    if not retriever:
+        raise HTTPException(status_code=500, detail="RAG provider not configured")
+    try:
+        return retriever.ingest_file(content, safe_filename)
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501, detail="Upload not supported by current RAG provider"
+        )
+    except ValueError as exc:
+        # Invalid user input or unsupported file content; treat as a client error
+        logger.warning("Invalid RAG resource upload: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid RAG resource. Please check the file and try again.",
+        )
+    except RuntimeError as exc:
+        # Internal error during ingestion; log and return a generic server error
+        logger.exception("Runtime error while ingesting RAG resource: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to ingest RAG resource due to an internal error.",
+        )
 
 
 @app.get("/api/config", response_model=ConfigResponse)

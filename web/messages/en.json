@@ -32,6 +32,17 @@
     "addNewMCPServers": "Add New MCP Servers",
     "mcpConfigDescription": "DeerFlow uses the standard JSON MCP config to create a new server.",
     "pasteConfigBelow": "Paste your config below and click \"Add\" to add new servers.",
+    "rag": {
+      "title": "Resources",
+      "description": "Manage your knowledge base resources here. Upload markdown or text files to be indexed for retrieval.",
+      "upload": "Upload",
+      "uploading": "Uploading...",
+      "uploadSuccess": "File uploaded successfully",
+      "uploadFailed": "Failed to upload file",
+      "emptyFile": "Cannot upload an empty file",
+      "loading": "Loading resources...",
+      "noResources": "No resources found. Upload a file to get started."
+    },
     "add": "Add",
     "general": {
       "title": "General",
@@ -44,7 +55,9 @@
       "maxStepsOfPlan": "Max steps of a research plan",
       "maxStepsDescription": "By default, each research plan has 3 steps.",
       "maxSearchResults": "Max search results",
-      "maxSearchResultsDescription": "By default, each search step has 3 results."
+      "maxSearchResultsDescription": "By default, each search step has 3 results.",
+      "enableWebSearch": "Enable web search",
+      "enableWebSearchDescription": "When disabled, only local RAG knowledge base will be used. Useful for environments without internet access."
     },
     "mcp": {
       "title": "MCP Servers",
@@ -130,7 +143,13 @@
       "generatePodcast": "Generate podcast",
       "edit": "Edit",
       "copy": "Copy",
-      "downloadReport": "Download report as markdown",
+      "downloadReport": "Download report",
+      "downloadMarkdown": "Markdown (.md)",
+      "downloadHTML": "HTML (.html)",
+      "downloadPDF": "PDF (.pdf)",
+      "downloadWord": "Word (.docx)",
+      "downloadImage": "Image (.png)",
+      "exportFailed": "Export failed, please try again",
       "searchingFor": "Searching for",
       "reading": "Reading",
       "runningPythonCode": "Running Python code",

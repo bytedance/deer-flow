@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from functools import partial
-from typing import Any, Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -63,6 +63,15 @@ def handoff_after_clarification(
     return
 
 
+@tool
+def direct_response(
+    message: Annotated[str, "The response message to send directly to user."],
+    locale: Annotated[str, "The user's detected language locale (e.g., en-US, zh-CN)."],
+):
+    """Respond directly to user for greetings, small talk, or polite rejections. Do NOT use this for research questions - use handoff_to_planner instead."""
+    return
+
+
 def needs_clarification(state: dict) -> bool:
     """
     Check if clarification is needed based on current state.
@@ -109,13 +118,14 @@ def preserve_state_meta_fields(state: State) -> dict:
     }
 
 
-def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
+def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False, enable_web_search: bool = True) -> dict:
     """
     Validate and fix a plan to ensure it meets requirements.
 
     Args:
         plan: The plan dict to validate
         enforce_web_search: If True, ensure at least one step has need_search=true
+        enable_web_search: If False, skip web search enforcement (takes precedence)
 
     Returns:
         The validated/fixed plan dict
@@ -145,8 +155,9 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 
     # ============================================================
     # SECTION 2: Enforce web search requirements
+    # Skip enforcement if web search is disabled (enable_web_search=False takes precedence)
     # ============================================================
-    if enforce_web_search:
+    if enforce_web_search and enable_web_search:
         # Check if any step has need_search=true (only check dict steps)
         has_search_step = any(
             step.get("need_search", False) 
@@ -188,6 +199,12 @@ def validate_and_fix_plan(plan: dict, enforce_web_search: bool = False) -> dict:
 def background_investigation_node(state: State, config: RunnableConfig):
     logger.info("background investigation node is running.")
     configurable = Configuration.from_runnable_config(config)
+
+    # Background investigation relies on web search; skip entirely when web search is disabled
+    if not configurable.enable_web_search:
+        logger.info("Web search is disabled, skipping background investigation.")
+        return {"background_investigation_results": json.dumps([], ensure_ascii=False)}
+
     query = state.get("clarified_research_topic") or state.get("research_topic")
     background_investigation_results = []
     
@@ -348,7 +365,7 @@ def planner_node(
 
     # Validate and fix plan to ensure web search requirements are met
     if isinstance(curr_plan, dict):
-        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search)
+        curr_plan = validate_and_fix_plan(curr_plan, configurable.enforce_web_search, configurable.enable_web_search)
 
     if isinstance(curr_plan, dict) and curr_plan.get("has_enough_context"):
         logger.info("Planner response has enough context.")
@@ -471,7 +488,7 @@ def human_feedback_node(
         new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search)
+        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
     except (json.JSONDecodeError, AttributeError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
         if isinstance(current_plan, dict) and "content" in original_plan:
@@ -524,12 +541,12 @@ def coordinator_node(
         messages.append(
             {
                 "role": "system",
-                "content": "CRITICAL: Clarification is DISABLED. You MUST immediately call handoff_to_planner tool with the user's query as-is. Do NOT ask questions or mention needing more information.",
+                "content": "Clarification is DISABLED. For research questions, use handoff_to_planner. For greetings or small talk, use direct_response. Do NOT ask clarifying questions.",
             }
         )
 
-        # Only bind handoff_to_planner tool
-        tools = [handoff_to_planner]
+        # Bind both handoff_to_planner and direct_response tools
+        tools = [handoff_to_planner, direct_response]
         response = (
             get_llm_by_type(AGENT_LLM_MAP["coordinator"])
             .bind_tools(tools)
@@ -556,10 +573,23 @@ def coordinator_node(
                         if tool_args.get("research_topic"):
                             research_topic = tool_args.get("research_topic")
                         break
+                    elif tool_name == "direct_response":
+                        logger.info("Direct response to user (greeting/small talk)")
+                        goto = "__end__"
+                        # Append direct message to messages list instead of overwriting response
+                        if tool_args.get("message"):
+                            messages.append(AIMessage(content=tool_args.get("message"), name="coordinator"))
+                        break
 
             except Exception as e:
                 logger.error(f"Error processing tool calls: {e}")
                 goto = "planner"
+
+        # Do not return early - let code flow to unified return logic below
+        # Set clarification variables for legacy mode
+        clarification_rounds = 0
+        clarification_history = []
+        clarified_topic = research_topic
 
     # ============================================================
     # BRANCH 2: Clarification ENABLED (New Feature)
@@ -735,16 +765,19 @@ def coordinator_node(
             logger.error(f"Error processing tool calls: {e}")
             goto = "planner"
     else:
-        # No tool calls detected - fallback to planner instead of ending
-        logger.warning(
-            "LLM didn't call any tools. This may indicate tool calling issues with the model. "
-            "Falling back to planner to ensure research proceeds."
-        )
-        # Log full response for debugging
-        logger.debug(f"Coordinator response content: {response.content}")
-        logger.debug(f"Coordinator response object: {response}")
-        # Fallback to planner to ensure workflow continues
-        goto = "planner"
+        # No tool calls detected
+        if enable_clarification:
+            # BRANCH 2: Fallback to planner to ensure research proceeds
+            logger.warning(
+                "LLM didn't call any tools. This may indicate tool calling issues with the model. "
+                "Falling back to planner to ensure research proceeds."
+            )
+            logger.debug(f"Coordinator response content: {response.content}")
+            logger.debug(f"Coordinator response object: {response}")
+            goto = "planner"
+        else:
+            # BRANCH 1: No tool calls means end workflow gracefully (e.g., greeting handled)
+            logger.info("No tool calls in legacy mode - ending workflow gracefully")
 
     # Apply background_investigation routing if enabled (unified logic)
     if goto == "planner" and state.get("enable_background_investigation"):
@@ -1047,7 +1080,8 @@ async def _execute_agent_step(
     if should_validate:
         # Check if enforcement is enabled in configuration
         configurable = Configuration.from_runnable_config(config) if config else Configuration()
-        if configurable.enforce_researcher_search:
+        # Skip validation if web search is disabled (user intentionally disabled it)
+        if configurable.enforce_researcher_search and configurable.enable_web_search:
             web_search_validated = validate_web_search_usage(result["messages"], agent_name)
             
             # If web search was not used, add a warning to the response
@@ -1185,15 +1219,30 @@ async def researcher_node(
     configurable = Configuration.from_runnable_config(config)
     logger.debug(f"[researcher_node] Max search results: {configurable.max_search_results}")
     
-    tools = [get_web_search_tool(configurable.max_search_results), crawl_tool]
+    # Build tools list based on configuration
+    tools = []
+    
+    # Add web search and crawl tools only if web search is enabled
+    if configurable.enable_web_search:
+        tools.extend([get_web_search_tool(configurable.max_search_results), crawl_tool])
+    else:
+        logger.info("[researcher_node] Web search is disabled, using only local RAG")
+    
+    # Add retriever tool if resources are available (always add, higher priority)
     retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         logger.debug(f"[researcher_node] Adding retriever tool to tools list")
         tools.insert(0, retriever_tool)
     
+    # Warn if no tools are available
+    if not tools:
+        logger.warning("[researcher_node] No tools available (web search disabled, no resources). "
+                       "Researcher will operate in pure reasoning mode.")
+    
     logger.info(f"[researcher_node] Researcher tools count: {len(tools)}")
     logger.debug(f"[researcher_node] Researcher tools: {[tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]}")
-    logger.info(f"[researcher_node] enforce_researcher_search is set to: {configurable.enforce_researcher_search}")
+    logger.info(f"[researcher_node] enforce_researcher_search={configurable.enforce_researcher_search}, "
+                f"enable_web_search={configurable.enable_web_search}")
     
     return await _setup_and_execute_agent_step(
         state,

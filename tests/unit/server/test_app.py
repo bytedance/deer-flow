@@ -103,6 +103,7 @@ async def test_astream_workflow_generator_preserves_clarification_history():
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=True,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=True,
@@ -462,6 +463,111 @@ class TestRAGEndpoints:
         assert response.status_code == 200
         assert response.json()["resources"] == []
 
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_success(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.return_value = {
+            "uri": "milvus://test/file.md",
+            "title": "Test File",
+            "description": "Uploaded file",
+        }
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 200
+        assert response.json()["title"] == "Test File"
+        assert response.json()["uri"] == "milvus://test/file.md"
+        mock_retriever.ingest_file.assert_called_once()
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_no_retriever(self, mock_build_retriever, client):
+        mock_build_retriever.return_value = None
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 500
+        assert "RAG provider not configured" in response.json()["detail"]
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_not_implemented(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.side_effect = NotImplementedError
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 501
+        assert "Upload not supported" in response.json()["detail"]
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_value_error(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.side_effect = ValueError("File is not valid UTF-8")
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.txt", b"\x80\x81\x82", "text/plain")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 400
+        assert "Invalid RAG resource" in response.json()["detail"]
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_runtime_error(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.side_effect = RuntimeError("Failed to insert into Milvus")
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("test.md", b"# Test content", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 500
+        assert "Failed to ingest RAG resource" in response.json()["detail"]
+
+    def test_upload_rag_resource_invalid_file_type(self, client):
+        files = {"file": ("test.exe", b"binary content", "application/octet-stream")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 400
+        assert "Invalid file type" in response.json()["detail"]
+
+    def test_upload_rag_resource_empty_file(self, client):
+        files = {"file": ("test.md", b"", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 400
+        assert "empty file" in response.json()["detail"]
+
+    @patch("src.server.app.MAX_UPLOAD_SIZE_BYTES", 10)
+    def test_upload_rag_resource_file_too_large(self, client):
+        files = {"file": ("test.md", b"x" * 100, "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 413
+        assert "File too large" in response.json()["detail"]
+
+    @patch("src.server.app.build_retriever")
+    def test_upload_rag_resource_path_traversal_sanitized(self, mock_build_retriever, client):
+        mock_retriever = MagicMock()
+        mock_retriever.ingest_file.return_value = {
+            "uri": "milvus://test/file.md",
+            "title": "Test File",
+            "description": "Uploaded file",
+        }
+        mock_build_retriever.return_value = mock_retriever
+
+        files = {"file": ("../../../etc/passwd.md", b"# Test", "text/markdown")}
+        response = client.post("/api/rag/upload", files=files)
+
+        assert response.status_code == 200
+        # Verify the filename was sanitized (only basename used)
+        mock_retriever.ingest_file.assert_called_once()
+        call_args = mock_retriever.ingest_file.call_args
+        assert call_args[0][1] == "passwd.md"
+
 
 class TestChatStreamEndpoint:
     @patch("src.server.app.graph")
@@ -608,6 +714,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -649,6 +756,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="edit_plan",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -685,6 +793,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -723,6 +832,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -766,6 +876,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -809,6 +920,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,
@@ -849,6 +961,7 @@ class TestAstreamWorkflowGenerator:
             interrupt_feedback="",
             mcp_settings={},
             enable_background_investigation=False,
+            enable_web_search=True,
             report_style=ReportStyle.ACADEMIC,
             enable_deep_thinking=False,
             enable_clarification=False,

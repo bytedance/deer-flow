@@ -772,7 +772,8 @@ def test_coordinator_node_no_tool_calls(
     patch_handoff_to_planner,
     patch_logger,
 ):
-    # No tool calls, should fallback to planner (fix for issue #535)
+    # No tool calls when clarification disabled - should end workflow (fix for issue #733)
+    # When LLM doesn't call any tools in BRANCH 1, workflow ends gracefully
     with (
         patch("src.graph.nodes.AGENT_LLM_MAP", {"coordinator": "basic"}),
         patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
@@ -783,8 +784,8 @@ def test_coordinator_node_no_tool_calls(
         mock_get_llm.return_value = mock_llm
 
         result = coordinator_node(mock_state_coordinator, MagicMock())
-        # Should fallback to planner instead of __end__ to ensure workflow continues
-        assert result.goto == "planner"
+        # With direct_response tool available, no tool calls means end workflow
+        assert result.goto == "__end__"
         assert result.update["locale"] == "en-US"
         assert result.update["resources"] == ["resource1", "resource2"]
 
@@ -1704,7 +1705,7 @@ def test_coordinator_tools_with_clarification_enabled(mock_get_llm):
 
 @patch("src.graph.nodes.get_llm_by_type")
 def test_coordinator_tools_with_clarification_disabled(mock_get_llm):
-    """Test that coordinator binds only one tool when clarification is disabled."""
+    """Test that coordinator binds two tools when clarification is disabled (fix for issue #733)."""
     # Mock LLM response with tool call
     mock_llm = MagicMock()
     mock_response = MagicMock()
@@ -1736,9 +1737,11 @@ def test_coordinator_tools_with_clarification_disabled(mock_get_llm):
     assert mock_llm.bind_tools.called
     bound_tools = mock_llm.bind_tools.call_args[0][0]
 
-    # Should bind only 1 tool when clarification is disabled
-    assert len(bound_tools) == 1
-    assert bound_tools[0].name == "handoff_to_planner"
+    # Should bind 2 tools when clarification is disabled: handoff_to_planner and direct_response
+    assert len(bound_tools) == 2
+    tool_names = {tool.name for tool in bound_tools}
+    assert "handoff_to_planner" in tool_names
+    assert "direct_response" in tool_names
 
 
 @patch("src.graph.nodes.get_llm_by_type")
