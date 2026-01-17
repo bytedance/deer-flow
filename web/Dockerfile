@@ -1,6 +1,6 @@
 ##### DEPENDENCIES
 
-FROM node:20-alpine AS deps
+FROM node:20.20.0-alpine AS deps
 RUN apk add --no-cache libc6-compat openssl
 WORKDIR /app
 
@@ -18,7 +18,7 @@ RUN \
 
 ##### BUILDER
 
-FROM node:20-alpine AS builder
+FROM node:20.20.0-alpine AS builder
 WORKDIR /app
 ARG NEXT_PUBLIC_API_URL
 COPY --from=deps /app/node_modules ./node_modules
