@@ -63,6 +63,9 @@ class Configuration:
     interrupt_before_tools: list[str] = field(
         default_factory=list
     )  # List of tool names to interrupt before execution
+    enable_recursion_fallback: bool = (
+        True  # Enable graceful fallback when recursion limit is reached
+    )
 
     @classmethod
     def from_runnable_config(
