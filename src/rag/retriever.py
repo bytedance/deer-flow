@@ -67,7 +67,18 @@ class Retriever(abc.ABC):
     @abc.abstractmethod
     def list_resources(self, query: str | None = None) -> list[Resource]:
         """
-        List resources from the rag provider.
+        List resources from the rag provider (synchronous version).
+        """
+        pass
+
+    @abc.abstractmethod
+    async def list_resources_async(self, query: str | None = None) -> list[Resource]:
+        """
+        List resources from the rag provider (asynchronous version).
+        
+        This method should be implemented by concrete retriever classes to provide
+        non-blocking I/O operations. The default implementation can use asyncio.to_thread()
+        to wrap the synchronous version if truly async I/O is not available.
         """
         pass
 
@@ -76,7 +87,20 @@ class Retriever(abc.ABC):
         self, query: str, resources: list[Resource] = []
     ) -> list[Document]:
         """
-        Query relevant documents from the resources.
+        Query relevant documents from the resources (synchronous version).
+        """
+        pass
+
+    @abc.abstractmethod
+    async def query_relevant_documents_async(
+        self, query: str, resources: list[Resource] = []
+    ) -> list[Document]:
+        """
+        Query relevant documents from the resources (asynchronous version).
+        
+        This method should be implemented by concrete retriever classes to provide
+        non-blocking I/O operations. The default implementation can use asyncio.to_thread()
+        to wrap the synchronous version if truly async I/O is not available.
         """
         pass
 

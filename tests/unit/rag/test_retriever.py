@@ -56,7 +56,13 @@ def test_retriever_abstract_methods():
         def list_resources(self, query=None):
             return [Resource(uri="uri", title="title")]
 
+        async def list_resources_async(self, query=None):
+            return [Resource(uri="uri", title="title")]
+
         def query_relevant_documents(self, query, resources=[]):
+            return [Document(id="id", chunks=[])]
+
+        async def query_relevant_documents_async(self, query, resources=[]):
             return [Document(id="id", chunks=[])]
 
     retriever = DummyRetriever()
@@ -71,3 +77,34 @@ def test_retriever_abstract_methods():
 def test_retriever_cannot_instantiate():
     with pytest.raises(TypeError):
         Retriever()
+
+
+@pytest.mark.asyncio
+async def test_retriever_async_methods():
+    """Test that async methods work correctly in DummyRetriever."""
+    class DummyRetriever(Retriever):
+        def list_resources(self, query=None):
+            return [Resource(uri="uri", title="title")]
+
+        async def list_resources_async(self, query=None):
+            return [Resource(uri="uri_async", title="title_async")]
+
+        def query_relevant_documents(self, query, resources=[]):
+            return [Document(id="id", chunks=[])]
+
+        async def query_relevant_documents_async(self, query, resources=[]):
+            return [Document(id="id_async", chunks=[])]
+
+    retriever = DummyRetriever()
+    
+    # Test async list_resources
+    resources = await retriever.list_resources_async()
+    assert isinstance(resources, list)
+    assert isinstance(resources[0], Resource)
+    assert resources[0].uri == "uri_async"
+    
+    # Test async query_relevant_documents
+    docs = await retriever.query_relevant_documents_async("query", resources)
+    assert isinstance(docs, list)
+    assert isinstance(docs[0], Document)
+    assert docs[0].id == "id_async"

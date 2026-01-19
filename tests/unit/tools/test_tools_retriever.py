@@ -66,47 +66,52 @@ async def test_retriever_tool_arun():
     mock_retriever = Mock(spec=Retriever)
     chunk = Chunk(content="async content", similarity=0.8)
     doc = Document(id="doc2", chunks=[chunk])
-    mock_retriever.query_relevant_documents.return_value = [doc]
+    
+    # Mock the async method
+    async def mock_async_query(*args, **kwargs):
+        return [doc]
+    
+    mock_retriever.query_relevant_documents_async = mock_async_query
 
     resources = [Resource(uri="test://uri", title="Test")]
     tool = RetrieverTool(retriever=mock_retriever, resources=resources)
 
     mock_run_manager = Mock(spec=AsyncCallbackManagerForToolRun)
-    mock_sync_manager = Mock(spec=CallbackManagerForToolRun)
-    mock_run_manager.get_sync.return_value = mock_sync_manager
 
     result = await tool._arun("async keywords", mock_run_manager)
 
-    mock_run_manager.get_sync.assert_called_once()
     assert isinstance(result, list)
     assert len(result) == 1
     assert result[0] == doc.to_dict()
 
 
+@pytest.mark.asyncio
 @patch("src.tools.retriever.build_retriever")
-def test_get_retriever_tool_success(mock_build_retriever):
+async def test_get_retriever_tool_success(mock_build_retriever):
     mock_retriever = Mock(spec=Retriever)
     mock_build_retriever.return_value = mock_retriever
 
     resources = [Resource(uri="test://uri", title="Test")]
-    tool = get_retriever_tool(resources)
+    tool = await get_retriever_tool(resources)
 
     assert isinstance(tool, RetrieverTool)
     assert tool.retriever == mock_retriever
     assert tool.resources == resources
 
 
-def test_get_retriever_tool_empty_resources():
-    result = get_retriever_tool([])
+@pytest.mark.asyncio
+async def test_get_retriever_tool_empty_resources():
+    result = await get_retriever_tool([])
     assert result is None
 
 
+@pytest.mark.asyncio
 @patch("src.tools.retriever.build_retriever")
-def test_get_retriever_tool_no_retriever(mock_build_retriever):
+async def test_get_retriever_tool_no_retriever(mock_build_retriever):
     mock_build_retriever.return_value = None
 
     resources = [Resource(uri="test://uri", title="Test")]
-    result = get_retriever_tool(resources)
+    result = await get_retriever_tool(resources)
 
     assert result is None
 

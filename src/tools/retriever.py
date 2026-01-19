@@ -47,10 +47,18 @@ class RetrieverTool(BaseTool):
         keywords: str,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
     ) -> list[Document]:
-        return self._run(keywords, run_manager.get_sync())
+        logger.info(
+            f"Retriever tool query: {keywords}", extra={"resources": self.resources}
+        )
+        documents = await self.retriever.query_relevant_documents_async(
+            keywords, self.resources
+        )
+        if not documents:
+            return "No results found from the local knowledge base."
+        return [doc.to_dict() for doc in documents]
 
 
-def get_retriever_tool(resources: List[Resource]) -> RetrieverTool | None:
+async def get_retriever_tool(resources: List[Resource]) -> RetrieverTool | None:
     if not resources:
         return None
     logger.info(f"create retriever tool: {SELECTED_RAG_PROVIDER}")

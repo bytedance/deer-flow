@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -255,6 +256,17 @@ class VikingDBKnowledgeBaseProvider(Retriever):
 
         return list(all_documents.values())
 
+    async def query_relevant_documents_async(
+        self, query: str, resources: list[Resource] = []
+    ) -> list[Document]:
+        """
+        Asynchronous version of query_relevant_documents.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.query_relevant_documents, query, resources
+        )
+
     def list_resources(self, query: str | None = None) -> list[Resource]:
         """
         List resources (knowledge bases) from the knowledge base service
@@ -290,6 +302,13 @@ class VikingDBKnowledgeBaseProvider(Retriever):
             resources.append(resource)
 
         return resources
+
+    async def list_resources_async(self, query: str | None = None) -> list[Resource]:
+        """
+        Asynchronous version of list_resources.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self.list_resources, query)
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
