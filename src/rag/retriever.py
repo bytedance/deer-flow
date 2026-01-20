@@ -76,10 +76,9 @@ class Retriever(abc.ABC):
         """
         List resources from the rag provider (asynchronous version).
         
-        This method should be implemented by concrete retriever classes to provide
-        non-blocking I/O operations. Implementations should provide non-blocking I/O
-        operations where possible, or use asyncio.to_thread() to wrap the synchronous
-        version if truly async I/O is not available.
+        Implementations should choose between:
+        - Providing native async I/O operations for true non-blocking behavior
+        - Using asyncio.to_thread() to wrap the synchronous version if async I/O is not available
         """
         pass
 
@@ -99,10 +98,9 @@ class Retriever(abc.ABC):
         """
         Query relevant documents from the resources (asynchronous version).
         
-        This method should be implemented by concrete retriever classes to provide
-        non-blocking I/O operations. Implementations should provide non-blocking I/O
-        operations where possible, or use asyncio.to_thread() to wrap the synchronous
-        version if truly async I/O is not available.
+        Implementations should choose between:
+        - Providing native async I/O operations for true non-blocking behavior
+        - Using asyncio.to_thread() to wrap the synchronous version if async I/O is not available
         """
         pass
 
