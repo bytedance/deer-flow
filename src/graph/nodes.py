@@ -1216,7 +1216,7 @@ async def researcher_node(
         logger.info("[researcher_node] Web search is disabled, using only local RAG")
     
     # Add retriever tool if resources are available (always add, higher priority)
-    retriever_tool = await get_retriever_tool(state.get("resources", []))
+    retriever_tool = get_retriever_tool(state.get("resources", []))
     if retriever_tool:
         logger.debug(f"[researcher_node] Adding retriever tool to tools list")
         tools.insert(0, retriever_tool)

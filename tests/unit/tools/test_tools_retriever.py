@@ -85,33 +85,30 @@ async def test_retriever_tool_arun():
     assert result[0] == doc.to_dict()
 
 
-@pytest.mark.asyncio
 @patch("src.tools.retriever.build_retriever")
-async def test_get_retriever_tool_success(mock_build_retriever):
+def test_get_retriever_tool_success(mock_build_retriever):
     mock_retriever = Mock(spec=Retriever)
     mock_build_retriever.return_value = mock_retriever
 
     resources = [Resource(uri="test://uri", title="Test")]
-    tool = await get_retriever_tool(resources)
+    tool = get_retriever_tool(resources)
 
     assert isinstance(tool, RetrieverTool)
     assert tool.retriever == mock_retriever
     assert tool.resources == resources
 
 
-@pytest.mark.asyncio
-async def test_get_retriever_tool_empty_resources():
-    result = await get_retriever_tool([])
+def test_get_retriever_tool_empty_resources():
+    result = get_retriever_tool([])
     assert result is None
 
 
-@pytest.mark.asyncio
 @patch("src.tools.retriever.build_retriever")
-async def test_get_retriever_tool_no_retriever(mock_build_retriever):
+def test_get_retriever_tool_no_retriever(mock_build_retriever):
     mock_build_retriever.return_value = None
 
     resources = [Resource(uri="test://uri", title="Test")]
-    result = await get_retriever_tool(resources)
+    result = get_retriever_tool(resources)
 
     assert result is None
 

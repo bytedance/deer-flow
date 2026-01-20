@@ -58,7 +58,7 @@ class RetrieverTool(BaseTool):
         return [doc.to_dict() for doc in documents]
 
 
-async def get_retriever_tool(resources: List[Resource]) -> RetrieverTool | None:
+def get_retriever_tool(resources: List[Resource]) -> RetrieverTool | None:
     if not resources:
         return None
     logger.info(f"create retriever tool: {SELECTED_RAG_PROVIDER}")
