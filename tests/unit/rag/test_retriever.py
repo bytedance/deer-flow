@@ -66,12 +66,16 @@ def test_retriever_abstract_methods():
             return [Document(id="id", chunks=[])]
 
     retriever = DummyRetriever()
+    # Test synchronous methods
     resources = retriever.list_resources()
     assert isinstance(resources, list)
     assert isinstance(resources[0], Resource)
+    assert resources[0].uri == "uri"
+    
     docs = retriever.query_relevant_documents("query", resources)
     assert isinstance(docs, list)
     assert isinstance(docs[0], Document)
+    assert docs[0].id == "id"
 
 
 def test_retriever_cannot_instantiate():
