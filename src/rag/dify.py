@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import os
 from urllib.parse import urlparse
 
@@ -94,6 +95,17 @@ class DifyProvider(Retriever):
 
         return list(all_documents.values())
 
+    async def query_relevant_documents_async(
+        self, query: str, resources: list[Resource] = []
+    ) -> list[Document]:
+        """
+        Asynchronous version of query_relevant_documents.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.query_relevant_documents, query, resources
+        )
+
     def list_resources(self, query: str | None = None) -> list[Resource]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -123,6 +135,13 @@ class DifyProvider(Retriever):
             resources.append(item)
 
         return resources
+
+    async def list_resources_async(self, query: str | None = None) -> list[Resource]:
+        """
+        Asynchronous version of list_resources.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self.list_resources, query)
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
