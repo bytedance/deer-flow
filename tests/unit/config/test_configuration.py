@@ -68,18 +68,20 @@ def test_from_runnable_config_with_env_override(monkeypatch):
 
 
 def test_from_runnable_config_with_none_and_falsy(monkeypatch):
+    """Test that None values are skipped but falsy values (0, False, empty string) are preserved."""
     config_dict = {
         "configurable": {
-            "max_plan_iterations": None,
-            "max_step_num": 0,  # falsy, should be skipped
-            "max_search_results": "",
+            "max_plan_iterations": None,  # None should be skipped, use default
+            "max_step_num": 0,  # 0 is valid, should be preserved
+            "max_search_results": "",  # Empty string should be preserved
         }
     }
     config = Configuration.from_runnable_config(config_dict)
-    # Should fall back to defaults for skipped/falsy values
+    # None values should fall back to defaults
     assert config.max_plan_iterations == 1
-    assert config.max_step_num == 3
-    assert config.max_search_results == 3
+    # Falsy but valid values should be preserved
+    assert config.max_step_num == 0
+    assert config.max_search_results == ""
 
 
 def test_from_runnable_config_with_no_config():
@@ -90,6 +92,48 @@ def test_from_runnable_config_with_no_config():
     assert config.resources == []
     assert config.mcp_settings is None
 
+
+def test_from_runnable_config_with_boolean_false_values():
+    """Test that boolean False values are correctly preserved and not filtered out.
+    
+    This is a regression test for the bug where False values were treated as falsy
+    and filtered out, causing fields to revert to their default values.
+    """
+    config_dict = {
+        "configurable": {
+            "enable_web_search": False,  # Should be preserved as False, not revert to True
+            "enable_deep_thinking": False,  # Should be preserved as False
+            "enforce_web_search": False,  # Should be preserved as False
+            "enforce_researcher_search": False,  # Should be preserved as False
+            "max_plan_iterations": 5,  # Control: non-falsy value
+        }
+    }
+    config = Configuration.from_runnable_config(config_dict)
+    
+    # Assert that False values are preserved
+    assert config.enable_web_search is False, "enable_web_search should be False, not default True"
+    assert config.enable_deep_thinking is False, "enable_deep_thinking should be False"
+    assert config.enforce_web_search is False, "enforce_web_search should be False"
+    assert config.enforce_researcher_search is False, "enforce_researcher_search should be False, not default True"
+    
+    # Control: verify non-falsy values still work
+    assert config.max_plan_iterations == 5
+
+
+def test_from_runnable_config_with_boolean_true_values():
+    """Test that boolean True values work correctly (control test)."""
+    config_dict = {
+        "configurable": {
+            "enable_web_search": True,
+            "enable_deep_thinking": True,
+            "enforce_web_search": True,
+        }
+    }
+    config = Configuration.from_runnable_config(config_dict)
+    
+    assert config.enable_web_search is True
+    assert config.enable_deep_thinking is True
+    assert config.enforce_web_search is True
 
 def test_get_recursion_limit_default(monkeypatch):
     from src.config.configuration import get_recursion_limit
