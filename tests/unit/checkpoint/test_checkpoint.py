@@ -118,9 +118,18 @@ def test_persist_postgresql_local_db():
     messages = ["This is a test message."]
     result = manager._persist_to_postgresql(thread_id, messages)
     assert result is True
-    # Simulate a message with existing thread
+    # Simulate a message with existing thread (should append, not overwrite)
     result = manager._persist_to_postgresql(thread_id, ["Another message."])
     assert result is True
+
+    # Verify the messages were appended correctly
+    with manager.postgres_conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT messages FROM chat_streams WHERE thread_id = %s", (thread_id,)
+        )
+        existing_record = cursor.fetchone()
+        assert existing_record is not None
+        assert existing_record["messages"] == ["This is a test message.", "Another message."]
 
 
 @pytest.mark.skipif(
@@ -184,13 +193,13 @@ def test_persist_mongodb_local_db():
         assert doc is not None
         assert doc["messages"] == messages
 
-        # Simulate a message with existing thread
+        # Simulate a message with existing thread (should append, not overwrite)
         result = manager._persist_to_mongodb(thread_id, ["Another message."])
         assert result is True
 
-        # Verify update worked
+        # Verify update worked - messages should be appended to existing ones
         doc = collection.find_one({"thread_id": thread_id})
-        assert doc["messages"] == ["Another message."]
+        assert doc["messages"] == ["This is a test message.", "Another message."]
 
 
 @pytest.mark.skipif(
@@ -422,12 +431,12 @@ def test_mongodb_insert_and_update_paths():
         assert doc is not None
         assert doc["messages"] == ["message1"]
 
-        # Update success (existing thread)
+        # Update success (existing thread - should append, not overwrite)
         assert manager._persist_to_mongodb("th1", ["message2"]) is True
 
-        # Verify update worked
+        # Verify update worked - messages should be appended
         doc = collection.find_one({"thread_id": "th1"})
-        assert doc["messages"] == ["message2"]
+        assert doc["messages"] == ["message1", "message2"]
 
         # Test error case by mocking collection methods
         original_find_one = collection.find_one
