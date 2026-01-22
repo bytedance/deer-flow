@@ -186,7 +186,7 @@ class ContextManager:
         state["messages"] = compressed_messages
         return state
 
-    def _compress_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
+    def _compress_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """
         Compress ToolMessage content, specifically web_search raw_content by truncating to 1024 chars.
         Args:
