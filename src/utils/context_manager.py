@@ -188,35 +188,86 @@ class ContextManager:
 
     def _compress_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         """
-        Compress ToolMessage content, specifically web_search raw_content by truncating to 1024 chars.
+        Compress messages to fit within token limit through two strategies:
+        1. First, compress web_search ToolMessage raw_content by truncating to 1024 chars
+        2. If still over limit, drop oldest messages while preserving prefix messages and system messages
+        
         Args:
             messages: List of messages to compress
         Returns:
-            List of messages with compressed content
+            List of messages with compressed content and/or dropped messages
         """
-        for msg in messages:
+        # Create a deep copy to avoid mutating original messages
+        compressed = copy.deepcopy(messages)
+        
+        # Step 1: Compress raw_content in web_search ToolMessages
+        for msg in compressed:
             # Only compress ToolMessage with name 'web_search'
             if isinstance(msg, ToolMessage) and getattr(msg, "name", None) == "web_search":
-                # Parse the content as JSON
-                if isinstance(msg.content, str):
-                    content_data = json.loads(msg.content)
-                elif isinstance(msg.content, list):
-                    content_data = msg.content
-                else:
+                try:
+                    # Determine content type and check if compression is needed
+                    if isinstance(msg.content, str):
+                        # Early exit if content is small enough (avoid JSON parsing overhead)
+                        # A heuristic: if string is less than 2KB, raw_content likely doesn't need truncation
+                        if len(msg.content) < 2048:
+                            continue
+                        
+                        try:
+                            content_data = json.loads(msg.content)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse JSON content in web_search ToolMessage: {e}. Content: {msg.content[:200]}")
+                            continue
+                    elif isinstance(msg.content, list):
+                        content_data = copy.deepcopy(msg.content)
+                    else:
+                        continue
+
+                    # Compress raw_content in the content (item by item processing)
+                    # Track if any modifications were made
+                    modified = False
+                    if isinstance(content_data, list):
+                        for item in content_data:
+                            if isinstance(item, dict) and "raw_content" in item:
+                                raw_content = item.get("raw_content")
+                                if raw_content and isinstance(raw_content, str) and len(raw_content) > 1024:
+                                    item["raw_content"] = raw_content[:1024]
+                                    modified = True
+                        
+                        # Update message content with modified data only if changes were made
+                        if modified:
+                            msg.content = json.dumps(content_data, ensure_ascii=False)
+                except Exception as e:
+                    logger.error(f"Unexpected error during message compression: {e}")
                     continue
 
-                # Compress raw_content in the content (item by item processing)
-                if isinstance(content_data, list):
-                    for item in content_data:
-                        if isinstance(item, dict) and "raw_content" in item:
-                            raw_content = item.get("raw_content")
-                            if raw_content and isinstance(raw_content, str) and len(raw_content) > 1024:
-                                item["raw_content"] = raw_content[:1024]
-                    
-                    # Update message content with modified data
-                    msg.content = json.dumps(content_data, ensure_ascii=False)
+        # Step 2: If still over limit after raw_content compression, drop oldest messages
+        # while preserving prefix messages (e.g., system message) and recent messages
+        if self.is_over_limit(compressed):
+            # Identify messages to preserve at the beginning
+            preserved_count = self.preserve_prefix_message_count
+            preserved_messages = compressed[:preserved_count]
+            remaining_messages = compressed[preserved_count:]
+            
+            # Drop messages from the middle, keeping the most recent ones
+            result_messages = preserved_messages
+            for msg in reversed(remaining_messages):
+                result_messages.insert(len(preserved_messages), msg)
+                if not self.is_over_limit(result_messages):
+                    break
+            
+            compressed = result_messages
 
-        return messages
+        # Step 3: Verify that compression was successful and log warning if needed
+        if self.is_over_limit(compressed):
+            current_tokens = self.count_tokens(compressed)
+            logger.warning(
+                f"Message compression failed to bring tokens below limit: "
+                f"{current_tokens} > {self.token_limit} tokens. "
+                f"Total messages: {len(compressed)}. "
+                f"Consider increasing token_limit or preserve_prefix_message_count."
+            )
+
+        return compressed
 
     def _create_summary_message(self, messages: List[BaseMessage]) -> BaseMessage:
         """
