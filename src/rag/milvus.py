@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -514,6 +515,13 @@ class MilvusRetriever(Retriever):
             return self._list_local_markdown_resources()
         return resources
 
+    async def list_resources_async(self, query: Optional[str] = None) -> List[Resource]:
+        """
+        Asynchronous version of list_resources.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self.list_resources, query)
+
     def _list_local_markdown_resources(self) -> List[Resource]:
         """Return local example markdown files as ``Resource`` objects.
 
@@ -660,6 +668,17 @@ class MilvusRetriever(Retriever):
 
         except Exception as e:
             raise RuntimeError(f"Failed to query documents from Milvus: {str(e)}")
+
+    async def query_relevant_documents_async(
+        self, query: str, resources: Optional[List[Resource]] = None
+    ) -> List[Document]:
+        """
+        Asynchronous version of query_relevant_documents.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.query_relevant_documents, query, resources
+        )
 
     def create_collection(self) -> None:
         """Public hook ensuring collection exists (explicit initialization)."""

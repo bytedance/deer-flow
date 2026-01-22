@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import hashlib
 import logging
 import uuid
@@ -351,6 +352,13 @@ class QdrantProvider(Retriever):
             return self._list_local_markdown_resources()
         return resources
 
+    async def list_resources_async(self, query: Optional[str] = None) -> List[Resource]:
+        """
+        Asynchronous version of list_resources.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(self.list_resources, query)
+
     def _list_local_markdown_resources(self) -> List[Resource]:
         current_file = Path(__file__)
         project_root = current_file.parent.parent.parent
@@ -418,6 +426,17 @@ class QdrantProvider(Retriever):
             documents[doc_id].chunks.append(chunk)
 
         return list(documents.values())
+
+    async def query_relevant_documents_async(
+        self, query: str, resources: Optional[List[Resource]] = None
+    ) -> List[Document]:
+        """
+        Asynchronous version of query_relevant_documents.
+        Wraps the synchronous implementation in asyncio.to_thread() to avoid blocking the event loop.
+        """
+        return await asyncio.to_thread(
+            self.query_relevant_documents, query, resources
+        )
 
     def create_collection(self) -> None:
         if not self.client:

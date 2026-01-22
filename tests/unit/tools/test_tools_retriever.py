@@ -66,18 +66,20 @@ async def test_retriever_tool_arun():
     mock_retriever = Mock(spec=Retriever)
     chunk = Chunk(content="async content", similarity=0.8)
     doc = Document(id="doc2", chunks=[chunk])
-    mock_retriever.query_relevant_documents.return_value = [doc]
+    
+    # Mock the async method
+    async def mock_async_query(*args, **kwargs):
+        return [doc]
+    
+    mock_retriever.query_relevant_documents_async = mock_async_query
 
     resources = [Resource(uri="test://uri", title="Test")]
     tool = RetrieverTool(retriever=mock_retriever, resources=resources)
 
     mock_run_manager = Mock(spec=AsyncCallbackManagerForToolRun)
-    mock_sync_manager = Mock(spec=CallbackManagerForToolRun)
-    mock_run_manager.get_sync.return_value = mock_sync_manager
 
     result = await tool._arun("async keywords", mock_run_manager)
 
-    mock_run_manager.get_sync.assert_called_once()
     assert isinstance(result, list)
     assert len(result) == 1
     assert result[0] == doc.to_dict()
