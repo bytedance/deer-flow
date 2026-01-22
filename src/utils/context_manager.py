@@ -186,79 +186,37 @@ class ContextManager:
         state["messages"] = compressed_messages
         return state
 
-    def _compress_messages(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+    def _compress_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
         """
-        Compress compressible messages
-
+        Compress ToolMessage content, specifically web_search raw_content by truncating to 1024 chars.
         Args:
             messages: List of messages to compress
-
         Returns:
-            Compressed message list
+            List of messages with compressed content
         """
+        for msg in messages:
+            # Only compress ToolMessage with name 'web_search'
+            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) == "web_search":
+                # Parse the content as JSON
+                if isinstance(msg.content, str):
+                    content_data = json.loads(msg.content)
+                elif isinstance(msg.content, list):
+                    content_data = msg.content
+                else:
+                    continue
 
-        available_token = self.token_limit
-        prefix_messages = []
+                # Compress raw_content in the content (item by item processing)
+                if isinstance(content_data, list):
+                    for item in content_data:
+                        if isinstance(item, dict) and "raw_content" in item:
+                            raw_content = item.get("raw_content")
+                            if raw_content and isinstance(raw_content, str) and len(raw_content) > 1024:
+                                item["raw_content"] = raw_content[:1024]
+                    
+                    # Update message content with modified data
+                    msg.content = json.dumps(content_data, ensure_ascii=False)
 
-        # 1. Preserve head messages of specified length to retain system prompts and user input
-        for i in range(min(self.preserve_prefix_message_count, len(messages))):
-            cur_token_cnt = self._count_message_tokens(messages[i])
-            if available_token > 0 and available_token >= cur_token_cnt:
-                prefix_messages.append(messages[i])
-                available_token -= cur_token_cnt
-            elif available_token > 0:
-                # Truncate content to fit available tokens
-                truncated_message = self._truncate_message_content(
-                    messages[i], available_token
-                )
-                prefix_messages.append(truncated_message)
-                return prefix_messages
-            else:
-                break
-
-        # 2. Compress subsequent messages from the tail, some messages may be discarded
-        messages = messages[len(prefix_messages) :]
-        suffix_messages = []
-        for i in range(len(messages) - 1, -1, -1):
-            cur_token_cnt = self._count_message_tokens(messages[i])
-
-            if cur_token_cnt > 0 and available_token >= cur_token_cnt:
-                suffix_messages = [messages[i]] + suffix_messages
-                available_token -= cur_token_cnt
-            elif available_token > 0:
-                # Truncate content to fit available tokens
-                truncated_message = self._truncate_message_content(
-                    messages[i], available_token
-                )
-                suffix_messages = [truncated_message] + suffix_messages
-                return prefix_messages + suffix_messages
-            else:
-                break
-
-        return prefix_messages + suffix_messages
-
-    def _truncate_message_content(
-        self, message: BaseMessage, max_tokens: int
-    ) -> BaseMessage:
-        """
-        Truncate message content while preserving all other attributes by copying the original message
-        and only modifying its content attribute.
-
-        Args:
-            message: The message to truncate
-            max_tokens: Maximum number of tokens to keep
-
-        Returns:
-            New message instance with truncated content
-        """
-
-        # Create a deep copy of the original message to preserve all attributes
-        truncated_message = copy.deepcopy(message)
-
-        # Truncate only the content attribute
-        truncated_message.content = message.content[:max_tokens]
-
-        return truncated_message
+        return messages
 
     def _create_summary_message(self, messages: List[BaseMessage]) -> BaseMessage:
         """

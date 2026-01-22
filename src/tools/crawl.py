@@ -43,7 +43,7 @@ def crawl_tool(
     try:
         crawler = Crawler()
         article = crawler.crawl(url)
-        return json.dumps({"url": url, "crawled_content": article.to_markdown()[:1000]})
+        return json.dumps({"url": url, "crawled_content": article.to_markdown()[:1000]}, ensure_ascii=False)
     except BaseException as e:
         error_msg = f"Failed to crawl. Error: {repr(e)}"
         logger.error(error_msg)
