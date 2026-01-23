@@ -17,7 +17,7 @@ class TestGetWebSearchTool:
         tool = get_web_search_tool(max_search_results=5)
         assert tool.name == "web_search"
         assert tool.max_results == 5
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
         assert tool.include_image_descriptions is True
         assert tool.include_answer is False
@@ -79,7 +79,7 @@ class TestGetWebSearchTool:
             "SEARCH_ENGINE": {
                 "include_answer": True,
                 "search_depth": "basic",
-                "include_raw_content": False,
+                "include_raw_content": True,
                 "include_images": False,
                 "include_image_descriptions": True,
                 "include_domains": ["example.com"],
@@ -91,7 +91,7 @@ class TestGetWebSearchTool:
         assert tool.max_results == 5
         assert tool.include_answer is True
         assert tool.search_depth == "basic"
-        assert tool.include_raw_content is False
+        assert tool.include_raw_content is True
         assert tool.include_images is False
         # include_image_descriptions should be False because include_images is False
         assert tool.include_image_descriptions is False
@@ -108,7 +108,7 @@ class TestGetWebSearchTool:
         assert tool.max_results == 10
         assert tool.include_answer is False
         assert tool.search_depth == "advanced"
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
         assert tool.include_image_descriptions is True
         assert tool.include_domains == []
@@ -143,7 +143,7 @@ class TestGetWebSearchTool:
         tool = get_web_search_tool(max_search_results=3)
         assert tool.include_answer is True
         assert tool.search_depth == "advanced"  # default
-        assert tool.include_raw_content is True  # default
+        assert tool.include_raw_content is False  # default
         assert tool.include_domains == ["trusted.com"]
         assert tool.exclude_domains == []  # default
 
@@ -157,7 +157,7 @@ class TestGetWebSearchTool:
         assert tool.max_results == 5
         assert tool.include_answer is False
         assert tool.search_depth == "advanced"
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
@@ -184,7 +184,7 @@ class TestGetWebSearchTool:
         assert tool.max_results == 5
         assert tool.include_answer is False
         assert tool.search_depth == "advanced"
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
         assert tool.include_domains == []
         assert tool.exclude_domains == []
@@ -199,7 +199,7 @@ class TestGetWebSearchTool:
         assert tool.max_results == 5
         assert tool.include_answer is False
         assert tool.search_depth == "advanced"
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
@@ -210,7 +210,7 @@ class TestGetWebSearchTool:
         tool = get_web_search_tool(max_search_results=5)
         assert tool.include_answer is True
         assert tool.search_depth == "advanced"
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
@@ -221,7 +221,7 @@ class TestGetWebSearchTool:
         tool = get_web_search_tool(max_search_results=5)
         assert tool.search_depth == "basic"
         assert tool.include_answer is False
-        assert tool.include_raw_content is True
+        assert tool.include_raw_content is False
         assert tool.include_images is True
 
     @patch("src.tools.search.SELECTED_SEARCH_ENGINE", SearchEngine.TAVILY.value)
@@ -286,6 +286,6 @@ class TestGetWebSearchTool:
             tool.include_image_descriptions is False
         )  # should be False since include_images is False
         assert tool.search_depth == "advanced"  # default
-        assert tool.include_raw_content is True  # default
+        assert tool.include_raw_content is False  # default
         assert tool.include_domains == []  # default
         assert tool.exclude_domains == []  # default
