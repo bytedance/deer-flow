@@ -275,7 +275,16 @@ def validate_args_for_local_file_access(args: List[str]) -> None:
         # Check for directory traversal
         if ".." in arg:
             # More specific check for actual traversal patterns
-            if "../" in arg or "..\\" in arg or arg == ".." or arg.startswith(".."):
+            # Catches: "../", "..\", "/..", "\..", standalone "..", starts with "..", ends with ".."
+            if (
+                "../" in arg
+                or "..\\" in arg
+                or "/.." in arg
+                or "\\.." in arg
+                or arg == ".."
+                or arg.startswith("..")
+                or arg.endswith("..")
+            ):
                 raise MCPValidationError(
                     f"Argument at index {i} contains directory traversal pattern: {arg[:50]}",
                     field="args",

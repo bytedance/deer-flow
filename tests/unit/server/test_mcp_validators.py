@@ -89,6 +89,9 @@ class TestValidateArgsForLocalFileAccess:
             ["..\\windows\\system32"],
             ["../../secret"],
             ["foo/../bar/../../../etc/passwd"],
+            ["foo/.."],  # ".." at end after path separator
+            ["bar\\.."],  # ".." at end after Windows path separator
+            ["path/to/foo/.."],  # Longer path ending with ".."
         ]
         for args in traversal_patterns:
             with pytest.raises(MCPValidationError) as exc_info:
