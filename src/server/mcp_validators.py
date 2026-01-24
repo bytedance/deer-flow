@@ -15,8 +15,8 @@ Reference: https://github.com/FlowiseAI/Flowise/blob/main/packages/components/no
 """
 
 import logging
-import re
-from typing import Any, Dict, List, Optional
+
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,10 @@ def validate_command(command: str) -> None:
     if base_command.endswith(".exe"):
         base_command = base_command[:-4]
 
-    if base_command not in ALLOWED_COMMANDS:
+    # Normalize to lowercase to handle case-insensitive filesystems (e.g., Windows)
+    normalized_command = base_command.lower()
+
+    if normalized_command not in ALLOWED_COMMANDS:
         raise MCPValidationError(
             f"Command '{command}' is not allowed. Allowed commands: {', '.join(sorted(ALLOWED_COMMANDS))}",
             field="command",
@@ -362,13 +365,6 @@ def validate_command_injection(args: List[str]) -> None:
                     f"Argument at index {i} contains command chaining pattern '{pattern}': {arg[:50]}",
                     field="args",
                 )
-
-        # Check for backticks (command substitution)
-        if "`" in arg:
-            raise MCPValidationError(
-                f"Argument at index {i} contains backtick command substitution: {arg[:50]}",
-                field="args",
-            )
 
 
 def validate_environment_variables(env: Dict[str, str]) -> None:

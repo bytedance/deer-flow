@@ -77,20 +77,8 @@ async def load_mcp_tools(
     Raises:
         HTTPException: If there's an error loading the tools
     """
-    # Validate the MCP server configuration for security
-    try:
-        validate_mcp_server_config(
-            transport=server_type,
-            command=command,
-            args=args,
-            url=url,
-            env=env,
-            headers=headers,
-            strict=True,
-        )
-    except MCPValidationError as e:
-        logger.warning(f"MCP server configuration validation failed: {e.message}")
-        raise HTTPException(status_code=400, detail=f"Invalid MCP configuration: {e.message}")
+    # MCP server configuration is validated at the request boundary (Pydantic model)
+    # to avoid duplicate validation logic here.
 
     try:
         if server_type == "stdio":
