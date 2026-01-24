@@ -7,11 +7,12 @@ import { LoadingAnimation } from "~/components/deer-flow/loading-animation";
 import { Markdown } from "~/components/deer-flow/markdown";
 import ReportEditor from "~/components/editor";
 import { useReplay } from "~/core/replay";
-import { useMessage, useStore } from "~/core/store";
+import { useCitations, useMessage, useStore } from "~/core/store";
 import { cn } from "~/lib/utils";
 
 export function ResearchReportBlock({
   className,
+  researchId,
   messageId,
   editing,
 }: {
@@ -21,6 +22,7 @@ export function ResearchReportBlock({
   editing: boolean;
 }) {
   const message = useMessage(messageId);
+  const citations = useCitations(researchId);
   const { isReplay } = useReplay();
   const handleMarkdownChange = useCallback(
     (markdown: string) => {
@@ -61,7 +63,7 @@ export function ResearchReportBlock({
         />
       ) : (
         <>
-          <Markdown animated checkLinkCredibility>
+          <Markdown animated checkLinkCredibility citations={citations}>
             {message?.content}
           </Markdown>
           {message?.isStreaming && <LoadingAnimation className="my-12" />}

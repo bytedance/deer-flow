@@ -25,6 +25,7 @@ export interface Message {
   finishReason?: "stop" | "interrupt" | "tool_calls";
   interruptFeedback?: string;
   resources?: Array<Resource>;
+  citations?: Array<Citation>;
 }
 
 export interface Option {
@@ -44,4 +45,15 @@ export interface Resource {
   uri: string;
   title: string;
   description?: string;
+}
+
+export interface Citation {
+  url: string;
+  title: string;
+  description?: string;
+  content_snippet?: string;
+  domain?: string;
+  relevance_score?: number;
+  accessed_at?: string;
+  source_type?: string;
 }
