@@ -6,14 +6,14 @@ Citation data models for structured source metadata.
 """
 
 import hashlib
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from pydantic import BaseModel, ConfigDict, Field
 
-@dataclass
-class CitationMetadata:
+
+class CitationMetadata(BaseModel):
     """Metadata extracted from a source."""
 
     # Core identifiers
@@ -32,7 +32,7 @@ class CitationMetadata:
     language: Optional[str] = None
 
     # Media
-    images: List[str] = field(default_factory=list)
+    images: List[str] = Field(default_factory=list)
     favicon: Optional[str] = None
 
     # Quality indicators
@@ -40,13 +40,16 @@ class CitationMetadata:
     credibility_score: float = 0.0
 
     # Timestamps
-    accessed_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    accessed_at: str = Field(default_factory=lambda: datetime.now().isoformat())
 
     # Additional metadata
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = Field(default_factory=dict)
 
-    def __post_init__(self):
-        """Extract domain from URL if not provided."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def __init__(self, **data):
+        """Initialize and extract domain from URL if not provided."""
+        super().__init__(**data)
         if not self.domain and self.url:
             try:
                 parsed = urlparse(self.url)
@@ -87,7 +90,7 @@ class CitationMetadata:
         """Create from dictionary."""
         # Remove 'id' as it's computed from url
         data = {k: v for k, v in data.items() if k != "id"}
-        return cls(**data)
+        return cls.model_validate(data)
 
     @classmethod
     def from_search_result(
@@ -107,8 +110,8 @@ class CitationMetadata:
         )
 
 
-@dataclass
-class Citation:
+
+class Citation(BaseModel):
     """
     A citation reference that can be used in reports.
 
@@ -126,6 +129,8 @@ class Citation:
 
     # Specific quote or fact being cited
     cited_text: Optional[str] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
     def id(self) -> str:
@@ -154,12 +159,14 @@ class Citation:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Citation":
         """Create from dictionary."""
-        return cls(
-            number=data["number"],
-            metadata=CitationMetadata.from_dict(data["metadata"]),
-            context=data.get("context"),
-            cited_text=data.get("cited_text"),
-        )
+        return cls.model_validate({
+            "number": data["number"],
+            "metadata": CitationMetadata.from_dict(data["metadata"])
+            if isinstance(data.get("metadata"), dict)
+            else data["metadata"],
+            "context": data.get("context"),
+            "cited_text": data.get("cited_text"),
+        })
 
     def to_markdown_reference(self) -> str:
         """Generate markdown reference format: [Title](URL)"""

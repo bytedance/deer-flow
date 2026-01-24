@@ -6,7 +6,7 @@ Citation formatter for generating citation sections and inline references.
 """
 
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .models import Citation, CitationMetadata
 
@@ -239,33 +239,157 @@ class CitationFormatter:
         return json.dumps(data, ensure_ascii=False)
 
 
-def parse_citations_from_report(report: str) -> List[Tuple[str, str]]:
+def parse_citations_from_report(
+    report: str, section_patterns: List[str] = None
+) -> Dict[str, Any]:
     """
-    Parse citation links from a report's Key Citations section.
-
+    Extract citation information from report, supporting multiple formats.
+    
+    Supports various citation formats:
+    - Markdown: [Title](URL)
+    - Numbered: [1] Title - URL
+    - Footnote: [^1]: Title - URL
+    - HTML: <a href="URL">Title</a>
+    
     Args:
         report: The report markdown text
-
+        section_patterns: Custom section header patterns (optional)
+    
     Returns:
-        List of (title, url) tuples
+        Dictionary with 'citations' list and 'count' of unique citations
+    """
+    if section_patterns is None:
+        section_patterns = [
+            r"(?:##\s*Key Citations|##\s*References|##\s*Sources|##\s*Bibliography)",
+        ]
+    
+    citations = []
+    
+    # 1. Find citation section and extract citations
+    for pattern in section_patterns:
+        section_matches = re.finditer(
+            pattern + r"\s*\n(.*?)(?=\n##|$)",
+            report,
+            re.IGNORECASE | re.DOTALL,
+        )
+        
+        for section_match in section_matches:
+            section = section_match.group(1)
+            
+            # 2. Extract citations in various formats
+            citations.extend(_extract_markdown_links(section))
+            citations.extend(_extract_numbered_citations(section))
+            citations.extend(_extract_footnote_citations(section))
+            citations.extend(_extract_html_links(section))
+    
+    # 3. Deduplicate by URL
+    unique_citations = {}
+    for citation in citations:
+        url = citation.get("url", "")
+        if url and url not in unique_citations:
+            unique_citations[url] = citation
+    
+    return {
+        "citations": list(unique_citations.values()),
+        "count": len(unique_citations),
+    }
+
+
+def _extract_markdown_links(text: str) -> List[Dict[str, str]]:
+    """
+    Extract Markdown links [title](url).
+    
+    Args:
+        text: Text to extract from
+    
+    Returns:
+        List of citation dictionaries with title, url, and format
     """
     citations = []
+    pattern = r"\[([^\]]+)\]\(([^)]+)\)"
+    
+    for match in re.finditer(pattern, text):
+        title, url = match.groups()
+        if url.startswith(("http://", "https://")):
+            citations.append({
+                "title": title.strip(),
+                "url": url.strip(),
+                "format": "markdown",
+            })
+    
+    return citations
 
-    # Find the Key Citations section
-    section_pattern = (
-        r"(?:##\s*Key Citations|##\s*References|##\s*Sources)\s*\n(.*?)(?=\n##|\Z)"
-    )
-    section_match = re.search(section_pattern, report, re.IGNORECASE | re.DOTALL)
 
-    if section_match:
-        section = section_match.group(1)
+def _extract_numbered_citations(text: str) -> List[Dict[str, str]]:
+    """
+    Extract numbered citations [1] Title - URL.
+    
+    Args:
+        text: Text to extract from
+    
+    Returns:
+        List of citation dictionaries
+    """
+    citations = []
+    # Match: [number] title - URL
+    pattern = r"\[\d+\]\s+([^-\n]+?)\s*-\s*(https?://[^\s\n]+)"
+    
+    for match in re.finditer(pattern, text):
+        title, url = match.groups()
+        citations.append({
+            "title": title.strip(),
+            "url": url.strip(),
+            "format": "numbered",
+        })
+    
+    return citations
 
-        # Extract markdown links
-        link_pattern = r"\[([^\]]+)\]\(([^)]+)\)"
-        for match in re.finditer(link_pattern, section):
-            title = match.group(1)
-            url = match.group(2)
-            if url.startswith(("http://", "https://")):
-                citations.append((title, url))
 
+def _extract_footnote_citations(text: str) -> List[Dict[str, str]]:
+    """
+    Extract footnote citations [^1]: Title - URL.
+    
+    Args:
+        text: Text to extract from
+    
+    Returns:
+        List of citation dictionaries
+    """
+    citations = []
+    # Match: [^number]: title - URL
+    pattern = r"\[\^(\d+)\]:\s+([^-\n]+?)\s*-\s*(https?://[^\s\n]+)"
+    
+    for match in re.finditer(pattern, text):
+        _, title, url = match.groups()
+        citations.append({
+            "title": title.strip(),
+            "url": url.strip(),
+            "format": "footnote",
+        })
+    
+    return citations
+
+
+def _extract_html_links(text: str) -> List[Dict[str, str]]:
+    """
+    Extract HTML links <a href="url">title</a>.
+    
+    Args:
+        text: Text to extract from
+    
+    Returns:
+        List of citation dictionaries
+    """
+    citations = []
+    pattern = r'<a\s+(?:[^>]*?\s)?href=(["\'])([^"\']+)\1[^>]*>([^<]+)</a>'
+    
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        _, url, title = match.groups()
+        if url.startswith(("http://", "https://")):
+            citations.append({
+                "title": title.strip(),
+                "url": url.strip(),
+                "format": "html",
+            })
+    
     return citations

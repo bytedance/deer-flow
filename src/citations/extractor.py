@@ -7,6 +7,7 @@ Citation extraction utilities for extracting citations from tool results.
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -205,6 +206,84 @@ def _result_to_citation(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def extract_title_from_content(content: str, max_length: int = 200) -> str:
+    """
+    Intelligent title extraction supporting multiple formats.
+    
+    Priority:
+    1. HTML <title> tag
+    2. Markdown h1 (# Title)
+    3. Markdown h2-h6 (## Title, etc.)
+    4. JSON/YAML title field
+    5. First substantial non-empty line
+    6. "Untitled" as fallback
+    
+    Args:
+        content: The content to extract title from
+        max_length: Maximum title length (default: 200)
+    
+    Returns:
+        Extracted title or "Untitled"
+    """
+    if not content:
+        return "Untitled"
+    
+    # 1. Try HTML title tag
+    html_title_match = re.search(
+        r'<title[^>]*>([^<]+)</title>',
+        content,
+        re.IGNORECASE | re.DOTALL
+    )
+    if html_title_match:
+        title = html_title_match.group(1).strip()
+        if title:
+            return title[:max_length]
+    
+    # 2. Try Markdown h1 (exact match of only one #)
+    md_h1_match = re.search(
+        r'^#{1}\s+(.+?)$',
+        content,
+        re.MULTILINE
+    )
+    if md_h1_match:
+        title = md_h1_match.group(1).strip()
+        if title:
+            return title[:max_length]
+    
+    # 3. Try any Markdown heading (h2-h6)
+    md_heading_match = re.search(
+        r'^#{2,6}\s+(.+?)$',
+        content,
+        re.MULTILINE
+    )
+    if md_heading_match:
+        title = md_heading_match.group(1).strip()
+        if title:
+            return title[:max_length]
+    
+    # 4. Try JSON/YAML title field
+    json_title_match = re.search(
+        r'"?title"?\s*:\s*["\']?([^"\'\n]+)["\']?',
+        content,
+        re.IGNORECASE
+    )
+    if json_title_match:
+        title = json_title_match.group(1).strip()
+        if title and len(title) > 3:
+            return title[:max_length]
+    
+    # 5. First substantial non-empty line
+    for line in content.split('\n'):
+        line = line.strip()
+        # Skip short lines, code blocks, list items, and separators
+        if (line and 
+            len(line) > 10 and 
+            not line.startswith(('```', '---', '***', '- ', '* ', '+ ', '#'))):
+            return line[:max_length]
+    
+    return "Untitled"
+
+
 def _extract_from_crawl_result(data: Any) -> Optional[Dict[str, Any]]:
     """
     Extract citation from crawl tool result.
@@ -224,18 +303,8 @@ def _extract_from_crawl_result(data: Any) -> Optional[Dict[str, Any]]:
 
     content = data.get("crawled_content", "")
 
-    # Try to extract title from content (first h1 or first line)
-    title = "Untitled"
-    if content:
-        lines = content.strip().split("\n")
-        for line in lines:
-            line = line.strip()
-            if line.startswith("# "):
-                title = line[2:].strip()
-                break
-            elif line and not line.startswith("#"):
-                title = line[:100]
-                break
+    # Extract title using intelligent extraction function
+    title = extract_title_from_content(content)
 
     return {
         "url": url,
@@ -249,14 +318,47 @@ def _extract_from_crawl_result(data: Any) -> Optional[Dict[str, Any]]:
 
 
 def _extract_domain(url: str) -> str:
-    """Extract domain from URL."""
+    """
+    Extract domain from URL using urllib with regex fallback.
+    
+    Handles:
+    - Standard URLs: https://www.example.com/path
+    - Short URLs: example.com
+    - Invalid URLs: graceful fallback
+    
+    Args:
+        url: The URL string to extract domain from
+    
+    Returns:
+        The domain netloc (including port if present), or empty string if extraction fails
+    """
+    if not url:
+        return ""
+    
+    # Approach 1: Try urllib first (fast path for standard URLs)
     try:
         from urllib.parse import urlparse
-
+        
         parsed = urlparse(url)
-        return parsed.netloc
-    except Exception:
-        return ""
+        if parsed.netloc:
+            return parsed.netloc
+    except Exception as e:
+        logger.debug(f"URL parsing failed for {url}: {e}")
+    
+    # Approach 2: Regex fallback (for non-standard or bare URLs without scheme)
+    # Matches: domain[:port] where domain is a valid hostname
+    # Pattern breakdown:
+    # ([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)
+    # - domain labels separated by dots, each 1-63 chars, starting/ending with alphanumeric
+    # (?::\d+)? - optional port
+    pattern = r'^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(?::\d+)?)(?:[/?#]|$)'
+    
+    match = re.match(pattern, url)
+    if match:
+        return match.group(1)
+    
+    logger.warning(f"Could not extract domain from URL: {url}")
+    return ""
 
 
 def merge_citations(

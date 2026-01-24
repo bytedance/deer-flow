@@ -28,6 +28,7 @@ class CitationCollector:
         self._citations: Dict[str, CitationMetadata] = {}  # url -> metadata
         self._citation_order: List[str] = []  # ordered list of URLs
         self._used_citations: set[str] = set()  # URLs that are actually cited
+        self._url_to_index: Dict[str, int] = {}  # url -> index of _citation_order (O(1) lookup)
 
     def add_from_search_results(
         self, results: List[Dict[str, Any]], query: str = ""
@@ -58,6 +59,7 @@ class CitationCollector:
             if url not in self._citations:
                 self._citations[url] = metadata
                 self._citation_order.append(url)
+                self._url_to_index[url] = len(self._citation_order) - 1
                 added.append(metadata)
                 logger.debug(f"Added citation: {metadata.title} ({url})")
             else:
@@ -104,6 +106,7 @@ class CitationCollector:
             )
             self._citations[url] = metadata
             self._citation_order.append(url)
+            self._url_to_index[url] = len(self._citation_order) - 1
 
         return metadata
 
@@ -124,7 +127,7 @@ class CitationCollector:
 
     def get_number(self, url: str) -> Optional[int]:
         """
-        Get the citation number for a URL.
+        Get the citation number for a URL (O(1) time complexity).
 
         Args:
             url: The URL to look up
@@ -132,10 +135,8 @@ class CitationCollector:
         Returns:
             The citation number (1-indexed) or None if not found
         """
-        try:
-            return self._citation_order.index(url) + 1
-        except ValueError:
-            return None
+        index = self._url_to_index.get(url)
+        return index + 1 if index is not None else None
 
     def get_metadata(self, url: str) -> Optional[CitationMetadata]:
         """
@@ -215,7 +216,9 @@ class CitationCollector:
         for citation_data in data.get("citations", []):
             citation = Citation.from_dict(citation_data)
             collector._citations[citation.url] = citation.metadata
+            index = len(collector._citation_order)
             collector._citation_order.append(citation.url)
+            collector._url_to_index[citation.url] = index
         collector._used_citations = set(data.get("used_urls", []))
         return collector
 
@@ -230,6 +233,7 @@ class CitationCollector:
             if url not in self._citations:
                 self._citations[url] = other._citations[url]
                 self._citation_order.append(url)
+                self._url_to_index[url] = len(self._citation_order) - 1
         self._used_citations.update(other._used_citations)
 
     @property
@@ -247,6 +251,7 @@ class CitationCollector:
         self._citations.clear()
         self._citation_order.clear()
         self._used_citations.clear()
+        self._url_to_index.clear()
 
 
 def extract_urls_from_text(text: str) -> List[str]:
