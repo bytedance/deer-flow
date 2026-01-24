@@ -8,9 +8,9 @@ Tests the Pydantic BaseModel implementation of CitationMetadata and Citation cla
 """
 
 import json
-from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
 from src.citations.models import Citation, CitationMetadata
 
@@ -156,10 +156,10 @@ class TestCitationMetadata:
     def test_metadata_pydantic_validation(self):
         """Test that Pydantic validates required fields."""
         # URL and title are required
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             CitationMetadata()  # Missing required fields
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             CitationMetadata(url="https://example.com")  # Missing title
 
     def test_metadata_model_dump(self):
@@ -379,14 +379,14 @@ class TestCitation:
     def test_citation_pydantic_validation(self):
         """Test that Pydantic validates required fields."""
         # Number and metadata are required
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             Citation()  # Missing required fields
 
         metadata = CitationMetadata(
             url="https://example.com",
             title="Example",
         )
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Citation(metadata=metadata)  # Missing number
 
 

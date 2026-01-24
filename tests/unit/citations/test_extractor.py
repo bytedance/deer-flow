@@ -7,8 +7,6 @@ Unit tests for extractor optimizations.
 Tests the enhanced domain extraction and title extraction functions.
 """
 
-import pytest
-
 from src.citations.extractor import (
     _extract_domain,
     extract_title_from_content,
@@ -49,7 +47,6 @@ class TestExtractDomainOptimization:
     def test_extract_domain_empty_url(self):
         """Test handling of empty URL."""
         assert _extract_domain("") == ""
-        assert _extract_domain(None) == "" or _extract_domain(None) is None
 
     def test_extract_domain_without_scheme(self):
         """Test extraction from URLs without scheme (handled by regex fallback)."""

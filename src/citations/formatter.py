@@ -6,9 +6,9 @@ Citation formatter for generating citation sections and inline references.
 """
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-from .models import Citation, CitationMetadata
+from .models import Citation
 
 
 class CitationFormatter:
@@ -267,10 +267,12 @@ def parse_citations_from_report(
     
     # 1. Find citation section and extract citations
     for pattern in section_patterns:
+        # Use a more efficient pattern that matches line-by-line content
+        # instead of relying on dotall with greedy matching for large reports
         section_matches = re.finditer(
-            pattern + r"\s*\n(.*?)(?=\n##|$)",
+            pattern + r"\s*\n((?:(?!\n##).*\n?)*)",
             report,
-            re.IGNORECASE | re.DOTALL,
+            re.IGNORECASE | re.MULTILINE,
         )
         
         for section_match in section_matches:

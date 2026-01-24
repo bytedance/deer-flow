@@ -7,10 +7,7 @@ Unit tests for CitationCollector optimization with reverse index cache.
 Tests the O(1) URL lookup performance optimization via _url_to_index cache.
 """
 
-import pytest
-
 from src.citations.collector import CitationCollector
-from src.citations.models import CitationMetadata
 
 
 class TestCitationCollectorOptimization:

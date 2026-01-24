@@ -7,8 +7,6 @@ Unit tests for citation formatter enhancements.
 Tests the multi-format citation parsing and extraction capabilities.
 """
 
-import pytest
-
 from src.citations.formatter import (
     parse_citations_from_report,
     _extract_markdown_links,

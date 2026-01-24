@@ -206,7 +206,7 @@ def _result_to_citation(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def extract_title_from_content(content: str, max_length: int = 200) -> str:
+def extract_title_from_content(content: Optional[str], max_length: int = 200) -> str:
     """
     Intelligent title extraction supporting multiple formats.
     
@@ -219,7 +219,7 @@ def extract_title_from_content(content: str, max_length: int = 200) -> str:
     6. "Untitled" as fallback
     
     Args:
-        content: The content to extract title from
+        content: The content to extract title from (can be None)
         max_length: Maximum title length (default: 200)
     
     Returns:
@@ -317,7 +317,7 @@ def _extract_from_crawl_result(data: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _extract_domain(url: str) -> str:
+def _extract_domain(url: Optional[str]) -> str:
     """
     Extract domain from URL using urllib with regex fallback.
     
@@ -327,7 +327,7 @@ def _extract_domain(url: str) -> str:
     - Invalid URLs: graceful fallback
     
     Args:
-        url: The URL string to extract domain from
+        url: The URL string to extract domain from (can be None)
     
     Returns:
         The domain netloc (including port if present), or empty string if extraction fails
