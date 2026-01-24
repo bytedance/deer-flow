@@ -11,6 +11,8 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from src.server.mcp_validators import MCPValidationError, validate_mcp_server_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,6 +77,21 @@ async def load_mcp_tools(
     Raises:
         HTTPException: If there's an error loading the tools
     """
+    # Validate the MCP server configuration for security
+    try:
+        validate_mcp_server_config(
+            transport=server_type,
+            command=command,
+            args=args,
+            url=url,
+            env=env,
+            headers=headers,
+            strict=True,
+        )
+    except MCPValidationError as e:
+        logger.warning(f"MCP server configuration validation failed: {e.message}")
+        raise HTTPException(status_code=400, detail=f"Invalid MCP configuration: {e.message}")
+
     try:
         if server_type == "stdio":
             if not command:
