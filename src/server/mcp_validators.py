@@ -294,14 +294,14 @@ def validate_args_for_local_file_access(args: List[str]) -> None:
                 )
 
         # Check for absolute paths (Unix-style)
-        # Be careful to allow flags like -f, --flag, etc.
+        # Be careful to allow flags like -f, --flag, etc. (e.g. "/-f").
+        # We reject all absolute Unix paths (including single-component ones like "/etc")
+        # to avoid access to potentially sensitive directories.
         if arg.startswith("/") and not arg.startswith("/-"):
-            # Check if it looks like a file path (contains more slashes or extensions)
-            if "/" in arg[1:] or any(arg.endswith(ext) for ext in DANGEROUS_EXTENSIONS):
-                raise MCPValidationError(
-                    f"Argument at index {i} contains absolute path: {arg[:50]}",
-                    field="args",
-                )
+            raise MCPValidationError(
+                f"Argument at index {i} contains absolute path: {arg[:50]}",
+                field="args",
+            )
 
         # Check for Windows absolute paths
         if len(arg) >= 2 and arg[1] == ":" and arg[0].isalpha():
