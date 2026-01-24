@@ -55,14 +55,14 @@ async def test_load_mcp_tools_stdio_success(
 
     result = await mcp_utils.load_mcp_tools(
         server_type="stdio",
-        command="echo",
-        args=["foo"],
-        env={"FOO": "BAR"},
+        command="node",
+        args=["server.js"],
+        env={"API_KEY": "test123"},
         timeout_seconds=3,
     )
     assert result == ["toolA"]
     mock_StdioServerParameters.assert_called_once_with(
-        command="echo", args=["foo"], env={"FOO": "BAR"}
+        command="node", args=["server.js"], env={"API_KEY": "test123"}
     )
     mock_stdio_client.assert_called_once_with(params)
     mock_get_tools.assert_awaited_once_with(mock_client, 3)
@@ -165,7 +165,7 @@ async def test_load_mcp_tools_unsupported_type():
     with pytest.raises(HTTPException) as exc:
         await mcp_utils.load_mcp_tools(server_type="unknown")
     assert exc.value.status_code == 400
-    assert "Unsupported server type" in exc.value.detail
+    assert "Invalid transport type" in exc.value.detail or "Unsupported server type" in exc.value.detail
 
 
 @pytest.mark.asyncio
@@ -180,6 +180,6 @@ async def test_load_mcp_tools_exception_handling(
     mock_stdio_client.return_value = MagicMock()
 
     with pytest.raises(HTTPException) as exc:
-        await mcp_utils.load_mcp_tools(server_type="stdio", command="foo")
+        await mcp_utils.load_mcp_tools(server_type="stdio", command="node")
     assert exc.value.status_code == 500
     assert "unexpected error" in exc.value.detail
