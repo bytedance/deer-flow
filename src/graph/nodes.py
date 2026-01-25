@@ -974,7 +974,10 @@ async def _handle_recursion_limit_fallback(
     # Apply the recursion_fallback prompt template
     system_prompt = get_system_prompt_template(agent_name, fallback_state, None, fallback_state.get("locale", "en-US"))
     limit_prompt = get_system_prompt_template("recursion_fallback", fallback_state, None, fallback_state.get("locale", "en-US"))
-    fallback_messages = cleared_messages + [system_prompt, limit_prompt]
+    fallback_messages = cleared_messages + [
+        SystemMessage(content=system_prompt),
+        SystemMessage(content=limit_prompt)
+    ]
 
     # Get the LLM without tools (strip all tools from binding)
     fallback_llm = get_llm_by_type(AGENT_LLM_MAP[agent_name])

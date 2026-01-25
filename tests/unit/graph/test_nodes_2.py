@@ -66,13 +66,13 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "# Summary\n\nBased on the research, AI safety is important."
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template") as mock_apply_template, \
+             patch("src.graph.nodes.get_system_prompt_template") as mock_get_system_prompt, \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(return_value=mock_llm_response)
             mock_get_llm.return_value = mock_llm
-            mock_apply_template.return_value = [{"role": "system", "content": "Fallback instructions"}]
+            mock_get_system_prompt.return_value = "Fallback instructions"
 
             # Call the fallback function
             result = await _handle_recursion_limit_fallback(
@@ -112,13 +112,13 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Summary in Chinese"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template") as mock_apply_template, \
+             patch("src.graph.nodes.get_system_prompt_template") as mock_get_system_prompt, \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(return_value=mock_llm_response)
             mock_get_llm.return_value = mock_llm
-            mock_apply_template.return_value = [{"role": "system", "content": "Template rendered"}]
+            mock_get_system_prompt.return_value = "Template rendered"
 
             await _handle_recursion_limit_fallback(
                 messages=partial_agent_messages,
@@ -127,12 +127,18 @@ class TestHandleRecursionLimitFallback:
                 state=state,
             )
 
-            # Verify apply_prompt_template was called with correct arguments
-            mock_apply_template.assert_called_once()
-            call_args = mock_apply_template.call_args
-            assert call_args[0][0] == "recursion_fallback"
-            assert "locale" in call_args[0][1]
-            assert call_args[0][1]["locale"] == "zh-CN"
+            # Verify get_system_prompt_template was called with correct arguments
+            assert mock_get_system_prompt.call_count == 2  # Called twice (once for agent, once for fallback)
+            
+            # Check the first call (for agent prompt)
+            first_call = mock_get_system_prompt.call_args_list[0]
+            assert first_call[0][0] == "researcher"  # agent_name
+            assert first_call[0][1]["locale"] == "zh-CN"  # locale in state
+            
+            # Check the second call (for recursion_fallback prompt)
+            second_call = mock_get_system_prompt.call_args_list[1]
+            assert second_call[0][0] == "recursion_fallback"  # prompt_name
+            assert second_call[0][1]["locale"] == "zh-CN"  # locale in state
 
     @pytest.mark.asyncio
     async def test_fallback_gets_llm_without_tools(self):
@@ -145,7 +151,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value="Template"), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -181,7 +187,7 @@ class TestHandleRecursionLimitFallback:
         sanitized_content = "Summary content"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=sanitized_content):
 
             mock_llm = MagicMock()
@@ -217,13 +223,13 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template") as mock_apply_template, \
+             patch("src.graph.nodes.get_system_prompt_template") as mock_get_system_prompt, \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(return_value=mock_llm_response)
             mock_get_llm.return_value = mock_llm
-            mock_apply_template.return_value = [{"role": "system", "content": "Template"}]
+            mock_get_system_prompt.return_value = "Template"
 
             result = await _handle_recursion_limit_fallback(
                 messages=partial_agent_messages,
@@ -233,7 +239,7 @@ class TestHandleRecursionLimitFallback:
             )
 
             # Verify locale was passed to template
-            call_args = mock_apply_template.call_args
+            call_args = mock_get_system_prompt.call_args
             assert call_args[0][1]["locale"] == "zh-CN"
 
     @pytest.mark.asyncio
@@ -246,7 +252,7 @@ class TestHandleRecursionLimitFallback:
         partial_agent_messages = [HumanMessage(content="Test")]
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]):
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(side_effect=Exception("LLM API error"))
@@ -273,7 +279,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Agent summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -320,7 +326,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Fallback summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -356,7 +362,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Fallback summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -437,18 +443,18 @@ class TestRecursionFallbackConfiguration:
             assert config.enable_recursion_fallback is True  # Actual behavior
 
     def test_config_from_runnable_config(self):
-        """Test that enable_recursion_fallback can be set via RunnableConfig.
-        NOTE: This test documents the current behavior. The Configuration.from_runnable_config
-        method has a known issue where it doesn't properly convert boolean values.
-        """
+        """Test that enable_recursion_fallback can be set via RunnableConfig."""
         from langchain_core.runnables import RunnableConfig
 
-        config = RunnableConfig(configurable={"enable_recursion_fallback": False})
-        configuration = Configuration.from_runnable_config(config)
+        # Test with False value
+        config_false = RunnableConfig(configurable={"enable_recursion_fallback": False})
+        configuration_false = Configuration.from_runnable_config(config_false)
+        assert configuration_false.enable_recursion_fallback is False
 
-        # Currently returns True due to Configuration class bug
-        # Should return False when the config is properly passed
-        assert configuration.enable_recursion_fallback is True  # Actual behavior
+        # Test with True value
+        config_true = RunnableConfig(configurable={"enable_recursion_fallback": True})
+        configuration_true = Configuration.from_runnable_config(config_true)
+        assert configuration_true.enable_recursion_fallback is True
 
     def test_config_field_exists(self):
         """Test that enable_recursion_fallback field exists in Configuration."""
@@ -475,7 +481,7 @@ class TestRecursionFallbackIntegration:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -518,7 +524,7 @@ class TestRecursionFallbackEdgeCases:
         mock_llm_response.content = "No observations available"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -547,7 +553,7 @@ class TestRecursionFallbackEdgeCases:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -577,13 +583,13 @@ class TestRecursionFallbackEdgeCases:
             mock_llm_response.content = f"Summary for {locale}"
 
             with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-                 patch("src.graph.nodes.apply_prompt_template") as mock_apply_template, \
+                 patch("src.graph.nodes.get_system_prompt_template") as mock_get_system_prompt, \
                  patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
                 mock_llm = MagicMock()
                 mock_llm.invoke = MagicMock(return_value=mock_llm_response)
                 mock_get_llm.return_value = mock_llm
-                mock_apply_template.return_value = [{"role": "system", "content": "Template"}]
+                mock_get_system_prompt.return_value = "Template"
 
                 result = await _handle_recursion_limit_fallback(
                     messages=partial_agent_messages,
@@ -593,7 +599,7 @@ class TestRecursionFallbackEdgeCases:
                 )
 
                 # Verify locale was passed to template
-                call_args = mock_apply_template.call_args
+                call_args = mock_get_system_prompt.call_args
                 assert call_args[0][1]["locale"] == locale
 
     @pytest.mark.asyncio
@@ -608,13 +614,13 @@ class TestRecursionFallbackEdgeCases:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.apply_prompt_template") as mock_apply_template, \
+             patch("src.graph.nodes.get_system_prompt_template") as mock_get_system_prompt, \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(return_value=mock_llm_response)
             mock_get_llm.return_value = mock_llm
-            mock_apply_template.return_value = [{"role": "system", "content": "Template"}]
+            mock_get_system_prompt.return_value = "Template"
 
             # Should not raise, should use default locale
             result = await _handle_recursion_limit_fallback(
@@ -625,5 +631,5 @@ class TestRecursionFallbackEdgeCases:
             )
 
             # Verify default locale "en-US" was used
-            call_args = mock_apply_template.call_args
+            call_args = mock_get_system_prompt.call_args
             assert call_args[0][1]["locale"] is None or call_args[0][1]["locale"] == "en-US"
