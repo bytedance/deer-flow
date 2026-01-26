@@ -305,6 +305,31 @@ Or via API request parameter:
 
 ---
 
+## Recursion Fallback Configuration
+
+When agents hit the recursion limit, DeerFlow can gracefully generate a summary of accumulated findings instead of failing (enabled by default).
+
+### Configuration
+
+In `conf.yaml`:
+```yaml
+ENABLE_RECURSION_FALLBACK: true
+```
+
+### Recursion Limit
+
+Set the maximum recursion limit via environment variable:
+```bash
+export AGENT_RECURSION_LIMIT=50  # default: 25
+```
+
+Or in `.env`:
+```ini
+AGENT_RECURSION_LIMIT=50
+```
+
+---
+
 ## RAG (Retrieval-Augmented Generation) Configuration
 
 DeerFlow supports multiple RAG providers for document retrieval. Configure the RAG provider by setting environment variables.

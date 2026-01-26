@@ -1107,7 +1107,12 @@ def mock_agent():
         # Simulate agent returning a message list
         return {"messages": [MagicMock(content="result content")]}
 
+    def stream(input, config, stream_mode):
+        # Simulate agent.stream() yielding messages
+        yield {"messages": [MagicMock(content="result content")]}
+
     agent.ainvoke = ainvoke
+    agent.stream = stream
     return agent
 
 
@@ -1172,7 +1177,12 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         assert any("DO NOT include inline citations" in m.content for m in messages)
         return {"messages": [MagicMock(content="resource result")]}
 
+    def stream(input, config, stream_mode):
+        # Simulate agent.stream() yielding messages
+        yield {"messages": [MagicMock(content="resource result")]}
+
     agent.ainvoke = ainvoke
+    agent.stream = stream
     with patch(
         "src.graph.nodes.HumanMessage",
         side_effect=lambda content, name=None: MagicMock(content=content, name=name),
@@ -2414,7 +2424,43 @@ async def test_execute_agent_step_preserves_multiple_tool_messages():
         ]
         return {"messages": messages}
     
+    def stream(input, config, stream_mode):
+        # Simulate agent.stream() yielding the final messages
+        messages = [
+            AIMessage(
+                content="I'll search for information about this topic.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "first search query"}
+                }]
+            ),
+            ToolMessage(
+                content="First search result content here",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Let me search for more specific information.",
+                tool_calls=[{
+                    "id": "call_2",
+                    "name": "web_search",
+                    "args": {"query": "second search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Second search result content here",
+                tool_call_id="call_2",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Based on my research, here is the comprehensive answer..."
+            ),
+        ]
+        yield {"messages": messages}
+    
     agent.ainvoke = mock_ainvoke
+    agent.stream = stream
     
     # Execute the agent step
     with patch(
@@ -2510,7 +2556,30 @@ async def test_execute_agent_step_single_tool_call_still_works():
         ]
         return {"messages": messages}
     
+    def stream(input, config, stream_mode):
+        # Simulate agent.stream() yielding the messages
+        messages = [
+            AIMessage(
+                content="I'll search for information.",
+                tool_calls=[{
+                    "id": "call_1",
+                    "name": "web_search",
+                    "args": {"query": "search query"}
+                }]
+            ),
+            ToolMessage(
+                content="Search result content",
+                tool_call_id="call_1",
+                name="web_search",
+            ),
+            AIMessage(
+                content="Here is the answer based on the search result."
+            ),
+        ]
+        yield {"messages": messages}
+    
     agent.ainvoke = mock_ainvoke
+    agent.stream = stream
     
     with patch(
         "src.graph.nodes.HumanMessage",
@@ -2570,7 +2639,17 @@ async def test_execute_agent_step_no_tool_calls_still_works():
         ]
         return {"messages": messages}
     
+    def stream(input, config, stream_mode):
+        # Simulate agent.stream() yielding messages without tool calls
+        messages = [
+            AIMessage(
+                content="Based on my knowledge, here is the answer without needing to search."
+            ),
+        ]
+        yield {"messages": messages}
+    
     agent.ainvoke = mock_ainvoke
+    agent.stream = stream
     
     with patch(
         "src.graph.nodes.HumanMessage",
