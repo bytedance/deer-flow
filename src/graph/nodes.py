@@ -961,7 +961,6 @@ async def _handle_recursion_limit_fallback(
     if len(messages) == 0:
         return messages
 
-
     cleared_messages = messages.copy()
     while len(cleared_messages) > 0 and cleared_messages[-1].type == "system":
         cleared_messages = cleared_messages[:-1]
@@ -1202,8 +1201,8 @@ async def _execute_agent_step(
             },
             goto="research_team",
         )
-    else:
-        response_messages = result["messages"]
+
+    response_messages = result["messages"]
 
     # Process the result
     response_content = response_messages[-1].content

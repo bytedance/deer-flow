@@ -9,12 +9,10 @@ including the _handle_recursion_limit_fallback function and the
 enable_recursion_fallback configuration option.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.errors import GraphRecursionError
-from langgraph.types import Command
 
 from src.config.configuration import Configuration
 from src.graph.nodes import _handle_recursion_limit_fallback
@@ -40,13 +38,6 @@ class TestHandleRecursionLimitFallback:
         # Mock current step
         current_step = MagicMock()
         current_step.execution_res = None
-
-        # Mock agent input with tool observations
-        agent_input = {
-            "messages": [
-                HumanMessage(content="# Research Topic\n\nAI safety\n\n# Current Step\n\n## Title\n\nAnalyze AI safety"),
-            ]
-        }
 
         # Mock partial agent messages (accumulated during execution before hitting limit)
         tool_call = ToolCall(
@@ -187,7 +178,7 @@ class TestHandleRecursionLimitFallback:
         sanitized_content = "Summary content"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=sanitized_content):
 
             mock_llm = MagicMock()
@@ -231,7 +222,7 @@ class TestHandleRecursionLimitFallback:
             mock_get_llm.return_value = mock_llm
             mock_get_system_prompt.return_value = "Template"
 
-            result = await _handle_recursion_limit_fallback(
+            await _handle_recursion_limit_fallback(
                 messages=partial_agent_messages,
                 agent_name="researcher",
                 current_step=current_step,
@@ -252,7 +243,7 @@ class TestHandleRecursionLimitFallback:
         partial_agent_messages = [HumanMessage(content="Test")]
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]):
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""):
 
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(side_effect=Exception("LLM API error"))
@@ -279,7 +270,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Agent summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -304,7 +295,6 @@ class TestHandleRecursionLimitFallback:
         """Test that fallback includes partial agent messages in result."""
         state = State(messages=[], locale="en-US")
         current_step = MagicMock()
-        agent_input = {"messages": [HumanMessage(content="Input message")]}
 
         # Create partial agent messages with tool calls
         # Use proper tool_call format
@@ -326,7 +316,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Fallback summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -362,7 +352,7 @@ class TestHandleRecursionLimitFallback:
         mock_llm_response.content = "Fallback summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -481,7 +471,7 @@ class TestRecursionFallbackIntegration:
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -517,14 +507,13 @@ class TestRecursionFallbackEdgeCases:
         """Test fallback behavior when there are no observations."""
         state = State(messages=[], locale="en-US")
         current_step = MagicMock()
-        agent_input = {"messages": []}
         partial_agent_messages = []
 
         mock_llm_response = MagicMock()
         mock_llm_response.content = "No observations available"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -546,14 +535,13 @@ class TestRecursionFallbackEdgeCases:
         """Test fallback with very large recursion limit value."""
         state = State(messages=[], locale="en-US")
         current_step = MagicMock()
-        agent_input = {"messages": []}
         partial_agent_messages = []
 
         mock_llm_response = MagicMock()
         mock_llm_response.content = "Summary"
 
         with patch("src.graph.nodes.get_llm_by_type") as mock_get_llm, \
-             patch("src.graph.nodes.get_system_prompt_template", return_value=[]), \
+             patch("src.graph.nodes.get_system_prompt_template", return_value=""), \
              patch("src.graph.nodes.sanitize_tool_response", return_value=mock_llm_response.content):
 
             mock_llm = MagicMock()
@@ -591,7 +579,7 @@ class TestRecursionFallbackEdgeCases:
                 mock_get_llm.return_value = mock_llm
                 mock_get_system_prompt.return_value = "Template"
 
-                result = await _handle_recursion_limit_fallback(
+                await _handle_recursion_limit_fallback(
                     messages=partial_agent_messages,
                     agent_name="researcher",
                     current_step=current_step,
@@ -623,7 +611,7 @@ class TestRecursionFallbackEdgeCases:
             mock_get_system_prompt.return_value = "Template"
 
             # Should not raise, should use default locale
-            result = await _handle_recursion_limit_fallback(
+            await _handle_recursion_limit_fallback(
                 messages=partial_agent_messages,
                 agent_name="researcher",
                 current_step=current_step,
