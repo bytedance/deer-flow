@@ -11,6 +11,8 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from src.server.mcp_validators import MCPValidationError, validate_mcp_server_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,6 +77,9 @@ async def load_mcp_tools(
     Raises:
         HTTPException: If there's an error loading the tools
     """
+    # MCP server configuration is validated at the request boundary (Pydantic model)
+    # to avoid duplicate validation logic here.
+
     try:
         if server_type == "stdio":
             if not command:

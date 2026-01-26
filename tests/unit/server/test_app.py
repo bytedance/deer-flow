@@ -352,9 +352,9 @@ class TestMCPEndpoint:
 
         request_data = {
             "transport": "stdio",
-            "command": "test_command",
-            "args": ["arg1", "arg2"],
-            "env": {"ENV_VAR": "value"},
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"API_KEY": "test123"},
         }
 
         response = client.post("/api/mcp/server/metadata", json=request_data)
@@ -362,7 +362,7 @@ class TestMCPEndpoint:
         assert response.status_code == 200
         response_data = response.json()
         assert response_data["transport"] == "stdio"
-        assert response_data["command"] == "test_command"
+        assert response_data["command"] == "node"
         assert len(response_data["tools"]) == 1
 
     @patch("src.server.app.load_mcp_tools")
@@ -375,7 +375,7 @@ class TestMCPEndpoint:
 
         request_data = {
             "transport": "stdio",
-            "command": "test_command",
+            "command": "node",
             "timeout_seconds": 60,
         }
 
@@ -424,9 +424,9 @@ class TestMCPEndpoint:
 
         request_data = {
             "transport": "stdio",
-            "command": "test_command",
-            "args": ["arg1", "arg2"],
-            "env": {"ENV_VAR": "value"},
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"API_KEY": "test123"},
         }
 
         response = client.post("/api/mcp/server/metadata", json=request_data)
@@ -444,9 +444,9 @@ class TestMCPEndpoint:
     ):
         request_data = {
             "transport": "stdio",
-            "command": "test_command",
-            "args": ["arg1", "arg2"],
-            "env": {"ENV_VAR": "value"},
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"API_KEY": "test123"},
         }
 
         response = client.post("/api/mcp/server/metadata", json=request_data)

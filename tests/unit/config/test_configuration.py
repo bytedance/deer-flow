@@ -135,17 +135,18 @@ def test_from_runnable_config_with_boolean_true_values():
     assert config.enable_deep_thinking is True
     assert config.enforce_web_search is True
 
-
-def test_get_recursion_limit_default():
+def test_get_recursion_limit_default(monkeypatch):
     from src.config.configuration import get_recursion_limit
 
+    monkeypatch.delenv("AGENT_RECURSION_LIMIT", raising=False)
     result = get_recursion_limit()
     assert result == 25
 
 
-def test_get_recursion_limit_custom_default():
+def test_get_recursion_limit_custom_default(monkeypatch):
     from src.config.configuration import get_recursion_limit
 
+    monkeypatch.delenv("AGENT_RECURSION_LIMIT", raising=False)
     result = get_recursion_limit(50)
     assert result == 50
 

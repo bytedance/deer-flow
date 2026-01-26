@@ -85,8 +85,8 @@ class TestContextManager:
         # Should return the same messages when not over limit
         assert len(compressed["messages"]) == len(messages)
 
-    def test_compress_messages_with_system_message(self):
-        """Test compress_messages preserves system message"""
+    def test_compress_messages_with_tool_message(self):
+        """Test compress_messages preserves system message and compresses raw_content"""
         # Create a context manager with limited token capacity
         limited_cm = ContextManager(token_limit=200)
 
@@ -94,15 +94,26 @@ class TestContextManager:
             SystemMessage(content="You are a helpful assistant."),
             HumanMessage(content="Hello"),
             AIMessage(content="Hi there!"),
-            HumanMessage(
-                content="Can you tell me a very long story that would exceed token limits? "
-                * 100
-            ),
+            ToolMessage(
+                name="web_search",
+                content='[{"title": "Test Result", "url": "https://example.com", "raw_content": "' + ("This is a test content that should be compressed if it exceeds 1024 characters. " * 2000) + '"}]',
+                tool_call_id="test_search",
+            )
         ]
 
         compressed = limited_cm.compress_messages({"messages": messages})
         # Should preserve system message and some recent messages
-        assert len(compressed["messages"]) == 1
+        assert len(compressed["messages"]) == 4
+        
+        # Verify raw_content was compressed to 1024 characters
+        import json
+        for msg in compressed["messages"]:
+            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) == "web_search":
+                content_data = json.loads(msg.content)
+                if isinstance(content_data, list):
+                    for item in content_data:
+                        if isinstance(item, dict) and "raw_content" in item:
+                            assert len(item["raw_content"]) == 1024
 
     def test_compress_messages_with_preserve_prefix_message(self):
         """Test compress_messages when no system message is present"""
@@ -201,9 +212,24 @@ class TestContextManager:
             HumanMessage(
                 content="Can you tell me a very long story that would exceed token limits? " * 100
             ),
+            ToolMessage(
+                name="web_search",
+                content='[{"title": "Test Result", "url": "https://example.com", "raw_content": "' + ("This is a test content that should be compressed if it exceeds 1024 characters. " * 2000) + '"}]',
+                tool_call_id="test_search",
+            )
         ]
         compressed = limited_cm.compress_messages({"messages": messages}, runtime=object())
         assert isinstance(compressed, dict)
         assert "messages" in compressed
         # Should preserve only what fits; with this setup we expect heavy compression
-        assert len(compressed["messages"]) == 1
+        assert len(compressed["messages"]) == 5
+        
+        # Verify raw_content was compressed to 1024 characters
+        import json
+        for msg in compressed["messages"]:
+            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) == "web_search":
+                content_data = json.loads(msg.content)
+                if isinstance(content_data, list):
+                    for item in content_data:
+                        if isinstance(item, dict) and "raw_content" in item:
+                            assert len(item["raw_content"]) == 1024

@@ -57,7 +57,7 @@ def get_web_search_tool(max_search_results: int):
         exclude_domains: Optional[List[str]] = search_config.get("exclude_domains", [])
         include_answer: bool = search_config.get("include_answer", False)
         search_depth: str = search_config.get("search_depth", "advanced")
-        include_raw_content: bool = search_config.get("include_raw_content", True)
+        include_raw_content: bool = search_config.get("include_raw_content", False)
         include_images: bool = search_config.get("include_images", True)
         include_image_descriptions: bool = include_images and search_config.get(
             "include_image_descriptions", True
