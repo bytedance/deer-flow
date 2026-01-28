@@ -1125,10 +1125,11 @@ async def _execute_agent_step(
         )
 
     try:
-        # Use stream from the start to capture messages in real-time
+        # Use astream (async) from the start to capture messages in real-time
         # This allows us to retrieve accumulated messages even if recursion limit is hit
+        # NOTE: astream is required for MCP tools which only support async invocation
         accumulated_messages = []
-        for chunk in agent.stream(
+        async for chunk in agent.astream(
             input=agent_input,
             config={"recursion_limit": recursion_limit},
             stream_mode="values",

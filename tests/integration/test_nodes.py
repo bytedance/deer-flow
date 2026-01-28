@@ -1107,12 +1107,12 @@ def mock_agent():
         # Simulate agent returning a message list
         return {"messages": [MagicMock(content="result content")]}
 
-    def stream(input, config, stream_mode):
-        # Simulate agent.stream() yielding messages
+    async def astream(input, config, stream_mode):
+        # Simulate agent.astream() yielding messages (async generator)
         yield {"messages": [MagicMock(content="result content")]}
 
     agent.ainvoke = ainvoke
-    agent.stream = stream
+    agent.astream = astream
     return agent
 
 
@@ -1177,12 +1177,12 @@ async def test_execute_agent_step_with_resources_and_researcher(mock_step):
         assert any("DO NOT include inline citations" in m.content for m in messages)
         return {"messages": [MagicMock(content="resource result")]}
 
-    def stream(input, config, stream_mode):
-        # Simulate agent.stream() yielding messages
+    async def astream(input, config, stream_mode):
+        # Simulate agent.astream() yielding messages (async generator)
         yield {"messages": [MagicMock(content="resource result")]}
 
     agent.ainvoke = ainvoke
-    agent.stream = stream
+    agent.astream = astream
     with patch(
         "src.graph.nodes.HumanMessage",
         side_effect=lambda content, name=None: MagicMock(content=content, name=name),
@@ -2424,8 +2424,8 @@ async def test_execute_agent_step_preserves_multiple_tool_messages():
         ]
         return {"messages": messages}
     
-    def stream(input, config, stream_mode):
-        # Simulate agent.stream() yielding the final messages
+    async def astream(input, config, stream_mode):
+        # Simulate agent.astream() yielding the final messages (async generator)
         messages = [
             AIMessage(
                 content="I'll search for information about this topic.",
@@ -2460,7 +2460,7 @@ async def test_execute_agent_step_preserves_multiple_tool_messages():
         yield {"messages": messages}
     
     agent.ainvoke = mock_ainvoke
-    agent.stream = stream
+    agent.astream = astream
     
     # Execute the agent step
     with patch(
@@ -2556,8 +2556,8 @@ async def test_execute_agent_step_single_tool_call_still_works():
         ]
         return {"messages": messages}
     
-    def stream(input, config, stream_mode):
-        # Simulate agent.stream() yielding the messages
+    async def astream(input, config, stream_mode):
+        # Simulate agent.astream() yielding the messages (async generator)
         messages = [
             AIMessage(
                 content="I'll search for information.",
@@ -2579,7 +2579,7 @@ async def test_execute_agent_step_single_tool_call_still_works():
         yield {"messages": messages}
     
     agent.ainvoke = mock_ainvoke
-    agent.stream = stream
+    agent.astream = astream
     
     with patch(
         "src.graph.nodes.HumanMessage",
@@ -2639,8 +2639,8 @@ async def test_execute_agent_step_no_tool_calls_still_works():
         ]
         return {"messages": messages}
     
-    def stream(input, config, stream_mode):
-        # Simulate agent.stream() yielding messages without tool calls
+    async def astream(input, config, stream_mode):
+        # Simulate agent.astream() yielding messages without tool calls (async generator)
         messages = [
             AIMessage(
                 content="Based on my knowledge, here is the answer without needing to search."
@@ -2649,7 +2649,7 @@ async def test_execute_agent_step_no_tool_calls_still_works():
         yield {"messages": messages}
     
     agent.ainvoke = mock_ainvoke
-    agent.stream = stream
+    agent.astream = astream
     
     with patch(
         "src.graph.nodes.HumanMessage",
