@@ -40,6 +40,49 @@ class TestRepairJsonOutput:
         expected = json.dumps({"key": "value"}, ensure_ascii=False)
         assert result == expected
 
+    def test_json_with_code_block_uppercase_json(self):
+        """Test JSON wrapped in ```JSON (uppercase) code block"""
+        content = '```JSON\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_code_block_uppercase_ts(self):
+        """Test JSON wrapped in ```TS (uppercase) code block"""
+        content = '```TS\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_code_block_mixed_case_json(self):
+        """Test JSON wrapped in ```Json (mixed case) code block"""
+        content = '```Json\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_code_block_uppercase_ts_with_prefix(self):
+        """Test JSON wrapped in ```TS code block with prefix text"""
+        content = 'some prefix ```TS\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_code_block_uppercase_json_with_prefix(self):
+        """Test JSON wrapped in ```JSON code block with prefix text - case sensitive fix"""
+        # This tests the fix for case-insensitive guard when fence is not at start
+        content = 'prefix ```JSON\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_plain_code_block_uppercase(self):
+        """Test JSON wrapped in plain ``` code block (case insensitive)"""
+        content = '```\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
     def test_malformed_json_repair(self):
         """Test with malformed JSON that can be repaired"""
         content = '{"key": "value", "incomplete":'
@@ -370,6 +413,49 @@ class TestRepairJsonOutputEdgeCases:
         assert parsed["title"] == "地月距离小报告"
         assert parsed["thought"] == "测试中文内容"
         assert isinstance(parsed["steps"], list)
+
+    def test_code_block_uppercase_json_with_leading_spaces(self):
+        """Test uppercase JSON code block with leading spaces"""
+        content = '   ```JSON\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_uppercase_json_with_tabs(self):
+        """Test uppercase JSON code block with tabs"""
+        content = '\t```JSON\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_mixed_case_with_multiple_newlines(self):
+        """Test mixed case code block with multiple newlines"""
+        content = '```JsOn\n\n\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_uppercase_with_spaces_before_closing(self):
+        """Test uppercase code block with spaces before closing fence"""
+        content = '```TYPESCRIPT\n{"key": "value"}\n  ```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_case_insensitive_various_languages(self):
+        """Test code blocks with various language specifiers in different cases"""
+        test_cases = [
+            ('```Python\n{"key": "value"}\n```', '{"key": "value"}'),
+            ('```PYTHON\n{"key": "value"}\n```', '{"key": "value"}'),
+            ('```pYtHoN\n{"key": "value"}\n```', '{"key": "value"}'),
+            ('```sql\n{"key": "value"}\n```', '{"key": "value"}'),
+            ('```SQL\n{"key": "value"}\n```', '{"key": "value"}'),
+        ]
+        for content, expected_json_str in test_cases:
+            result = repair_json_output(content)
+            # Verify it's valid JSON
+            parsed = json.loads(result)
+            assert parsed["key"] == "value"
 
 
 class TestExtractJsonFromContentEdgeCases:

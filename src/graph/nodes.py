@@ -333,7 +333,7 @@ def planner_node(
 
     # Clean the response first to handle markdown code blocks (```json, ```ts, etc.)
     cleaned_response = repair_json_output(full_response)
-    
+
     # Validate explicitly that response content is valid JSON before proceeding to parse it
     if not cleaned_response.strip().startswith('{') and not cleaned_response.strip().startswith('['):
         logger.warning("Planner response does not appear to be valid JSON after cleanup")

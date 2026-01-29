@@ -122,9 +122,9 @@ def repair_json_output(content: str) -> str:
     if not content:
         return content
 
-    # Handle markdown code blocks (```json or ```ts)
+    # Handle markdown code blocks (```json, ```ts, or ```)
     # This must be checked first, as content may start with ``` instead of { or [
-    if "```json" in content or "```ts" in content or content.startswith("```"):
+    if "```" in content:
         # Remove opening markdown code block markers (```json, ```ts, or ```), allowing
         # optional leading spaces and multiple blank lines after the fence.
         content = re.sub(
@@ -133,8 +133,8 @@ def repair_json_output(content: str) -> str:
             content,
             flags=re.IGNORECASE | re.MULTILINE,
         )
-        # Remove closing markdown code block markers, allowing optional spaces
-        # and blank lines before the closing fence.
+        # Remove closing markdown code block markers (```), allowing optional
+        # leading newlines and trailing spaces.
         content = re.sub(
             r'\n*```[ \t]*$',
             '',
