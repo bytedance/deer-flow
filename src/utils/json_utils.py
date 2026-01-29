@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import json_repair
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,27 @@ def repair_json_output(content: str) -> str:
     
     if not content:
         return content
+
+    # Handle markdown code blocks (```json or ```ts)
+    # This must be checked first, as content may start with ``` instead of { or [
+    if "```json" in content or "```ts" in content or content.startswith("```"):
+        # Remove opening markdown code block markers (```json, ```ts, or ```), allowing
+        # optional leading spaces and multiple blank lines after the fence.
+        content = re.sub(
+            r'^[ \t]*```(?:json|ts)?[ \t]*\n+',
+            '',
+            content,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        # Remove closing markdown code block markers, allowing optional spaces
+        # and blank lines before the closing fence.
+        content = re.sub(
+            r'\n*```[ \t]*$',
+            '',
+            content,
+            flags=re.MULTILINE,
+        )
+        content = content.strip()
 
     # First attempt: try to extract valid JSON if there are extra tokens
     content = _extract_json_from_content(content)
