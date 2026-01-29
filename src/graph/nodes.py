@@ -14,23 +14,22 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, interrupt
 
-from src.agents import create_agent
-from src.citations import extract_citations_from_messages, merge_citations
-from src.config.agents import AGENT_LLM_MAP
-from src.config.configuration import Configuration
-from src.llms.llm import get_llm_by_type, get_llm_token_limit_by_type
-from src.prompts.planner_model import Plan
-from src.prompts.template import apply_prompt_template, get_system_prompt_template
-from src.tools import (
+from ..agents import create_agent
+from ..citations import extract_citations_from_messages, merge_citations
+from ..config.agents import AGENT_LLM_MAP
+from ..config.configuration import Configuration
+from ..llms.llm import get_llm_by_type, get_llm_token_limit_by_type
+from ..prompts.planner_model import Plan
+from ..prompts.template import apply_prompt_template, get_system_prompt_template
+from ..tools import (
     crawl_tool,
     get_retriever_tool,
     get_web_search_tool,
     python_repl_tool,
 )
-from src.tools.search import LoggedTavilySearch
-from src.utils.context_manager import ContextManager, validate_message_content
-from src.utils.json_utils import repair_json_output, sanitize_tool_response
-
+from ..tools.search import LoggedTavilySearch
+from ..utils.context_manager import ContextManager, validate_message_content
+from ..utils.json_utils import repair_json_output, sanitize_tool_response
 from ..config import SELECTED_SEARCH_ENGINE, SearchEngine
 from .types import State
 from .utils import (
@@ -332,9 +331,12 @@ def planner_node(
     logger.debug(f"Current state messages: {state['messages']}")
     logger.info(f"Planner response: {full_response}")
 
+    # Clean the response first to handle markdown code blocks (```json, ```ts, etc.)
+    cleaned_response = repair_json_output(full_response)
+    
     # Validate explicitly that response content is valid JSON before proceeding to parse it
-    if not full_response.strip().startswith('{') and not full_response.strip().startswith('['):
-        logger.warning("Planner response does not appear to be valid JSON")
+    if not cleaned_response.strip().startswith('{') and not cleaned_response.strip().startswith('['):
+        logger.warning("Planner response does not appear to be valid JSON after cleanup")
         if plan_iterations > 0:
             return Command(
                 update=preserve_state_meta_fields(state),
@@ -347,7 +349,7 @@ def planner_node(
             )
 
     try:
-        curr_plan = json.loads(repair_json_output(full_response))
+        curr_plan = json.loads(cleaned_response)
         # Need to extract the plan from the full_response
         curr_plan_content = extract_plan_content(curr_plan)
         # load the current_plan

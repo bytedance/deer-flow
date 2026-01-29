@@ -1,10 +1,8 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from unittest.mock import Mock, patch
 import json
-
-
+from unittest.mock import Mock, patch
 
 from src.crawler.infoquest_client import InfoQuestClient
 

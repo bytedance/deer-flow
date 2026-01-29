@@ -14,7 +14,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from src.config import load_yaml_config
+from ..config import load_yaml_config
 
 logger = logging.getLogger(__name__)
 

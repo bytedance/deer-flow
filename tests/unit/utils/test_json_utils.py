@@ -6,6 +6,7 @@ import json
 from src.utils.json_utils import (
     _extract_json_from_content,
     repair_json_output,
+    sanitize_args,
     sanitize_tool_response,
 )
 
@@ -226,3 +227,269 @@ class TestSanitizeToolResponse:
         content = '[{"id": 1}, {"id": 2}] invalid stuff'
         result = sanitize_tool_response(content)
         assert result == '[{"id": 1}, {"id": 2}]'
+
+
+class TestSanitizeArgs:
+    def test_sanitize_special_characters(self):
+        """Test sanitization of special characters"""
+        args = '{"key": "value", "array": [1, 2, 3]}'
+        result = sanitize_args(args)
+        assert result == '&#123;"key": "value", "array": &#91;1, 2, 3&#93;&#125;'
+
+    def test_sanitize_square_brackets(self):
+        """Test sanitization of square brackets"""
+        args = '[1, 2, 3]'
+        result = sanitize_args(args)
+        assert result == '&#91;1, 2, 3&#93;'
+
+    def test_sanitize_curly_braces(self):
+        """Test sanitization of curly braces"""
+        args = '{key: value}'
+        result = sanitize_args(args)
+        assert result == '&#123;key: value&#125;'
+
+    def test_sanitize_mixed_brackets(self):
+        """Test sanitization of mixed bracket types"""
+        args = '{[test]}'
+        result = sanitize_args(args)
+        assert result == '&#123;&#91;test&#93;&#125;'
+
+    def test_sanitize_non_string_input(self):
+        """Test sanitization of non-string input returns empty string"""
+        assert sanitize_args(None) == ""
+        assert sanitize_args(123) == ""
+        assert sanitize_args([1, 2, 3]) == ""
+        assert sanitize_args({"key": "value"}) == ""
+
+    def test_sanitize_empty_string(self):
+        """Test sanitization of empty string"""
+        result = sanitize_args("")
+        assert result == ""
+
+    def test_sanitize_plain_text(self):
+        """Test sanitization of plain text without special characters"""
+        args = "plain text without brackets or braces"
+        result = sanitize_args(args)
+        assert result == "plain text without brackets or braces"
+
+    def test_sanitize_nested_structures(self):
+        """Test sanitization of deeply nested structures"""
+        args = '{"outer": {"inner": [1, [2, 3]]}}'
+        result = sanitize_args(args)
+        assert result == '&#123;"outer": &#123;"inner": &#91;1, &#91;2, 3&#93;&#93;&#125;&#125;'
+
+
+class TestRepairJsonOutputEdgeCases:
+    def test_code_block_with_leading_spaces(self):
+        """Test code block with leading spaces"""
+        content = '   ```json\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_with_tabs(self):
+        """Test code block with tabs"""
+        content = '\t```json\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_with_multiple_newlines(self):
+        """Test code block with multiple newlines after opening fence"""
+        content = '```json\n\n\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_code_block_with_spaces_before_closing(self):
+        """Test code block with spaces before closing fence"""
+        content = '```json\n{"key": "value"}\n  ```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_newlines_in_values(self):
+        """Test JSON with newlines in string values"""
+        content = '{"text": "line1\\nline2\\nline3"}'
+        result = repair_json_output(content)
+        expected = json.dumps({"text": "line1\nline2\nline3"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_with_special_unicode(self):
+        """Test JSON with special unicode characters"""
+        content = '{"emoji": "🔥💯", "chinese": "中文测试", "math": "∑∫"}'
+        result = repair_json_output(content)
+        expected = json.dumps({"emoji": "🔥💯", "chinese": "中文测试", "math": "∑∫"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_boolean_values(self):
+        """Test JSON with boolean values"""
+        content = '{"active": true, "disabled": false, "nullable": null}'
+        result = repair_json_output(content)
+        expected = json.dumps({"active": True, "disabled": False, "nullable": None}, ensure_ascii=False)
+        assert result == expected
+
+    def test_json_numeric_values(self):
+        """Test JSON with various numeric values"""
+        content = '{"int": 42, "float": 3.14159, "negative": -123, "scientific": 1.23e10}'
+        result = repair_json_output(content)
+        parsed = json.loads(result)
+        assert parsed["int"] == 42
+        assert parsed["float"] == 3.14159
+        assert parsed["negative"] == -123
+
+    def test_plain_code_block_marker(self):
+        """Test plain ``` code block without language specifier"""
+        content = '```\n{"key": "value"}\n```'
+        result = repair_json_output(content)
+        expected = json.dumps({"key": "value"}, ensure_ascii=False)
+        assert result == expected
+
+    def test_multiple_json_objects_takes_first_complete(self):
+        """Test that multiple JSON objects are properly extracted"""
+        content = '{"first": "object"} {"second": "object"}'
+        result = repair_json_output(content)
+        # json_repair will combine multiple objects into an array
+        expected = json.dumps([{"first": "object"}, {"second": "object"}], ensure_ascii=False)
+        assert result == expected
+
+    def test_chinese_json_with_code_block(self):
+        """Test JSON with Chinese content wrapped in markdown code block"""
+        content = '''```json
+{
+  "locale": "en-US",
+  "has_enough_context": true,
+  "thought": "测试中文内容",
+  "title": "地月距离小报告",
+  "steps": []
+}
+```'''
+        result = repair_json_output(content)
+        parsed = json.loads(result)
+        assert parsed["locale"] == "en-US"
+        assert parsed["title"] == "地月距离小报告"
+        assert parsed["thought"] == "测试中文内容"
+        assert isinstance(parsed["steps"], list)
+
+
+class TestExtractJsonFromContentEdgeCases:
+    def test_deeply_nested_json(self):
+        """Test extraction of deeply nested JSON"""
+        content = '{"l1": {"l2": {"l3": {"l4": {"l5": "deep"}}}}} garbage'
+        result = _extract_json_from_content(content)
+        assert result == '{"l1": {"l2": {"l3": {"l4": {"l5": "deep"}}}}}'
+
+    def test_json_array_of_arrays(self):
+        """Test extraction of nested arrays"""
+        content = '[[1, 2], [3, 4], [5, 6]] extra'
+        result = _extract_json_from_content(content)
+        assert result == '[[1, 2], [3, 4], [5, 6]]'
+
+    def test_json_with_backslashes_in_string(self):
+        """Test JSON with backslashes in string values"""
+        content = r'{"path": "C:\\Users\\test\\file.txt"} garbage'
+        result = _extract_json_from_content(content)
+        assert result == r'{"path": "C:\\Users\\test\\file.txt"}'
+
+    def test_json_with_forward_slashes(self):
+        """Test JSON with forward slashes in string values"""
+        content = '{"url": "https://example.com/path/to/resource"} extra'
+        result = _extract_json_from_content(content)
+        assert result == '{"url": "https://example.com/path/to/resource"}'
+
+    def test_mixed_object_and_array(self):
+        """Test JSON with mixed objects and arrays"""
+        content = '{"items": [{"id": 1}, {"id": 2}], "count": 2} tail'
+        result = _extract_json_from_content(content)
+        assert result == '{"items": [{"id": 1}, {"id": 2}], "count": 2}'
+
+    def test_json_with_unicode_escape_sequences(self):
+        """Test JSON with unicode escape sequences"""
+        content = r'{"text": "\u4E2D\u6587"} junk'
+        result = _extract_json_from_content(content)
+        assert result == r'{"text": "\u4E2D\u6587"}'
+
+    def test_no_json_structure(self):
+        """Test content without JSON structure"""
+        content = 'just plain text without brackets'
+        result = _extract_json_from_content(content)
+        assert result == content
+
+    def test_unbalanced_braces_in_middle(self):
+        """Test content with unbalanced braces doesn't extract invalid JSON"""
+        content = '{"incomplete": {"nested": } text'
+        result = _extract_json_from_content(content)
+        # Should not mark as valid end since braces are unbalanced
+        assert result == content
+
+    def test_json_with_comma_separated_values(self):
+        """Test JSON object with multiple comma-separated values"""
+        content = '{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5} more text'
+        result = _extract_json_from_content(content)
+        assert result == '{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}'
+
+
+class TestSanitizeToolResponseEdgeCases:
+    def test_json_object_with_extra_tokens(self):
+        """Test sanitizing JSON object with trailing tokens"""
+        content = '{"status": "success", "data": {"id": 123}} trailing garbage'
+        result = sanitize_tool_response(content)
+        assert result == '{"status": "success", "data": {"id": 123}}'
+
+    def test_truncation_at_exact_boundary(self):
+        """Test truncation behavior at exact max_length boundary"""
+        content = "x" * 50000
+        result = sanitize_tool_response(content, max_length=50000)
+        assert len(result) == 50000
+        assert not result.endswith("...")
+
+    def test_truncation_one_over_boundary(self):
+        """Test truncation when content is one char over limit"""
+        content = "x" * 50001
+        result = sanitize_tool_response(content, max_length=50000)
+        assert len(result) <= 50003
+        assert result.endswith("...")
+
+    def test_multiple_control_characters(self):
+        """Test removal of multiple types of control characters"""
+        content = "text\x00with\x01various\x02control\x1Fchars\x7F"
+        result = sanitize_tool_response(content)
+        # All control characters should be removed
+        assert "\x00" not in result
+        assert "\x01" not in result
+        assert "\x02" not in result
+        assert "\x1F" not in result
+        assert "\x7F" not in result
+        assert "textwithvariouscontrolchars" == result
+
+    def test_newline_and_tab_preservation(self):
+        """Test that newlines and tabs are preserved (they are valid)"""
+        content = "line1\nline2\tindented"
+        result = sanitize_tool_response(content)
+        assert "\n" in result
+        assert "\t" in result
+        assert result == "line1\nline2\tindented"
+
+    def test_non_json_content_unchanged(self):
+        """Test that non-JSON content is not modified"""
+        content = "This is plain text without any JSON structure"
+        result = sanitize_tool_response(content)
+        assert result == content
+
+    def test_json_array_at_start(self):
+        """Test extraction of JSON array at start of content"""
+        content = '[1, 2, 3, 4, 5] followed by text'
+        result = sanitize_tool_response(content)
+        assert result == '[1, 2, 3, 4, 5]'
+
+    def test_empty_json_structures_preserved(self):
+        """Test that empty JSON structures are preserved"""
+        content = '{"empty_obj": {}, "empty_arr": []} extra'
+        result = sanitize_tool_response(content)
+        assert result == '{"empty_obj": {}, "empty_arr": []}'
+
+    def test_whitespace_variations(self):
+        """Test handling of various whitespace patterns"""
+        content = "  \n\t  content with spaces  \t\n  "
+        result = sanitize_tool_response(content)
+        assert result == "content with spaces"

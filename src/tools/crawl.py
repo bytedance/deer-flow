@@ -8,8 +8,7 @@ from urllib.parse import urlparse
 
 from langchain_core.tools import tool
 
-from src.crawler import Crawler
-
+from ..crawler import Crawler
 from .decorators import log_io
 
 logger = logging.getLogger(__name__)

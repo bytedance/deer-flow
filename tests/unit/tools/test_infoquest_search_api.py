@@ -9,6 +9,7 @@ import requests
 
 from src.tools.infoquest_search.infoquest_search_api import InfoQuestAPIWrapper
 
+
 class TestInfoQuestAPIWrapper:
     @pytest.fixture
     def wrapper(self):
