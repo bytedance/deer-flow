@@ -3,6 +3,7 @@
 import asyncio
 import os
 
+
 # Configure Windows event loop policy for PostgreSQL compatibility
 # On Windows, psycopg requires a selector-based event loop, not the default ProactorEventLoop
 # This must be set at the earliest possible point before any event loop is created

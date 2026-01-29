@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from ..server.mcp_validators import (
+from src.server.mcp_validators import (
     MCPValidationError,
     validate_args_for_local_file_access,
     validate_command,

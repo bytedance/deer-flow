@@ -11,7 +11,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from ..server.mcp_validators import MCPValidationError, validate_mcp_server_config
+from src.server.mcp_validators import MCPValidationError, validate_mcp_server_config
 
 logger = logging.getLogger(__name__)
 

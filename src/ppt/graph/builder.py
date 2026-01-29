@@ -3,9 +3,9 @@
 
 from langgraph.graph import END, START, StateGraph
 
-from ...ppt.graph.ppt_composer_node import ppt_composer_node
-from ...ppt.graph.ppt_generator_node import ppt_generator_node
-from ...ppt.graph.state import PPTState
+from src.ppt.graph.ppt_composer_node import ppt_composer_node
+from src.ppt.graph.ppt_generator_node import ppt_generator_node
+from src.ppt.graph.state import PPTState
 
 
 def build_graph():

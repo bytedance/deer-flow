@@ -3,7 +3,7 @@
 
 import logging
 
-from ...podcast.graph.state import PodcastState
+from src.podcast.graph.state import PodcastState
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import os
 import subprocess
 import uuid
 
-from ...ppt.graph.state import PPTState
+from src.ppt.graph.state import PPTState
 
 logger = logging.getLogger(__name__)
 

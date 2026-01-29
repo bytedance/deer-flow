@@ -3,7 +3,7 @@
 
 from typing import Optional, TypedDict
 
-from ...config.report_style import ReportStyle
+from src.config.report_style import ReportStyle
 
 
 class PromptEnhancerState(TypedDict):

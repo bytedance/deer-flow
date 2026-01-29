@@ -1,8 +1,6 @@
 
 from unittest.mock import patch
-
 import mongomock
-
 import src.graph.checkpoint as checkpoint
 
 MONGO_URL = "mongodb://admin:admin@localhost:27017/checkpointing_db?authSource=admin"

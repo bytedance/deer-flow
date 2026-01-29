@@ -8,15 +8,14 @@ https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest
 """
 
 import json
-import logging
 from typing import Any, Dict, List
 
 import aiohttp
 import requests
 from langchain_core.utils import get_from_dict_or_env
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
-
-from ...config import load_yaml_config
+from src.config import load_yaml_config
+import logging
 
 logger = logging.getLogger(__name__)
 

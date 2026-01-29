@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from ..rag.retriever import Chunk, Document, Resource, Retriever
+from src.rag.retriever import Chunk, Document, Resource, Retriever
 
 
 class RAGFlowProvider(Retriever):

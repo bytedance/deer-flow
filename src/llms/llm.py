@@ -12,9 +12,9 @@ from langchain_deepseek import ChatDeepSeek
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
-from ..config import load_yaml_config
-from ..config.agents import LLMType
-from ..llms.providers.dashscope import ChatDashscope
+from src.config import load_yaml_config
+from src.config.agents import LLMType
+from src.llms.providers.dashscope import ChatDashscope
 
 logger = logging.getLogger(__name__)
 

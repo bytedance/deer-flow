@@ -6,13 +6,13 @@ import logging
 
 from langgraph.graph import END, START, StateGraph
 
-from ...prose.graph.prose_continue_node import prose_continue_node
-from ...prose.graph.prose_fix_node import prose_fix_node
-from ...prose.graph.prose_improve_node import prose_improve_node
-from ...prose.graph.prose_longer_node import prose_longer_node
-from ...prose.graph.prose_shorter_node import prose_shorter_node
-from ...prose.graph.prose_zap_node import prose_zap_node
-from ...prose.graph.state import ProseState
+from src.prose.graph.prose_continue_node import prose_continue_node
+from src.prose.graph.prose_fix_node import prose_fix_node
+from src.prose.graph.prose_improve_node import prose_improve_node
+from src.prose.graph.prose_longer_node import prose_longer_node
+from src.prose.graph.prose_shorter_node import prose_shorter_node
+from src.prose.graph.prose_zap_node import prose_zap_node
+from src.prose.graph.state import ProseState
 
 
 def optional_node(state: ProseState):
@@ -20,7 +20,7 @@ def optional_node(state: ProseState):
 
 
 def build_graph():
-    """Build and return the prose workflow graph."""
+    """Build and return the ppt workflow graph."""
     # build state graph
     builder = StateGraph(ProseState)
     builder.add_node("prose_continue", prose_continue_node)
@@ -40,13 +40,8 @@ def build_graph():
             "fix": "prose_fix",
             "zap": "prose_zap",
         },
+        END,
     )
-    builder.add_edge("prose_continue", END)
-    builder.add_edge("prose_improve", END)
-    builder.add_edge("prose_shorter", END)
-    builder.add_edge("prose_longer", END)
-    builder.add_edge("prose_fix", END)
-    builder.add_edge("prose_zap", END)
     return builder.compile()
 
 

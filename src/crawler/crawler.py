@@ -1,15 +1,15 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-import logging
 import re
+import logging
 
-from ..config import load_yaml_config
-from ..config.tools import CrawlerEngine
-from ..crawler.article import Article
-from ..crawler.infoquest_client import InfoQuestClient
-from ..crawler.jina_client import JinaClient
-from ..crawler.readability_extractor import ReadabilityExtractor
+from src.config.tools import CrawlerEngine
+from src.config import load_yaml_config
+from src.crawler.article import Article
+from src.crawler.infoquest_client import InfoQuestClient
+from src.crawler.jina_client import JinaClient
+from src.crawler.readability_extractor import ReadabilityExtractor
 
 logger = logging.getLogger(__name__)
 

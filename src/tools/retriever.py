@@ -11,8 +11,8 @@ from langchain_core.callbacks import (
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from ..config.tools import SELECTED_RAG_PROVIDER
-from ..rag import Document, Resource, Retriever, build_retriever
+from src.config.tools import SELECTED_RAG_PROVIDER
+from src.rag import Document, Resource, Retriever, build_retriever
 
 logger = logging.getLogger(__name__)
 

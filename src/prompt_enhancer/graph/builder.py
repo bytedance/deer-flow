@@ -3,8 +3,8 @@
 
 from langgraph.graph import StateGraph
 
-from ...prompt_enhancer.graph.enhancer_node import prompt_enhancer_node
-from ...prompt_enhancer.graph.state import PromptEnhancerState
+from src.prompt_enhancer.graph.enhancer_node import prompt_enhancer_node
+from src.prompt_enhancer.graph.state import PromptEnhancerState
 
 
 def build_graph():

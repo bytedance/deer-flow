@@ -5,8 +5,8 @@ import base64
 import logging
 import os
 
-from ...podcast.graph.state import PodcastState
-from ...tools.tts import VolcengineTTS
+from src.podcast.graph.state import PodcastState
+from src.tools.tts import VolcengineTTS
 
 logger = logging.getLogger(__name__)
 
