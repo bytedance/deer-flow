@@ -14,8 +14,8 @@ from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
 
-from src.config.loader import get_bool_env, get_int_env, get_str_env
-from src.rag.retriever import Chunk, Document, Resource, Retriever
+from ..config.loader import get_bool_env, get_int_env, get_str_env
+from ..rag.retriever import Chunk, Document, Resource, Retriever
 
 logger = logging.getLogger(__name__)
 

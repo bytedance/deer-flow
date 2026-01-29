@@ -21,10 +21,10 @@ from langchain_community.utilities import (
     WikipediaAPIWrapper,
 )
 
-from src.config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
-from src.tools.decorators import create_logged_tool
-from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
-from src.tools.tavily_search.tavily_search_results_with_images import (
+from ..config import SELECTED_SEARCH_ENGINE, SearchEngine, load_yaml_config
+from ..tools.decorators import create_logged_tool
+from ..tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
+from ..tools.tavily_search.tavily_search_results_with_images import (
     TavilySearchWithImages,
 )
 

@@ -6,6 +6,7 @@
 import json
 import logging
 from typing import Any, Dict, List, Literal, Optional, Tuple, Type, Union
+
 from langchain_core.callbacks import (
     AsyncCallbackManagerForToolRun,
     CallbackManagerForToolRun,
@@ -13,7 +14,7 @@ from langchain_core.callbacks import (
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from src.tools.infoquest_search.infoquest_search_api import InfoQuestAPIWrapper
+from .infoquest_search_api import InfoQuestAPIWrapper
 
 logger = logging.getLogger(__name__)
 

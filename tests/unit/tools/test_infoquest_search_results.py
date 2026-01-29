@@ -7,8 +7,6 @@ from unittest.mock import Mock, patch
 import pytest
 
 
-
-
 class TestInfoQuestSearchResults:
     @pytest.fixture
     def search_tool(self):
@@ -93,7 +91,9 @@ class TestInfoQuestSearchResults:
             mock_instance = Mock()
             mock_wrapper_class.return_value = mock_instance
             
-            from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
+            from src.tools.infoquest_search.infoquest_search_results import (
+                InfoQuestSearchResults,
+            )
             
             with patch.object(InfoQuestSearchResults, '__init__', return_value=None) as mock_init:
                 InfoQuestSearchResults(infoquest_api_key="dummy-key")
@@ -106,7 +106,9 @@ class TestInfoQuestSearchResults:
             mock_instance = Mock()
             mock_wrapper_class.return_value = mock_instance
             
-            from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
+            from src.tools.infoquest_search.infoquest_search_results import (
+                InfoQuestSearchResults,
+            )
             
             with patch.object(InfoQuestSearchResults, '__init__', return_value=None) as mock_init:
                 InfoQuestSearchResults(
@@ -218,7 +220,9 @@ class TestInfoQuestSearchResults:
             mock_instance = Mock()
             mock_wrapper_class.return_value = mock_instance
             
-            from src.tools.infoquest_search.infoquest_search_results import InfoQuestSearchResults
+            from src.tools.infoquest_search.infoquest_search_results import (
+                InfoQuestSearchResults,
+            )
             
             with patch.object(InfoQuestSearchResults, '__init__', return_value=None) as mock_init:
                 InfoQuestSearchResults(infoquest_api_key="test-key")

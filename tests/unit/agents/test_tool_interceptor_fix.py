@@ -3,8 +3,11 @@
 
 import unittest
 from unittest.mock import MagicMock
+
 from langchain_core.tools import Tool
+
 from src.agents.tool_interceptor import ToolInterceptor
+
 
 class TestToolInterceptorFix(unittest.TestCase):
     def test_interceptor_patches_run_method(self):

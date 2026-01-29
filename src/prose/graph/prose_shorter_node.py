@@ -5,10 +5,10 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.config.agents import AGENT_LLM_MAP
-from src.llms.llm import get_llm_by_type
-from src.prompts.template import get_prompt_template
-from src.prose.graph.state import ProseState
+from ...config.agents import AGENT_LLM_MAP
+from ...llms.llm import get_llm_by_type
+from ...prompts.template import get_prompt_template
+from ...prose.graph.state import ProseState
 
 logger = logging.getLogger(__name__)
 

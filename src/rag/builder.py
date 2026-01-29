@@ -1,14 +1,14 @@
 # Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-from src.config.tools import SELECTED_RAG_PROVIDER, RAGProvider
-from src.rag.dify import DifyProvider
-from src.rag.milvus import MilvusProvider
-from src.rag.moi import MOIProvider
-from src.rag.qdrant import QdrantProvider
-from src.rag.ragflow import RAGFlowProvider
-from src.rag.retriever import Retriever
-from src.rag.vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
+from ..config.tools import SELECTED_RAG_PROVIDER, RAGProvider
+from ..rag.dify import DifyProvider
+from ..rag.milvus import MilvusProvider
+from ..rag.moi import MOIProvider
+from ..rag.qdrant import QdrantProvider
+from ..rag.ragflow import RAGFlowProvider
+from ..rag.retriever import Retriever
+from ..rag.vikingdb_knowledge_base import VikingDBKnowledgeBaseProvider
 
 
 def build_retriever() -> Retriever | None:

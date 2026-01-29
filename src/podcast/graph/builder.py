@@ -3,10 +3,10 @@
 
 from langgraph.graph import END, START, StateGraph
 
-from src.podcast.graph.audio_mixer_node import audio_mixer_node
-from src.podcast.graph.script_writer_node import script_writer_node
-from src.podcast.graph.state import PodcastState
-from src.podcast.graph.tts_node import tts_node
+from ...podcast.graph.audio_mixer_node import audio_mixer_node
+from ...podcast.graph.script_writer_node import script_writer_node
+from ...podcast.graph.state import PodcastState
+from ...podcast.graph.tts_node import tts_node
 
 
 def build_graph():

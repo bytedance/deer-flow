@@ -8,7 +8,7 @@ from typing import Any, Callable, List, Optional
 from langchain_core.tools import BaseTool
 from langgraph.types import interrupt
 
-from src.utils.log_sanitizer import (
+from ..utils.log_sanitizer import (
     sanitize_feedback,
     sanitize_log_input,
     sanitize_tool_name,

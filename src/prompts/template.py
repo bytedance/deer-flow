@@ -7,7 +7,7 @@ from datetime import datetime
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
 from langchain.agents import AgentState
 
-from src.config.configuration import Configuration
+from ..config.configuration import Configuration
 
 # Initialize Jinja2 environment
 env = Environment(

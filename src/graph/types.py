@@ -7,8 +7,8 @@ from typing import Any
 
 from langgraph.graph import MessagesState
 
-from src.prompts.planner_model import Plan
-from src.rag import Resource
+from ..prompts.planner_model import Plan
+from ..rag import Resource
 
 
 class State(MessagesState):

@@ -10,7 +10,7 @@ https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest
 import json
 import logging
 import os
-from typing import Dict, Any
+from typing import Any, Dict
 
 import requests
 
