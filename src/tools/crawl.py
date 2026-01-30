@@ -8,8 +8,8 @@ from urllib.parse import urlparse
 
 from langchain_core.tools import tool
 
+from src.crawler.article import Article
 from src.crawler import Crawler
-
 from .decorators import log_io
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,18 @@ def crawl_tool(
     try:
         crawler = Crawler()
         article = crawler.crawl(url)
-        return json.dumps({"url": url, "crawled_content": article.to_markdown()[:1000]}, ensure_ascii=False)
+        article_content = compress_crawl_content(article)
+        return json.dumps({"url": url, "crawled_content": article_content}, ensure_ascii=False)
     except BaseException as e:
         error_msg = f"Failed to crawl. Error: {repr(e)}"
         logger.error(error_msg)
         return error_msg
+
+
+def compress_crawl_content(article: Article) -> str:
+    """
+    Compress user-defined function for article content.
+    We can customize this function to implement different compression strategies.
+    Currently, it truncates the markdown content to the first 1000 characters.
+    """
+    return article.to_markdown()[:1000]
