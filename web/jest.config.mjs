@@ -7,6 +7,7 @@ export default {
   ],
   testPathIgnorePatterns: ['/node_modules/', '/.next/'],
   moduleNameMapper: {
+    '^~/env$': '<rootDir>/tests/__mocks__/env-mock.ts',
     '^~(.*)$': '<rootDir>/src$1',
     '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
     '\\.(jpg|jpeg|png|gif|svg)$': '<rootDir>/tests/__mocks__/fileMock.js',

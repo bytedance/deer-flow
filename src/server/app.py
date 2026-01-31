@@ -339,7 +339,7 @@ async def lifespan(app):
         _mongo_client.close()
         logger.info("Global MongoDB connection closed")
 
-from src.server.middleware.auth import authenticate_user, create_access_token, get_current_user, require_admin_user
+from src.server.middleware.auth import authenticate_user, create_access_token, generate_csrf_token, get_current_user, require_admin_user
 
 logger = logging.getLogger(__name__)
 INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
@@ -354,6 +354,7 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: dict
+    csrf_token: Optional[str] = None
 
 app = FastAPI(
     title="DeerFlow API",

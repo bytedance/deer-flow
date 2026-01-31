@@ -1,6 +1,3 @@
-import { describe, it } from "node:test";
-import assert from "node:assert/strict";
-
 import { __internal } from "../src/core/api/admin";
 
 const { normalizeConfig } = __internal;
@@ -8,7 +5,7 @@ const { normalizeConfig } = __internal;
 describe("normalizeConfig", () => {
   it("returns empty defaults when payload is undefined", () => {
     const result = normalizeConfig(undefined);
-    assert.deepStrictEqual(result, {
+    expect(result).toEqual({
       tavilyApiKey: "",
       braveSearchApiKey: "",
       volcengineTtsAppId: "",
@@ -24,7 +21,7 @@ describe("normalizeConfig", () => {
       ragflow_api_key: "rag",
     });
 
-    assert.deepStrictEqual(result, {
+    expect(result).toEqual({
       tavilyApiKey: "tavily",
       braveSearchApiKey: "brave",
       volcengineTtsAppId: "volc",
@@ -40,7 +37,7 @@ describe("normalizeConfig", () => {
       brave_search_api_key: "snakeBrave",
     });
 
-    assert.deepStrictEqual(result, {
+    expect(result).toEqual({
       tavilyApiKey: "camel",
       braveSearchApiKey: "camelBrave",
       volcengineTtsAppId: "",
