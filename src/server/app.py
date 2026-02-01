@@ -82,6 +82,13 @@ from src.utils.log_sanitizer import (
     sanitize_tool_name,
     sanitize_user_content,
 )
+from src.server.middleware.auth import (
+    authenticate_user,
+    create_access_token,
+    generate_csrf_token,
+    get_current_user,
+    require_admin_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,140 +222,6 @@ async def lifespan(app):
         _mongo_client.close()
         logger.info("Global MongoDB connection closed")
 
-
-# Global connection pools (initialized at startup if configured)
-_pg_pool: Optional[AsyncConnectionPool] = None
-_pg_checkpointer: Optional[AsyncPostgresSaver] = None
-
-# Global MongoDB connection (initialized at startup if configured)
-_mongo_client: Optional[Any] = None
-_mongo_checkpointer: Optional[AsyncMongoDBSaver] = None
-
-
-from contextlib import asynccontextmanager
-
-
-@asynccontextmanager
-async def lifespan(app):
-    """
-    Application lifecycle manager
-    - Startup: Register asyncio exception handler and initialize global connection pools
-    - Shutdown: Clean up global connection pools
-    """
-    global _pg_pool, _pg_checkpointer, _mongo_client, _mongo_checkpointer
-
-    # ========== STARTUP ==========
-    try:
-        asyncio.get_running_loop()
-
-    except RuntimeError as e:
-        logger.warning(f"Could not register asyncio exception handler: {e}")
-
-    # Initialize global connection pool based on configuration
-    checkpoint_saver = get_bool_env("LANGGRAPH_CHECKPOINT_SAVER", False)
-    checkpoint_url = get_str_env("LANGGRAPH_CHECKPOINT_DB_URL", "")
-
-    if not checkpoint_saver or not checkpoint_url:
-        logger.info("Checkpoint saver not configured, skipping connection pool initialization")
-    else:
-        # Initialize PostgreSQL connection pool
-        if checkpoint_url.startswith("postgresql://"):
-            pool_min_size = get_int_env("PG_POOL_MIN_SIZE", 5)
-            pool_max_size = get_int_env("PG_POOL_MAX_SIZE", 20)
-            pool_timeout = get_int_env("PG_POOL_TIMEOUT", 60)
-
-            connection_kwargs = {
-                "autocommit": True,
-                "prepare_threshold": 0,
-                "row_factory": dict_row,
-            }
-
-            logger.info(
-                f"Initializing global PostgreSQL connection pool: "
-                f"min_size={pool_min_size}, max_size={pool_max_size}, timeout={pool_timeout}s"
-            )
-
-            try:
-                _pg_pool = AsyncConnectionPool(
-                    checkpoint_url,
-                    kwargs=connection_kwargs,
-                    min_size=pool_min_size,
-                    max_size=pool_max_size,
-                    timeout=pool_timeout,
-                )
-                await _pg_pool.open()
-
-                _pg_checkpointer = AsyncPostgresSaver(_pg_pool)
-                await _pg_checkpointer.setup()
-
-                logger.info("Global PostgreSQL connection pool initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize PostgreSQL connection pool: {e}")
-                _pg_pool = None
-                _pg_checkpointer = None
-                raise RuntimeError(
-                    "Checkpoint persistence is explicitly configured with PostgreSQL, "
-                    "but initialization failed. Application will not start."
-                ) from e
-
-        # Initialize MongoDB connection pool
-        elif checkpoint_url.startswith("mongodb://"):
-            try:
-                from motor.motor_asyncio import AsyncIOMotorClient
-
-                # MongoDB connection pool settings
-                mongo_max_pool_size = get_int_env("MONGO_MAX_POOL_SIZE", 20)
-                mongo_min_pool_size = get_int_env("MONGO_MIN_POOL_SIZE", 5)
-
-                logger.info(
-                    f"Initializing global MongoDB connection pool: "
-                    f"min_pool_size={mongo_min_pool_size}, max_pool_size={mongo_max_pool_size}"
-                )
-
-                _mongo_client = AsyncIOMotorClient(
-                    checkpoint_url,
-                    maxPoolSize=mongo_max_pool_size,
-                    minPoolSize=mongo_min_pool_size,
-                )
-
-                # Create the MongoDB checkpointer using the global client
-                _mongo_checkpointer = AsyncMongoDBSaver(_mongo_client)
-                await _mongo_checkpointer.setup()
-
-                logger.info("Global MongoDB connection pool initialized successfully")
-            except ImportError:
-                logger.error("motor package not installed. Please install it with: pip install motor")
-                raise RuntimeError("MongoDB checkpoint persistence is configured but the 'motor' package is not installed. Aborting startup.")
-            except Exception as e:
-                logger.error(f"Failed to initialize MongoDB connection pool: {e}")
-                raise RuntimeError(f"MongoDB checkpoint persistence is configured but could not be initialized: {e}")
-
-    # ========== YIELD - Application runs here ==========
-    yield
-
-    # ========== SHUTDOWN ==========
-    # Close PostgreSQL connection pool
-    if _pg_pool:
-        logger.info("Closing global PostgreSQL connection pool")
-        await _pg_pool.close()
-        logger.info("Global PostgreSQL connection pool closed")
-
-    # Close MongoDB connection
-    if _mongo_client:
-        logger.info("Closing global MongoDB connection")
-        _mongo_client.close()
-        logger.info("Global MongoDB connection closed")
-
-from src.server.middleware.auth import authenticate_user, create_access_token, generate_csrf_token, get_current_user, require_admin_user
-
-logger = logging.getLogger(__name__)
-INTERNAL_SERVER_ERROR_DETAIL = "Internal Server Error"
-
-app = FastAPI(
-    title="DeerFlow API",
-    description="API for Deer",
-    version="0.1.0",
-)
 
 class LoginResponse(BaseModel):
     access_token: str
