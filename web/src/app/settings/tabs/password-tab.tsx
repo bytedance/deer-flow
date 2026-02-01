@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Key, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { Loader2 } from "lucide-react";
+import { useState, type FunctionComponent } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 
+import { Button } from "~/components/ui/button";
 import {
   Form,
   FormControl,
@@ -18,8 +19,8 @@ import {
   FormMessage,
 } from "~/components/ui/form";
 import { Input } from "~/components/ui/input";
-import { Button } from "~/components/ui/button";
 import { changePassword } from "~/core/api/users";
+import type { SettingsState } from "~/core/store";
 
 import type { Tab } from "./types";
 
@@ -52,7 +53,10 @@ const passwordFormSchema = z.object({
 
 type PasswordFormValues = z.infer<typeof passwordFormSchema>;
 
-export const PasswordTab: Tab = () => {
+const PasswordTabComponent: FunctionComponent<{
+  settings: SettingsState;
+  onChange: (changes: Partial<SettingsState>) => void;
+}> = ({ settings: _, onChange: __ }) => {
   const [isChanging, setIsChanging] = useState(false);
 
   const form = useForm<PasswordFormValues>({
@@ -78,85 +82,85 @@ export const PasswordTab: Tab = () => {
     }
   }
 
-  return {
-    label: "Password",
-    icon: <Key className="h-4 w-4" />,
-    content: (
-      <div className="space-y-4">
-        <div>
-          <h3 className="text-lg font-medium">Change Password</h3>
-          <p className="text-sm text-muted-foreground">
-            Update your password to keep your account secure
-          </p>
-        </div>
-
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            <FormField
-              control={form.control}
-              name="currentPassword"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Current Password</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="password"
-                      placeholder="Enter your current password"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name="newPassword"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>New Password</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="password"
-                      placeholder="Enter your new password"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormDescription>
-                    Password must be at least 8 characters with uppercase, lowercase,
-                    digit, and special character
-                  </FormDescription>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name="confirmPassword"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Confirm New Password</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="password"
-                      placeholder="Confirm your new password"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <Button type="submit" disabled={isChanging}>
-              {isChanging && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Change Password
-            </Button>
-          </form>
-        </Form>
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-lg font-medium">Change Password</h3>
+        <p className="text-sm text-muted-foreground">
+          Update your password to keep your account secure
+        </p>
       </div>
-    ),
-  };
+
+      <Form {...form}>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+          <FormField
+            control={form.control}
+            name="currentPassword"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Current Password</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    placeholder="Enter your current password"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="newPassword"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>New Password</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    placeholder="Enter your new password"
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription>
+                  Password must be at least 8 characters with uppercase, lowercase,
+                  digit, and special character
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="confirmPassword"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Confirm New Password</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    placeholder="Confirm your new password"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <Button type="submit" disabled={isChanging}>
+            {isChanging && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Change Password
+          </Button>
+        </form>
+      </Form>
+    </div>
+  );
 };
+
+PasswordTabComponent.displayName = "Password";
+
+export const PasswordTab: Tab = PasswordTabComponent;

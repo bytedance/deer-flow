@@ -1,5 +1,6 @@
-import { resolveServiceURL } from "./resolve-service-url";
 import { getAuthHeaders } from "~/core/auth/utils";
+
+import { resolveServiceURL } from "./resolve-service-url";
 
 export interface User {
   id: string;
@@ -37,7 +38,7 @@ export async function fetchUsers(): Promise<User[]> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Failed to fetch users" }));
-    throw new Error(error.detail || "Failed to fetch users");
+    throw new Error(error.detail ?? "Failed to fetch users");
   }
 
   return response.json();
@@ -55,7 +56,7 @@ export async function createUser(data: CreateUserRequest): Promise<User> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Failed to create user" }));
-    throw new Error(error.detail || "Failed to create user");
+    throw new Error(error.detail ?? "Failed to create user");
   }
 
   return response.json();
@@ -73,7 +74,7 @@ export async function updateUser(userId: string, data: UpdateUserRequest): Promi
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Failed to update user" }));
-    throw new Error(error.detail || "Failed to update user");
+    throw new Error(error.detail ?? "Failed to update user");
   }
 
   return response.json();
@@ -90,7 +91,7 @@ export async function deleteUser(userId: string): Promise<void> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Failed to delete user" }));
-    throw new Error(error.detail || "Failed to delete user");
+    throw new Error(error.detail ?? "Failed to delete user");
   }
 }
 
@@ -109,6 +110,6 @@ export async function changePassword(oldPassword: string, newPassword: string): 
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Failed to change password" }));
-    throw new Error(error.detail || "Failed to change password");
+    throw new Error(error.detail ?? "Failed to change password");
   }
 }
