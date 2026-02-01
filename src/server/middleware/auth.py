@@ -142,16 +142,11 @@ def require_admin_user(current_user: dict = Depends(get_current_user)):
     return current_user
 
 def authenticate_user(email: str, password: str) -> dict:
-    """Authenticate user - in production, check against database"""
-    # This is a simple mock implementation
-    # In production, you would check against a database
-    if email and password:
-        # Simple role assignment based on email for demo
-        role = "admin" if "admin" in email else "user"
-        return {
-            "id": f"user_{email}",
-            "email": email,
-            "name": email.split("@")[0],
-            "role": role
-        }
-    return {}
+    """Authenticate user by verifying credentials against users.yaml"""
+    from src.config.users import verify_user_credentials
+    
+    user = verify_user_credentials(email, password)
+    if not user:
+        return {}
+    
+    return user

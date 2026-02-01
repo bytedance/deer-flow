@@ -361,24 +361,12 @@ class TestEnhancePromptEndpoint:
 
 
 class TestMCPEndpoint:
-    def _login_as_admin(self, client):
-        """Helper method to login as admin and return token"""
-        login_data = {
-            "email": "admin@test.com",
-            "password": "testpass"
-        }
-        response = client.post("/api/auth/login", json=login_data)
-        assert response.status_code == 200
-        return response.json()["access_token"]
-
     @patch("src.server.app.load_mcp_tools")
     @patch.dict(
         os.environ,
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_mcp_server_metadata_success(self, mock_load_tools, client):
-        # Login as admin first
-        token = self._login_as_admin(client)
         
         mock_load_tools.return_value = [
             {"name": "test_tool", "description": "Test tool"}
@@ -391,9 +379,7 @@ class TestMCPEndpoint:
             "env": {"API_KEY": "test123"},
         }
 
-        response = client.post("/api/mcp/server/metadata", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/mcp/server/metadata", json=request_data)
 
         assert response.status_code == 200
         response_data = response.json()
@@ -407,8 +393,6 @@ class TestMCPEndpoint:
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_mcp_server_metadata_with_custom_timeout(self, mock_load_tools, client):
-        # Login as admin first
-        token = self._login_as_admin(client)
         
         mock_load_tools.return_value = []
 
@@ -418,9 +402,7 @@ class TestMCPEndpoint:
             "timeout_seconds": 60,
         }
 
-        response = client.post("/api/mcp/server/metadata", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/mcp/server/metadata", json=request_data)
 
         assert response.status_code == 200
         mock_load_tools.assert_called_once()
@@ -459,9 +441,6 @@ class TestMCPEndpoint:
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_mcp_server_metadata_with_exception(self, mock_load_tools, client):
-        # Login as admin first
-        token = self._login_as_admin(client)
-        
         mock_load_tools.side_effect = HTTPException(
             status_code=400, detail="MCP Server Error"
         )
@@ -473,9 +452,7 @@ class TestMCPEndpoint:
             "env": {"API_KEY": "test123"},
         }
 
-        response = client.post("/api/mcp/server/metadata", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/mcp/server/metadata", json=request_data)
 
         assert response.status_code == 500
         assert response.json()["detail"] == "Internal Server Error"
@@ -488,9 +465,6 @@ class TestMCPEndpoint:
     def test_mcp_server_metadata_without_enable_configuration(
         self, mock_load_tools, client
     ):
-        # Login as admin first
-        token = self._login_as_admin(client)
-        
         request_data = {
             "transport": "stdio",
             "command": "node",
@@ -498,9 +472,7 @@ class TestMCPEndpoint:
             "env": {"API_KEY": "test123"},
         }
 
-        response = client.post("/api/mcp/server/metadata", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/mcp/server/metadata", json=request_data)
 
         assert response.status_code == 403
         assert (
@@ -650,21 +622,8 @@ class TestRAGEndpoints:
 
 
 class TestChatStreamEndpoint:
-    def _login_as_user(self, client):
-        """Helper method to login as regular user and return token"""
-        login_data = {
-            "email": "user@test.com",
-            "password": "testpass"
-        }
-        response = client.post("/api/auth/login", json=login_data)
-        assert response.status_code == 200
-        return response.json()["access_token"]
-
     @patch("src.server.app.graph")
     def test_chat_stream_with_default_thread_id(self, mock_graph, client):
-        # Login as user first
-        token = self._login_as_user(client)
-        
         # Mock the async stream
         async def mock_astream(*args, **kwargs):
             yield ("agent1", "step1", {"test": "data"})
@@ -685,18 +644,13 @@ class TestChatStreamEndpoint:
             "report_style": "academic",
         }
 
-        response = client.post("/api/chat/stream", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/chat/stream", json=request_data)
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
 
     @patch("src.server.app.graph")
     def test_chat_stream_with_mcp_settings(self, mock_graph, client):
-        # Login as user first
-        token = self._login_as_user(client)
-        
         # Mock the async stream
         async def mock_astream(*args, **kwargs):
             yield ("agent1", "step1", {"test": "data"})
@@ -728,9 +682,7 @@ class TestChatStreamEndpoint:
             "report_style": "academic",
         }
 
-        response = client.post("/api/chat/stream", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/chat/stream", json=request_data)
 
         assert response.status_code == 403
         assert (
@@ -744,9 +696,6 @@ class TestChatStreamEndpoint:
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_chat_stream_with_mcp_settings_enabled(self, mock_graph, client):
-        # Login as user first
-        token = self._login_as_user(client)
-        
         # Mock the async stream
         async def mock_astream(*args, **kwargs):
             yield ("agent1", "step1", {"test": "data"})
@@ -778,9 +727,7 @@ class TestChatStreamEndpoint:
             "report_style": "academic",
         }
 
-        response = client.post("/api/chat/stream", 
-                             json=request_data,
-                             headers={"Authorization": f"Bearer {token}"})
+        response = client.post("/api/chat/stream", json=request_data)
 
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream; charset=utf-8"

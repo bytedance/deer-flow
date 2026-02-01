@@ -229,6 +229,31 @@ class LoginResponse(BaseModel):
     user: dict
     csrf_token: Optional[str] = None
 
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: str
+
+
+class CreateUserRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "user"
+
+
+class UpdateUserRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
 app = FastAPI(
     title="DeerFlow API",
     description="API for Deer",
@@ -254,6 +279,10 @@ app.add_middleware(
 # Load examples into RAG providers if configured
 load_milvus_examples()
 load_qdrant_examples()
+
+# Initialize admin user from environment variables on startup
+from src.config.users import initialize_admin
+initialize_admin()
 
 in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
@@ -311,6 +340,119 @@ async def logout():
     """Logout user"""
     # In a real implementation, you might want to add the token to a blacklist
     return {"message": "Successfully logged out"}
+
+
+@app.put("/api/auth/password")
+async def change_password(
+    request: ChangePasswordRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Change current user's password"""
+    from src.config.users import change_password as change_user_password
+    
+    success, error = change_user_password(
+        current_user["id"],
+        request.old_password,
+        request.new_password
+    )
+    
+    if not success:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return {"message": "Password changed successfully"}
+
+
+@app.get("/api/admin/users", response_model=List[UserResponse])
+async def list_users(current_user: dict = Depends(require_admin_user)):
+    """List all users (admin only)"""
+    from src.config.users import get_all_users
+    
+    users = get_all_users()
+    return [
+        UserResponse(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            role=user.role
+        )
+        for user in users
+    ]
+
+
+@app.post("/api/admin/users", response_model=UserResponse)
+async def create_user_endpoint(
+    request: CreateUserRequest,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Create a new user (admin only)"""
+    from src.config.users import create_user
+    
+    user, error = create_user(
+        email=request.email,
+        password=request.password,
+        name=request.name,
+        role=request.role
+    )
+    
+    if not user:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role
+    )
+
+
+@app.put("/api/admin/users/{user_id}", response_model=UserResponse)
+async def update_user_endpoint(
+    user_id: str,
+    request: UpdateUserRequest,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Update user name and/or role (admin only)"""
+    from src.config.users import update_user
+    
+    user, error = update_user(
+        user_id=user_id,
+        name=request.name,
+        role=request.role
+    )
+    
+    if not user:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role
+    )
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user_endpoint(
+    user_id: str,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Delete a user (admin only)"""
+    from src.config.users import delete_user
+    
+    # Prevent admin from deleting themselves
+    if user_id == current_user["id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete your own account"
+        )
+    
+    success, error = delete_user(user_id)
+    
+    if not success:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return {"message": "User deleted successfully"}
+
 
 # Add CORS middleware
 # It's recommended to load the allowed origins from an environment variable
