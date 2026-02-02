@@ -425,22 +425,22 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
                 # Handle multimodal message format where content is a list
                 # Extract text content from the list structure
                 logger.debug(f"Extracting plan content from multimodal list format with {len(plan_data['content'])} elements")
-                text_parts = []
                 for item in plan_data["content"]:
                     if isinstance(item, str) and item.strip():
-                        text_parts.append(item)
+                        # Return the first valid text content found
+                        # We only take the first one because plan content should be a single JSON object
+                        # Joining multiple text parts with newlines would produce invalid JSON
+                        return item
                     elif isinstance(item, dict):
                         # Handle content block format like {"type": "text", "text": "..."}
                         if item.get("type") == "text" and "text" in item:
-                            text_parts.append(item["text"])
+                            return item["text"]
                         elif "content" in item and isinstance(item["content"], str):
-                            text_parts.append(item["content"])
-                if text_parts:
-                    return "\n".join(text_parts)
-                else:
-                    logger.warning(f"No valid text content found in multimodal list: {plan_data['content']}")
-                    # Fallback: try to convert to JSON if it looks like structured data
-                    return json.dumps(plan_data["content"], ensure_ascii=False)
+                            return item["content"]
+                # No valid text content found - raise ValueError to trigger error handling
+                # Do NOT use json.dumps() here as it would produce a JSON array that causes
+                # Plan.model_validate() to fail with ValidationError (issue #845)
+                raise ValueError(f"No valid text content found in multimodal list: {plan_data['content']}")
             else:
                 logger.warning(f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string")
                 return str(plan_data["content"])
@@ -514,7 +514,7 @@ def human_feedback_node(
         # Validate and fix plan to ensure web search requirements are met
         configurable = Configuration.from_runnable_config(config)
         new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
-    except (json.JSONDecodeError, AttributeError) as e:
+    except (json.JSONDecodeError, AttributeError, ValueError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
         if isinstance(current_plan, dict) and "content" in original_plan:
             logger.warning(f"Plan appears to be an AIMessage object with content field")

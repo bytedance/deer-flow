@@ -14,6 +14,7 @@ from src.graph.nodes import (
     researcher_node,
     extract_plan_content,
 )
+from src.prompts.planner_model import Plan
 
 
 class TestExtractPlanContent:
@@ -225,14 +226,123 @@ class TestExtractPlanContent:
         parsed_result = json.loads(result)
         assert parsed_result["title"] == "Block Test"
 
+    def test_extract_plan_content_with_generic_content_dict_format(self):
+        """Test multimodal list with generic {"content": "..."} dict format.
+        
+        Some LLM providers may use a simpler content block format where the dict
+        has a "content" field directly instead of {"type": "text", "text": "..."}.
+        This test ensures that format is also handled correctly.
+        """
+        plan_json = '{"locale": "en-US", "title": "Generic Content Test", "has_enough_context": true, "steps": []}'
+        # Simulate generic content dict format: [{"content": "..."}]
+        content_dict = {"content": [{"content": plan_json}]}
+        
+        result = extract_plan_content(content_dict)
+        assert result == plan_json
+        parsed_result = json.loads(result)
+        assert parsed_result["title"] == "Generic Content Test"
+
     def test_extract_plan_content_with_empty_multimodal_list(self):
-        """Test multimodal list with empty or whitespace-only content."""
+        """Test multimodal list with empty or whitespace-only content raises ValueError."""
         # Simulate the case from issue #845: ['', ['XXXXXXXX']]
         content_dict_empty = {"content": ["", ["XXXXXXXX"]]}
         
-        result = extract_plan_content(content_dict_empty)
-        # Should fallback to JSON dump since no valid text content found
-        assert isinstance(result, str)
+        # Should raise ValueError since no valid text content found
+        # This prevents the original bug where json.dumps would create a JSON array
+        # that causes Plan.model_validate() to fail
+        with pytest.raises(ValueError) as exc_info:
+            extract_plan_content(content_dict_empty)
+        assert "No valid text content found in multimodal list" in str(exc_info.value)
+
+    def test_extract_plan_content_multimodal_uses_first_text_only(self):
+        """Test that only the first valid text element is used from multimodal list.
+        
+        When multiple text parts are present, joining them with newlines would produce
+        invalid JSON. Therefore, we only use the first valid text element.
+        """
+        first_json = '{"locale": "en-US", "title": "First Plan", "has_enough_context": true, "steps": []}'
+        second_json = '{"locale": "zh-CN", "title": "Second Plan", "has_enough_context": false, "steps": []}'
+        
+        # Multiple JSON strings in the list - only the first should be used
+        content_dict = {"content": [first_json, second_json]}
+        result = extract_plan_content(content_dict)
+        
+        # Should return only the first JSON, not joined with newlines
+        assert result == first_json
+        assert "\n" not in result  # Ensure no newline joining occurred
+        
+        # Verify the result is valid JSON
+        parsed_result = json.loads(result)
+        assert parsed_result["title"] == "First Plan"
+        assert parsed_result["locale"] == "en-US"
+
+    def test_extract_plan_content_multimodal_full_flow_issue_845(self):
+        """Test complete flow: multimodal content -> extract -> parse -> Plan.model_validate().
+        
+        This is a comprehensive end-to-end test for issue #845 that validates:
+        1. The extracted result can be successfully parsed as JSON
+        2. The parsed result is a dict (not a list)
+        3. The parsed dict can be validated by Plan.model_validate() without raising ValidationError
+        
+        Note: This test uses the real Plan.model_validate to verify the fix, bypassing the
+        autouse fixture that patches Plan.model_validate globally for other tests.
+        """
+        # Import Plan directly and get the real model_validate method
+        from src.prompts.planner_model import Plan as PlanModel
+        # Get the real model_validate method (bypass any patches)
+        real_model_validate = PlanModel.__pydantic_validator__.validate_python
+        
+        # Create a valid plan JSON that matches the Plan model schema
+        valid_plan = {
+            "locale": "en-US",
+            "has_enough_context": True,
+            "thought": "Test thought",
+            "title": "Test Plan Title",
+            "steps": [
+                {
+                    "need_search": True,
+                    "title": "Step 1",
+                    "description": "Step 1 description",
+                    "step_type": "research"
+                }
+            ]
+        }
+        plan_json = json.dumps(valid_plan, ensure_ascii=False)
+        
+        # Test case 1: Multimodal list with valid text content
+        content_dict = {"content": [plan_json]}
+        result = extract_plan_content(content_dict)
+        
+        # Verify result can be parsed as JSON
+        parsed_result = json.loads(result)
+        
+        # Verify parsed result is a dict, not a list - this is the KEY assertion for issue #845
+        # The original bug caused parsed_result to be a list, which fails Plan.model_validate()
+        assert isinstance(parsed_result, dict), f"Expected dict but got {type(parsed_result).__name__}"
+        
+        # Verify it can be validated by the real Plan.model_validate() without raising ValidationError
+        # This is the key assertion - if parsed_result was a list (the original bug),
+        # this would raise: ValidationError: 1 validation error for PlanInput should be a valid dictionary
+        validated_plan = real_model_validate(parsed_result)
+        assert validated_plan.title == "Test Plan Title"
+        assert validated_plan.locale == "en-US"
+        assert len(validated_plan.steps) == 1
+        
+        # Test case 2: Multimodal list with content block format
+        content_dict_blocks = {"content": [{"type": "text", "text": plan_json}]}
+        result_blocks = extract_plan_content(content_dict_blocks)
+        parsed_blocks = json.loads(result_blocks)
+        assert isinstance(parsed_blocks, dict), f"Expected dict but got {type(parsed_blocks).__name__}"
+        validated_blocks = real_model_validate(parsed_blocks)
+        assert validated_blocks.title == "Test Plan Title"
+        
+        # Test case 3: Mixed content - should extract only valid text
+        content_dict_mixed = {"content": [plan_json, ["reference1", "reference2"]]}
+        result_mixed = extract_plan_content(content_dict_mixed)
+        parsed_mixed = json.loads(result_mixed)
+        assert isinstance(parsed_mixed, dict), f"Expected dict but got {type(parsed_mixed).__name__}"
+        validated_mixed = real_model_validate(parsed_mixed)
+        assert validated_mixed.title == "Test Plan Title"
 
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
