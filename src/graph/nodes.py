@@ -421,6 +421,26 @@ def extract_plan_content(plan_data: str | dict | Any) -> str:
             if isinstance(plan_data["content"], dict):
                 logger.debug("Converting content field dict to JSON string")
                 return json.dumps(plan_data["content"], ensure_ascii=False)
+            if isinstance(plan_data["content"], list):
+                # Handle multimodal message format where content is a list
+                # Extract text content from the list structure
+                logger.debug(f"Extracting plan content from multimodal list format with {len(plan_data['content'])} elements")
+                text_parts = []
+                for item in plan_data["content"]:
+                    if isinstance(item, str) and item.strip():
+                        text_parts.append(item)
+                    elif isinstance(item, dict):
+                        # Handle content block format like {"type": "text", "text": "..."}
+                        if item.get("type") == "text" and "text" in item:
+                            text_parts.append(item["text"])
+                        elif "content" in item and isinstance(item["content"], str):
+                            text_parts.append(item["content"])
+                if text_parts:
+                    return "\n".join(text_parts)
+                else:
+                    logger.warning(f"No valid text content found in multimodal list: {plan_data['content']}")
+                    # Fallback: try to convert to JSON if it looks like structured data
+                    return json.dumps(plan_data["content"], ensure_ascii=False)
             else:
                 logger.warning(f"Unexpected type for 'content' field in plan_data dict: {type(plan_data['content']).__name__}, converting to string")
                 return str(plan_data["content"])

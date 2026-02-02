@@ -188,6 +188,52 @@ class TestExtractPlanContent:
         assert len(parsed_result["steps"]) == 1
         assert parsed_result["steps"][0]["title"] == "收集埃菲尔铁塔和世界最高建筑的高度数据"
 
+    def test_extract_plan_content_with_multimodal_list_issue_845(self):
+        """Test that extract_plan_content handles multimodal message format (list type) from issue #845."""
+        # This is the structure that causes ValidationError in issue #845
+        # When content is a list like ['', ['XXXXXXXX']] from multimodal LLM models
+        plan_json = '{"locale": "en-US", "has_enough_context": false, "title": "Test Plan", "steps": []}'
+        content_dict_simple_list = {"content": [plan_json]}
+        
+        result = extract_plan_content(content_dict_simple_list)
+        # Should extract the text content from the list
+        assert result == plan_json
+        # Verify it can be parsed as JSON
+        parsed_result = json.loads(result)
+        assert parsed_result["locale"] == "en-US"
+
+    def test_extract_plan_content_with_multimodal_list_mixed_content(self):
+        """Test multimodal list with mixed content (text and references)."""
+        plan_json = '{"locale": "zh-CN", "title": "测试计划", "steps": []}'
+        # Simulate multimodal format: ['text_content', ['reference1', 'reference2']]
+        content_dict_mixed = {"content": [plan_json, ["ref1", "ref2"]]}
+        
+        result = extract_plan_content(content_dict_mixed)
+        # Should extract only the text content, ignoring nested lists
+        assert result == plan_json
+        parsed_result = json.loads(result)
+        assert parsed_result["title"] == "测试计划"
+
+    def test_extract_plan_content_with_multimodal_content_blocks(self):
+        """Test multimodal list with content block format."""
+        plan_json = '{"locale": "en-US", "title": "Block Test", "steps": []}'
+        # Simulate content block format: [{"type": "text", "text": "..."}]
+        content_dict_blocks = {"content": [{"type": "text", "text": plan_json}]}
+        
+        result = extract_plan_content(content_dict_blocks)
+        assert result == plan_json
+        parsed_result = json.loads(result)
+        assert parsed_result["title"] == "Block Test"
+
+    def test_extract_plan_content_with_empty_multimodal_list(self):
+        """Test multimodal list with empty or whitespace-only content."""
+        # Simulate the case from issue #845: ['', ['XXXXXXXX']]
+        content_dict_empty = {"content": ["", ["XXXXXXXX"]]}
+        
+        result = extract_plan_content(content_dict_empty)
+        # Should fallback to JSON dump since no valid text content found
+        assert isinstance(result, str)
+
 
 # 在这里 mock 掉 get_llm_by_type，避免 ValueError
 with patch("src.llms.llm.get_llm_by_type", return_value=MagicMock()):
