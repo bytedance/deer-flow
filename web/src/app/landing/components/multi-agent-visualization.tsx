@@ -123,12 +123,20 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
       <div className="flex h-6 w-full shrink-0 items-center justify-center">
         <div className="bg-muted/50 z-[200] flex rounded-3xl px-4 py-2">
           <Tooltip title={t("moveToPrevious")}>
-            <Button variant="ghost" onClick={prevStep}>
+            <Button
+              variant="ghost"
+              onClick={prevStep}
+              aria-label={t("moveToPrevious")}
+            >
               <ChevronLeft className="size-5" />
             </Button>
           </Tooltip>
           <Tooltip title={t("playPause")}>
-            <Button variant="ghost" onClick={togglePlay}>
+            <Button
+              variant="ghost"
+              onClick={togglePlay}
+              aria-label={t("playPause")}
+            >
               {playing ? (
                 <Pause className="size-5" />
               ) : (
@@ -143,6 +151,7 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
                 setHasPlayed(true);
                 nextStep();
               }}
+              aria-label={t("moveToNext")}
             >
               <ChevronRight className="size-5" />
             </Button>
@@ -158,6 +167,7 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
                 setHasPlayed(true);
                 activateStep(value!);
               }}
+              aria-label="Timeline"
             />
           </div>
           <Tooltip title={t("toggleFullscreen")}>
@@ -168,6 +178,7 @@ export function MultiAgentVisualization({ className }: { className?: string }) {
                 setHasPlayed(true);
                 void toggleFullscreen();
               }}
+              aria-label={t("toggleFullscreen")}
             >
               {fullscreen ? (
                 <Minimize className="size-5" />
