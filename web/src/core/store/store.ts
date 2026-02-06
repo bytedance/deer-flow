@@ -155,7 +155,14 @@ export async function sendMessage(
     for await (const event of stream) {
       const { type, data } = event;
       let message: Message | undefined;
-      
+
+      if (type === "error") {
+        // Server sent an error event - check if it's user cancellation
+        if (data.reason !== "cancelled") {
+          toast(data.error || "An error occurred while generating the response.");
+        }
+        break;
+      }
       // Handle citations event: store citations for the current research
       if (type === "citations") {
         const ongoingResearchId = useStore.getState().ongoingResearchId;
@@ -207,10 +214,12 @@ export async function sendMessage(
         scheduleUpdate();
       }
     }
-  } catch {
-    toast("An error occurred while generating the response. Please try again.");
+  } catch (error) {
+    const isAborted = (error as Error).name === "AbortError";
+    if (!isAborted) {
+      toast("An error occurred while generating the response. Please try again.");
+    }
     // Update message status.
-    // TODO: const isAborted = (error as Error).name === "AbortError";
     if (messageId != null) {
       const message = getMessage(messageId);
       if (message?.isStreaming) {

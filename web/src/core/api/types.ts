@@ -84,10 +84,20 @@ export interface CitationsEvent {
   };
 }
 
+export interface ErrorEvent {
+  type: "error";
+  data: {
+    thread_id: string;
+    error: string;
+    reason?: "cancelled" | string;
+  };
+}
+
 export type ChatEvent =
   | MessageChunkEvent
   | ToolCallsEvent
   | ToolCallChunksEvent
   | ToolCallResultEvent
   | InterruptEvent
-  | CitationsEvent;
+  | CitationsEvent
+  | ErrorEvent;
