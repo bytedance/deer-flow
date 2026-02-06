@@ -155,7 +155,14 @@ export async function sendMessage(
     for await (const event of stream) {
       const { type, data } = event;
       let message: Message | undefined;
-      
+
+      if (type === "error") {
+        // Server sent an error event - check if it's user cancellation
+        if (data.reason !== "cancelled") {
+          toast(data.error || "An error occurred while generating the response.");
+        }
+        break;
+      }
       // Handle citations event: store citations for the current research
       if (type === "citations") {
         const ongoingResearchId = useStore.getState().ongoingResearchId;
