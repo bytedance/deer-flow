@@ -207,10 +207,12 @@ export async function sendMessage(
         scheduleUpdate();
       }
     }
-  } catch {
-    toast("An error occurred while generating the response. Please try again.");
+  } catch (error) {
+    const isAborted = (error as Error).name === "AbortError";
+    if (!isAborted) {
+      toast("An error occurred while generating the response. Please try again.");
+    }
     // Update message status.
-    // TODO: const isAborted = (error as Error).name === "AbortError";
     if (messageId != null) {
       const message = getMessage(messageId);
       if (message?.isStreaming) {

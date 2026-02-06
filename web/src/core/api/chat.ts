@@ -84,6 +84,7 @@ export async function* chatStream(
     });
     
     for await (const event of stream) {
+      if (event.data == null) continue;
       yield {
         type: event.event,
         data: JSON.parse(event.data),
