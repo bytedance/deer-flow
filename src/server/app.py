@@ -970,10 +970,19 @@ async def _stream_graph_events(
         
         logger.debug(f"[{safe_thread_id}] Graph event stream completed. Total events: {event_count}")
     except asyncio.CancelledError:
-        # User cancelled/interrupted the stream - this is normal, not an error
+        # User cancelled/interrupted the stream - this is normal, not an error.
+        # Do not re-raise: ending the generator gracefully lets FastAPI close the
+        # HTTP response properly so the client won't see "error decoding response body".
         logger.info(f"[{safe_thread_id}] Graph event stream cancelled by user after {event_count} events")
-        # Re-raise to signal cancellation properly without yielding an error event
-        raise
+        try:
+            yield _make_event("error", {
+                "thread_id": thread_id,
+                "error": "Stream cancelled",
+                "reason": "cancelled",
+            })
+        except Exception:
+            pass  # Client likely already disconnected
+        return
     except Exception as e:
         logger.exception(f"[{safe_thread_id}] Error during graph execution")
         yield _make_event(

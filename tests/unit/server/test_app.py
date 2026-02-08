@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 
+import asyncio
 import base64
 import os
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
@@ -17,6 +18,7 @@ from src.server.app import (
     _astream_workflow_generator,
     _create_interrupt_event,
     _make_event,
+    _stream_graph_events,
     app,
 )
 from src.server.middleware.auth import get_current_user, require_admin_user
@@ -72,6 +74,57 @@ class TestMakeEvent:
             'event: tool_calls\ndata: {"role": "assistant", "tool_calls": []}\n\n'
         )
         assert result == expected
+
+
+class TestStreamGraphEventsCancellation:
+    """Tests for graceful handling of asyncio.CancelledError in _stream_graph_events."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_does_not_propagate(self):
+        """When the stream is cancelled, the generator should end gracefully
+        instead of re-raising CancelledError (fixes issue #847)."""
+
+        async def _mock_astream(*args, **kwargs):
+            yield ("agent", None, {"some": "data"})
+            raise asyncio.CancelledError()
+
+        graph = MagicMock()
+        graph.astream = _mock_astream
+
+        events = []
+        # The generator must NOT raise CancelledError
+        async for event in _stream_graph_events(
+            graph, {"input": "test"}, {}, "test-thread-id"
+        ):
+            events.append(event)
+
+        # It should have yielded a final error event with reason='cancelled'
+        final_events_with_cancelled = [
+            e for e in events if '"reason": "cancelled"' in e
+        ]
+        assert len(final_events_with_cancelled) == 1
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_yields_cancelled_reason(self):
+        """The final event should carry reason='cancelled' so the client
+        can distinguish cancellation from real errors."""
+
+        async def _mock_astream(*args, **kwargs):
+            raise asyncio.CancelledError()
+            yield  # make this an async generator  # noqa: E501
+
+        graph = MagicMock()
+        graph.astream = _mock_astream
+
+        events = []
+        async for event in _stream_graph_events(
+            graph, {"input": "test"}, {}, "test-thread-id"
+        ):
+            events.append(event)
+
+        assert len(events) == 1
+        assert '"reason": "cancelled"' in events[0]
+        assert '"error": "Stream cancelled"' in events[0]
 
 
 @pytest.mark.asyncio
