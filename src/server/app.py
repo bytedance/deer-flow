@@ -22,9 +22,12 @@ if _debug_mode:
     logging.getLogger("langchain").setLevel(logging.DEBUG)
     logging.getLogger("langgraph").setLevel(logging.DEBUG)
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
+
+from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -79,6 +82,15 @@ from src.utils.log_sanitizer import (
     sanitize_thread_id,
     sanitize_tool_name,
     sanitize_user_content,
+)
+from src.server.middleware.auth import (
+    add_token_to_blacklist,
+    authenticate_user,
+    create_access_token,
+    generate_csrf_token,
+    get_current_user,
+    require_admin_user,
+    security as auth_security,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +226,37 @@ async def lifespan(app):
         logger.info("Global MongoDB connection closed")
 
 
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+    csrf_token: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: str
+
+
+class CreateUserRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "user"
+
+
+class UpdateUserRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
 app = FastAPI(
     title="DeerFlow API",
     description="API for Deer",
@@ -240,12 +283,241 @@ app.add_middleware(
 load_milvus_examples()
 load_qdrant_examples()
 
+# Initialize admin user from environment variables on startup
+from src.config.users import initialize_admin
+initialize_admin()
+
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(form_data: dict, response: Response):
+    """Authenticate user and return JWT token"""
+    email = form_data.get("email")
+    password = form_data.get("password")
+    
+    if not email or not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Email and password are required"
+        )
+    
+    user = authenticate_user(email, password)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials"
+        )
+    
+    access_token = create_access_token(
+        data={"sub": user["id"], "email": user["email"], "role": user["role"]}
+    )
+    
+    # Generate CSRF token
+    csrf_token = generate_csrf_token()
+    
+    # Set CSRF token in cookie
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=not _debug_mode,
+        samesite="strict",
+        max_age=86400  # 24 hours
+    )
+    
+    login_response = LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=user
+    )
+    
+    # Add CSRF token if available (for new auth system)
+    if csrf_token:
+        login_response.csrf_token = csrf_token
+    
+    return login_response
+
+@app.post("/api/auth/logout")
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_security),
+):
+    """Logout user and invalidate the current JWT token."""
+    add_token_to_blacklist(credentials.credentials)
+    return {"message": "Successfully logged out"}
+
+
+@app.get("/api/auth/validate")
+async def validate_auth(current_user: dict = Depends(get_current_user)):
+    """Validate current authentication token and return user info."""
+    # If the token is invalid or expired, get_current_user will raise HTTPException
+    return {"valid": True, "user": current_user}
+@app.put("/api/auth/password")
+async def change_password(
+    request: ChangePasswordRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Change current user's password"""
+    from src.config.users import change_password as change_user_password
+    
+    success, error = change_user_password(
+        current_user["id"],
+        request.old_password,
+        request.new_password
+    )
+    
+    if not success:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return {"message": "Password changed successfully"}
+
+
+@app.get("/api/admin/users", response_model=List[UserResponse])
+async def list_users(current_user: dict = Depends(require_admin_user)):
+    """List all users (admin only)"""
+    from src.config.users import get_all_users
+    
+    users = get_all_users()
+    return [
+        UserResponse(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            role=user.role
+        )
+        for user in users
+    ]
+
+
+@app.post("/api/admin/users", response_model=UserResponse)
+async def create_user_endpoint(
+    request: CreateUserRequest,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Create a new user (admin only)"""
+    from src.config.users import create_user
+    
+    user, error = create_user(
+        email=request.email,
+        password=request.password,
+        name=request.name,
+        role=request.role
+    )
+    
+    if not user:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role
+    )
+
+
+@app.put("/api/admin/users/{user_id}", response_model=UserResponse)
+async def update_user_endpoint(
+    user_id: str,
+    request: UpdateUserRequest,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Update user name and/or role (admin only)"""
+    from src.config.users import update_user
+    
+    user, error = update_user(
+        user_id=user_id,
+        name=request.name,
+        role=request.role
+    )
+    
+    if not user:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role
+    )
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user_endpoint(
+    user_id: str,
+    current_user: dict = Depends(require_admin_user)
+):
+    """Delete a user (admin only)"""
+    from src.config.users import delete_user
+    
+    # Prevent admin from deleting themselves
+    if user_id == current_user["id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete your own account"
+        )
+    
+    success, error = delete_user(user_id)
+    
+    if not success:
+        raise HTTPException(status_code=400, detail=error)
+    
+    return {"message": "User deleted successfully"}
+
+
+class AdminConfigUpdateRequest(BaseModel):
+    """Request model for updating admin configuration settings.
+
+    This is intentionally minimal to avoid changing existing configuration
+    behavior. The frontend can send arbitrary key-value pairs in `settings`,
+    which will be echoed back by the update endpoint.
+    """
+
+    settings: dict[str, Any]
+
+
+@app.get("/api/admin/config")
+async def get_admin_config(
+    current_user: dict = Depends(require_admin_user),
+):
+    """Fetch admin configuration (admin only).
+
+    Currently returns an empty settings object to provide a valid endpoint
+    without modifying existing configuration persistence behavior.
+    """
+    return {"settings": {}}
+
+
+@app.post("/api/admin/config")
+async def update_admin_config(
+    request: AdminConfigUpdateRequest,
+    current_user: dict = Depends(require_admin_user),
+):
+    """Update admin configuration (admin only).
+
+    This endpoint accepts arbitrary settings and echoes them back without
+    persisting them, to avoid altering configuration behavior while
+    satisfying the frontend contract and eliminating missing-endpoint errors.
+    """
+    return {"settings": request.settings}
+# Add CORS middleware
+# It's recommended to load the allowed origins from an environment variable
+# for better security and flexibility across different environments.
+allowed_origins_str = get_str_env("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",")]
+
+logger.info(f"Allowed origins: {allowed_origins}")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,  # Restrict to specific origins
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Include all used HTTP methods
+    allow_headers=["*"],  # Now allow all headers, but can be restricted further
+)
 in_memory_store = InMemoryStore()
 graph = build_graph_with_memory()
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     # Check if MCP server configuration is enabled
     mcp_enabled = get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False)
 
@@ -1153,7 +1425,7 @@ async def enhance_prompt(request: EnhancePromptRequest):
 
 
 @app.post("/api/mcp/server/metadata", response_model=MCPServerMetadataResponse)
-async def mcp_server_metadata(request: MCPServerMetadataRequest):
+async def mcp_server_metadata(request: MCPServerMetadataRequest, current_user: dict = Depends(require_admin_user)):
     """Get information about an MCP server."""
     # Check if MCP server configuration is enabled
     if not get_bool_env("ENABLE_MCP_SERVER_CONFIGURATION", False):

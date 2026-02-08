@@ -3,7 +3,9 @@
 
 export * from "./chat";
 export * from "./evaluate";
+export * from "./admin";
 export * from "./mcp";
 export * from "./podcast";
 export * from "./prompt-enhancer";
 export * from "./types";
+export * from "./users";

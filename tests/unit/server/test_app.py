@@ -21,11 +21,32 @@ from src.server.app import (
     _stream_graph_events,
     app,
 )
+from src.server.middleware.auth import get_current_user, require_admin_user
+
+
+# Mock user data for authentication
+MOCK_USER = {"id": "test_user", "email": "test@test.com", "role": "user"}
+MOCK_ADMIN_USER = {"id": "admin_user", "email": "admin@test.com", "role": "admin"}
+
+
+def mock_get_current_user():
+    """Override for get_current_user dependency."""
+    return MOCK_USER
+
+
+def mock_require_admin_user():
+    """Override for require_admin_user dependency."""
+    return MOCK_ADMIN_USER
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    # Override authentication dependencies
+    app.dependency_overrides[get_current_user] = mock_get_current_user
+    app.dependency_overrides[require_admin_user] = mock_require_admin_user
+    yield TestClient(app)
+    # Clean up overrides after test
+    app.dependency_overrides.clear()
 
 
 class TestMakeEvent:
@@ -399,6 +420,7 @@ class TestMCPEndpoint:
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_mcp_server_metadata_success(self, mock_load_tools, client):
+        
         mock_load_tools.return_value = [
             {"name": "test_tool", "description": "Test tool"}
         ]
@@ -424,6 +446,7 @@ class TestMCPEndpoint:
         {"ENABLE_MCP_SERVER_CONFIGURATION": "true"},
     )
     def test_mcp_server_metadata_with_custom_timeout(self, mock_load_tools, client):
+        
         mock_load_tools.return_value = []
 
         request_data = {

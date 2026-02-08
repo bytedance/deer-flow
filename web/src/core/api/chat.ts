@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 // SPDX-License-Identifier: MIT
 
+import { getAuthHeaders, getAuthToken } from "~/core/auth/utils";
 import { env } from "~/env";
 
 import type { MCPServerMetadata } from "../mcp";
@@ -74,12 +75,22 @@ export async function* chatStream(
   
   try{
     const locale = getLocaleFromCookie();
+    const token = getAuthToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    
     const stream = fetchStream(resolveServiceURL("chat/stream"), {
       body: JSON.stringify({
         messages: [{ role: "user", content: userMessage }],
         locale,
         ...params,
       }),
+      headers: getAuthHeaders(),
       signal: options.abortSignal,
     });
     

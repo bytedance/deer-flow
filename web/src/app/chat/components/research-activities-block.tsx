@@ -150,14 +150,12 @@ function WebSearchToolCall({ toolCall }: { toolCall: ToolCallRuntime }) {
   }, [toolCall.result]);
   const searchResults = useMemo<SearchResult[]>(() => {
     let results: SearchResult[] | undefined = undefined;
-    let parseError = false;
     
     try {
       if (toolCall.result) {
         results = parseJSON(toolCall.result, []);
       }
     } catch (error) {
-      parseError = true;
       console.warn("Failed to parse search results:", error);
       results = undefined;
     }
