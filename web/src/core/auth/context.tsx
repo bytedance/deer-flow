@@ -64,7 +64,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     void checkAuth();
-    void checkAuth();
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {

@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from src.config.users import (
-    UserConfig,
     validate_password,
     hash_password,
     verify_password,
@@ -23,8 +22,6 @@ from src.config.users import (
     can_delete_user,
     initialize_admin,
     verify_user_credentials,
-    save_users,
-    load_users,
 )
 
 

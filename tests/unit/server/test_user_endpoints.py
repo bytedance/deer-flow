@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from src.config.users import create_user
 from src.server.app import app
 from src.server.middleware.auth import get_current_user, require_admin_user
 
@@ -60,7 +61,7 @@ class TestPasswordChangeEndpoint:
 
     def test_change_password_success(self, client_user, temp_users_file):
         """Test successful password change"""
-        from src.config.users import create_user
+        
         
         # Create a user
         create_user("user@test.com", "OldPass123!@#", "Test User", "user")
@@ -92,7 +93,6 @@ class TestPasswordChangeEndpoint:
 
     def test_change_password_wrong_old_password(self, client_user, temp_users_file):
         """Test password change with wrong old password"""
-        from src.config.users import create_user
         
         create_user("user@test.com", "OldPass123!@#", "Test User", "user")
         
@@ -122,7 +122,6 @@ class TestPasswordChangeEndpoint:
 
     def test_change_password_invalid_new_password(self, client_user, temp_users_file):
         """Test password change with invalid new password"""
-        from src.config.users import create_user
         
         create_user("user@test.com", "OldPass123!@#", "Test User", "user")
         
@@ -155,7 +154,6 @@ class TestListUsersEndpoint:
 
     def test_list_users_as_admin(self, client_admin, temp_users_file):
         """Test listing users as admin"""
-        from src.config.users import create_user
         
         create_user("user1@test.com", "Test123!@#", "User 1", "user")
         create_user("admin1@test.com", "Test123!@#", "Admin 1", "admin")
@@ -223,7 +221,6 @@ class TestCreateUserEndpoint:
 
     def test_create_user_duplicate_email(self, client_admin, temp_users_file):
         """Test user creation with duplicate email"""
-        from src.config.users import create_user
         
         create_user("existing@test.com", "Test123!@#", "Existing User", "user")
         
@@ -246,7 +243,6 @@ class TestUpdateUserEndpoint:
 
     def test_update_user_name(self, client_admin, temp_users_file):
         """Test updating user name"""
-        from src.config.users import create_user
         
         user, _ = create_user("user@test.com", "Test123!@#", "Old Name", "user")
         
@@ -261,7 +257,6 @@ class TestUpdateUserEndpoint:
 
     def test_update_user_role(self, client_admin, temp_users_file):
         """Test updating user role"""
-        from src.config.users import create_user
         
         user, _ = create_user("user@test.com", "Test123!@#", "Test User", "user")
         
@@ -289,7 +284,6 @@ class TestDeleteUserEndpoint:
 
     def test_delete_user_success(self, client_admin, temp_users_file):
         """Test successful user deletion"""
-        from src.config.users import create_user
         
         # Create admin first to avoid last admin issue
         create_user("admin@test.com", "Test123!@#", "Admin", "admin")
@@ -309,7 +303,7 @@ class TestDeleteUserEndpoint:
 
     def test_delete_last_admin_forbidden(self, client_admin, temp_users_file):
         """Test that last admin cannot be deleted"""
-        from src.config.users import create_user
+
         
         admin, _ = create_user("admin@test.com", "Test123!@#", "Admin", "admin")
         
