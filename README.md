@@ -41,7 +41,7 @@ In this demo, we showcase how to use DeerFlow to:
 
 ### Replays
 
-- [How tall is Eiffel Tower compared to tallest building?](https://deerflow.tech/chat?replay=eiffel-tower-vs-tallest-building)
+- [How tall is Eiffel Tower compared to the tallest building?](https://deerflow.tech/chat?replay=eiffel-tower-vs-tallest-building)
 - [What are the top trending repositories on GitHub?](https://deerflow.tech/chat?replay=github-top-trending-repo)
 - [Write an article about Nanjing's traditional dishes](https://deerflow.tech/chat?replay=nanjing-traditional-dishes)
 - [How to decorate a rental apartment?](https://deerflow.tech/chat?replay=rental-apartment-decoration)
@@ -439,7 +439,7 @@ When you submit a research topic in the Studio UI, you'll be able to see the ent
 - The research and writing phases for each section
 - The final report generation
 
-### Enabling LangSmith Tracing
+### Enabling LangSmith Tracing  
 
 DeerFlow supports LangSmith tracing to help you debug and monitor your workflows. To enable LangSmith tracing:
 
@@ -460,27 +460,27 @@ DeerFlow supports LangSmith tracing to help you debug and monitor your workflows
 This will enable trace visualization in LangGraph Studio and send your traces to LangSmith for monitoring and analysis.
 
 ### Checkpointing
-1. Postgres and MonogDB implementation of LangGraph checkpoint saver.
-2. In-memory store is used to caching the streaming messages before persisting to database, If finish_reason is "stop" or "interrupt", it triggers persistence.
+1. Postgres and MongoDB implementation of LangGraph checkpoint saver.
+2. In-memory store is used to cache the streaming messages before persisting to database; If finish_reason is "stop" or "interrupt", it triggers persistence.
 3. Supports saving and loading checkpoints for workflow execution.
 4. Supports saving chat stream events for replaying conversations.
 
 *Note: About langgraph issue #5557* 
-The latest langgraph-checkpoint-postgres-2.0.23 have checkpointing issue, you can check the open issue:"TypeError: Object of type HumanMessage is not JSON serializable"  [https://github.com/langchain-ai/langgraph/issues/5557].
+The latest langgraph-checkpoint-postgres-2.0.23 have checkpointing issue, you can check the open issue: "TypeError: Object of type HumanMessage is not JSON serializable"  [https://github.com/langchain-ai/langgraph/issues/5557].
 
-To use postgres checkpoint you should install langgraph-checkpoint-postgres-2.0.21
+To use postgres checkpoint, you should install langgraph-checkpoint-postgres-2.0.21
 
 *Note: About psycopg dependencies* 
 Please read the following document before using postgres:  https://www.psycopg.org/psycopg3/docs/basic/install.html
 
-BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq mannually:
+BY default, psycopg needs libpq to be installed on your system. If you don't have libpq installed, you can install psycopg with the `binary` extra to include a statically linked version of libpq manually:
 
 ```bash
 pip install psycopg[binary]
 ```
-This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform : https://pypi.org/project/psycopg-binary/#files
+This will install a self-contained package with all the libraries needed, but binary not supported for all platform, you check the supported platform: https://pypi.org/project/psycopg-binary/#files
 
-if not supported, you can select local-installation: https://www.psycopg.org/psycopg3/docs/basic/install.html#local-installation
+If not supported, you can select local-installation: https://www.psycopg.org/psycopg3/docs/basic/install.html#local-installation
 
 
 The default database and collection will be automatically created if not exists.
@@ -503,7 +503,7 @@ LANGGRAPH_CHECKPOINT_DB_URL="mongodb://localhost:27017/"
 
 You can also run this project with Docker.
 
-First, you need read the [configuration](docs/configuration_guide.md) below. Make sure `.env`, `.conf.yaml` files are ready.
+First, you need to read the [configuration](docs/configuration_guide.md) below. Make sure `.env`, `.conf.yaml` files are ready.
 
 Second, to build a Docker image of your own web server:
 
@@ -511,7 +511,7 @@ Second, to build a Docker image of your own web server:
 docker build -t deer-flow-api .
 ```
 
-Final, start up a docker container running the web server:
+Finally, start up a docker container running the web server:
 ```bash
 # Replace deer-flow-api-app with your preferred container name
 # Start the server then bind to localhost:8000
