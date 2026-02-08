@@ -50,6 +50,7 @@ dependencies = [
     "psycopg[binary]>=3.2.9",
     "qdrant-client>=1.15.1",
     "langchain-qdrant>=0.2.0",
+    "orjson>=3.11.5",
 ]
 
 [project.optional-dependencies]
