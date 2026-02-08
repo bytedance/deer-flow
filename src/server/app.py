@@ -25,7 +25,7 @@ if _debug_mode:
 from fastapi import FastAPI, HTTPException, Query, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from fastapi.security import HTTPBearer
+
 from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.checkpoint.mongodb import AsyncMongoDBSaver
@@ -284,8 +284,6 @@ load_qdrant_examples()
 from src.config.users import initialize_admin
 initialize_admin()
 
-in_memory_store = InMemoryStore()
-graph = build_graph_with_memory()
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(form_data: dict, response: Response):
@@ -318,7 +316,7 @@ async def login(form_data: dict, response: Response):
         key="csrf_token",
         value=csrf_token,
         httponly=False,
-        secure=True,
+        secure=not _debug_mode,
         samesite="strict",
         max_age=86400  # 24 hours
     )
@@ -342,6 +340,11 @@ async def logout():
     return {"message": "Successfully logged out"}
 
 
+@app.get("/api/auth/validate")
+async def validate_auth(current_user: dict = Depends(get_current_user)):
+    """Validate current authentication token and return user info."""
+    # If the token is invalid or expired, get_current_user will raise HTTPException
+    return {"valid": True, "user": current_user}
 @app.put("/api/auth/password")
 async def change_password(
     request: ChangePasswordRequest,
@@ -454,6 +457,41 @@ async def delete_user_endpoint(
     return {"message": "User deleted successfully"}
 
 
+class AdminConfigUpdateRequest(BaseModel):
+    """Request model for updating admin configuration settings.
+
+    This is intentionally minimal to avoid changing existing configuration
+    behavior. The frontend can send arbitrary key-value pairs in `settings`,
+    which will be echoed back by the update endpoint.
+    """
+
+    settings: dict[str, Any]
+
+
+@app.get("/api/admin/config")
+async def get_admin_config(
+    current_user: dict = Depends(require_admin_user),
+):
+    """Fetch admin configuration (admin only).
+
+    Currently returns an empty settings object to provide a valid endpoint
+    without modifying existing configuration persistence behavior.
+    """
+    return {"settings": {}}
+
+
+@app.post("/api/admin/config")
+async def update_admin_config(
+    request: AdminConfigUpdateRequest,
+    current_user: dict = Depends(require_admin_user),
+):
+    """Update admin configuration (admin only).
+
+    This endpoint accepts arbitrary settings and echoes them back without
+    persisting them, to avoid altering configuration behavior while
+    satisfying the frontend contract and eliminating missing-endpoint errors.
+    """
+    return {"settings": request.settings}
 # Add CORS middleware
 # It's recommended to load the allowed origins from an environment variable
 # for better security and flexibility across different environments.
@@ -466,7 +504,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,  # Restrict to specific origins
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Use the configured list of methods
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Include all used HTTP methods
     allow_headers=["*"],  # Now allow all headers, but can be restricted further
 )
 in_memory_store = InMemoryStore()

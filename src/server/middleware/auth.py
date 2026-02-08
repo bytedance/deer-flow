@@ -83,41 +83,32 @@ def generate_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 def validate_csrf_token(request: Request, csrf_token: str) -> bool:
-    """Validate CSRF token against session or header"""
-    # For state-changing operations, validate CSRF token
-    # In production, you might store this in session or validate against user session
-    expected_token = request.headers.get("X-CSRF-Token") or request.cookies.get("csrf_token")
-    return secrets.compare_digest(csrf_token, expected_token) if expected_token else False
+    """Validate CSRF token sent in header against CSRF cookie"""
+    # For state-changing operations, validate CSRF token using a double-submit
+    # pattern: compare the value in the X-CSRF-Token header to the value stored
+    # in the csrf_token cookie that the server previously set.
+    expected_token = request.cookies.get("csrf_token")
+    if not expected_token:
+        logger.warning("CSRF token cookie is missing during CSRF validation")
+        return False
+    return secrets.compare_digest(csrf_token, expected_token)
 
-def csrf_protected(request: Request = None):
-    """Decorator for CSRF protection on state-changing operations"""
-    def decorator(func: Callable) -> Callable:
-        async def wrapper(*args, **kwargs):
-            if request and request.method in ["POST", "PUT", "DELETE", "PATCH"]:
-                csrf_token = request.headers.get("X-CSRF-Token")
-                if not csrf_token or not validate_csrf_token(request, csrf_token):
-                    raise HTTPException(status_code=403, detail="CSRF token validation failed")
-            return await func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 def verify_token(token: str) -> dict:
     """Verify JWT token with enhanced error handling"""
     try:
-        import jwt
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        
+
         # Additional validation
         if not all(key in payload for key in ["sub", "email", "role"]):
             return {}
-            
+
         return payload
     except jwt.ExpiredSignatureError:
+        logger.info("Token verification failed: expired signature")
         return {}
     except jwt.InvalidTokenError:
-        return {}
-    except Exception as e:
-        logger.warning(f"Token verification error: {e}")
+        logger.info("Token verification failed: invalid token")
         return {}
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):

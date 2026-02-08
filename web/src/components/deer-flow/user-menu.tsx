@@ -31,15 +31,6 @@ export function UserMenu() {
     window.location.href = "/login";
   };
 
-  const getUserInitials = () => {
-    if (user.name) {
-      return user.name.charAt(0).toUpperCase();
-    }
-    if (user.email) {
-      return user.email.charAt(0).toUpperCase();
-    }
-    return "U";
-  };
 
   return (
     <DropdownMenu>
