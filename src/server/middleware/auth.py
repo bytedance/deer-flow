@@ -59,6 +59,54 @@ elif not validate_secret_key(SECRET_KEY):
 
 security = HTTPBearer()
 
+# In-memory token blacklist for invalidated (logged-out) tokens.
+# NOTE: For production deployments with multiple workers/processes, replace
+# this with a shared store such as Redis.
+_token_blacklist: set[str] = set()
+_blacklist_expiry: dict[str, datetime] = {}
+
+
+def add_token_to_blacklist(token: str) -> None:
+    """Invalidate a token by adding it to the blacklist.
+
+    The token's own expiry claim is used so that the blacklist entry is
+    automatically cleaned up once the token would have expired anyway.
+    """
+    _cleanup_expired_blacklist_entries()
+    _token_blacklist.add(token)
+    # Try to extract the token's expiry so we can auto-purge later
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        exp = payload.get("exp")
+        if exp:
+            _blacklist_expiry[token] = datetime.fromtimestamp(exp, tz=timezone.utc)
+        else:
+            _blacklist_expiry[token] = datetime.now(timezone.utc) + timedelta(hours=24)
+    except Exception:
+        # If decoding fails, default to 24 h
+        _blacklist_expiry[token] = datetime.now(timezone.utc) + timedelta(hours=24)
+
+
+def is_token_blacklisted(token: str) -> bool:
+    """Return True if the token has been blacklisted (i.e. logged out)."""
+    return token in _token_blacklist
+
+
+def _cleanup_expired_blacklist_entries() -> None:
+    """Remove expired entries from the blacklist to prevent unbounded growth."""
+    now = datetime.now(timezone.utc)
+    expired = [t for t, exp in _blacklist_expiry.items() if exp < now]
+    for t in expired:
+        _token_blacklist.discard(t)
+        _blacklist_expiry.pop(t, None)
+
+
+def clear_token_blacklist() -> None:
+    """Clear the entire blacklist (intended for tests)."""
+    _token_blacklist.clear()
+    _blacklist_expiry.clear()
+
+
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     """Create JWT token with configurable expiration"""
     to_encode = data.copy()
@@ -96,6 +144,11 @@ def validate_csrf_token(request: Request, csrf_token: str) -> bool:
 
 def verify_token(token: str) -> dict:
     """Verify JWT token with enhanced error handling"""
+    # Reject tokens that have been explicitly invalidated (logged out)
+    if is_token_blacklisted(token):
+        logger.info("Token verification failed: token has been blacklisted")
+        return {}
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 

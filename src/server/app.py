@@ -25,6 +25,7 @@ if _debug_mode:
 from fastapi import FastAPI, HTTPException, Query, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
 
 from pydantic import BaseModel
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
@@ -83,11 +84,13 @@ from src.utils.log_sanitizer import (
     sanitize_user_content,
 )
 from src.server.middleware.auth import (
+    add_token_to_blacklist,
     authenticate_user,
     create_access_token,
     generate_csrf_token,
     get_current_user,
     require_admin_user,
+    security as auth_security,
 )
 
 logger = logging.getLogger(__name__)
@@ -334,9 +337,11 @@ async def login(form_data: dict, response: Response):
     return login_response
 
 @app.post("/api/auth/logout")
-async def logout():
-    """Logout user"""
-    # In a real implementation, you might want to add the token to a blacklist
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_security),
+):
+    """Logout user and invalidate the current JWT token."""
+    add_token_to_blacklist(credentials.credentials)
     return {"message": "Successfully logged out"}
 
 
