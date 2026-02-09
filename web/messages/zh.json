@@ -9,7 +9,28 @@
     "send": "发送",
     "stop": "停止",
     "linkNotReliable": "此链接可能是 AI 生成的幻觉，可能并不可靠。",
-    "noResult": "无结果"
+    "noResult": "无结果",
+    "logout": "登出"
+  },
+  "auth": {
+    "login": "登录",
+    "loginDescription": "输入您的邮箱和密码登录账户。",
+    "email": "邮箱",
+    "password": "密码",
+    "signIn": "登录",
+    "signingIn": "登录中...",
+    "invalidCredentials": "邮箱或密码无效",
+    "loginError": "登录过程中发生错误"
+  },
+  "admin": {
+    "systemConfiguration": "系统配置",
+    "systemConfigurationDescription": "配置系统级设置和API密钥",
+    "tavilyApiKey": "Tavily API密钥",
+    "braveSearchApiKey": "Brave搜索API密钥",
+    "volcengineTtsAppId": "火山引擎TTS应用ID",
+    "ragflowApiKey": "RAGFlow API密钥",
+    "saveConfiguration": "保存配置",
+    "configSaved": "配置保存成功"
   },
   "messageInput": {
     "placeholder": "我能帮你做什么？",
@@ -103,7 +124,10 @@
     "page": {
       "loading": "正在加载 DeerFlow...",
       "welcomeUser": "欢迎，{username}",
-      "starOnGitHub": "在 GitHub 上点赞"
+      "starOnGitHub": "在 GitHub 上点赞",
+      "userMenu": {
+        "logout": "登出"
+      }
     },
     "welcome": {
       "greeting": "👋 你好！",
