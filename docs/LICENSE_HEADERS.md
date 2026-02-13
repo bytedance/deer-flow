@@ -94,28 +94,13 @@ The script automatically detects and processes:
 - Python files (`.py`)
 - TypeScript files (`.ts`)
 - TypeScript React files (`.tsx`)
-uv run python scripts/license_header.py src/agents/ --check
-
-# Add headers to specific files
-uv run python scripts/license_header.py src/new_module/ --verbose
-
-# Check a single file
-uv run python scripts/license_header.py src/workflow.py --check
-```
-
-### Script Options
--all`)** - checks both Python and TypeScript
-
-If any files are missing license headers, the commit will be blocked. Run `make add-license-all
-- `paths`: One or more paths (files or directories) to process
 
 ## Pre-commit Hook
 
 The license header check is integrated into the pre-commit hook. Before allowing a commit, it will:
 
 1. Run linting (`make lint`)
-2. Run formatting -all
-```
+2. Run formatting (`make format`)
 
 This ensures all merged code has proper license headers for both Python and TypeScript fileill be blocked. Run `make add-license` to fix.
 
