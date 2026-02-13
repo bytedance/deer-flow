@@ -20,6 +20,17 @@ if [ $FORMAT_RESULT -ne 0 ]; then
     exit 1
 fi
 
+# Check license headers
+echo "Checking license headers..."
+make check-license-all
+LICENSE_RESULT=$?
+
+if [ $LICENSE_RESULT -ne 0 ]; then
+    echo "❌ Some files are missing license headers."
+    echo "Run 'make add-license-all' to add them automatically."
+    exit 1
+fi
+
 # If any files were reformatted, add them back to staging
 git diff --name-only | xargs -I {} git add "{}"
 

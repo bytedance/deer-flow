@@ -1,4 +1,4 @@
-.PHONY: help lint format install-dev serve test coverage langgraph-dev lint-frontend
+.PHONY: help lint format install-dev serve test coverage langgraph-dev lint-frontend add-license add-license-ts add-license-all check-license check-license-ts check-license-all
 
 help: ## Show this help message
 	@echo "Deer Flow - Available Make Targets:"
@@ -34,3 +34,11 @@ langgraph-dev: ## Start langgraph development server
 
 coverage: ## Run tests with coverage report
 	uv run pytest --cov=src tests/ --cov-report=term-missing --cov-report=xml
+
+add-license-all: ## Add license headers to all Python and TypeScript files
+	@echo "Adding license headers to all source files..."
+	@uv run python scripts/license_header.py src/ tests/ server.py main.py web/src/ web/tests/ --verbose
+
+check-license-all: ## Check if all Python and TypeScript files have license headers
+	@echo "Checking license headers in all source files..."
+	@uv run python scripts/license_header.py src/ tests/ server.py main.py web/src/ web/tests/ --check
