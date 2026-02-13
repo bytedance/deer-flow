@@ -207,11 +207,11 @@ const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
 
 function transformPastedHTML(html: string) {
   try {
-    // Strip HTML from user-pasted content
-    const tempEl = document.createElement("div");
-    tempEl.innerHTML = html;
+    // Strip HTML from user-pasted content using DOMParser for better security
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
 
-    return tempEl.textContent || tempEl.innerText || "";
+    return doc.body.textContent || "";
   } catch (error) {
     console.error("Error transforming pasted HTML", error);
 
