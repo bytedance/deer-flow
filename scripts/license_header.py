@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright DeerFlow Authors
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 """Script to add or check license headers in Python and TypeScript files."""
 
