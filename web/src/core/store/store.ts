@@ -469,13 +469,20 @@ export function useRenderableMessageIds() {
           return true;
         }
 
-        // For user and coordinator messages, only include if they have content
-        // This prevents empty dividers from appearing in the UI
-        if (message.role === "user" || message.agent === "coordinator") {
-          return !!message.content;
+        // Research-phase agents (researcher, coder, reporter, analyst) are rendered
+        // inside ResearchCard via researchActivityIds, not in the main message list
+        const isResearchAgent =
+          message.agent === "researcher" ||
+          message.agent === "coder" ||
+          message.agent === "reporter" ||
+          message.agent === "analyst";
+        if (isResearchAgent) {
+          return false;
         }
 
-        return false;
+        // All other messages (user, coordinator, unknown agents) render if they have content
+        // This prevents empty dividers while ensuring unknown agent messages (#456) are shown
+        return !!message.content;
       });
     }),
   );

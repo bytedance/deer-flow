@@ -142,12 +142,20 @@ function MessageListItem({
     return researchIds.includes(messageId);
   }, [researchIds, messageId]);
   if (message) {
+    // Research-phase agents are rendered inside ResearchCard, skip them here
+    const isResearchAgent =
+      message.agent === "researcher" ||
+      message.agent === "coder" ||
+      message.agent === "reporter" ||
+      message.agent === "analyst";
     if (
-      message.role === "user" ||
-      message.agent === "coordinator" ||
-      message.agent === "planner" ||
-      message.agent === "podcast" ||
-      startOfResearch
+      !isResearchAgent &&
+      (message.role === "user" ||
+        message.agent === "coordinator" ||
+        message.agent === "planner" ||
+        message.agent === "podcast" ||
+        startOfResearch ||
+        message.content)
     ) {
       let content: React.ReactNode;
       if (message.agent === "planner") {
