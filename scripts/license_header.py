@@ -209,7 +209,7 @@ def main():
             print(f"\n❌ {len(missing_header)} file(s) missing license header:")
             for path in missing_header:
                 print(f"  - {path}")
-            print("\nRun 'make add-license' to add headers.")
+            print("\nRun 'make add-license-all' to add headers.")
             return 1
         else:
             print(f"✅ All {len(all_files)} source file(s) have license headers.")

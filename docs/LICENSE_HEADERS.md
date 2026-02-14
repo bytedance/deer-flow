@@ -102,7 +102,7 @@ The license header check is integrated into the pre-commit hook. Before allowing
 1. Run linting (`make lint`)
 2. Run formatting (`make format`)
 
-This ensures all merged code has proper license headers for both Python and TypeScript fileill be blocked. Run `make add-license` to fix.
+This ensures all merged code has proper license headers for both Python and TypeScript fileill be blocked. Run `make add-license-all` to fix.
 
 ## CI/CD Integration
 
@@ -110,8 +110,7 @@ For continuous integration, add the license check to your workflow:
 
 ```bash
 # In your CI script or GitHub Actions
-ma`.next` (Next.js build directory)
-- ke check-license
+- make check-license `.next` (Next.js build directory)
 ```
 
 This ensures all merged code has proper license headers.
@@ -142,7 +141,7 @@ LICENSE_HEADERS: Dict[str, str] = {
 }
 ```
 
-### Adding Mo-all:
+### Adding Licenserce header to all files:
     @uv run python scripts/license_header.py src/ tests/ scripts/ web/src/ web/test
 1. Add the extension to `FILE_TYPE_MAP` in `scripts/license_header.py`
 2. Add the corresponding header format to `LICENSE_HEADERS`
@@ -168,16 +167,16 @@ Checking license headers in all source files...
 ✅ All 289 source file(s) have license headers.
 ```
 
-### Example 2: Check Only TypeScript Files
+### Example 2: Check Only Python and TypeScript Files
 ```bash
-$ make check-license-ts
-Checking license headers in TypeScript files...
+$ make check-license-all
+Checking license headers in Python and TypeScript files...
 ❌ 3 file(s) missing license header:
   - web/src/components/new-component.tsx
   - web/src/core/api/new-api.ts
   - web/tests/new-test.test.ts
 
-Run 'make add-license-ts' to add headers.
+Run 'make add-license-all' to add headers.
 ```
 
 ### Example 3: Add Headers to New Module
@@ -196,21 +195,21 @@ Header already present: web/src/components/editor/index.tsx
 ✅ All 24 sourceooks for exact matches (ignoring leading/trailing whitespace)
 
 ### "Pre-commit hook blocks my commit"
-- Run `make add-license` to add headers to all files
+- Run `make add-license-all` to add headers to all files
 - Or disable the check temporarily by editing the `pre-commit` file
 
 ## Examples
 
 ### Example 1: Check All Files
 ```bash
-$ make check-license
+$ make check-license-all
 Checking license headers in Python files...
 ✅ All 156 Python file(s) have license headers.
 ```
 
 ### Example 2: Add Headers to New Module
 ```bash
-$ make add-license
+$ make add-license-all
 Adding license headers to Python files...
 ✅ Added license header to 11 file(s).
 ```

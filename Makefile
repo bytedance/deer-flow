@@ -1,4 +1,4 @@
-.PHONY: help lint format install-dev serve test coverage langgraph-dev lint-frontend add-license add-license-ts add-license-all check-license check-license-ts check-license-all
+.PHONY: help lint format install-dev serve test coverage langgraph-dev lint-frontend add-license-all check-license-all
 
 help: ## Show this help message
 	@echo "Deer Flow - Available Make Targets:"
