@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liquid Glass Weather</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Syncopate:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --glass-bg: rgba(255, 255, 255, 0.08);
+            --glass-border: rgba(255, 255, 255, 0.18);
+            --glass-highlight: rgba(255, 255, 255, 0.25);
+            --glass-shadow: rgba(0, 0, 0, 0.3);
+            --text-primary: rgba(255, 255, 255, 0.95);
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --accent-glow: rgba(255, 255, 255, 0.15);
+        }
+
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Space Grotesk', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Animated background particles */
+        .bg-particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            animation: float 15s infinite ease-in-out;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(100vh) rotate(0deg); opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { transform: translateY(-100vh) rotate(720deg); opacity: 0; }
+        }
+
+        /* Weather effects container */
+        .weather-effects {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+            overflow: hidden;
+        }
+
+        /* Sun rays for sunny weather */
+        .sun-rays {
+            position: absolute;
+            top: -50%;
+            right: -30%;
+            width: 150%;
+            height: 150%;
+            background: radial-gradient(ellipse at center, rgba(255, 200, 100, 0.15) 0%, transparent 60%);
+            opacity: 0;
+            transition: opacity 1s ease;
+            animation: sunPulse 8s infinite ease-in-out;
+        }
+
+        .weather-sunny .sun-rays {
+            opacity: 1;
+        }
+
+        @keyframes sunPulse {
+            0%, 100% { transform: scale(1) rotate(0deg); }
+            50% { transform: scale(1.1) rotate(5deg); }
+        }
+
+        /* Rain drops */
+        .rain-drop {
+            position: absolute;
+            width: 2px;
+            height: 20px;
+            background: linear-gradient(to bottom, transparent, rgba(174, 194, 224, 0.6));
+            opacity: 0;
+            animation: rainFall 1s linear infinite;
+        }
+
+        .weather-rainy .rain-drop {
+            opacity: 1;
+        }
+
+        @keyframes rainFall {
+            0% { transform: translateY(-100px); }
+            100% { transform: translateY(100vh); }
+        }
+
+        /* Snow flakes */
+        .snow-flake {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            opacity: 0;
+            animation: snowFall 3s linear infinite;
+        }
+
+        .weather-snowy .snow-flake {
+            opacity: 1;
+        }
+
+        @keyframes snowFall {
+            0% { transform: translateY(-100px) rotate(0deg); }
+            100% { transform: translateY(100vh) rotate(360deg); }
+        }
+
+        /* Main container */
+        .container {
+            position: relative;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 40px;
+            perspective: 1200px;
+        }
+
+        /* Liquid Glass Weather Card */
+        .weather-card {
+            width: 380px;
+            padding: 40px;
+            border-radius: 30px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(25px);
+            -webkit-backdrop-filter: blur(25px);
+            border: 1px solid var(--glass-border);
+            box-shadow: 
+                0 25px 50px -12px var(--glass-shadow),
+                inset 0 1px 1px var(--glass-highlight),
+                inset 0 -1px 1px rgba(0, 0, 0, 0.1);
+            transform-style: preserve-3d;
+            transition: transform 0.1s ease-out, box-shadow 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Liquid shine effect */
+        .weather-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                45deg,
+                transparent 30%,
+                rgba(255, 255, 255, 0.03) 50%,
+                transparent 70%
+            );
+            animation: liquidShine 8s infinite linear;
+            pointer-events: none;
+        }
+
+        @keyframes liquidShine {
+            0% { transform: translateX(-100%) translateY(-100%) rotate(45deg); }
+            100% { transform: translateX(100%) translateY(100%) rotate(45deg); }
+        }
+
+        /* Inner glow */
+        .weather-card::after {
+            content: '';
+            position: absolute;
+            inset: 1px;
+            border-radius: 29px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%, rgba(255,255,255,0.05) 100%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        /* Weather icon container */
+        .weather-icon {
+            width: 140px;
+            height: 140px;
+            margin: 0 auto 30px;
+            position: relative;
+            transform-style: preserve-3d;
+            transform: translateZ(40px);
+        }
+
+        /* Sun icon */
+        .icon-sun {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transform: scale(0.8);
+            transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .icon-sun.active {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .sun-core {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 70px;
+            height: 70px;
+            background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+            border-radius: 50%;
+            box-shadow: 
+                0 0 40px rgba(255, 215, 0, 0.6),
+                0 0 80px rgba(255, 165, 0, 0.4),
+                inset -5px -5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .sun-rays-icon {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%;
+            height: 100%;
+            animation: sunRotate 12s linear infinite;
+        }
+
+        .sun-rays-icon::before,
+        .sun-rays-icon::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.8), transparent);
+        }
+
+        .sun-rays-icon::after {
+            transform: translate(-50%, -50%) rotate(90deg);
+        }
+
+        .sun-ray {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.6), transparent);
+            transform-origin: center;
+        }
+
+        @keyframes sunRotate {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        /* Rain icon */
+        .icon-rain {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transform: scale(0.8) translateY(20px);
+            transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .icon-rain.active {
+            opacity: 1;
+            transform: scale(1) translateY(0);
+        }
+
+        .cloud {
+            position: absolute;
+            top: 30%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90px;
+            height: 50px;
+            background: linear-gradient(180deg, #e0e0e0 0%, #a0a0a0 100%);
+            border-radius: 50px;
+            box-shadow: 
+                0 10px 30px rgba(0, 0, 0, 0.3),
+                inset 0 -5px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .cloud::before {
+            content: '';
+            position: absolute;
+            top: -25px;
+            left: 15px;
+            width: 45px;
+            height: 45px;
+            background: linear-gradient(180deg, #e8e8e8 0%, #b0b0b0 100%);
+            border-radius: 50%;
+        }
+
+        .cloud::after {
+            content: '';
+            position: absolute;
+            top: -15px;
+            right: 15px;
+            width: 35px;
+            height: 35px;
+            background: linear-gradient(180deg, #e8e8e8 0%, #b0b0b0 100%);
+            border-radius: 50%;
+        }
+
+        .rain-drops-icon {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60px;
+            height: 40px;
+        }
+
+        .rain-drop-icon {
+            position: absolute;
+            width: 3px;
+            height: 12px;
+            background: linear-gradient(to bottom, #4a90d9, #2e5c8a);
+            border-radius: 0 0 50% 50%;
+            animation: rainDropFall 0.8s infinite ease-in;
+        }
+
+        .rain-drop-icon:nth-child(1) { left: 10px; animation-delay: 0s; }
+        .rain-drop-icon:nth-child(2) { left: 25px; animation-delay: 0.2s; }
+        .rain-drop-icon:nth-child(3) { left: 40px; animation-delay: 0.4s; }
+
+        @keyframes rainDropFall {
+            0% { transform: translateY(0); opacity: 1; }
+            100% { transform: translateY(30px); opacity: 0; }
+        }
+
+        /* Snow icon */
+        .icon-snow {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transform: scale(0.8);
+            transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .icon-snow.active {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .snow-cloud {
+            position: absolute;
+            top: 25%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 85px;
+            height: 45px;
+            background: linear-gradient(180deg, #f5f5f5 0%, #d0d0d0 100%);
+            border-radius: 50px;
+            box-shadow: 
+                0 8px 25px rgba(0, 0, 0, 0.2),
+                inset 0 -3px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .snow-cloud::before {
+            content: '';
+            position: absolute;
+            top: -22px;
+            left: 12px;
+            width: 42px;
+            height: 42px;
+            background: linear-gradient(180deg, #fafafa 0%, #e0e0e0 100%);
+            border-radius: 50%;
+        }
+
+        .snow-cloud::after {
+            content: '';
+            position: absolute;
+            top: -12px;
+            right: 12px;
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(180deg, #fafafa 0%, #e0e0e0 100%);
+            border-radius: 50%;
+        }
+
+        .snow-flakes-icon {
+            position: absolute;
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 70px;
+            height: 50px;
+        }
+
+        .snow-flake-icon {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            animation: snowFlakeFall 2s infinite ease-in-out;
+        }
+
+        .snow-flake-icon::before {
+            content: '❄';
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.9);
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+        }
+
+        .snow-flake-icon:nth-child(1) { left: 15px; animation-delay: 0s; }
+        .snow-flake-icon:nth-child(2) { left: 35px; animation-delay: 0.6s; }
+        .snow-flake-icon:nth-child(3) { left: 55px; animation-delay: 1.2s; }
+
+        @keyframes snowFlakeFall {
+            0%, 100% { transform: translateY(0) rotate(0deg); }
+            50% { transform: translateY(20px) rotate(180deg); }
+        }
+
+        /* Weather info */
+        .weather-info {
+            text-align: center;
+            transform: translateZ(30px);
+        }
+
+        .temperature {
+            font-family: 'Syncopate', sans-serif;
+            font-size: 72px;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+            margin-bottom: 10px;
+            text-shadow: 0 0 40px rgba(255, 255, 255, 0.2);
+            transition: all 0.5s ease;
+        }
+
+        .condition {
+            font-size: 24px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 4px;
+            margin-bottom: 25px;
+            transition: all 0.5s ease;
+        }
+
+        .details {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .detail-item {
+            text-align: center;
+        }
+
+        .detail-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 5px;
+        }
+
+        .detail-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Location */
+        .location {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            transform: translateZ(20px);
+        }
+
+        .location-icon {
+            width: 16px;
+            height: 16px;
+            fill: var(--text-secondary);
+        }
+
+        .location-text {
+            font-size: 14px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+        }
+
+        /* Control buttons */
+        .controls {
+            display: flex;
+            gap: 20px;
+            transform: translateZ(50px);
+        }
+
+        .weather-btn {
+            padding: 16px 32px;
+            border: none;
+            border-radius: 16px;
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            cursor: pointer;
+            background: var(--glass-bg);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            box-shadow: 
+                0 10px 30px -10px var(--glass-shadow),
+                inset 0 1px 1px var(--glass-highlight);
+            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .weather-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .weather-btn:hover {
+            transform: translateY(-3px) scale(1.02);
+            box-shadow: 
+                0 20px 40px -10px var(--glass-shadow),
+                inset 0 1px 1px var(--glass-highlight),
+                0 0 30px var(--accent-glow);
+        }
+
+        .weather-btn:hover::before {
+            left: 100%;
+        }
+
+        .weather-btn:active {
+            transform: translateY(-1px) scale(0.98);
+        }
+
+        .weather-btn.active {
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: 
+                0 0 30px rgba(255, 255, 255, 0.2),
+                inset 0 1px 1px var(--glass-highlight);
+        }
+
+        /* Deerflow signature */
+        .deerflow-signature {
+            position: fixed;
+            bottom: 25px;
+            right: 25px;
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.4);
+            text-decoration: none;
+            letter-spacing: 2px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--glass-border);
+            transition: all 0.3s ease;
+            z-index: 100;
+        }
+
+        .deerflow-signature:hover {
+            color: rgba(255, 255, 255, 0.8);
+            background: rgba(255, 255, 255, 0.12);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Responsive */
+        @media (max-width: 480px) {
+            .weather-card {
+                width: 320px;
+                padding: 30px;
+            }
+
+            .temperature {
+                font-size: 56px;
+            }
+
+            .condition {
+                font-size: 18px;
+            }
+
+            .controls {
+                flex-direction: column;
+                gap: 12px;
+            }
+
+            .weather-btn {
+                padding: 14px 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Background particles -->
+    <div class="bg-particles" id="bgParticles"></div>
+
+    <!-- Weather effects -->
+    <div class="weather-effects" id="weatherEffects">
+        <div class="sun-rays"></div>
+    </div>
+
+    <!-- Main container -->
+    <div class="container">
+        <!-- Weather Card -->
+        <div class="weather-card" id="weatherCard">
+            <div class="location">
+                <svg class="location-icon" viewBox="0 0 24 24">
+                    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                </svg>
+                <span class="location-text">San Francisco, CA</span>
+            </div>
+
+            <div class="weather-icon">
+                <!-- Sun -->
+                <div class="icon-sun active" id="iconSun">
+                    <div class="sun-core"></div>
+                    <div class="sun-rays-icon">
+                        <div class="sun-ray" style="transform: translate(-50%, -50%) rotate(45deg);"></div>
+                        <div class="sun-ray" style="transform: translate(-50%, -50%) rotate(135deg);"></div>
+                    </div>
+                </div>
+
+                <!-- Rain -->
+                <div class="icon-rain" id="iconRain">
+                    <div class="cloud"></div>
+                    <div class="rain-drops-icon">
+                        <div class="rain-drop-icon"></div>
+                        <div class="rain-drop-icon"></div>
+                        <div class="rain-drop-icon"></div>
+                    </div>
+                </div>
+
+                <!-- Snow -->
+                <div class="icon-snow" id="iconSnow">
+                    <div class="snow-cloud"></div>
+                    <div class="snow-flakes-icon">
+                        <div class="snow-flake-icon"></div>
+                        <div class="snow-flake-icon"></div>
+                        <div class="snow-flake-icon"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="weather-info">
+                <div class="temperature" id="temperature">72°</div>
+                <div class="condition" id="condition">Sunny</div>
+                <div class="details">
+                    <div class="detail-item">
+                        <div class="detail-label">Humidity</div>
+                        <div class="detail-value" id="humidity">45%</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-label">Wind</div>
+                        <div class="detail-value" id="wind">8 mph</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-label">UV Index</div>
+                        <div class="detail-value" id="uvIndex">High</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Buttons -->
+        <div class="controls">
+            <button class="weather-btn active" id="btnSunny" onclick="setWeather('sunny')">Sunny</button>
+            <button class="weather-btn" id="btnRainy" onclick="setWeather('rainy')">Rainy</button>
+            <button class="weather-btn" id="btnSnowy" onclick="setWeather('snowy')">Snowy</button>
+        </div>
+    </div>
+
+    <!-- Deerflow Signature -->
+    <a href="https://deerflow.tech" target="_blank" class="deerflow-signature">✦ Deerflow</a>
+
+    <script>
+        // Weather data
+        const weatherData = {
+            sunny: {
+                temp: '72°',
+                condition: 'Sunny',
+                humidity: '45%',
+                wind: '8 mph',
+                uvIndex: 'High',
+                bgClass: 'weather-sunny'
+            },
+            rainy: {
+                temp: '58°',
+                condition: 'Rainy',
+                humidity: '82%',
+                wind: '15 mph',
+                uvIndex: 'Low',
+                bgClass: 'weather-rainy'
+            },
+            snowy: {
+                temp: '28°',
+                condition: 'Snowy',
+                humidity: '68%',
+                wind: '12 mph',
+                uvIndex: 'Low',
+                bgClass: 'weather-snowy'
+            }
+        };
+
+        // DOM elements
+        const weatherCard = document.getElementById('weatherCard');
+        const weatherEffects = document.getElementById('weatherEffects');
+        const temperature = document.getElementById('temperature');
+        const condition = document.getElementById('condition');
+        const humidity = document.getElementById('humidity');
+        const wind = document.getElementById('wind');
+        const uvIndex = document.getElementById('uvIndex');
+
+        // Icon elements
+        const iconSun = document.getElementById('iconSun');
+        const iconRain = document.getElementById('iconRain');
+        const iconSnow = document.getElementById('iconSnow');
+
+        // Button elements
+        const btnSunny = document.getElementById('btnSunny');
+        const btnRainy = document.getElementById('btnRainy');
+        const btnSnowy = document.getElementById('btnSnowy');
+
+        // 3D Tilt effect
+        let bounds;
+
+        function rotateToMouse(e) {
+            if (!bounds) bounds = weatherCard.getBoundingClientRect();
+            
+            const mouseX = e.clientX;
+            const mouseY = e.clientY;
+            const leftX = mouseX - bounds.x;
+            const topY = mouseY - bounds.y;
+            const center = {
+                x: leftX - bounds.width / 2,
+                y: topY - bounds.height / 2
+            };
+            const distance = Math.sqrt(center.x ** 2 + center.y ** 2);
+
+            weatherCard.style.transform = `
+                perspective(1200px)
+                rotateX(${center.y / -15}deg)
+                rotateY(${center.x / 15}deg)
+                scale3d(1.02, 1.02, 1.02)
+            `;
+
+            // Dynamic shadow based on tilt
+            const shadowX = center.x / -10;
+            const shadowY = center.y / -10 + 25;
+            weatherCard.style.boxShadow = `
+                ${shadowX}px ${shadowY}px 50px -12px var(--glass-shadow),
+                inset 0 1px 1px var(--glass-highlight),
+                inset 0 -1px 1px rgba(0, 0, 0, 0.1)
+            `;
+        }
+
+        function resetTilt() {
+            weatherCard.style.transform = 'perspective(1200px) rotateX(0) rotateY(0) scale3d(1, 1, 1)';
+            weatherCard.style.boxShadow = `
+                0 25px 50px -12px var(--glass-shadow),
+                inset 0 1px 1px var(--glass-highlight),
+                inset 0 -1px 1px rgba(0, 0, 0, 0.1)
+            `;
+            bounds = null;
+        }
+
+        weatherCard.addEventListener('mousemove', rotateToMouse);
+        weatherCard.addEventListener('mouseleave', resetTilt);
+        window.addEventListener('resize', () => bounds = null);
+
+        // Set weather function
+        function setWeather(type) {
+            const data = weatherData[type];
+            
+            // Update text with animation
+            temperature.style.opacity = '0';
+            condition.style.opacity = '0';
+            
+            setTimeout(() => {
+                temperature.textContent = data.temp;
+                condition.textContent = data.condition;
+                humidity.textContent = data.humidity;
+                wind.textContent = data.wind;
+                uvIndex.textContent = data.uvIndex;
+                
+                temperature.style.opacity = '1';
+                condition.style.opacity = '1';
+            }, 250);
+
+            // Update icons
+            iconSun.classList.remove('active');
+            iconRain.classList.remove('active');
+            iconSnow.classList.remove('active');
+
+            setTimeout(() => {
+                if (type === 'sunny') iconSun.classList.add('active');
+                if (type === 'rainy') iconRain.classList.add('active');
+                if (type === 'snowy') iconSnow.classList.add('active');
+            }, 200);
+
+            // Update background weather effects
+            document.body.className = '';
+            document.body.classList.add(data.bgClass);
+
+            // Update buttons
+            btnSunny.classList.remove('active');
+            btnRainy.classList.remove('active');
+            btnSnowy.classList.remove('active');
+            
+            if (type === 'sunny') btnSunny.classList.add('active');
+            if (type === 'rainy') btnRainy.classList.add('active');
+            if (type === 'snowy') btnSnowy.classList.add('active');
+
+            // Update weather effects
+            updateWeatherEffects(type);
+        }
+
+        // Create weather effects
+        function updateWeatherEffects(type) {
+            // Clear existing effects
+            const existingEffects = weatherEffects.querySelectorAll('.rain-drop, .snow-flake');
+            existingEffects.forEach(el => el.remove());
+
+            if (type === 'rainy') {
+                for (let i = 0; i < 50; i++) {
+                    const drop = document.createElement('div');
+                    drop.className = 'rain-drop';
+                    drop.style.left = Math.random() * 100 + '%';
+                    drop.style.animationDelay = Math.random() * 2 + 's';
+                    drop.style.animationDuration = (0.5 + Math.random() * 0.5) + 's';
+                    weatherEffects.appendChild(drop);
+                }
+            } else if (type === 'snowy') {
+                for (let i = 0; i < 40; i++) {
+                    const flake = document.createElement('div');
+                    flake.className = 'snow-flake';
+                    flake.style.left = Math.random() * 100 + '%';
+                    flake.style.animationDelay = Math.random() * 3 + 's';
+                    flake.style.animationDuration = (2 + Math.random() * 2) + 's';
+                    flake.style.width = (4 + Math.random() * 6) + 'px';
+                    flake.style.height = flake.style.width;
+                    weatherEffects.appendChild(flake);
+                }
+            }
+        }
+
+        // Create background particles
+        function createParticles() {
+            const container = document.getElementById('bgParticles');
+            for (let i = 0; i < 30; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.animationDelay = Math.random() * 15 + 's';
+                particle.style.animationDuration = (10 + Math.random() * 10) + 's';
+                container.appendChild(particle);
+            }
+        }
+
+        // Initialize
+        createParticles();
+        document.body.classList.add('weather-sunny');
+    </script>
+</body>
+</html>

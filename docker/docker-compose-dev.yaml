@@ -1,0 +1,166 @@
+# DeerFlow Development Environment
+# Usage: docker-compose -f docker-compose-dev.yaml up --build
+#
+# Services:
+#   - nginx: Reverse proxy (port 2026)
+#   - frontend: Frontend Next.js dev server (port 3000)
+#   - gateway: Backend Gateway API (port 8001)
+#   - langgraph: LangGraph server (port 2024)
+#   - provisioner: Sandbox provisioner (creates Pods in host Kubernetes)
+#
+# Prerequisites:
+#   - Host machine must have a running Kubernetes cluster (Docker Desktop K8s,
+#     minikube, kind, etc.) with kubectl configured (~/.kube/config).
+#
+# Access: http://localhost:2026
+
+services:
+  # ── Sandbox Provisioner ────────────────────────────────────────────────
+  # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
+  # cluster via the K8s API.
+  # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
+  provisioner:
+    build:
+      context: ./provisioner
+      dockerfile: Dockerfile
+    container_name: deer-flow-provisioner
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+    environment:
+      - K8S_NAMESPACE=deer-flow
+      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
+      # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
+      # Set these in your shell before running docker-compose:
+      #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
+      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      - KUBECONFIG_PATH=/root/.kube/config
+      - NODE_HOST=host.docker.internal
+      # Override K8S API server URL since kubeconfig uses 127.0.0.1
+      # which is unreachable from inside the container
+      - K8S_API_SERVER=https://host.docker.internal:26443
+    env_file:
+      - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  # ── Reverse Proxy ──────────────────────────────────────────────────────
+  # Routes API traffic to gateway, langgraph, and provisioner services.
+  nginx:
+    image: nginx:alpine
+    container_name: deer-flow-nginx
+    ports:
+      - "2026:2026"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - gateway
+      - langgraph
+      - provisioner
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+  # Frontend - Next.js Development Server
+  frontend:
+    build:
+      context: ../
+      dockerfile: frontend/Dockerfile
+      args:
+        PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
+    container_name: deer-flow-frontend
+    command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
+    volumes:
+      - ../frontend/src:/app/frontend/src
+      - ../frontend/public:/app/frontend/public
+      - ../frontend/next.config.js:/app/frontend/next.config.js:ro
+      - ../logs:/app/logs
+      # Mount pnpm store for caching
+      - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
+    working_dir: /app
+    environment:
+      - NODE_ENV=development
+      - WATCHPACK_POLLING=true
+      - CI=true
+    env_file:
+      - ../frontend/.env
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+  # Backend - Gateway API
+  gateway:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+      cache_from:
+        - type=local,src=/tmp/docker-cache-gateway
+    container_name: deer-flow-gateway
+    command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
+    volumes:
+      - ../backend/src:/app/backend/src
+      - ../backend/.env:/app/backend/.env
+      - ../config.yaml:/app/config.yaml
+      - ../skills:/app/skills
+      - ../logs:/app/logs
+      - ../backend/.deer-flow:/app/backend/.deer-flow
+      # Mount uv cache for faster dependency installation
+      - ~/.cache/uv:/root/.cache/uv
+    working_dir: /app
+    environment:
+      - CI=true
+    env_file:
+      - ../.env
+    extra_hosts:
+      # For Linux: map host.docker.internal to host gateway
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+  # Backend - LangGraph Server
+  langgraph:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+      cache_from:
+        - type=local,src=/tmp/docker-cache-langgraph
+    container_name: deer-flow-langgraph
+    command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
+    volumes:
+      - ../backend/src:/app/backend/src
+      - ../backend/.env:/app/backend/.env
+      - ../config.yaml:/app/config.yaml
+      - ../skills:/app/skills
+      - ../logs:/app/logs
+      - ../backend/.deer-flow:/app/backend/.deer-flow
+      # Mount uv cache for faster dependency installation
+      - ~/.cache/uv:/root/.cache/uv
+    working_dir: /app
+    environment:
+      - CI=true
+    env_file:
+      - ../.env
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+volumes: {}
+
+networks:
+  deer-flow-dev:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.200.0/24

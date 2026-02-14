@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Caren — Pure Skincare</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Montserrat:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --blush: #F5E6E0;
+            --blush-dark: #E8D5CD;
+            --cream: #FAF7F5;
+            --charcoal: #2C2C2C;
+            --soft-gray: #8A8A8A;
+            --light-gray: #E5E5E5;
+            --accent: #D4A59A;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: 'Montserrat', sans-serif;
+            background: var(--cream);
+            color: var(--charcoal);
+            overflow-x: hidden;
+        }
+
+        /* Typography */
+        h1, h2, h3, .display {
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 300;
+            letter-spacing: -0.02em;
+        }
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            padding: 1.5rem 4rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(250, 247, 245, 0.85);
+            backdrop-filter: blur(20px);
+            transition: all 0.4s ease;
+        }
+
+        nav.scrolled {
+            padding: 1rem 4rem;
+            background: rgba(250, 247, 245, 0.95);
+        }
+
+        .logo {
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 1.8rem;
+            font-weight: 400;
+            letter-spacing: 0.3em;
+            color: var(--charcoal);
+            text-decoration: none;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 3rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+            color: var(--charcoal);
+            font-size: 0.75rem;
+            font-weight: 500;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            position: relative;
+            transition: color 0.3s ease;
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 1px;
+            background: var(--accent);
+            transition: width 0.3s ease;
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        .nav-cta {
+            padding: 0.75rem 1.5rem;
+            background: var(--charcoal);
+            color: var(--cream) !important;
+            font-size: 0.7rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .nav-cta:hover {
+            background: var(--accent);
+        }
+
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            padding: 0 4rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-content {
+            flex: 1;
+            max-width: 600px;
+            z-index: 2;
+            animation: fadeInUp 1s ease-out;
+        }
+
+        .hero-tag {
+            font-size: 0.7rem;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            color: var(--accent);
+            margin-bottom: 1.5rem;
+            display: block;
+        }
+
+        .hero h1 {
+            font-size: clamp(3rem, 6vw, 5rem);
+            line-height: 1.1;
+            margin-bottom: 1.5rem;
+            font-weight: 300;
+        }
+
+        .hero h1 em {
+            font-style: italic;
+            color: var(--accent);
+        }
+
+        .hero p {
+            font-size: 1rem;
+            line-height: 1.8;
+            color: var(--soft-gray);
+            margin-bottom: 2.5rem;
+            max-width: 450px;
+        }
+
+        .hero-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1.2rem 2.5rem;
+            background: var(--charcoal);
+            color: var(--cream);
+            text-decoration: none;
+            font-size: 0.75rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            transition: all 0.4s ease;
+        }
+
+        .hero-cta:hover {
+            background: var(--accent);
+            gap: 1.5rem;
+        }
+
+        .hero-cta svg {
+            width: 16px;
+            height: 16px;
+            transition: transform 0.3s ease;
+        }
+
+        .hero-cta:hover svg {
+            transform: translateX(4px);
+        }
+
+        .hero-image {
+            flex: 1;
+            height: 85vh;
+            position: relative;
+            animation: fadeIn 1.2s ease-out 0.3s both;
+        }
+
+        .hero-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 0;
+        }
+
+        .hero-image::before {
+            content: '';
+            position: absolute;
+            top: -30px;
+            right: -30px;
+            width: 100%;
+            height: 100%;
+            border: 1px solid var(--blush-dark);
+            z-index: -1;
+            animation: fadeIn 1.5s ease-out 0.5s both;
+        }
+
+        /* Marquee */
+        .marquee {
+            background: var(--blush);
+            padding: 1.5rem 0;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+
+        .marquee-content {
+            display: inline-flex;
+            animation: marquee 30s linear infinite;
+        }
+
+        .marquee-item {
+            font-size: 0.75rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--charcoal);
+            padding: 0 3rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .marquee-item::after {
+            content: '✦';
+            color: var(--accent);
+        }
+
+        /* Philosophy Section */
+        .philosophy {
+            padding: 10rem 4rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6rem;
+            align-items: center;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .philosophy-image {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .philosophy-image img {
+            width: 100%;
+            height: 600px;
+            object-fit: cover;
+            transition: transform 0.8s ease;
+        }
+
+        .philosophy-image:hover img {
+            transform: scale(1.03);
+        }
+
+        .philosophy-content h2 {
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: 2rem;
+            line-height: 1.2;
+        }
+
+        .philosophy-content h2 em {
+            font-style: italic;
+            color: var(--accent);
+        }
+
+        .philosophy-content p {
+            font-size: 1rem;
+            line-height: 2;
+            color: var(--soft-gray);
+            margin-bottom: 1.5rem;
+        }
+
+        .stats {
+            display: flex;
+            gap: 4rem;
+            margin-top: 3rem;
+            padding-top: 3rem;
+            border-top: 1px solid var(--light-gray);
+        }
+
+        .stat h3 {
+            font-size: 2.5rem;
+            font-weight: 300;
+            color: var(--charcoal);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat span {
+            font-size: 0.7rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: var(--soft-gray);
+        }
+
+        /* Products Section */
+        .products {
+            padding: 8rem 4rem;
+            background: var(--blush);
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 5rem;
+        }
+
+        .section-header h2 {
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: 1rem;
+        }
+
+        .section-header p {
+            color: var(--soft-gray);
+            font-size: 0.9rem;
+            letter-spacing: 0.1em;
+        }
+
+        .products-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 3rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .product-card {
+            background: var(--cream);
+            padding: 3rem 2rem;
+            text-align: center;
+            transition: all 0.4s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .product-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--accent);
+            transform: scaleX(0);
+            transition: transform 0.4s ease;
+        }
+
+        .product-card:hover::before {
+            transform: scaleX(1);
+        }
+
+        .product-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.05);
+        }
+
+        .product-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 1.5rem;
+            background: var(--blush);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .product-card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .product-card .price {
+            font-size: 0.85rem;
+            color: var(--accent);
+            letter-spacing: 0.1em;
+            margin-bottom: 1rem;
+        }
+
+        .product-card p {
+            font-size: 0.85rem;
+            color: var(--soft-gray);
+            line-height: 1.7;
+            margin-bottom: 1.5rem;
+        }
+
+        .product-btn {
+            padding: 0.75rem 1.5rem;
+            border: 1px solid var(--charcoal);
+            background: transparent;
+            color: var(--charcoal);
+            font-size: 0.7rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .product-btn:hover {
+            background: var(--charcoal);
+            color: var(--cream);
+        }
+
+        /* Ingredients Section */
+        .ingredients {
+            padding: 10rem 4rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6rem;
+            align-items: center;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .ingredients-content {
+            order: 2;
+        }
+
+        .ingredients-image {
+            order: 1;
+            position: relative;
+        }
+
+        .ingredients-image img {
+            width: 100%;
+            height: 500px;
+            object-fit: cover;
+        }
+
+        .ingredients-content h2 {
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: 2rem;
+        }
+
+        .ingredients-content h2 em {
+            font-style: italic;
+            color: var(--accent);
+        }
+
+        .ingredients-content p {
+            font-size: 1rem;
+            line-height: 2;
+            color: var(--soft-gray);
+            margin-bottom: 2rem;
+        }
+
+        .ingredient-list {
+            list-style: none;
+        }
+
+        .ingredient-list li {
+            padding: 1rem 0;
+            border-bottom: 1px solid var(--light-gray);
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .ingredient-list li::before {
+            content: '✦';
+            color: var(--accent);
+        }
+
+        /* Testimonials */
+        .testimonials {
+            padding: 8rem 4rem;
+            background: var(--charcoal);
+            color: var(--cream);
+            text-align: center;
+        }
+
+        .testimonials h2 {
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: 4rem;
+        }
+
+        .testimonial-slider {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .testimonial {
+            font-family: 'Cormorant Garamond', serif;
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            font-style: italic;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+            font-weight: 300;
+        }
+
+        .testimonial-author {
+            font-size: 0.75rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+
+        /* Newsletter */
+        .newsletter {
+            padding: 8rem 4rem;
+            text-align: center;
+            background: var(--blush);
+        }
+
+        .newsletter h2 {
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: 1rem;
+        }
+
+        .newsletter p {
+            color: var(--soft-gray);
+            margin-bottom: 2.5rem;
+        }
+
+        .newsletter-form {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .newsletter-form input {
+            flex: 1;
+            padding: 1rem 1.5rem;
+            border: 1px solid var(--light-gray);
+            background: var(--cream);
+            font-family: 'Montserrat', sans-serif;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.3s ease;
+        }
+
+        .newsletter-form input:focus {
+            border-color: var(--accent);
+        }
+
+        .newsletter-form button {
+            padding: 1rem 2rem;
+            background: var(--charcoal);
+            color: var(--cream);
+            border: none;
+            font-size: 0.75rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+
+        .newsletter-form button:hover {
+            background: var(--accent);
+        }
+
+        /* Footer */
+        footer {
+            padding: 4rem;
+            background: var(--cream);
+            border-top: 1px solid var(--light-gray);
+        }
+
+        .footer-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr 1fr;
+            gap: 4rem;
+        }
+
+        .footer-brand .logo {
+            margin-bottom: 1rem;
+            display: inline-block;
+        }
+
+        .footer-brand p {
+            font-size: 0.85rem;
+            color: var(--soft-gray);
+            line-height: 1.8;
+            max-width: 300px;
+        }
+
+        .footer-col h4 {
+            font-size: 0.7rem;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+        }
+
+        .footer-col ul {
+            list-style: none;
+        }
+
+        .footer-col li {
+            margin-bottom: 0.75rem;
+        }
+
+        .footer-col a {
+            text-decoration: none;
+            color: var(--soft-gray);
+            font-size: 0.85rem;
+            transition: color 0.3s ease;
+        }
+
+        .footer-col a:hover {
+            color: var(--accent);
+        }
+
+        .footer-bottom {
+            max-width: 1400px;
+            margin: 4rem auto 0;
+            padding-top: 2rem;
+            border-top: 1px solid var(--light-gray);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--soft-gray);
+        }
+
+        /* Deerflow Badge */
+        .deerflow-badge {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 0.6rem 1rem;
+            background: rgba(44, 44, 44, 0.9);
+            color: var(--cream);
+            font-size: 0.65rem;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            text-decoration: none;
+            border-radius: 2px;
+            opacity: 0.7;
+            transition: all 0.3s ease;
+            z-index: 999;
+        }
+
+        .deerflow-badge:hover {
+            opacity: 1;
+            background: var(--charcoal);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes marquee {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+        }
+
+        /* Scroll Reveal */
+        .reveal {
+            opacity: 0;
+            transform: translateY(30px);
+            transition: all 0.8s ease;
+        }
+
+        .reveal.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .philosophy,
+            .ingredients {
+                grid-template-columns: 1fr;
+                gap: 3rem;
+            }
+
+            .ingredients-content {
+                order: 1;
+            }
+
+            .ingredients-image {
+                order: 2;
+            }
+
+            .products-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .footer-content {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            nav {
+                padding: 1rem 2rem;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            .hero {
+                flex-direction: column;
+                padding: 8rem 2rem 4rem;
+            }
+
+            .hero-image {
+                height: 50vh;
+                width: 100%;
+                margin-top: 3rem;
+            }
+
+            .philosophy,
+            .ingredients,
+            .products,
+            .testimonials,
+            .newsletter {
+                padding: 4rem 2rem;
+            }
+
+            .products-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats {
+                flex-direction: column;
+                gap: 2rem;
+            }
+
+            .newsletter-form {
+                flex-direction: column;
+            }
+
+            .footer-content {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+
+            .deerflow-badge {
+                bottom: 1rem;
+                right: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav id="navbar">
+        <a href="#" class="logo">CAREN</a>
+        <ul class="nav-links">
+            <li><a href="#philosophy">Philosophy</a></li>
+            <li><a href="#products">Products</a></li>
+            <li><a href="#ingredients">Ingredients</a></li>
+            <li><a href="#about">About</a></li>
+        </ul>
+        <button class="nav-cta">Shop Now</button>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-content">
+            <span class="hero-tag">New Collection</span>
+            <h1>Pure Beauty, <em>Simplified</em></h1>
+            <p>Discover the art of less. Our minimalist skincare routine delivers maximum results with carefully curated, clean ingredients that honor your skin's natural balance.</p>
+            <a href="#products" class="hero-cta">
+                Explore Collection
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+            </a>
+        </div>
+        <div class="hero-image">
+            <img src="caren-hero.jpg" alt="Caren Skincare Product">
+        </div>
+    </section>
+
+    <!-- Marquee -->
+    <div class="marquee">
+        <div class="marquee-content">
+            <span class="marquee-item">Clean Beauty</span>
+            <span class="marquee-item">Cruelty Free</span>
+            <span class="marquee-item">Sustainable</span>
+            <span class="marquee-item">Vegan</span>
+            <span class="marquee-item">Dermatologist Tested</span>
+            <span class="marquee-item">Clean Beauty</span>
+            <span class="marquee-item">Cruelty Free</span>
+            <span class="marquee-item">Sustainable</span>
+            <span class="marquee-item">Vegan</span>
+            <span class="marquee-item">Dermatologist Tested</span>
+        </div>
+    </div>
+
+    <!-- Philosophy Section -->
+    <section class="philosophy" id="philosophy">
+        <div class="philosophy-image reveal">
+            <img src="caren-lifestyle.jpg" alt="Skincare Ritual">
+        </div>
+        <div class="philosophy-content reveal">
+            <h2>Less is <em>More</em></h2>
+            <p>We believe in the power of simplicity. In a world of overwhelming choices, Caren offers a refined selection of essential skincare products that work in harmony with your skin.</p>
+            <p>Each formula is crafted with intention, using only the finest plant-based ingredients backed by science. No fillers, no fragrances, no compromise.</p>
+            <div class="stats">
+                <div class="stat">
+                    <h3>98%</h3>
+                    <span>Natural Origin</span>
+                </div>
+                <div class="stat">
+                    <h3>0%</h3>
+                    <span>Artificial Fragrance</span>
+                </div>
+                <div class="stat">
+                    <h3>100%</h3>
+                    <span>Cruelty Free</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Products Section -->
+    <section class="products" id="products">
+        <div class="section-header reveal">
+            <h2>The Essentials</h2>
+            <p>Three products. Infinite possibilities.</p>
+        </div>
+        <div class="products-grid">
+            <div class="product-card reveal">
+                <div class="product-icon">✦</div>
+                <h3>Gentle Cleanser</h3>
+                <div class="price">$38</div>
+                <p>A soft, cloud-like formula that removes impurities without stripping your skin's natural moisture barrier.</p>
+                <button class="product-btn">Add to Cart</button>
+            </div>
+            <div class="product-card reveal">
+                <div class="product-icon">◈</div>
+                <h3>Hydrating Serum</h3>
+                <div class="price">$68</div>
+                <p>Deep hydration with hyaluronic acid and vitamin B5 for plump, radiant skin that glows from within.</p>
+                <button class="product-btn">Add to Cart</button>
+            </div>
+            <div class="product-card reveal">
+                <div class="product-icon">✧</div>
+                <h3>Repair Moisturizer</h3>
+                <div class="price">$58</div>
+                <p>Rich yet lightweight, this moisturizer locks in hydration while supporting your skin's natural repair process.</p>
+                <button class="product-btn">Add to Cart</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Ingredients Section -->
+    <section class="ingredients" id="ingredients">
+        <div class="ingredients-content reveal">
+            <h2>Ingredients You Can <em>Trust</em></h2>
+            <p>Transparency is at the heart of everything we do. Every ingredient serves a purpose, carefully selected for its proven efficacy and skin-loving properties.</p>
+            <ul class="ingredient-list">
+                <li>Hyaluronic Acid — Deep hydration</li>
+                <li>Niacinamide — Brightening & pore refining</li>
+                <li>Centella Asiatica — Soothing & healing</li>
+                <li>Squalane — Lightweight moisture</li>
+                <li>Vitamin E — Antioxidant protection</li>
+            </ul>
+        </div>
+        <div class="ingredients-image reveal">
+            <img src="caren-ingredients.jpg" alt="Natural Ingredients">
+        </div>
+    </section>
+
+    <!-- Testimonials -->
+    <section class="testimonials">
+        <h2 class="reveal">Words from Our Community</h2>
+        <div class="testimonial-slider reveal">
+            <p class="testimonial">"Finally, a skincare brand that understands simplicity. My skin has never looked better, and my routine has never been simpler. Caren is pure magic."</p>
+            <span class="testimonial-author">— Sarah M., Verified Buyer</span>
+        </div>
+    </section>
+
+    <!-- Newsletter -->
+    <section class="newsletter">
+        <h2 class="reveal">Join the Caren Family</h2>
+        <p class="reveal">Subscribe for exclusive offers, skincare tips, and early access to new releases.</p>
+        <form class="newsletter-form reveal">
+            <input type="email" placeholder="Your email address" required>
+            <button type="submit">Subscribe</button>
+        </form>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-content">
+            <div class="footer-brand">
+                <a href="#" class="logo">CAREN</a>
+                <p>Pure, minimalist skincare for the modern individual. Made with intention, delivered with care.</p>
+            </div>
+            <div class="footer-col">
+                <h4>Shop</h4>
+                <ul>
+                    <li><a href="#">All Products</a></li>
+                    <li><a href="#">Cleansers</a></li>
+                    <li><a href="#">Serums</a></li>
+                    <li><a href="#">Moisturizers</a></li>
+                </ul>
+            </div>
+            <div class="footer-col">
+                <h4>Company</h4>
+                <ul>
+                    <li><a href="#">About Us</a></li>
+                    <li><a href="#">Sustainability</a></li>
+                    <li><a href="#">Careers</a></li>
+                    <li><a href="#">Press</a></li>
+                </ul>
+            </div>
+            <div class="footer-col">
+                <h4>Help</h4>
+                <ul>
+                    <li><a href="#">Contact</a></li>
+                    <li><a href="#">Shipping</a></li>
+                    <li><a href="#">Returns</a></li>
+                    <li><a href="#">FAQ</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <span>© 2026 Caren. All rights reserved.</span>
+            <span>Made with care for you and the planet.</span>
+        </div>
+    </footer>
+
+    <!-- Deerflow Badge -->
+    <a href="https://deerflow.tech" target="_blank" class="deerflow-badge">Created By Deerflow</a>
+
+    <script>
+        // Navbar scroll effect
+        const navbar = document.getElementById('navbar');
+        window.addEventListener('scroll', () => {
+            if (window.scrollY > 50) {
+                navbar.classList.add('scrolled');
+            } else {
+                navbar.classList.remove('scrolled');
+            }
+        });
+
+        // Scroll reveal animation
+        const revealElements = document.querySelectorAll('.reveal');
+        
+        const revealObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('active');
+                }
+            });
+        }, {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        });
+
+        revealElements.forEach(el => revealObserver.observe(el));
+
+        // Smooth scroll for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+
+        // Newsletter form
+        document.querySelector('.newsletter-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const input = e.target.querySelector('input');
+            if (input.value) {
+                alert('Thank you for subscribing! Welcome to the Caren family.');
+                input.value = '';
+            }
+        });
+
+        // Product buttons
+        document.querySelectorAll('.product-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                alert('Added to cart! This is a demo landing page.');
+            });
+        });
+
+        // Nav CTA
+        document.querySelector('.nav-cta').addEventListener('click', () => {
+            document.getElementById('products').scrollIntoView({ behavior: 'smooth' });
+        });
+    </script>
+</body>
+</html>

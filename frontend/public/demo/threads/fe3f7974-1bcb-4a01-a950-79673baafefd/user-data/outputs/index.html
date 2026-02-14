@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeerFlow Research Report 2026</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@300;400;500&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-tertiary: #1a1a25;
+            --accent-primary: #00d4aa;
+            --accent-secondary: #00a8e8;
+            --accent-glow: rgba(0, 212, 170, 0.15);
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0b0;
+            --text-muted: #606070;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --gradient-1: linear-gradient(135deg, #00d4aa 0%, #00a8e8 100%);
+            --gradient-2: linear-gradient(180deg, transparent 0%, rgba(0, 212, 170, 0.03) 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Background Effects */
+        .bg-grid {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(0, 212, 170, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 170, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .bg-glow {
+            position: fixed;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+            animation: float 20s ease-in-out infinite;
+        }
+
+        .bg-glow:nth-child(1) { top: -200px; left: -200px; animation-delay: 0s; }
+        .bg-glow:nth-child(2) { top: 50%; right: -300px; animation-delay: -7s; }
+        .bg-glow:nth-child(3) { bottom: -200px; left: 30%; animation-delay: -14s; }
+
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -30px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.95); }
+        }
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 1.5rem 3rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 1000;
+            background: linear-gradient(180deg, var(--bg-primary) 0%, transparent 100%);
+            backdrop-filter: blur(10px);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-family: 'Playfair Display', serif;
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--gradient-1);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2.5rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.3s ease;
+            position: relative;
+        }
+
+        .nav-links a:hover {
+            color: var(--accent-primary);
+        }
+
+        .nav-links a::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--gradient-1);
+            transition: width 0.3s ease;
+        }
+
+        .nav-links a:hover::after {
+            width: 100%;
+        }
+
+        /* Main Content */
+        main {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 8rem 3rem 4rem;
+            position: relative;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 100px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--accent-primary);
+            margin-bottom: 2rem;
+            width: fit-content;
+        }
+
+        .hero-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background: var(--accent-primary);
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .hero h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: clamp(3rem, 8vw, 6rem);
+            font-weight: 700;
+            line-height: 1.1;
+            margin-bottom: 1.5rem;
+            background: linear-gradient(135deg, #ffffff 0%, #a0a0b0 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero h1 em {
+            font-style: italic;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-subtitle {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin-bottom: 3rem;
+            line-height: 1.7;
+        }
+
+        .hero-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 2rem;
+            max-width: 800px;
+        }
+
+        .stat-item {
+            padding: 1.5rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            transition: transform 0.3s ease, border-color 0.3s ease;
+        }
+
+        .stat-item:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent-primary);
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 2rem;
+            font-weight: 500;
+            color: var(--accent-primary);
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        /* Section Styles */
+        section {
+            padding: 6rem 3rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-header {
+            margin-bottom: 4rem;
+        }
+
+        .section-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--accent-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            margin-bottom: 1rem;
+        }
+
+        .section-title {
+            font-family: 'Playfair Display', serif;
+            font-size: clamp(2rem, 5vw, 3.5rem);
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .section-desc {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            max-width: 600px;
+        }
+
+        /* Executive Summary */
+        .summary-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 24px;
+            padding: 3rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .summary-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: var(--gradient-1);
+        }
+
+        .summary-text {
+            font-size: 1.25rem;
+            line-height: 2;
+            color: var(--text-secondary);
+        }
+
+        .summary-text strong {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        /* Timeline */
+        .timeline {
+            position: relative;
+            padding-left: 3rem;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(180deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+        }
+
+        .timeline-item {
+            position: relative;
+            padding-bottom: 4rem;
+        }
+
+        .timeline-item:last-child {
+            padding-bottom: 0;
+        }
+
+        .timeline-dot {
+            position: absolute;
+            left: -3rem;
+            top: 0.5rem;
+            width: 12px;
+            height: 12px;
+            background: var(--bg-primary);
+            border: 3px solid var(--accent-primary);
+            border-radius: 50%;
+            transform: translateX(-5px);
+        }
+
+        .timeline-phase {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--accent-primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .timeline-date {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .timeline-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .timeline-content {
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+
+        /* Architecture Diagram */
+        .architecture-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 24px;
+            padding: 3rem;
+            margin-top: 2rem;
+        }
+
+        .arch-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            align-items: center;
+        }
+
+        .arch-row {
+            display: flex;
+            gap: 1.5rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .arch-node {
+            padding: 1.25rem 2rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            text-align: center;
+            min-width: 160px;
+            transition: all 0.3s ease;
+        }
+
+        .arch-node:hover {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .arch-node.primary {
+            background: var(--gradient-1);
+            border: none;
+            color: var(--bg-primary);
+            font-weight: 600;
+        }
+
+        .arch-node-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .arch-node-desc {
+            font-size: 0.75rem;
+            opacity: 0.8;
+            margin-top: 0.25rem;
+        }
+
+        .arch-connector {
+            width: 2px;
+            height: 30px;
+            background: linear-gradient(180deg, var(--accent-primary), var(--accent-secondary));
+            position: relative;
+        }
+
+        .arch-connector::after {
+            content: '▼';
+            position: absolute;
+            bottom: -5px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.6rem;
+            color: var(--accent-secondary);
+        }
+
+        .arch-branch {
+            display: flex;
+            gap: 2rem;
+            position: relative;
+        }
+
+        .arch-branch::before {
+            content: '';
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+        }
+
+        /* Features Grid */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .feature-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 2rem;
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent-primary);
+        }
+
+        .feature-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .feature-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.25rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .feature-desc {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+
+        /* Comparison Table */
+        .comparison-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin-top: 2rem;
+        }
+
+        .comparison-table th,
+        .comparison-table td {
+            padding: 1.25rem 1.5rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .comparison-table th {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            background: var(--bg-secondary);
+        }
+
+        .comparison-table th:first-child {
+            border-radius: 12px 0 0 0;
+        }
+
+        .comparison-table th:last-child {
+            border-radius: 0 12px 0 0;
+        }
+
+        .comparison-table tr:hover td {
+            background: var(--bg-secondary);
+        }
+
+        .comparison-table td {
+            color: var(--text-secondary);
+        }
+
+        .comparison-table td:first-child {
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .check {
+            color: var(--accent-primary);
+            font-weight: 600;
+        }
+
+        .cross {
+            color: var(--text-muted);
+        }
+
+        /* Strengths/Weaknesses */
+        .swot-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        .swot-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 2.5rem;
+        }
+
+        .swot-card.strengths {
+            border-top: 3px solid var(--accent-primary);
+        }
+
+        .swot-card.weaknesses {
+            border-top: 3px solid var(--accent-secondary);
+        }
+
+        .swot-title {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .swot-list {
+            list-style: none;
+        }
+
+        .swot-list li {
+            padding: 0.75rem 0;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+        }
+
+        .swot-list li:last-child {
+            border-bottom: none;
+        }
+
+        .swot-list li::before {
+            content: '→';
+            color: var(--accent-primary);
+            font-weight: 600;
+        }
+
+        /* Footer */
+        footer {
+            padding: 4rem 3rem;
+            text-align: center;
+            border-top: 1px solid var(--border-subtle);
+            margin-top: 4rem;
+        }
+
+        .footer-text {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        /* DeerFlow Badge */
+        .deerflow-badge {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 0.75rem 1.25rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 100px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .deerflow-badge:hover {
+            border-color: var(--accent-primary);
+            color: var(--accent-primary);
+            transform: translateY(-2px);
+        }
+
+        .deerflow-badge::before {
+            content: '✦';
+            color: var(--accent-primary);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            nav {
+                padding: 1rem 1.5rem;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            .hero {
+                padding: 6rem 1.5rem 3rem;
+            }
+
+            .hero-stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            section {
+                padding: 4rem 1.5rem;
+            }
+
+            .timeline {
+                padding-left: 2rem;
+            }
+
+            .swot-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .arch-branch {
+                flex-direction: column;
+            }
+
+            .comparison-table {
+                font-size: 0.85rem;
+            }
+
+            .comparison-table th,
+            .comparison-table td {
+                padding: 1rem;
+            }
+        }
+
+        /* Scroll Animations */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(30px);
+            transition: opacity 0.8s ease, transform 0.8s ease;
+        }
+
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Code Block Style */
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--bg-tertiary);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent-primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-grid"></div>
+    <div class="bg-glow"></div>
+    <div class="bg-glow"></div>
+    <div class="bg-glow"></div>
+
+    <nav>
+        <a href="#" class="logo">
+            <div class="logo-icon">🦌</div>
+            DeerFlow Research
+        </a>
+        <ul class="nav-links">
+            <li><a href="#summary">Summary</a></li>
+            <li><a href="#timeline">Timeline</a></li>
+            <li><a href="#architecture">Architecture</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#comparison">Comparison</a></li>
+        </ul>
+    </nav>
+
+    <main>
+        <section class="hero">
+            <div class="hero-badge">Research Report 2026</div>
+            <h1>DeerFlow:<br><em>Multi-Agent Deep Research</em></h1>
+            <p class="hero-subtitle">A comprehensive analysis of ByteDance's open-source framework that combines language models with specialized tools for automated research workflows.</p>
+            <div class="hero-stats">
+                <div class="stat-item">
+                    <div class="stat-value" data-count="19531">0</div>
+                    <div class="stat-label">GitHub Stars</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" data-count="2452">0</div>
+                    <div class="stat-label">Forks</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" data-count="88">0</div>
+                    <div class="stat-label">Contributors</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">MIT</div>
+                    <div class="stat-label">License</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="summary">
+            <div class="section-header fade-in">
+                <div class="section-tag">01 / Overview</div>
+                <h2 class="section-title">Executive Summary</h2>
+                <p class="section-desc">The framework that redefines automated research through intelligent multi-agent orchestration.</p>
+            </div>
+            <div class="summary-card fade-in">
+                <p class="summary-text">
+                    <strong>DeerFlow</strong> (Deep Exploration and Efficient Research Flow) is an open-source multi-agent research automation framework developed by ByteDance and released under the MIT license in May 2025. The framework implements a <strong>graph-based orchestration</strong> of specialized agents that automate research pipelines end-to-end, combining language models with tools like web search engines, crawlers, and Python execution.
+                    <br><br>
+                    With <strong>19,531 stars</strong> and <strong>2,452 forks</strong> on GitHub, DeerFlow has established itself as a significant player in the deep research automation space, offering both console and web UI options with support for local LLM deployment and extensive tool integrations.
+                </p>
+            </div>
+        </section>
+
+        <section id="timeline">
+            <div class="section-header fade-in">
+                <div class="section-tag">02 / History</div>
+                <h2 class="section-title">Development Timeline</h2>
+                <p class="section-desc">From initial release to the upcoming DeerFlow 2.0 transition.</p>
+            </div>
+            <div class="timeline fade-in">
+                <div class="timeline-item">
+                    <div class="timeline-dot"></div>
+                    <div class="timeline-phase">Phase 01</div>
+                    <div class="timeline-date">May — July 2025</div>
+                    <h3 class="timeline-title">Project Inception</h3>
+                    <p class="timeline-content">DeerFlow was created by ByteDance and open-sourced on May 7, 2025. The initial release established the core multi-agent architecture built on LangGraph and LangChain frameworks, featuring specialized agents: Coordinator, Planner, Researcher, Coder, and Reporter.</p>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-dot"></div>
+                    <div class="timeline-phase">Phase 02</div>
+                    <div class="timeline-date">August — December 2025</div>
+                    <h3 class="timeline-title">Feature Expansion</h3>
+                    <p class="timeline-content">Major feature additions including MCP integration, text-to-speech capabilities, podcast generation, and support for multiple search engines (Tavily, InfoQuest, Brave Search, DuckDuckGo, Arxiv). The framework gained recognition for its human-in-the-loop collaboration features and was integrated into Volcengine's FaaS Application Center.</p>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-dot"></div>
+                    <div class="timeline-phase">Phase 03</div>
+                    <div class="timeline-date">January 2026 — Present</div>
+                    <h3 class="timeline-title">DeerFlow 2.0 Transition</h3>
+                    <p class="timeline-content">The project is transitioning to DeerFlow 2.0 with ongoing improvements to JSON repair handling, MCP tool integration, and fallback report generation. Now supports private knowledgebases including RAGFlow, Qdrant, Milvus, and VikingDB, along with comprehensive Docker deployment options.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="architecture">
+            <div class="section-header fade-in">
+                <div class="section-tag">03 / System Design</div>
+                <h2 class="section-title">Multi-Agent Architecture</h2>
+                <p class="section-desc">A modular system built on LangGraph enabling flexible state-based workflows.</p>
+            </div>
+            <div class="architecture-container fade-in">
+                <div class="arch-flow">
+                    <div class="arch-node primary">
+                        <div class="arch-node-title">Coordinator</div>
+                        <div class="arch-node-desc">Entry point & workflow lifecycle</div>
+                    </div>
+                    <div class="arch-connector"></div>
+                    <div class="arch-node primary">
+                        <div class="arch-node-title">Planner</div>
+                        <div class="arch-node-desc">Task decomposition & planning</div>
+                    </div>
+                    <div class="arch-connector"></div>
+                    <div class="arch-branch">
+                        <div class="arch-node">
+                            <div class="arch-node-title">🔍 Researcher</div>
+                            <div class="arch-node-desc">Web search & crawling</div>
+                        </div>
+                        <div class="arch-node">
+                            <div class="arch-node-title">💻 Coder</div>
+                            <div class="arch-node-desc">Python execution & analysis</div>
+                        </div>
+                    </div>
+                    <div class="arch-connector"></div>
+                    <div class="arch-node primary">
+                        <div class="arch-node-title">Reporter</div>
+                        <div class="arch-node-desc">Report generation & synthesis</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="features">
+            <div class="section-header fade-in">
+                <div class="section-tag">04 / Capabilities</div>
+                <h2 class="section-title">Key Features</h2>
+                <p class="section-desc">Comprehensive tooling for end-to-end research automation.</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🔍</div>
+                    <h3 class="feature-title">Multi-Engine Search</h3>
+                    <p class="feature-desc">Supports Tavily, InfoQuest (BytePlus), Brave Search, DuckDuckGo, and Arxiv for scientific papers with configurable parameters.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🔗</div>
+                    <h3 class="feature-title">MCP Integration</h3>
+                    <p class="feature-desc">Seamless integration with Model Context Protocol services for private domain access, knowledge graphs, and web browsing.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">📚</div>
+                    <h3 class="feature-title">Private Knowledgebase</h3>
+                    <p class="feature-desc">Integrates with RAGFlow, Qdrant, Milvus, VikingDB, MOI, and Dify for research on users' private documents.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🤝</div>
+                    <h3 class="feature-title">Human-in-the-Loop</h3>
+                    <p class="feature-desc">Intelligent clarification mechanisms, plan review and editing, and auto-acceptance options for streamlined workflows.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🎙️</div>
+                    <h3 class="feature-title">Content Creation</h3>
+                    <p class="feature-desc">Podcast generation with TTS synthesis, PowerPoint creation, and Notion-style block editing for report refinement.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🐳</div>
+                    <h3 class="feature-title">Production Ready</h3>
+                    <p class="feature-desc">Docker and Docker Compose support, cloud deployment via Volcengine, and comprehensive API documentation.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="comparison">
+            <div class="section-header fade-in">
+                <div class="section-tag">05 / Analysis</div>
+                <h2 class="section-title">Competitive Comparison</h2>
+                <p class="section-desc">How DeerFlow compares to other deep research solutions.</p>
+            </div>
+            <div style="overflow-x: auto;" class="fade-in">
+                <table class="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Feature</th>
+                            <th>DeerFlow</th>
+                            <th>OpenAI Deep Research</th>
+                            <th>LangChain OpenDeepResearch</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Multi-Agent Architecture</td>
+                            <td class="check">✓</td>
+                            <td class="cross">✗</td>
+                            <td class="check">✓</td>
+                        </tr>
+                        <tr>
+                            <td>Local LLM Support</td>
+                            <td class="check">✓</td>
+                            <td class="cross">✗</td>
+                            <td class="check">✓</td>
+                        </tr>
+                        <tr>
+                            <td>MCP Integration</td>
+                            <td class="check">✓</td>
+                            <td class="cross">✗</td>
+                            <td class="cross">✗</td>
+                        </tr>
+                        <tr>
+                            <td>Code Execution</td>
+                            <td class="check">✓ Python REPL</td>
+                            <td class="cross">Limited</td>
+                            <td class="check">✓</td>
+                        </tr>
+                        <tr>
+                            <td>Podcast Generation</td>
+                            <td class="check">✓</td>
+                            <td class="cross">✗</td>
+                            <td class="cross">✗</td>
+                        </tr>
+                        <tr>
+                            <td>Presentation Creation</td>
+                            <td class="check">✓</td>
+                            <td class="cross">✗</td>
+                            <td class="cross">✗</td>
+                        </tr>
+                        <tr>
+                            <td>Private Knowledgebase</td>
+                            <td class="check">✓ (6+ options)</td>
+                            <td class="cross">Limited</td>
+                            <td class="cross">Limited</td>
+                        </tr>
+                        <tr>
+                            <td>Open Source</td>
+                            <td class="check">✓ MIT</td>
+                            <td class="cross">✗ Proprietary</td>
+                            <td class="check">✓ Apache 2.0</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="swot">
+            <div class="section-header fade-in">
+                <div class="section-tag">06 / Assessment</div>
+                <h2 class="section-title">Strengths & Considerations</h2>
+                <p class="section-desc">Balanced evaluation of the framework's capabilities.</p>
+            </div>
+            <div class="swot-grid fade-in">
+                <div class="swot-card strengths">
+                    <h3 class="swot-title">💪 Strengths</h3>
+                    <ul class="swot-list">
+                        <li>Comprehensive multi-agent architecture with specialized roles</li>
+                        <li>Extensive tool integration across search, crawling, and databases</li>
+                        <li>Local LLM deployment support for privacy and cost control</li>
+                        <li>Human collaboration features bridging automation and oversight</li>
+                        <li>Active community with 88+ contributors</li>
+                        <li>Production-ready with Docker and cloud deployment options</li>
+                    </ul>
+                </div>
+                <div class="swot-card weaknesses">
+                    <h3 class="swot-title">⚠️ Considerations</h3>
+                    <ul class="swot-list">
+                        <li>Extensive feature set may present learning curve for new users</li>
+                        <li>Local deployment with multiple agents demands significant resources</li>
+                        <li>Advanced features require technical expertise beyond basic usage</li>
+                        <li>Version 2.0 transition may create temporary compatibility concerns</li>
+                        <li>Integration complexity for custom MCP tools and workflows</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-header fade-in">
+                <div class="section-tag">07 / Conclusion</div>
+                <h2 class="section-title">Final Assessment</h2>
+                <p class="section-desc">High confidence evaluation based on comprehensive analysis.</p>
+            </div>
+            <div class="summary-card fade-in">
+                <p class="summary-text">
+                    DeerFlow represents a <strong>significant advancement</strong> in research automation, combining the power of multi-agent coordination, LLM-driven reasoning, and human-in-the-loop collaboration. Its modular architecture, deep tool integrations, and developer-friendly design make it a <strong>compelling choice</strong> for researchers and organizations seeking to accelerate complex workflows.
+                    <br><br>
+                    With <strong>ByteDance backing</strong>, an active open-source community, and continuous feature development, DeerFlow is well-positioned to remain a leading framework in the deep research automation space. The upcoming DeerFlow 2.0 transition promises further enhancements to an already robust platform.
+                </p>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p class="footer-text">Research Report compiled on February 1, 2026 · GitHub Deep Research</p>
+    </footer>
+
+    <a href="https://deerflow.tech" target="_blank" class="deerflow-badge">Created By Deerflow</a>
+
+    <script>
+        // Animated counter
+        const animateCounter = (element) => {
+            const target = parseInt(element.getAttribute('data-count'));
+            const duration = 2000;
+            const step = target / (duration / 16);
+            let current = 0;
+
+            const update = () => {
+                current += step;
+                if (current < target) {
+                    element.textContent = Math.floor(current).toLocaleString();
+                    requestAnimationFrame(update);
+                } else {
+                    element.textContent = target.toLocaleString();
+                }
+            };
+
+            update();
+        };
+
+        // Intersection Observer for animations
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    
+                    // Trigger counters if this is the hero section
+                    const counters = entry.target.querySelectorAll('.stat-value[data-count]');
+                    counters.forEach(counter => {
+                        if (!counter.classList.contains('animated')) {
+                            counter.classList.add('animated');
+                            animateCounter(counter);
+                        }
+                    });
+                }
+            });
+        }, observerOptions);
+
+        // Observe all fade-in elements
+        document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+        // Observe hero for initial counter animation
+        const hero = document.querySelector('.hero');
+        if (hero) {
+            const heroObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const counters = entry.target.querySelectorAll('.stat-value[data-count]');
+                        counters.forEach(counter => {
+                            if (!counter.classList.contains('animated')) {
+                                counter.classList.add('animated');
+                                animateCounter(counter);
+                            }
+                        });
+                        heroObserver.unobserve(entry.target);
+                    }
+                });
+            }, { threshold: 0.3 });
+            
+            heroObserver.observe(hero);
+        }
+
+        // Smooth scroll for navigation
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>

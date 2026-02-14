@@ -1,0 +1,10 @@
+line-length = 240
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP"]
+ignore = []
+
+[format]
+quote-style = "double"
+indent-style = "space"

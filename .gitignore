@@ -1,0 +1,45 @@
+# DeerFlow docker image cache
+docker/.cache/
+# OS generated files
+.DS_Store
+*.local
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv
+venv/
+
+# Environment variables
+.env
+
+# Configuration files
+config.yaml
+mcp_config.json
+extensions_config.json
+
+# IDE
+.idea/
+
+# Coverage report
+coverage.xml
+coverage/
+.deer-flow/
+.claude/
+skills/custom/*
+logs/
+
+# Local git hooks (keep only on this machine, do not push)
+.githooks/
+
+# pnpm
+.pnpm-store
+sandbox_image_cache.tar

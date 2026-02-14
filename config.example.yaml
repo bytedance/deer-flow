@@ -1,0 +1,305 @@
+# Configuration for the DeerFlow application
+#
+# Guidelines:
+# - Copy this file to `config.yaml` and customize it for your environment
+# - The default path of this configuration file is `config.yaml` in the current working directory.
+#   However you can change it using the `DEER_FLOW_CONFIG_PATH` environment variable.
+# - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
+# - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
+
+# ============================================================================
+# Models Configuration
+# ============================================================================
+# Configure available LLM models for the agent to use
+
+models:
+  # Example: OpenAI model
+  - name: gpt-4
+    display_name: GPT-4
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4
+    api_key: $OPENAI_API_KEY # Use environment variable
+    max_tokens: 4096
+    temperature: 0.7
+    supports_vision: true # Enable vision support for view_image tool
+
+  # Example: Anthropic Claude model
+  # - name: claude-3-5-sonnet
+  #   display_name: Claude 3.5 Sonnet
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: claude-3-5-sonnet-20241022
+  #   api_key: $ANTHROPIC_API_KEY
+  #   max_tokens: 8192
+  #   supports_vision: true  # Enable vision support for view_image tool
+
+  # Example: DeepSeek model (with thinking support)
+  # - name: deepseek-v3
+  #   display_name: DeepSeek V3 (Thinking)
+  #   use: langchain_deepseek:ChatDeepSeek
+  #   model: deepseek-chat
+  #   api_key: $DEEPSEEK_API_KEY
+  #   max_tokens: 16384
+  #   supports_thinking: true
+  #   supports_vision: false  # DeepSeek V3 does not support vision
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+  # Example: Volcengine (Doubao) model
+  # - name: doubao-seed-1.8
+  #   display_name: Doubao 1.8 (Thinking)
+  #   use: langchain_deepseek:ChatDeepSeek
+  #   model: ep-m-20260106111913-xxxxx
+  #   api_base: https://ark.cn-beijing.volces.com/api/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   supports_thinking: true
+  #   supports_vision: false  # Check your specific model's capabilities
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+  # Example: Kimi K2.5 model
+  # - name: kimi-k2.5
+  #   display_name: Kimi K2.5
+  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: kimi-k2.5
+  #   api_base: https://api.moonshot.cn/v1
+  #   api_key: $MOONSHOT_API_KEY
+  #   max_tokens: 32768
+  #   supports_thinking: true
+  #   supports_vision: true  # Check your specific model's capabilities
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+# ============================================================================
+# Tool Groups Configuration
+# ============================================================================
+# Define groups of tools for organization and access control
+
+tool_groups:
+  - name: web
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+# ============================================================================
+# Tools Configuration
+# ============================================================================
+# Configure available tools for the agent to use
+
+tools:
+  # Web search tool (requires Tavily API key)
+  - name: web_search
+    group: web
+    use: src.community.tavily.tools:web_search_tool
+    max_results: 5
+    # api_key: $TAVILY_API_KEY  # Set if needed
+
+  # Web fetch tool (uses Jina AI reader)
+  - name: web_fetch
+    group: web
+    use: src.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+
+  # Image search tool (uses DuckDuckGo)
+  # Use this to find reference images before image generation
+  - name: image_search
+    group: web
+    use: src.community.image_search.tools:image_search_tool
+    max_results: 5
+
+  # File operations tools
+  - name: ls
+    group: file:read
+    use: src.sandbox.tools:ls_tool
+
+  - name: read_file
+    group: file:read
+    use: src.sandbox.tools:read_file_tool
+
+  - name: write_file
+    group: file:write
+    use: src.sandbox.tools:write_file_tool
+
+  - name: str_replace
+    group: file:write
+    use: src.sandbox.tools:str_replace_tool
+
+  # Bash execution tool
+  - name: bash
+    group: bash
+    use: src.sandbox.tools:bash_tool
+
+# ============================================================================
+# Sandbox Configuration
+# ============================================================================
+# Choose between local sandbox (direct execution) or Docker-based AIO sandbox
+
+# Option 1: Local Sandbox (Default)
+# Executes commands directly on the host machine
+sandbox:
+  use: src.sandbox.local:LocalSandboxProvider
+
+# Option 2: Container-based AIO Sandbox
+# Executes commands in isolated containers (Docker or Apple Container)
+# On macOS: Automatically prefers Apple Container if available, falls back to Docker
+# On other platforms: Uses Docker
+# Uncomment to use:
+# sandbox:
+#   use: src.community.aio_sandbox:AioSandboxProvider
+#
+#   # Optional: Use existing sandbox at this URL (no container will be started)
+#   # base_url: http://localhost:8080
+#
+#   # Optional: Container image to use (works with both Docker and Apple Container)
+#   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+#   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
+#   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+#
+#   # Optional: Base port for sandbox containers (default: 8080)
+#   # port: 8080
+#
+#   # Optional: Whether to automatically start Docker container (default: true)
+#   # auto_start: true
+#
+#   # Optional: Prefix for container names (default: deer-flow-sandbox)
+#   # container_prefix: deer-flow-sandbox
+#
+#   # Optional: Additional mount directories from host to container
+#   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
+#   # mounts:
+#   #   # Other custom mounts
+#   #   - host_path: /path/on/host
+#   #     container_path: /home/user/shared
+#   #     read_only: false
+#
+#   # Optional: Environment variables to inject into the sandbox container
+#   # Values starting with $ will be resolved from host environment variables
+#   # environment:
+#   #   NODE_ENV: production
+#   #   DEBUG: "false"
+#   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
+#   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+
+# Option 3: Provisioner-managed AIO Sandbox (docker-compose-dev)
+# Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
+# Recommended for production or advanced users who want better isolation and scalability.:
+# sandbox:
+#   use: src.community.aio_sandbox:AioSandboxProvider
+#   provisioner_url: http://provisioner:8002
+
+# ============================================================================
+# Skills Configuration
+# ============================================================================
+# Configure skills directory for specialized agent workflows
+
+skills:
+  # Path to skills directory on the host (relative to project root or absolute)
+  # Default: ../skills (relative to backend directory)
+  # Uncomment to customize:
+  # path: /absolute/path/to/custom/skills
+
+  # Path where skills are mounted in the sandbox container
+  # This is used by the agent to access skills in both local and Docker sandbox
+  # Default: /mnt/skills
+  container_path: /mnt/skills
+
+# ============================================================================
+# Title Generation Configuration
+# ============================================================================
+# Automatic conversation title generation settings
+
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null # Use default model (first model in models list)
+
+# ============================================================================
+# Summarization Configuration
+# ============================================================================
+# Automatically summarize conversation history when token limits are approached
+# This helps maintain context in long conversations without exceeding model limits
+
+summarization:
+  enabled: true
+
+  # Model to use for summarization (null = use default model)
+  # Recommended: Use a lightweight, cost-effective model like "gpt-4o-mini" or similar
+  model_name: null
+
+  # Trigger conditions - at least one required
+  # Summarization runs when ANY threshold is met (OR logic)
+  # You can specify a single trigger or a list of triggers
+  trigger:
+    # Trigger when token count reaches 15564
+    - type: tokens
+      value: 15564
+    # Uncomment to also trigger when message count reaches 50
+    # - type: messages
+    #   value: 50
+    # Uncomment to trigger when 80% of model's max input tokens is reached
+    # - type: fraction
+    #   value: 0.8
+
+  # Context retention policy after summarization
+  # Specifies how much recent history to preserve
+  keep:
+    # Keep the most recent 10 messages (recommended)
+    type: messages
+    value: 10
+    # Alternative: Keep specific token count
+    # type: tokens
+    # value: 3000
+    # Alternative: Keep percentage of model's max input tokens
+    # type: fraction
+    # value: 0.3
+
+  # Maximum tokens to keep when preparing messages for summarization
+  # Set to null to skip trimming (not recommended for very long conversations)
+  trim_tokens_to_summarize: 15564
+
+  # Custom summary prompt template (null = use default LangChain prompt)
+  # The prompt should guide the model to extract important context
+  summary_prompt: null
+
+# ============================================================================
+# MCP (Model Context Protocol) Configuration
+# ============================================================================
+# Configure MCP servers to provide additional tools and capabilities
+# MCP configuration is loaded from a separate `mcp_config.json` file
+#
+# Setup:
+# 1. Copy `mcp_config.example.json` to `mcp_config.json` in the project root
+# 2. Enable desired MCP servers by setting `enabled: true`
+# 3. Configure server commands, arguments, and environment variables
+# 4. Restart the application to load MCP tools
+#
+# MCP servers provide tools that are automatically discovered and integrated
+# with DeerFlow's agent system. Examples include:
+# - File system access
+# - Database connections (PostgreSQL, etc.)
+# - External APIs (GitHub, Brave Search, etc.)
+# - Browser automation (Puppeteer)
+# - Custom MCP server implementations
+#
+# For more information, see: https://modelcontextprotocol.io
+
+# ============================================================================
+# Memory Configuration
+# ============================================================================
+# Global memory mechanism
+# Stores user context and conversation history for personalized responses
+memory:
+  enabled: true
+  storage_path: .deer-flow/memory.json # Path relative to backend directory
+  debounce_seconds: 30 # Wait time before processing queued updates
+  model_name: null # Use default model
+  max_facts: 100 # Maximum number of facts to store
+  fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+  injection_enabled: true # Whether to inject memory into system prompt
+  max_injection_tokens: 2000 # Maximum tokens for memory injection

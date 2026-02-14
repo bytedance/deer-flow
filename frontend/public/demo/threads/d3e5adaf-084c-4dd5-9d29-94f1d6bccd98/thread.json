@@ -1,0 +1,1310 @@
+{
+  "values": {
+    "messages": [
+      {
+        "content": [
+          {
+            "type": "text",
+            "text": "I'm the tech lead of a startup. Watch https://www.youtube.com/watch?v=rP7bpYsfa6Q and take notes for me.\n\nI'm also interested in her background, so conduct deep researches on any content in the video that you think might interest me."
+          }
+        ],
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": "7093f725-fdee-47b0-b135-abeaea804aff"
+      },
+      {
+        "content": "<uploaded_files>\nNo files have been uploaded yet.\n</uploaded_files>",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "system",
+        "name": null,
+        "id": "68f2dd9d-794a-4c83-9c57-0b5f32fbb9d0"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "I need to watch the YouTube video at the given URL, take notes, and conduct deep research on content in the video that might interest the user (tech lead of a startup). However, I cannot directly watch videos; I need to fetch the video page and extract information. I'll use web_fetch to get the page content, then possibly search for additional information about the speaker and topics.\n\nFirst, I'll fetch the YouTube video page. Let's start with that."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf330-9900-7151-b951-e9f07987bf4c",
+        "tool_calls": [
+          {
+            "name": "web_fetch",
+            "args": {
+              "url": "https://www.youtube.com/watch?v=rP7bpYsfa6Q"
+            },
+            "id": "call_cjxnhx9bi3r45x8exrnevi0a",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "# Tips For Technical Startup Founders | Startup School\n\n# Tips For Technical Startup Founders | Startup School\n## Y Combinator\n2120000 subscribers\n5206 likes\n\n### Description\n187434 views\nPosted: 21 Apr 2023\nYC Group Partner Diana Hu was the CTO of her YC startup Escher Reality, which was acquired by Niantic (makers of Pokemon Go). She shares her advice for being a technical founder at the earliest stages - including topics like how to ship an MVP fast, how to deal with technology choices and technical debt, and how and when to hire an engineering team.\n\nApply to Y Combinator: https://yc.link/SUS-apply\nWork at a startup: https://yc.link/SUS-jobs\n\nChapters (Powered by https://bit.ly/chapterme-yc) - \n00:00 - Intro\n00:09 - How to Build and Perpetuate as a Technical Founder\n01:56 - What Does a Technical Founder Do?\n04:38 - How To Build\n08:30 - Build an MVP: The Startup Process\n11:29 - Principles for Building Your MVP\n15:04 - Choose the Tech Stack That Makes Sense for Your Startup\n19:43 - What Happens In The Launch Stage?\n22:43 - When You Launch: The Right Way to Build Tech\n25:36 - How the role evolved from ideating to hiring\n26:51 - Summary\n27:59 - Outro\n\n143 comments\n### Transcript:\n[Music] welcome everyone to how to build and succeed as a technical founder for the startup School talk quick intro I'm Diana who I'm currently a group partner at YC and previously I was a co-founder and CTO for Azure reality which was a startup building augmented reality SDK for game developers and we eventually had an exit and sold to Niantic where I was the director of engineering and heading up all of the AR platform there so I know a few things about building something from was just an idea to then a prototype to launching an MVP which is like a bit duct tapey to then scaling it and getting to product Market fit and scaling systems to millions of users so what are we going to cover in this talk is three stages first is what is the role of the technical founder and who are they number two how do you build in each of the different stages where all of you are in startup school ideating which is just an idea you're just getting started building an MVP once you got some validation and getting it to launch and then launch where you want to iterate towards product Market fit and then I'll have a small section on how the role of the technical founder evolved Pro product Market fit I won't cover it too much because a lot of you in startup School are mostly in this earlier stage and I'm excited to give this talk because I compiled it from many conversations and chats with many YC technical Founders like from algolia segment optimal easily way up so I'm excited for all of their inputs and examples in here all right the technical founder sometimes I hear non-technical Founders say I need somebody to build my app so that isn't going to cut it a technical founder is a partner in this whole journey of a startup and it requires really intense level of commitment and you're in just a Dev what does a technical founder do they lead a lot of the building of the product of course and also talking with users and sometimes I get the question of who is the CEO or CTO for a technical founder and this is a nuanced answer it really depends on the type of product the industry you're in the complete scale composition of the team to figure out who the CEO of CTO is and I've seen technical Founders be the CEO the CTO or various other roles and what does the role of the technical founder look like in the early eight stages it looks a lot like being a lead developer like if you've been a lead developer a company you were in charge of putting the project together and building it and getting it out to the finish line or if you're contributing to an open source project and you're the main developer you make all the tech choices but there's some key differences from being a lead developer you got to do all the tech things like if you're doing software you're gonna have to do the front and the back end devops the website the ux even I.T to provision the Google accounts anything if you're building hardware and maybe you're just familiar familiar with electrical and working with eaglecad you'll have to get familiar with the mechanical too and you'll of course as part of doing all the tech things you'll have to talk with users to really get those insights to iterate and you're going to have a bias towards building a good enough versus the perfect architecture because if you worked at a big company you might have been rewarded for the perfect architecture but not for a startup you're going to have bias towards action and moving quickly and actually deciding with a lot of incomplete information you're gonna get comfortable with technical debt inefficient processes and a lot of ugly code and basically lots of chaos and all of these is to say is the technical founder is committed to the success of your company and that means doing whatever it takes to get it to work and it's not going to cut it if you're an employee at a company I sometimes hear oh this task or this thing is not in my pay grade no that's not going to cut it here you got to do you gotta do it this next session on how to build the first stage is the ideating stage where you just have an idea of what you want to build and the goal here is to build a prototype as soon as possible with the singular Focus to build something to show and demo to users and it doesn't even have to work fully in parallel your CEO co-founder will be finding a list of users in these next couple days to TF meetings to show the Prototype when it's ready so the principle here is to build very quickly in a matter of days and sometimes I hear it's like oh Diana a day prototype that seems impossible how do you do it and one way of doing it is building on top of a lot of prototyping software and you keep it super super simple so for example if you're a software company you will build a clickable prototype perhap using something like figma or Envision if you're a devtools company you may just have a script that you wrote in an afternoon and just launch it on the terminal if you're a hardware company or heart attack it is possible to build a prototype maybe it takes you a little bit longer but the key here is 3D renderings to really show you the promise of what the product is and the example I have here is a company called Remora that is helping trucks capture carbon with this attachment and that example of that rendering was enough to get the users excited about their product even though it's hard tech so give you a couple examples of prototypes in the early days this company optimizely went through YC on winter 10 and they put this prototype literally in a couple of days and the reason why is that they had applied with YC with a very different idea they started with a Twitter referral widget and that idea didn't work and they quickly found out why so they strapped together very quickly this prototype and it was because the founders uh Pete and Dan and Dan was actually heading analytics for the Obama campaign and he recalled that he was called to optimize one of the funding pages and thought huh this could be a startup so they put a very together very quickly together and it was the first visual editor by creating a a b test that was just a Javascript file that lived on S3 I literally just opened option command J if you're in Chrome and they literally run manually the A B test there and it would work of course nobody could use it except the founders but it was enough to show it to marketers who were the target users to optimize sites to get the user excited so this was built in just few days other example is my startup Azure reality since we're building more harder Tech we had to get computer vision algorithms running on phones and we got that done in a few weeks that was a lot easier to show a demo of what AR is as you saw on the video than just explaining and hand waving and made selling and explaining so much easier now what are some common mistakes on prototypes you don't want to overbuild at this stage I've seen people have this bias and they tell me hey Diana but users don't see it or it's not good enough this prototype doesn't show the whole Vision this is the mistake when founder things you need a full MVP and the stage and not really the other mistake is obviously not talking or listening to users soon enough that you're gonna get uncomfortable and show this kind of prototyping duct type thing that you just slap together and that's okay you're gonna get feedback the other one at the stage as an example for optimizely when founders get too attached to idea I went up the feedback from users is something obvious that is not quite there not something that users want and it's not letting go of bad ideas okay so now into the next section so imagine you have this prototype you talk to people and there's enough interest then you move on to the next stage of actually building an MVP that works to get it to launch and the goal is basically build it to launch and it should be done also very quickly ideally in a matter of can be done a few days two weeks or sometimes months but ideally more on the weeks range for most software companies again exceptions to hardware and deep tech companies so the goal here at this stage is to build something that you will get commitment from users to use your product and ideally what that commitment looks like is getting them to pay and the reason why you have a prototype is while you're building this your co-founder or CEO could be talking to users and showing the Prototype and even getting commitments to use it once is ready to launch so I'm gonna do a bit of a bit of a diversion here because sometimes Founders get excited it's like oh I show this prototype people are excited and there's so much to build is hiring a good idea first is thing is like okay I got this prototype got people excited I'm gonna hire people to help me to build it as a first-time founder he's like oh my God oh my God there's a fit people want it is it a good idea it really depends it's gonna actually slow you down in terms of launching quickly because if you're hiring from a pool of people and Engineers that you don't know it takes over a month or more to find someone good and it's hard to find people at this stage with very nebulous and chaotic so it's going to make you move slowly and the other more Insidious thing is going to make you not develop some of the insights about your product because your product will evolved if someone else in your team is building that and not the founders you're gonna miss that key learning about your tag that could have a gold nugget but it was not built by you I mean there's exceptions to this I think you can hire a bit later when you have things more built out but at this stage it's still difficult so I'll give you a example here uh Justin TV and twitch it was just the four Founders and three very good technical Founders at the beginning for the MVP it was just the founders building software as software engineers and the magic was Justin Emmett and Kyle Building different parts of the system you had Kyle who become an awesome Fearless engineer tackling the hard problems of video streaming and then Emma doing all the database work Justin with the web and that was enough to get it to launch I mean I'll give you an exception after they launched they did hire good Engineers but the key thing about this they were very good at not caring about the resume they try to really find The Misfits and engineers at Google overlooked and those turned out to be amazing so Amon and Golem were very comfortable and awesome engineers and they took on a lot of the video weapon just three months since joining you want people like that that can just take off and run all right so now going back into the principles for for building towards your MVP principle one is the classic hologram essay on do things that don't scale basically find clever hacks to launch quickly in the spirit of doing things at those scale and the Drake posting edition of this avoid things like automatic self onboarding because that adds a lot of engineering building a scalable back-end automated scripts those sounds great at some point but not the stage and the hack perhaps could be manually onboarding you're literally editing the database and adding the users or the entries and the data on the other counterter thing is insane custom support it's just you the founders at the front line doing the work doing things that don't scale a classic sample is with stripe this is the site when they launch very simple they had the API for developers to send payments but on the back end the thing that did not scale it was literally the founders processing every manual request and filling Bank forms to process the payments at the beginning and that was good enough to get them to launch sooner now principle number two this is famous create 9010 solution that was coined by Paul bukite who was one of the group Partners here at YC and original inventor of Gmail the first version is not going to be the final remember and they will very likely a lot of the code be Rewritten and that's okay push off as many features to post launch and by launching quickly I created a 9010 solution I don't mean creating bugs I still want it good enough but you want to restrict the product to work on limited Dimensions which could be like situations type of data you handle functionality type of users you support could be the type of data the type number of devices or it could be Geo find a way to slice the problem to simplify it and this can be your secret superpowers that startup at the beginning because you can move a Lot quickly and large companies can't afford to do this or even if your startup gets big you have like lawyers and finance teams and sales team that make you kind of just move slow so give you a couple examples here doordash at the beginning they slapped it in one afternoon soon and they were actually called Palo Alto delivery and they took PDS for menus and literally put their phone number that phone number there is actually from one of the founders and there's the site is not Dynamic static it's literally just plain HTML and CSS and PDF that was our front end they didn't bother with building a back end the back end quote unquote was literally just Google forms and Google Docs where they coordinated all the orders and they didn't even build anything to track all the drivers or ETA they did that with using fancy on your iPhone find my friends to track where each of the deliveries were that was enough so this was put together literally in one afternoon and they were able to launch the very genius thing they did is that because they were Stanford student they constrained it to work only on Palo Alto and counterintuitively by focusing on Palo Alto and getting that right as they grew it got them to focus and get delivery and unit economics right in the suburbs right at the beginning so that they could scale that and get that right versus the competition which was focusing on Metro cities like GrubHub which make them now you saw how the story played out the unit economics and the Ops was much harder and didn't get it right so funny thing about focusing at the beginning and getting those right can get you to focus and do things right that later on can serve you well so now at this stage how do you choose a tech stack so what one thing is to balance what makes sense for your product and your personal expertise to ship as quickly as you can keep it simple don't just choose a cool new programming language just to learn it for your startup choose what you're dangerous enough and comfortable to launch quickly which brings me to the next principle choose the tag for iteration speed I mean now and the other thing is also it's very easy to build MVPs very quickly by using third-party Frameworks on API tools and you don't need to do a lot of those work for example authentication you have things like auth zero payments you have stripe cross-platform support and rendering you have things like react native Cloud infrastructure you have AWS gcp landing pages you have webflow back-end back-end serverless you have lambdas or Firebase or hosted database in the past startups would run out of money before even launching because they had to build everything from scratch and shift from metal don't try to be the kind of like cool engineer just build things from scratch no just use all these Frameworks but I know ctOS tell me oh it's too expensive to use this third-party apis or it's too slow it doesn't skill to use XYZ so what I'm going to say to this I mean there's there's two sides of the story with using third party I mean to move quickly but it doesn't mean this this is a great meme that Sean Wang who's the head of developer experience that everybody posted the funny thing about it is you have at the beginning quartile kind of the noob that just learned PHP or just JavaScript and just kind of use it to build the toy car serious engineers make fun of the new because oh PHP language doesn't scale or JavaScript and all these things it's like oh our PHP is not a good language blah blah and then the middle or average or mid-wit Engineers like okay I'm gonna put my big engineer pants and do what Google would do and build something optimal and scalable and use something for the back end like Kafka Linker Ros AMA Prometheus kubernetes Envoy big red or hundreds of microservices okay that's the average technical founder the average startup dies so that's not a good outcome another funny thing you got the Jedi Master and when you squint their Solutions look the same like the new one they chose also PHP and JavaScript but they choose it for different reasons not because they just learned it but they wreck recognizes this is because they can move a lot quicker and what I'm going to emphasize here is that if you build a company and it works and you get users good enough the tech choices don't matter as much you can solve your way out of it like Facebook famously was built on PHP because Mark was very familiar with that and of course PHP doesn't quite scale or is very performant but if you're Facebook and you get to that scale of the number of users they got you can solve your way out and that's when they built a custom transpiler called hip hop to make PHP compound C plus plus so that it would optimize see so that was the Jedi move and even for JavaScript there's a V8 engine which makes it pretty performant so I think it's fine way up was a 2015 company at YC that helps company hire diverse companies and is a job board for college students so JJ the CTO although he didn't formally study computer science or engineering at UPenn he that taught himself how to program on freelance for a couple years before he started way up and JJ chose again as the Jedi Master chose technology for iteration speed he chose Django and python although a lot of other peers were telling him to go and use Ruby and rails and I think in 2015 Ruby and rails were 10 times more popular by Google Trends and that was fine that that didn't kill the company at all I mean that was the right choice for them because he could move and get this move quickly and get this out of the door very quickly I kept it simple in the back end postgres python Heroku and that worked out well for them now I'm going to summarize here the only Tech choices that matter are the ones tied to your customer promises for example at Azure we in fact rewrote and threw away a lot of the code multiple times as we scale in different stages of our Tech but the promise that we maintain to our customers was at the API level in unity and game engines and that's the thing that we cannot throw away but everything else we rewrote and that's fine all right now we're gonna go part three so you have the MVP you built it and launched it now you launched it so what happens on this stage your goal here in the launch stage is to iterate to get towards product Market fit so principle number one is to quickly iterate with hard and soft data use hard data as a tech founder to make sure you have set up a dashboard with analytics that tracks your main kpi and again here choose technology for your analytics stack for Speed keep some keep it super simple something like Google analytics amplitude mix panel and don't go overboard with something super complex like lock stash Prometheus these are great for large companies but not at your stage you don't have that load again use Soft Data if I keep talking to users after you launch and marry these two to know why users stay or churn and ask to figure out what new problems your users have to iterate and build we pay another YC company when they launch they were at b2c payments product kind of a little bit like venmo-ish but the thing is that it never really took off they iterated so in terms of analytics they saw some of the features that we're launching like messaging nobody cared nobody used and they found out in terms of a lot of the payments their biggest user was GoFundMe back then they also talked to users they talk to GoFundMe who didn't care for any of this b2c UI stuff they just care to get the payments and then they discover a better opportunity to be an API and basically pivoted it into it and they got the first version and again applying the principles that did a scale they didn't even have technical docs and they worked with GoFundMe to get this version and this API version was the one that actually took off and got them to product Market fit principle number two in this launch stage is to continuously launch perfect example of this is a segment who started as a very different product they were classroom analytics similar stories they struggled with this first idea it didn't really work out until they launched a stripped out version of just their back end which was actually segment and see the impressive number of launches they did their very first launch was back in December 2012. that was their very first post and you saw the engagement in Hacker News very high that was a bit of a hint of a product Market fit and they got excited and they pivoted into this and kept launching every week they had a total of five launches in a span of a month or so and they kept adding features and iterating they added support for more things when they launched it only supported Google analytics mixpanel and intercom and by listening to the users they added node PHP support and WordPress and it kept on going and it took them to be then a unicorn that eventually had an exit to Twilight for over three billion dollars pretty impressive too now the last principle here what I want to say for when you're launch there's this funny state where you have Tech builds you want to balance building versus fixing you want to make thoughtful choices between fixing bugs or adding new features or addressing technical debt and one I want to say Tech debt is totally fine you gotta get comfortable a little bit with the heat of your Tech burning totally okay you're gonna fear the right things and that is towards getting you product Market fit sometimes that tiny bug and rendering maybe is not critical for you at this point to fix like in fact a lot of early products are very broken you're probably very familiar with Pokemon go when it launched in 2016 nobody could log into the game and guess what that did not kill the company at all in fact to this day Pokemon I think last year made over a billion dollars in Revenue that did not kill them and I'll give a little background what was happening on the tech it was very uh very straightforward they had a load balancer that was on Google cloud and they had a back-end and they had a TCP termination and HTTP requests that were done with their nginx to route to the different servers that were the AFE the application front end to manage all the requests and the issue with there it was that as users were connected they didn't get terminated until they got to the nginx and then as a result client also had retries and that what happened when you had such a huge load that in fact I think Pokemon go by the first month after launching they had the same number of uh active as as Twitter which took them 10 years to get there and they got there in one month of course things would break it was basically a lot of users trying to log in was kind of creating a bit of a dito's attack now December is a bit on when you launch some of the common mistakes after launching and I myself has made CTO Doge sad it is tempting to to build and say what would Google do that's almost certainly a trap would try to build like a big company or hiring to try to move quickly sometimes I think this is more of a nuanced question can be a mistake or the other thing is focusing too much on fixing refactoring and not building features towards iterating to product Market fit not discovering insights from users sometimes I see ctOS like okay we launched I get to conquer down and just get into building totally no again your role as a technical founder very different you got to be involved in the journey and really understand the insights of why users Stay or Leave Your products you have to keep talking to them and the other mistake I see is like oh we're just building features for their product but you also need to build Tech to grow in fact some of the best growth hacks where Engineers pair it up with sales and growth folks who are non-technical so now the last section on how the role evolves so assuming you got product Market fit what happens this is this point where you can actually then put on your big engineering pants and figure out pieces of the tech that need to be built to scale you need to and the attack will break which is actually a good thing breaking because of too much demand and that's totally okay that's my example from Pokemon go you'll find the pieces that need to be reworked refactor this is when you do it not before now not before product Market fit and you'll decide also what the engineering culture will look like and this is a stage where you actually do more of the hiring and here you're probably going to evolve from leading a small team of Engineers to hiring your first hires who are going to be people that you know and at this point Your Role really changes because you'll start having communication overhead and this is when you realize your role morphs like between two to five you still get time to code about 70 when you get to five to ten you only have less than 50 percent and Beyond 10 you probably won't really have time to code and have to decide how to structure things and whether you're going to remain as a architect type or role or you want to be more of a people role and be more of a BP rich now to summarize uh hear the talk first stage ideating Bill the goal is to build a prototype as soon as possible and the principle is built very quickly in a matter of days stage two you're in the process of building an MVP which I think a lot of you are in this or the previous one the goal is to build as quickly to launch in a matter of few weeks and the principles are do things that don't scale create a 90 10 solution choose the tech for iteration speed and the last one is once you launch all of the previous ideas on 9010 solution do things that don't scale still apply and add these onto it and the goal is to get an iteration towards product Market fit so you're going to also quickly iterate with hard and soft data with analytics and user interviews you're going to continuously launch and you're going to find the fine balance between building and fixing and where techdat is totally fine feel the heat for that Tech that is totally fine and if there's only one take away from this whole talk is that startups move quickly so thank you everyone [Music]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_fetch",
+        "id": "678552c7-4609-42eb-b390-491026e66143",
+        "tool_call_id": "call_cjxnhx9bi3r45x8exrnevi0a",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to take comprehensive notes on the video and conduct deep research on Diana Hu's background and any interesting content mentioned. Let me start by creating a todo list for this complex task."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf330-b448-73b3-867e-09bd7606c85b",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "pending"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "pending"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_3e5n994mkkkz1o1lezirv5gj",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'in_progress'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'pending'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'pending'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'pending'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'pending'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'pending'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "04916ed5-8302-4ccc-835d-43e74bb60287",
+        "tool_call_id": "call_3e5n994mkkkz1o1lezirv5gj",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll analyze the transcript and extract key insights. First, let me read through it carefully and organize the information. The video is a Y Combinator Startup School talk by Diana Hu, a YC Group Partner and former CTO of Escher Reality (acquired by Niantic). She covers three stages for technical founders: ideating, building MVP, and launch/post-launch.\n\nLet me extract the key points systematically:"
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf330-dbf5-7872-ae8d-764df9a92347",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "pending"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "pending"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_liolqm0me0f8cqe79g7tm3yk",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'in_progress'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'pending'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'pending'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'pending'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'pending'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "e094b1ea-091f-4074-9b3b-28da07c31952",
+        "tool_call_id": "call_liolqm0me0f8cqe79g7tm3yk",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll search for Diana Hu's background. Let me start with a web search."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-0768-70c1-8e02-ba178433c191",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Diana Hu Y Combinator group partner background education"
+            },
+            "id": "call_wj1lup49fkc5zn82jbhaich6",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Diana Hu - Partner at Y Combinator | LinkedIn\",\n    \"url\": \"https://www.linkedin.com/in/sdianahu\",\n    \"snippet\": \"Diana Hu\\nGroup Partner at Y Combinator\\nSan Francisco Bay Area\\n500 connections, 9078 followers\\n\\n\\nAbout\\nHelping founders start startups\\n\\n\\nExperience\\nN/A\\n\\n\\nEducation\\nN/A\"\n  },\n  {\n    \"title\": \"S Diana Hu Email & Phone Number | Y Combinator General Partner ...\",\n    \"url\": \"https://rocketreach.co/s-diana-hu-email_2211424\",\n    \"snippet\": \"S Diana Hu holds a Carnegie Mellon University. With a robust skill set that includes Machine Learning, Computer Vision, Image Processing, Pattern Recognition,\"\n  },\n  {\n    \"title\": \"Diana Hu - Facebook, Github, LinkedIn\",\n    \"url\": \"https://clay.earth/profile/diana-hu\",\n    \"snippet\": \"She holds a Master's degree in Electrical and Computer Engineering as well as a Bachelor's degree in the same field, both from Carnegie Mellon University. Diana\"\n  },\n  {\n    \"title\": \"Diana Hu - RetrieveX\",\n    \"url\": \"https://www.retrievex.co/speakers/diana-hu\",\n    \"snippet\": \"Originally from Chile, Diana graduated from Carnegie Mellon University with a BS and MS in Electrical and Computer Engineering with a focus in computer vision\"\n  },\n  {\n    \"title\": \"Diana (@sdianahu) / Posts / X - Twitter\",\n    \"url\": \"https://x.com/sdianahu?lang=en\",\n    \"snippet\": \"The YC AI Student Starter Pack includes over $20k in Azure & AWS credits, $5k+ in ChatGPT, Claude, and Grok credits, and more! ycombinator.com/blog/the-yc-ai… Y\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "45e282c5-75da-4918-bae2-e06640a96b1d",
+        "tool_call_id": "call_wj1lup49fkc5zn82jbhaich6",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-20e5-7f63-aa63-f069c0e54117",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "\"Diana Hu\" Escher Reality Niantic computer vision AR SDK"
+            },
+            "id": "call_pmaj589bj9s86u8afdg13dt4",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Niantic acquires AR dev Escher Reality - GamesIndustry.biz\",\n    \"url\": \"https://www.gamesindustry.biz/niantic-acquires-ar-dev-escher-reality\",\n    \"snippet\": \"Escher Reality's CEO Ross Finman and CTO Diana Hu will be joining Niantic as well. The pair co-founded the company two years ago and brought it\"\n  },\n  {\n    \"title\": \"Planet Scale AR: Welcoming Escher Reality to Niantic\",\n    \"url\": \"https://nianticlabs.com/news/escherreality/\",\n    \"snippet\": \"We are announcing the acquisition of Escher Reality, and welcoming the talented team led by Escher's co-founders Ross Finman and Diana Hu to Niantic.\"\n  },\n  {\n    \"title\": \"Diana Hu - Group Partner at Y Combinator - getprog.ai\",\n    \"url\": \"https://www.getprog.ai/profile/340475\",\n    \"snippet\": \"She previously led Niantic's AR Platform as Director of Engineering, shaping the company's augmented reality infrastructure and developer ecosystem, and before\"\n  },\n  {\n    \"title\": \"SIGGRAPH Spotlight: Episode 18 – Augmented Reality with Niantic ...\",\n    \"url\": \"https://blog.siggraph.org/2018/08/siggraph-spotlight-episode-18-augmented-reality-with-niantic-inc.html/\",\n    \"snippet\": \"A bit of a preview: Diana was previously the co-founder and CTO of Escher Reality, a startup that was acquired by Niantic and builds the backend\"\n  },\n  {\n    \"title\": \"Niantic acquires Escher Reality, an AR technology industry startup\",\n    \"url\": \"https://pokemongohub.net/post/news/niantic-acquires-escher-reality-ar-technology-industry-startup/\",\n    \"snippet\": \"Today Niantic announced the acquisition of Escher Reality and welcomed the talented team led by Escher's co-founders Ross Finman and Diana\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "5ea35e22-7f23-4b25-b7e7-0b1f4b0d3cd9",
+        "tool_call_id": "call_pmaj589bj9s86u8afdg13dt4",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now let me search for more detailed background. Let's also check her Twitter/X profile for more context."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-3f6c-7441-91a3-45de0c4d8cbc",
+        "tool_calls": [
+          {
+            "name": "web_fetch",
+            "args": {
+              "url": "https://x.com/sdianahu"
+            },
+            "id": "call_fzbgmjiswug5ll22a9gbu8bk",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Error: Failed to fetch url",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_fetch",
+        "id": "1f762f38-63d9-4e8d-9a38-90a77c85a324",
+        "tool_call_id": "call_fzbgmjiswug5ll22a9gbu8bk",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Let me search for more comprehensive information about her background."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-6293-7ae0-82b8-cad759e45010",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Diana Hu Carnegie Mellon Electrical Computer Engineering computer vision"
+            },
+            "id": "call_0dhml32lzyid37bed6fuq232",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"YC Partner Diana Hu Decrypt DeepSeek Engineering Technology ...\",\n    \"url\": \"https://www.threads.com/@fox.hsiao/post/DFs_TBqhLKJ?hl=en\",\n    \"snippet\": \"... Carnegie Mellon University with a bachelor's and master's degree in electrical and computer engineering with a focus on computer vision and machine learning.\"\n  },\n  {\n    \"title\": \"Diana Hu: YC Partner | Y Combinator\",\n    \"url\": \"https://www.ycombinator.com/people/diana-hu\",\n    \"snippet\": \"# Diana Hu. Diana Hu is a Group Partner at YC. She was co-founder and CTO of Escher Reality (YC S17), an Augmented Reality Backend company that was acquired by Niantic (makers of Pokémon Go). Originally from Chile, Diana graduated from Carnegie Mellon University with a BS and MS in Electrical and Computer Engineering with a focus in computer vision and machine learning. ## YC stats. * Diana is the founder and CTO of Escher Reality, acquired by Niantic, the makers of Pokémon Go. * Diana has done over 1,700 office hours over the course of 5 batches at YC. * She's advised top YC alumni including:. * YC blog:Diana Hu on Augmented Reality and Building a Startup in a New Market. * Venture Beat:Pokémon Go studio Niantic acquires AR firm Escher Reality. The Engineering Unlocks Behind DeepSeek | YC Decoded. Vertical AI Agents Could Be 10X Bigger Than SaaS. Why Vertical LLM Agents Are The New $1 Billion SaaS Opportunities.\"\n  },\n  {\n    \"title\": \"Diana Hu - Executive Bio, Work History, and Contacts - Equilar ...\",\n    \"url\": \"https://people.equilar.com/bio/person/diana-hu-y-combinator/27157269\",\n    \"snippet\": \"Diana Hu ... Originally from Chile, Diana graduated from Carnegie Mellon ... Electrical and Computer Engineering with a focus in computer vision and machine\"\n  },\n  {\n    \"title\": \"Diana Hu - Group Partner @ Y Combinator - Crunchbase Person ...\",\n    \"url\": \"https://www.crunchbase.com/person/diana-hu\",\n    \"snippet\": \"Mellon University with a BS and MS in Electrical and Computer Engineering with a focus in computer vision and machine learning. Read More\"\n  },\n  {\n    \"title\": \"Diana Hu - Facebook, Github, LinkedIn\",\n    \"url\": \"https://clay.earth/profile/diana-hu\",\n    \"snippet\": \"She holds a Master's degree in Electrical and Computer Engineering as well as a Bachelor's degree in the same field, both from Carnegie Mellon University. Diana\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "e4be9ab7-d304-4e69-b301-d9f97a8b4e83",
+        "tool_call_id": "call_0dhml32lzyid37bed6fuq232",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-7a09-71f1-a306-f2e62dbc6d80",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "pending"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "pending"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "pending"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_kzcncp2p0gsx0vukp2o1cy1j",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'in_progress'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'pending'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'pending'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'pending'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "23913a1c-de2b-4303-b868-188427fa2bb2",
+        "tool_call_id": "call_kzcncp2p0gsx0vukp2o1cy1j",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now let me fetch the Niantic acquisition announcement and other details about Escher Reality."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-a7b4-7480-8951-5060b15a6a26",
+        "tool_calls": [
+          {
+            "name": "web_fetch",
+            "args": {
+              "url": "https://nianticlabs.com/news/escherreality/"
+            },
+            "id": "call_wuv2nox7vbitxzjcwxcdy7mq",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "# Planet Scale AR: Welcoming Escher Reality to Niantic – Niantic Labs\n\nFebruary 1, 2018 \n\nPlanet Scale AR: Welcoming Escher Reality to Niantic\n\n[Blog](/blog/archive/) > Planet Scale AR: Welcoming Escher Reality to Niantic\n\nFebruary 1, 2018\n\nPlanet Scale AR: Welcoming Escher Reality to Niantic\n\nToday we are announcing the acquisition of Escher Reality, and welcoming the talented team led by Escher’s co-founders Ross Finman and Diana Hu to Niantic.\n\nEscher’s innovations focus on exploring the intersection of digital and physical worlds, augmented reality (AR), and computer vision. Escher’s technology helps to build persistent, cross platform, multi-user experiences.\n\nThe addition of the Escher AR technology is incredibly exciting to us at Niantic as it significantly accelerates our work on persistent, shared AR as part of the Niantic real-world application platform. It’s our intention to make our cross-platform AR technology available more widely to developers later this year. Stay tuned for information on developer availability.\n\nAt Niantic, we are committed to using technology to enhance our users’ interactions with the physical world, and we are excited to embrace the Escher team as we continue to evolve and grow our platform to support planet-scale AR.\n\n**—jh**\n\n [Back to Blog](/blog/archive/)\n\nShare Article\n\n   \n\n---\n\n  Get the latest\n\n ",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_fetch",
+        "id": "88560ccc-9391-4b95-9922-39c4780d094a",
+        "tool_call_id": "call_wuv2nox7vbitxzjcwxcdy7mq",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-c7d9-7e73-8fb4-721d824c6527",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Escher Reality Y Combinator S17 augmented reality SDK"
+            },
+            "id": "call_m99dfu6qw7kybrcydzhocho4",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Escher Reality - fifthrevision\",\n    \"url\": \"https://fifthrevision.com/projects/escherreality.html\",\n    \"snippet\": \"Escher Reality was founded in 2016 building Augmented Reality (AR) SDK and APIs for mobile devices. After joining the YCombinator 2017 Summer program, the\"\n  },\n  {\n    \"title\": \"YC Jobs Series: Women Engineers in Startups | Y Combinator\",\n    \"url\": \"https://www.ycombinator.com/blog/women-engineers-in-startups\",\n    \"snippet\": \"Escher Reality logo · Escher Reality (S17). The backend for Augmented Reality. Mutiny logo. Mutiny (S18). AI for Enterprise GTM · 2 open jobs.\"\n  },\n  {\n    \"title\": \"Escher Reality: The backend for Augmented Reality. - Y Combinator\",\n    \"url\": \"https://www.ycombinator.com/companies/escher-reality\",\n    \"snippet\": \"Previously I was co-founder and CTO of Escher Reality (YC S17), an Augmented Reality Backend company that was acquired by Niantic (makers of Pokémon Go), where\"\n  },\n  {\n    \"title\": \"Escher Reality is building the backend for cross- platform mobile AR\",\n    \"url\": \"https://www.facebook.com/YCombinator/posts/escher-reality-yc-s17-is-building-the-backend-for-cross-platform-mobile-ar-httpo/10155040222719107/?locale=ar_AR\",\n    \"snippet\": \"We create games, cross-platform apps and neural networks, can handle project of type: Games, Chat bots, eCommerce platforms, WEB services,\"\n  },\n  {\n    \"title\": \"Escher Reality - CB Insights\",\n    \"url\": \"https://www.cbinsights.com/company/escher-reality\",\n    \"snippet\": \"The company has an augmented reality API that allows developers to integrate digital overlays into their applications. Escher Reality's services are applicable\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "219de954-99d1-4655-a33f-fc6b1062c5fa",
+        "tool_call_id": "call_m99dfu6qw7kybrcydzhocho4",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf331-dfce-7d81-ad93-4312e6272ff8",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "pending"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "pending"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_ij4b09xsepazeecq1yfq6td0",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'completed'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'in_progress'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'pending'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'pending'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "9444b973-ee01-4898-8fc9-14c2a23c41f6",
+        "tool_call_id": "call_ij4b09xsepazeecq1yfq6td0",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to research the companies mentioned in the video. Let me search for them systematically. First, let me search for Optimizely since it was mentioned as an example."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-0668-7152-b9c9-721a9f37dbc2",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Optimizely YC W10 prototype JavaScript S3 A/B testing"
+            },
+            "id": "call_ac0t8fuc3d44dqqpge6h8mlu",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"A/B Testing You'll Actually Use: Optimizely (YC W10) Launches Out ...\",\n    \"url\": \"https://x.com/ycombinator/status/27275398674\",\n    \"snippet\": \"Y Combinator (@ycombinator). 12 likes. A/B Testing You'll Actually Use: Optimizely (YC W10) Launches Out of Beta.\"\n  },\n  {\n    \"title\": \"A/B testing tools: How to integrate Optimizely - Medium\",\n    \"url\": \"https://medium.com/codavel-blog/a-b-testing-tools-how-to-integrate-optimizely-e078fb88f9f0\",\n    \"snippet\": \"Optimizely is an experimentation platform that allows you to run experiments and roll out new features on your website, mobile app, server-side application.\"\n  },\n  {\n    \"title\": \"See how web experimentation works - Optimizely\",\n    \"url\": \"https://www.optimizely.com/insights/web-experimentation-demo/\",\n    \"snippet\": \"See how A/B testing in Web Experimentation works · Generate and summarize tests using AI · Create tests visually using easy templates · Flicker free and faster\"\n  },\n  {\n    \"title\": \"How To Create An A/B Test Using Optimizely Web\",\n    \"url\": \"https://world.optimizely.com/resources/videos/video/?vid=290725\",\n    \"snippet\": \"A critical vulnerability was discovered in React Server Components (Next.js). Our systems remain protected but we advise to update packages to newest version.\"\n  },\n  {\n    \"title\": \"A/B Testing with Optimizely - YouTube\",\n    \"url\": \"https://www.youtube.com/watch?v=iYeUys7n6GM\",\n    \"snippet\": \"Kristen Pol A/B testing can be a useful technique for identifying how changes on web pages affect user engagement and conversions.\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "c7adee4c-e801-404e-ae93-e237b5ec0ca6",
+        "tool_call_id": "call_ac0t8fuc3d44dqqpge6h8mlu",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-230b-7982-88cd-9fad8dcb5913",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Remora carbon capture trucks YC prototype rendering"
+            },
+            "id": "call_cvttzolf95yttb1sr97udhn2",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Remora (YC W21) – Carbon capture for semi trucks\",\n    \"url\": \"https://bestofshowhn.com/yc-w21/remora\",\n    \"snippet\": \"Remora is building a device that captures the carbon emissions from a semi truck. Our device mounts between the truck and its trailer, attaches to its tailpipes\"\n  },\n  {\n    \"title\": \"Remora | Carbon Capture for Vehicles\",\n    \"url\": \"https://remoracarbon.com/\",\n    \"snippet\": \"Remora generates revenue for railroads and trucking companies by extracting, purifying, and selling CO 2 from their exhaust.\"\n  },\n  {\n    \"title\": \"Introducing Remora, carbon capture for semi-trucks\",\n    \"url\": \"https://medium.com/@paulawgross/introducing-remora-carbon-capture-for-semi-trucks-28f5a8ff912c\",\n    \"snippet\": \"# Introducing Remora, carbon capture for semi-trucks. Remora is building a device that captures the carbon emissions from a semi-truck. Our device mounts between the truck and its trailer, attaches to its tailpipes, and captures at least 80% of its carbon emissions. It will enable some of the largest companies in the world to slash emissions today without waiting to clean up the grid, build new charging stations, or replace every truck in their fleet. Best of all, if we pair our device with biofuel, we can make semi-trucks run carbon negative — something electric and hydrogen semi-trucks can never achieve. Then, we teamed up with Eric, a mechanic-turned-engineer who spent years building electric and hydrogen semi-trucks for some of the world’s largest automotive companies. Soon, our first devices will be capturing carbon dioxide on trucks owned by some of the largest companies in the world.\"\n  },\n  {\n    \"title\": \"The World's First Commercial Mobile Carbon Capture ...\",\n    \"url\": \"https://www.ycombinator.com/library/Mz-the-world-s-first-commercial-mobile-carbon-capture-device\",\n    \"snippet\": \"Paul Gross and his team at Remora are trying to do something that's never been done before. They're building mobile carbon capture devices\"\n  },\n  {\n    \"title\": \"Remora's Carbon Capture Technology Targets Heavy-Duty ...\",\n    \"url\": \"https://sbn-detroit.org/remoras-carbon-capture-technology-targets-heavy-duty-transportation/\",\n    \"snippet\": \"Founded in 2020 and based in Wixom, Michigan, Remora is developing a carbon capture device designed to attach directly to semi-trucks and locomotives and\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "fe26ce04-5aaf-4c1a-a9e5-2400e8c5254b",
+        "tool_call_id": "call_cvttzolf95yttb1sr97udhn2",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-3d42-7ed0-891d-a8a2b9695ff5",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "Justin TV Twitch YC founders Emmett Kyle video streaming"
+            },
+            "id": "call_fkp20x6q5h4auxns7o5nqfw7",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Founder Story: Justin Kan of Twitch - Frederick AI\",\n    \"url\": \"https://www.frederick.ai/blog/justin-kan-twitch\",\n    \"snippet\": \"Pivotal Partnerships. The success of Justin.tv relied heavily on the talents of Kan's co-founders: Emmett Shear, Michael Seibel, and Kyle Vogt.\"\n  },\n  {\n    \"title\": \"Twitch Co-Founder Reunion and DJ Vlog (ft Michael Seibel, Emmett ...\",\n    \"url\": \"https://www.youtube.com/watch?v=rgb3I3ctCnw\",\n    \"snippet\": \"SUBSCRIBE TO MY ADVICE AND LIFE STORIES ▻ https://youtube.com/JustinKanTV I'm Justin Kan and I've been through the ups and downs in the\"\n  },\n  {\n    \"title\": \"The Twitch Mafia - getPIN.xyz\",\n    \"url\": \"https://www.getpin.xyz/post/the-twitch-mafia\",\n    \"snippet\": \"Co-founders of Twitch, Emmett Shear, Kyle Vogt, and Justin Kan, introduced the platform in June 2011 as a spin-off of the general-interest streaming platform called Justin.tv. Gaming, web3, transportation, and AI are the industries that the most startups have been founded in by former employees. Before founding Cruise, he was on the the co-founding team of Twitch. Just like Kyle Vogt, Justin Kan co-founded Twitch before starting his own company \\\"Rye\\\" in the world of web3. thirdweb is an end to end developer tool accelerating teams building web3 apps, games, tokens, NFTs, marketplaces, DAOs and more. Ben Robinson, COO and co-founder at Freedom Games, is a lifelong gamer who led a successful Counter-Strike team at 15 and excelled in World of Warcraft and DayZ. Benjamin Devienne, Founder Jam.gg is an economist-turned-game developer, startup advisor, and data science expert. **Twitch** **Role**: Global Head - Content Partnerships & Business Development, Director, Game Publisher & Developer Partnerships. FreshCut is a community focused gaming content platform. Ex Populus is a Web3 video game publishing company.\"\n  },\n  {\n    \"title\": \"What Happened to Justin.Tv & Why Did They Shut Down? - Failory\",\n    \"url\": \"https://www.failory.com/cemetery/justin-tv\",\n    \"snippet\": \"Founded in 2007, Justin.tv was a live streaming platform that eventually gave way to video game-focused live streaming giant Twitch. These pranks were partly responsible for Justin pivoting on his startup idea and relaunching Justin.tv as a full live streaming platform with his friends and co-founders, Emmett Shear, Michael Siebel, and Kyle Vogt. There were many reasons why the creators of Justin.tv decided to launch Twitch as a separate platform, but one of the biggest reasons was that there were no copyright issues associated with video game streaming content. In 2011, shortly after Justin.tv launched Twitch as a separate streaming site, the company’s original founder Justin Kan, whom the site was named after, decided to part ways with his creation and work on other startup ideas. So, ultimately, the reason Justin.tv shut down was that it spawned Twitch, a much more popular streaming platform, and that Amazon acquired the new streaming service.\"\n  },\n  {\n    \"title\": \"Justin.tv - Wikipedia\",\n    \"url\": \"https://en.wikipedia.org/wiki/Justin.tv\",\n    \"snippet\": \"# Justin.tv. **Justin.tv** was a website created by Justin Kan, Emmett Shear, Michael Seibel, and Kyle Vogt in 2007 to allow anyone to broadcast video online. Justin.tv user accounts were called \\\"channels\\\", like those on YouTube, and users were encouraged to broadcast a wide variety of user-generated live video content, called \\\"broadcasts\\\". The original Justin.tv was a single channel featuring founder Justin Kan, who broadcast his life 24/7 and popularized the term lifecasting \\\"Lifecasting (video stream)\\\"). The original Justin.tv was a single channel featuring Justin Kan. Wearing a webcam attached to a baseball cap and streamed online via a laptop-backpack system designed by co-founder Kyle Vogt, Kan decided he would wear the camera 24/7, and he began streaming continuous live video and audio at midnight March 19, 2007. Users could broadcast directly from the site, with Justin.tv using Flash to auto-detect and stream from an attached webcam.\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "023455a8-f4a3-4569-ba34-d219a227f4b4",
+        "tool_call_id": "call_fkp20x6q5h4auxns7o5nqfw7",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Let me search for more companies mentioned and key concepts."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-5a1d-7272-9452-8f7d61ff0ab0",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "\"90/10 solution\" Paul Buchheit Y Combinator"
+            },
+            "id": "call_9r316fpurxyggqjhwgpsjtin",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"YC's essential startup advice\",\n    \"url\": \"https://x.com/GISTNetwork/status/1854768314507030904\",\n    \"snippet\": \"... Paul Buchheit (PB) always gives in this case is to look for the “90/10 solution”. That is, look for a way in which you can accomplish 90% of\"\n  },\n  {\n    \"title\": \"YC's Paul Buchheit on the 90/10 solution for startups - LinkedIn\",\n    \"url\": \"https://www.linkedin.com/posts/darwin-lo-3bbb945_one-piece-of-advice-that-yc-partner-paul-activity-7368260770788200448-Tiem\",\n    \"snippet\": \"Most importantly, a 90% solution to a real customer problem which is available right away, is much better than a 100% solution that takes ages to build.\\\" https://lnkd.in/epnHhdJh. My team always said \\\"we like working with you because you don't overthink stuff and you don't let us overthink stuff either.\\\" Here's what they meant: Before Zoko, I built bridges for a living. Our research team’s Q3 analysis of 250+ platforms across Business Planning, Site & Feasibility, Design, Engineering, Construction, Facilities & Operations, and Decommissioning shows a pattern: tools create value only when they change who sees risk when, and who owns the next decision. That's why, to make OR work reliably, we need to think like engineers, not just modelers: Build → Ship → Adopt. The project was ultimately completed three months ahead of schedule, saving costs and earning acclaim as an \\\"engineering miracle in extreme conditions.\\\" At the closing meeting that day, Daniel told the team: \\\"We're not just building pipes and steel; we're using technology to build pathways for life.\"\n  },\n  {\n    \"title\": \"How to Build a Successful Startup: Essential Advice from Y ...\",\n    \"url\": \"https://hyperion360.com/blog/how-to-build-a-successful-startup-advice-from-y-combinator-and-unicorn-founders/\",\n    \"snippet\": \"This is where Paul Buchheit's (PB) advice, a YC Partner and the creator of Gmail, comes into play: seek the 90/10 solution. These are solutions\"\n  },\n  {\n    \"title\": \"Top 5 hacks used by YC startups : r/Entrepreneur - Reddit\",\n    \"url\": \"https://www.reddit.com/r/Entrepreneur/comments/1ckp7w0/top_5_hacks_used_by_yc_startups/\",\n    \"snippet\": \"YC partner Paul Buchheit consistently advises searching for the 90/10 solution in such situations. This involves finding a method that\"\n  },\n  {\n    \"title\": \"Startup Playbook\",\n    \"url\": \"https://playbook.samaltman.com/\",\n    \"snippet\": \"As Paul Buchheit says, find ways to get 90% of the value with 10% of the effort. The market doesn't care how hard you work—it only cares if you do the right\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "672b5b3b-977b-4f4e-90f5-b6ee21780164",
+        "tool_call_id": "call_9r316fpurxyggqjhwgpsjtin",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now let me search for more companies mentioned. Let's do parallel searches."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-7464-7172-8266-bfdb9b753c3a",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "DoorDash Palo Alto Delivery Google Forms PDF menus prototype"
+            },
+            "id": "call_ggt01qfvlc7rvy0tfn4gqxhw",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"DoorDash's v1 was 8 PDF menus on a static HTML website\",\n    \"url\": \"https://andrewchen.substack.com/p/doordashs-v1-was-8-pdf-menus-on-a/comments\",\n    \"snippet\": \"The original DoorDash MVP seemed practical. MVPs work when they test the core risk, and maybe when they get something out the door.\"\n  },\n  {\n    \"title\": \"A thick binder full of rejected orders. She got delivery requests every ...\",\n    \"url\": \"https://www.threads.com/@adrianchinghc/post/DTxkXMijaq9/a-thick-binder-full-of-rejected-orders-she-got-delivery-requests-every-day-but\",\n    \"snippet\": \"They created \\\"Palo Alto Delivery\\\" with: • A PDF of restaurant menus • A Google Voice number • A Google Form for orders • Themselves as delivery\"\n  },\n  {\n    \"title\": \"The DoorDash Blueprint: How a Google Doc Built a Delivery Empire\",\n    \"url\": \"https://www.youtube.com/watch?v=GYBmsrsb0GI\",\n    \"snippet\": \"It began as a shared Google Doc among four Stanford students who manually listed restaurant menus, took orders via text, and delivered food\"\n  },\n  {\n    \"title\": \"DoorDash's v1 was 8 PDF menus on a static HTML website\",\n    \"url\": \"https://andrewchen.substack.com/p/doordashs-v1-was-8-pdf-menus-on-a\",\n    \"snippet\": \"This naturally leads to strategies like testing one thing at a time, and making the One Main Feature the core of the product experience. The most dangerous outcome in product testing is getting false information, which is most likely to arrive in the form of false negatives due to the prior discussion about new products being about repeated failure. While testing helps startup teams navigate the Idea Maze from MVP to market-winning product, this view overlooks something crucial: you can learn immensely from studying the successes and failures already in your market, rather than trying to recreate all that knowledge from scratch. In an established market, you start with clear signals about customer needs and how different products position themselves. With a new category, you have no idea if there's actually a \\\"there there.\\\" Even if you iterate to a seemingly viable product, you can't be certain it will have the business characteristics you want.\"\n  },\n  {\n    \"title\": \"a16z speedrun | DoorDash was built in 45 minutes ... - Instagram\",\n    \"url\": \"https://www.instagram.com/reel/DNggT6Jy1W1/\",\n    \"snippet\": \"Yeah, we took 45 minutes to build it. We built Palo Alto Delivery. com which is a static HTML page that had eight PDF menus. So, these are menus\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "9e4de767-5acc-4456-8d72-520fa899e119",
+        "tool_call_id": "call_ggt01qfvlc7rvy0tfn4gqxhw",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-9080-7af0-9a4c-89c3477a91a2",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "pending"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_jnsr3lpoingbcpmplfled0tm",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'completed'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'completed'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'in_progress'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'pending'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "f609c7d9-1dc3-4814-815e-0913308dd5dd",
+        "tool_call_id": "call_jnsr3lpoingbcpmplfled0tm",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-b8c8-71f2-880b-56975dcb4246",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "\"do things that don't scale\" Paul Graham Y Combinator"
+            },
+            "id": "call_uvo5b3oornrm8y2rn74o5bzz",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Startup Experts Discuss Doing Things That Don't Scale - YouTube\",\n    \"url\": \"https://www.youtube.com/watch?v=IjPDIjge81o\",\n    \"snippet\": \"Startup Experts Discuss Doing Things That Don't Scale\\nY Combinator\\n2120000 subscribers\\n4570 likes\\n209367 views\\n30 May 2024\\nA little over ten years ago Paul Graham published the essay \\\"Do Things That Don't Scale.\\\" At the time, it was highly controversial advice that spoke to the drastically different needs of an early startup versus the needs of a much larger, more established company.\\n\\nYC Partners discuss PG's essay, its influence on Silicon Valley, and some prime examples of YC founders that embraced the mantra \\\"Do Things That Don't Scale.\\\" \\n\\nRead Paul Graham's essay here: http://paulgraham.com/ds.html\\n\\nApply to Y Combinator: https://yc.link/OfficeHours-apply\\nWork at a startup: https://yc.link/OfficeHours-jobs\\n\\nChapters (Powered by https://bit.ly/chapterme-yc) - \\n00:00 Intro\\n02:09 Paul Graham's Essay\\n04:17 Prioritizing Scalability\\n05:38 Solving Immediate Problems\\n08:53 Fleek's Manual Connections\\n10:32 Algolia and Stripe\\n12:25 Learning Over Scalability\\n15:20 Embrace Unscalable Tasks\\n17:41 Experiment and Adapt\\n19:06 DoorDash's Pragmatic Approach\\n21:26 Swift Problem Solving\\n22:33 Transition to Scalability\\n23:30 Consulting Services\\n25:05 Outro\\n111 comments\\n\"\n  },\n  {\n    \"title\": \"Paul Graham: What does it mean to do things that don't scale?\",\n    \"url\": \"https://www.youtube.com/watch?v=5-TgqZ8nado\",\n    \"snippet\": \"Paul Graham: What does it mean to do things that don't scale?\\nY Combinator\\n2120000 subscribers\\n826 likes\\n42536 views\\n16 Jul 2019\\nIn the beginning, startups should do things that don't scale. Here, YC founder Paul Graham explains why.\\n\\nJoin the community and learn from experts and YC partners. Sign up now for this year's course at https://startupschool.org.\\n9 comments\\n\"\n  },\n  {\n    \"title\": \"Paul Graham Was Wrong When He said “Do Things That Don't Scale”\",\n    \"url\": \"https://www.linkedin.com/pulse/paul-graham-wrong-when-he-said-do-things-dont-scale-brian-gallagher-xulae\",\n    \"snippet\": \"“Do Things that Don't Scale” should be a tool, not a blueprint. When used wisely, it can help founders unlock powerful insights and build a\"\n  },\n  {\n    \"title\": \"Doing Things that Don't Scale: Unpacking An Important Concept for ...\",\n    \"url\": \"https://www.interplay.vc/podcasts/doing-things-that-dont-scale-unpacking-important-concept-startups\",\n    \"snippet\": \"## Real-World Examples of Startups Doing Things That Don’t Scale. Things that don’t scale are manual, labor-intensive tasks that are not sustainable in the long term but are essential for understanding customer needs, testing ideas, and building relationships in the early stages of a startup. Startups should engage in these tasks to build strong customer relationships, validate concepts, and refine their products based on real-world feedback. By understanding customer needs deeply and refining their products through manual efforts, startups can develop efficient, automated processes that are more likely to succeed at scale. ### Can you give examples of startups that succeeded by doing things that don’t scale? Seamless founders managed orders themselves to build relationships, Diapers.com founders tested market demand by selling at a loss, and Airbnb's founders improved listing images personally to increase bookings. It allows founders to build strong relationships with customers, test and validate their business concepts, and iterate rapidly based on real-world feedback.\"\n  },\n  {\n    \"title\": \"Do Things that Don't Scale - Paul Graham\",\n    \"url\": \"https://paulgraham.com/ds.html\",\n    \"snippet\": \"Startups building things for other startups have a big pool of potential users in the other companies we've funded, and none took better advantage of it than Stripe. I have never once seen a startup lured down a blind alley by trying too hard to make their initial users happy. As long as you can find just one user who really needs something and can act on that need, you've got a toehold in making something people want, and that's as much as any startup needs initially. I occasionally meet founders who seem to believe startups are projectiles rather than powered aircraft, and that they'll make it big if and only if they're launched with sufficient initial velocity. But in most cases the second component will be what it usually is — recruit users manually and give them an overwhelmingly good experience — and the main benefit of treating startups as vectors will be to remind founders they need to work hard in two dimensions.\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "b846b338-cd5c-4654-b9bd-ae2a23d87ae7",
+        "tool_call_id": "call_uvo5b3oornrm8y2rn74o5bzz",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-d4a3-7153-9990-691842577054",
+        "tool_calls": [
+          {
+            "name": "web_search",
+            "args": {
+              "query": "technical debt startups early stage Y Combinator advice"
+            },
+            "id": "call_yokduk788mxy9fpv2qqxhi5n",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "[\n  {\n    \"title\": \"Tips for technical startup founders\",\n    \"url\": \"https://www.ycombinator.com/library/Is-tips-for-technical-startup-founders\",\n    \"snippet\": \"She shares her advice for being a technical founder at the earliest stages - including topics like how to ship an MVP fast, how to deal with\"\n  },\n  {\n    \"title\": \"30 Startup Best Practices From Y Combinator And Beyond\",\n    \"url\": \"https://medium.com/armchair-musings/30-startup-best-practices-from-y-combinator-and-beyond-a738b451a4f4\",\n    \"snippet\": \"Focus on features and short-term quality gains over minimizing tech debt. Growing pains are a sign of success.\"\n  },\n  {\n    \"title\": \"How a startup can survive technical debt\",\n    \"url\": \"https://news.ycombinator.com/item?id=25617083\",\n    \"snippet\": \"You can choose when to pay back technical debt. This is true but you will always feel that paying off the debt isn't growing the business or giving any real\"\n  },\n  {\n    \"title\": \"I've found that slowdown from tech debt killed as many ...\",\n    \"url\": \"https://news.ycombinator.com/item?id=31516517\",\n    \"snippet\": \"My general rule is: push off technical debt as late as you can. Aways leave code slightly better than you found it. Fix problems as you recognize them. I think\"\n  },\n  {\n    \"title\": \"Tips For Technical Startup Founders | Startup School\",\n    \"url\": \"https://open.spotify.com/episode/6qn4SAjavESW2SBjggtZkN\",\n    \"snippet\": \"She shares her advice for being a technical founder at the earliest stages - including topics like how to ship an MVP fast, how to deal with\"\n  }\n]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "web_search",
+        "id": "fe30e8a2-03c5-438a-9f29-1371c12dede7",
+        "tool_call_id": "call_yokduk788mxy9fpv2qqxhi5n",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to compile everything into comprehensive notes. Let me start by writing the notes."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf332-f065-7310-abea-a218feb131ee",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "completed"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "call_3s0hpkgarxfxq26uwv71ev9a",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'completed'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'completed'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'completed'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'in_progress'}, {'content': 'Present final research report with sources and insights', 'status': 'pending'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "8f6354b0-d9eb-4e2e-adce-d667c1239c18",
+        "tool_call_id": "call_3s0hpkgarxfxq26uwv71ev9a",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll compile comprehensive notes from the video and research. Let me create a detailed report."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf333-1730-7803-b6cc-25e3561ab015",
+        "tool_calls": [
+          {
+            "name": "write_file",
+            "args": {
+              "description": "Create comprehensive research notes on Diana Hu's talk and background",
+              "path": "/mnt/user-data/workspace/diana_hu_research.md",
+              "content": "# Diana Hu: Technical Startup Founder Advice - Comprehensive Research\n\n## Video Overview\n**Title:** Tips For Technical Startup Founders | Startup School  \n**Speaker:** Diana Hu, Y Combinator Group Partner  \n**Date:** April 21, 2023  \n**Length:** 28 minutes  \n**YouTube URL:** https://www.youtube.com/watch?v=rP7bpYsfa6Q\n\n## Speaker Background\n\n### Education\n- **BS and MS in Electrical and Computer Engineering** from Carnegie Mellon University\n- Focus on **computer vision and machine learning**\n- Originally from Chile\n\n### Career Path\n1. **Co-founder & CTO of Escher Reality** (YC S17)\n   - Startup building augmented reality SDK for game developers\n   - Company acquired by Niantic (makers of Pokémon Go) in February 2018\n\n2. **Director of Engineering at Niantic**\n   - Headed AR platform after acquisition\n   - Responsible for scaling AR infrastructure to millions of users\n\n3. **Group Partner at Y Combinator** (Current)\n   - Has conducted **over 1,700 office hours** across 5 batches\n   - Advises top YC alumni companies\n   - Specializes in technical founder guidance\n\n### Key Achievements\n- Successfully built and sold AR startup to Niantic\n- Scaled systems from prototype to millions of users\n- Extensive experience mentoring technical founders\n\n## Escher Reality Acquisition\n- **Founded:** 2016\n- **Y Combinator Batch:** Summer 2017 (S17)\n- **Product:** Augmented Reality backend/SDK for cross-platform mobile AR\n- **Acquisition:** February 1, 2018 by Niantic\n- **Terms:** Undisclosed, but both co-founders (Ross Finman and Diana Hu) joined Niantic\n- **Technology:** Persistent, cross-platform, multi-user AR experiences\n- **Impact:** Accelerated Niantic's work on planet-scale AR platform\n\n## Video Content Analysis\n\n### Three Stages of Technical Founder Journey\n\n#### Stage 1: Ideating (0:00-8:30)\n**Goal:** Build a prototype as soon as possible (matter of days)\n\n**Key Principles:**\n- Build something to show/demo to users\n- Doesn't have to work fully\n- CEO co-founder should be finding users to show prototype\n\n**Examples:**\n1. **Optimizely** (YC W10)\n   - Built prototype in couple of days\n   - JavaScript file on S3 for A/B testing\n   - Manual execution via Chrome console\n\n2. **Escher Reality** (Diana's company)\n   - Computer vision algorithms on phones\n   - Demo completed in few weeks\n   - Visual demo easier than explaining\n\n3. **Remora** (YC W21)\n   - Carbon capture for semi-trucks\n   - Used 3D renderings to show promise\n   - Enough to get users excited despite hard tech\n\n**Common Mistakes:**\n- Overbuilding at this stage\n- Not talking/listening to users soon enough\n- Getting too attached to initial ideas\n\n#### Stage 2: Building MVP (8:30-19:43)\n**Goal:** Build to launch quickly (weeks, not months)\n\n**Key Principles:**\n\n1. **Do Things That Don't Scale** (Paul Graham)\n   - Manual onboarding (editing database directly)\n   - Founders processing requests manually\n   - Example: Stripe founders filling bank forms manually\n\n2. **Create 90/10 Solution** (Paul Buchheit)\n   - Get 90% of value with 10% of effort\n   - Restrict product to limited dimensions\n   - Push features to post-launch\n\n3. **Choose Tech for Iteration Speed**\n   - Balance product needs with personal expertise\n   - Use third-party frameworks and APIs\n   - Don't build from scratch\n\n**Examples:**\n1. **DoorDash** (originally Palo Alto Delivery)\n   - Static HTML with PDF menus\n   - Google Forms for orders\n   - \"Find My Friends\" to track deliveries\n   - Built in one afternoon\n   - Focused only on Palo Alto initially\n\n2. **WayUp** (YC 2015)\n   - CTO JJ chose Django/Python over Ruby/Rails\n   - Prioritized iteration speed over popular choice\n   - Simple stack: Postgres, Python, Heroku\n\n3. **Justin TV/Twitch**\n   - Four founders (three technical)\n   - Each tackled different parts: video streaming, database, web\n   - Hired \"misfits\" overlooked by Google\n\n**Tech Stack Philosophy:**\n- \"If you build a company and it works, tech choices don't matter as much\"\n- Facebook: PHP → HipHop transpiler\n- JavaScript: V8 engine optimization\n- Choose what you're dangerous enough with\n\n#### Stage 3: Launch Stage (19:43-26:51)\n**Goal:** Iterate towards product-market fit\n\n**Key Principles:**\n\n1. **Quickly Iterate with Hard and Soft Data**\n   - Set up simple analytics dashboard (Google Analytics, Amplitude, Mixpanel)\n   - Keep talking to users\n   - Marry data with user insights\n\n2. **Continuously Launch**\n   - Example: Segment launched 5 times in one month\n   - Each launch added features based on user feedback\n   - Weekly launches to maintain momentum\n\n3. **Balance Building vs Fixing**\n   - Tech debt is totally fine early on\n   - \"Feel the heat of your tech burning\"\n   - Fix only what prevents product-market fit\n\n**Examples:**\n1. **WePay** (YC company)\n   - Started as B2C payments (Venmo-like)\n   - Analytics showed features unused\n   - User interviews revealed GoFundMe needed API\n   - Pivoted to API product\n\n2. **Pokémon Go Launch**\n   - Massive scaling issues on day 1\n   - Load balancer problems caused DDoS-like situation\n   - Didn't kill the company (made $1B+ revenue)\n   - \"Breaking because of too much demand is a good thing\"\n\n3. **Segment**\n   - December 2012: First launch on Hacker News\n   - Weekly launches adding features\n   - Started with Google Analytics, Mixpanel, Intercom support\n   - Added Node, PHP, WordPress support based on feedback\n\n### Role Evolution Post Product-Market Fit\n- **2-5 engineers:** 70% coding time\n- **5-10 engineers:** <50% coding time\n- **Beyond 10 engineers:** Little to no coding time\n- Decision point: Architect role vs People/VP role\n\n## Key Concepts Deep Dive\n\n### 90/10 Solution (Paul Buchheit)\n- Find ways to get 90% of the value with 10% of the effort\n- Available 90% solution now is better than 100% solution later\n- Restrict product dimensions: geography, user type, data type, functionality\n\n### Technical Debt in Startups\n- **Early stage:** Embrace technical debt\n- **Post product-market fit:** Address scaling issues\n- **Philosophy:** \"Tech debt is totally fine - feel the heat of your tech burning\"\n- Only fix what prevents reaching product-market fit\n\n### MVP Principles\n1. **Speed over perfection:** Launch in weeks, not months\n2. **Manual processes:** Founders do unscalable work\n3. **Limited scope:** Constrain to prove core value\n4. **Iterative validation:** Launch, learn, iterate\n\n## Companies Mentioned (with Context)\n\n### Optimizely (YC W10)\n- A/B testing platform\n- Prototype: JavaScript file on S3, manual execution\n- Founders: Pete Koomen and Dan Siroker\n- Dan previously headed analytics for Obama campaign\n\n### Remora (YC W21)\n- Carbon capture device for semi-trucks\n- Prototype: 3D renderings to demonstrate concept\n- Captures 80%+ of truck emissions\n- Can make trucks carbon-negative with biofuels\n\n### Justin TV/Twitch\n- Live streaming platform → gaming focus\n- Founders: Justin Kan, Emmett Shear, Michael Seibel, Kyle Vogt\n- MVP built by 4 founders (3 technical)\n- Hired overlooked engineers from Google\n\n### Stripe\n- Payment processing API\n- Early days: Founders manually processed payments\n- Filled bank forms manually for each transaction\n- Classic \"do things that don't scale\" example\n\n### DoorDash\n- Originally \"Palo Alto Delivery\"\n- Static HTML with PDF menus\n- Google Forms for orders\n- \"Find My Friends\" for delivery tracking\n- Focused on suburbs vs metro areas (competitive advantage)\n\n### WayUp (YC 2015)\n- Job board for college students\n- CTO JJ chose Django/Python over Ruby/Rails\n- Prioritized iteration speed over popular choice\n- Simple, effective tech stack\n\n### WePay (YC company)\n- Started as B2C payments (Venmo competitor)\n- Pivoted to API after user discovery\n- GoFundMe became key customer\n- Example of data + user interviews driving pivot\n\n### Segment\n- Analytics infrastructure\n- Multiple launches in short timeframe\n- Started with limited integrations\n- Added features based on user requests\n- Acquired by Twilio for $3.2B\n\n### Algolia\n- Search API mentioned as YC success\n- Part of Diana's network of advised companies\n\n## Actionable Advice for Technical Founders\n\n### Immediate Actions (Week 1)\n1. **Build clickable prototype** (Figma, InVision) in 1-3 days\n2. **Find 10 potential users** to show prototype\n3. **Use existing tools** rather than building from scratch\n4. **Embrace ugly code** - it's temporary\n\n### Tech Stack Selection\n1. **Choose familiarity over trendiness**\n2. **Use third-party services** for non-core functions\n3. **Keep infrastructure simple** (Heroku, Firebase, AWS)\n4. **Only build what's unique** to your value proposition\n\n### Hiring Strategy\n1. **Don't hire too early** (slows you down)\n2. **Founders must build** to gain product insights\n3. **Look for \"misfits\"** - overlooked talent\n4. **Post product-market fit:** Scale team strategically\n\n### Launch Strategy\n1. **Launch multiple times** (weekly iterations)\n2. **Combine analytics with user interviews**\n3. **Balance feature development with bug fixes**\n4. **Accept technical debt** until product-market fit\n\n### Mindset Shifts\n1. **From perfectionist to pragmatist**\n2. **From specialist to generalist** (do whatever it takes)\n3. **From employee to owner** (no task beneath you)\n4. **From certainty to comfort with ambiguity**\n\n## Diana's Personal Insights\n\n### From Her Experience\n- \"Technical founder is committed to the success of your company\"\n- \"Do whatever it takes to get it to work\"\n- \"Your product will evolve - if someone else builds it, you miss key learnings\"\n- \"The only tech choices that matter are tied to customer promises\"\n\n### Common Traps to Avoid\n1. **\"What would Google do?\"** - Building like a big company too early\n2. **Hiring to move faster** - Actually slows you down initially\n3. **Over-fixing vs building** - Focus on product-market fit first\n4. **Building features without user insights** - Keep talking to users\n\n## Resources & References\n\n### YC Resources\n- Y Combinator Library: \"Tips for technical startup founders\"\n- Paul Graham Essay: \"Do Things That Don't Scale\"\n- Paul Buchheit Concept: \"90/10 Solution\"\n- Startup School: Technical founder track\n\n### Tools Mentioned\n- **Prototyping:** Figma, InVision\n- **Analytics:** Google Analytics, Amplitude, Mixpanel\n- **Infrastructure:** Heroku, Firebase, AWS, GCP\n- **Authentication:** Auth0\n- **Payments:** Stripe\n- **Landing Pages:** Webflow\n\n### Further Reading\n1. Paul Graham essays (paulgraham.com)\n2. Y Combinator Startup School materials\n3. Case studies: Stripe, DoorDash, Segment early days\n4. Technical debt management in startups\n\n## Key Takeaways\n\n### For Technical Founders\n1. **Speed is your superpower** - Move faster than established companies\n2. **Embrace imperfection** - Good enough beats perfect when speed matters\n3. **Stay close to users** - Insights come from conversations, not just data\n4. **Tech debt is a feature, not a bug** - Early stage startups should accumulate it\n\n### For Startup Strategy\n1. **Constrained focus** leads to better unit economics (DoorDash example)\n2. **Manual processes** create customer intimacy and learning\n3. **Continuous launching** builds momentum and feedback loops\n4. **Break things at scale** is a good problem to have\n\n### For Team Building\n1. **Founders build first** - Critical for product insights\n2. **Hire for adaptability** over pedigree\n3. **Evolve role with growth** - Coding time decreases with team size\n4. **Culture emerges** from early team composition\n\n---\n\n*Research compiled from YouTube transcript, web searches, and Y Combinator resources. Last updated: January 25, 2026*"
+            },
+            "id": "call_5inpstc24ydfsuxnnidtiqja",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "OK",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_file",
+        "id": "91e7ff28-3dce-4959-a9a6-4a1152b2915d",
+        "tool_call_id": "call_5inpstc24ydfsuxnnidtiqja",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to present this as a final report. Let me update the todo list and present the file."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf334-9a5c-7012-bfbe-ed18dcf2c6e3",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "completed"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "completed"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "in_progress"
+                }
+              ]
+            },
+            "id": "call_m5fe53zfq6kl9a1m2taz1loc",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'completed'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'completed'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'completed'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'completed'}, {'content': 'Present final research report with sources and insights', 'status': 'in_progress'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "16942acc-5d9f-4737-9c44-be4d893d58ba",
+        "tool_call_id": "call_m5fe53zfq6kl9a1m2taz1loc",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "Now I need to copy the research file to the outputs directory and present it. Let me first check if the outputs directory exists and then copy the file."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf334-c5ef-7e90-ab2b-22f249d1b768",
+        "tool_calls": [
+          {
+            "name": "bash",
+            "args": {
+              "description": "Copy research file to outputs directory",
+              "command": "cp /mnt/user-data/workspace/diana_hu_research.md /mnt/user-data/outputs/"
+            },
+            "id": "call_m82scyxi9zoeecqrqg1o6tyd",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "(no output)",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "bash",
+        "id": "a4aa3ac0-7e22-4260-9946-e51f76d882f9",
+        "tool_call_id": "call_m82scyxi9zoeecqrqg1o6tyd",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": ""
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf334-eda2-7cf2-8823-73d4219fd611",
+        "tool_calls": [
+          {
+            "name": "write_todos",
+            "args": {
+              "todos": [
+                {
+                  "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Diana Hu's background (education, career path, achievements)",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+                  "status": "completed"
+                },
+                {
+                  "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+                  "status": "completed"
+                },
+                {
+                  "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+                  "status": "completed"
+                },
+                {
+                  "content": "Present final research report with sources and insights",
+                  "status": "completed"
+                }
+              ]
+            },
+            "id": "call_s1g87q6eupcn16l9gxfjir8x",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Updated todo list to [{'content': 'Analyze video transcript and extract key insights, advice, and frameworks', 'status': 'completed'}, {'content': \"Research Diana Hu's background (education, career path, achievements)\", 'status': 'completed'}, {'content': 'Research Escher Reality (her startup) and its acquisition by Niantic', 'status': 'completed'}, {'content': 'Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia', 'status': 'completed'}, {'content': 'Research key concepts: 90/10 solution, technical debt in startups, MVP principles', 'status': 'completed'}, {'content': 'Compile comprehensive notes with timestamps, key takeaways, and actionable advice', 'status': 'completed'}, {'content': 'Present final research report with sources and insights', 'status': 'completed'}]",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "write_todos",
+        "id": "5833099e-21e8-4611-8f52-b612df5d7950",
+        "tool_call_id": "call_s1g87q6eupcn16l9gxfjir8x",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "I've thoroughly analyzed Diana Hu's Y Combinator talk and conducted deep research on her background and the concepts discussed. Here's a comprehensive report that should be valuable for you as a tech lead.\n\n## Executive Summary\n\nDiana Hu provides a battle-tested framework for technical founders across three critical stages: ideation, MVP building, and launch. Her advice emphasizes **speed over perfection**, **embracing technical debt**, and **staying ruthlessly close to users**. Having successfully built and sold her AR startup Escher Reality to Niantic (Pokémon Go), she speaks from authentic experience scaling from prototype to millions of users.\n\n## Key Insights from the Talk\n\n### 1. **The Technical Founder Mindset Shift**\n- From specialist to generalist: Do whatever it takes (frontend, backend, devops, IT)\n- From perfectionist to pragmatist: Bias toward \"good enough\" over perfect architecture\n- From employee to owner: No task is beneath you; total commitment required\n\n### 2. **The Three-Stage Framework**\n\n**Stage 1: Ideating (Days)**\n- **Goal:** Build a prototype to demo, not a working product\n- **Examples:** Optimizely (JS file on S3), Remora (3D renderings), Escher Reality (visual AR demo)\n- **Mistake to avoid:** Overbuilding before validation\n\n**Stage 2: MVP Building (Weeks)**\n- **Principles:** Do things that don't scale + 90/10 solution + Choose tech for iteration speed\n- **Examples:** DoorDash (static HTML + Google Forms), Stripe (manual payment processing)\n- **Key insight:** Founders must build to gain product insights\n\n**Stage 3: Launch & Iteration**\n- **Goal:** Achieve product-market fit through continuous launching\n- **Examples:** Segment (5 launches in a month), WePay (pivot based on user interviews)\n- **Philosophy:** Tech debt is fine; breaking from too much demand is a good problem\n\n## Diana Hu's Background Deep Dive\n\n### Education & Early Career\n- **Degrees:** BS & MS in Electrical and Computer Engineering from Carnegie Mellon\n- **Specialization:** Computer vision and machine learning\n- **Origin:** Originally from Chile\n\n### Startup Success: Escher Reality\n- **Founded:** 2016, YC S17 batch\n- **Product:** Cross-platform AR SDK for game developers\n- **Acquisition:** February 2018 by Niantic (undisclosed terms)\n- **Role at Niantic:** Director of Engineering, heading AR platform\n- **Achievement:** Scaled AR infrastructure to support Pokémon Go's massive user base\n\n### Current Role: Y Combinator Group Partner\n- **Experience:** 1,700+ office hours across 5 batches\n- **Specialization:** Technical founder guidance\n- **Network:** Advises top YC alumni including Algolia, Segment, WayUp\n\n## Critical Concepts Explained\n\n### **90/10 Solution (Paul Buchheit)**\nGet 90% of the value with 10% of the effort. Available imperfect solutions now beat perfect solutions later. Constrain your product dimensions (geography, user type, functionality) to move faster.\n\n### **Technical Debt Philosophy**\nEarly-stage startups should **accumulate** technical debt. \"Feel the heat of your tech burning\" is acceptable until product-market fit. Only fix what prevents reaching PMF.\n\n### **\"Do Things That Don't Scale\" (Paul Graham)**\nManual processes create customer intimacy and learning opportunities. Examples: Stripe founders filling bank forms manually, DoorDash using \"Find My Friends\" to track deliveries.\n\n## Company Case Studies\n\n### **DoorDash's Genius Constraint**\nOriginally \"Palo Alto Delivery\" - focused only on suburbs vs competitors in metro areas. This constraint forced them to perfect unit economics for suburban delivery, creating a defensible advantage.\n\n### **Segment's Launch Velocity**\n5 launches in one month, adding features based on user feedback. Started with just 3 analytics integrations, grew to become a $3.2B acquisition by Twilio.\n\n### **Pokémon Go's Scaling Lesson**\nMassive launch-day failures didn't kill the company. Breaking from too much demand is preferable to no demand. The company made $1B+ revenue despite technical issues.\n\n## Actionable Advice for Your Startup\n\n### **Immediate Actions (This Week)**\n1. Build a clickable prototype in 1-3 days (Figma/InVision)\n2. Find 10 potential users to show it to\n3. Use existing tools rather than building from scratch\n4. Embrace ugly, temporary code\n\n### **Tech Stack Selection**\n1. Choose familiarity over trendiness\n2. Use third-party services for non-core functions (Auth0, Stripe, etc.)\n3. Keep infrastructure simple (Heroku, Firebase)\n4. Only build what's unique to your value proposition\n\n### **Hiring Strategy**\n1. Don't hire too early - founders must build for insights\n2. Look for adaptable \"misfits\" overlooked by big companies\n3. Post PMF: Scale team strategically based on proven needs\n\n### **Launch Mindset**\n1. Launch multiple times (weekly iterations)\n2. Combine analytics with qualitative user interviews\n3. Accept that things will break at scale - it means you have demand\n\n## Common Traps to Avoid\n- **\"What would Google do?\"** - Building enterprise architecture too early\n- **Hiring to move faster** - Actually slows learning velocity\n- **Over-fixing vs building** - Focus on PMF before technical perfection\n- **Building without user insights** - Stay in constant conversation with users\n\n## Resources & Tools Mentioned\n- **Prototyping:** Figma, InVision\n- **Analytics:** Google Analytics, Amplitude, Mixpanel (avoid complex solutions like Prometheus early)\n- **Infrastructure:** Heroku, Firebase, AWS, GCP\n- **Authentication:** Auth0\n- **Payments:** Stripe\n- **Landing Pages:** Webflow\n\n## The Bottom Line\nDiana's core message: **Speed is your superpower as a startup.** Large companies can't move as fast due to processes, legal constraints, and established infrastructure. Your ability to embrace imperfection, accumulate technical debt, and stay close to users creates a competitive moat that scales companies from prototype to product-market fit.\n\nI've compiled all this research into a comprehensive document that you can reference as you build your startup. The file includes timestamps, specific examples, and detailed background on all the companies and concepts mentioned.\n\n",
+        "additional_kwargs": {
+          "reasoning_content": "Now I'll present the comprehensive research report."
+        },
+        "response_metadata": {
+          "finish_reason": "tool_calls",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf335-1676-7202-bee7-d6693b034a0f",
+        "tool_calls": [
+          {
+            "name": "present_files",
+            "args": {
+              "filepaths": [
+                "/mnt/user-data/outputs/diana_hu_research.md"
+              ]
+            },
+            "id": "call_fiwu3557asbu155mzi3ore72",
+            "type": "tool_call"
+          }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      },
+      {
+        "content": "Successfully presented files",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": "present_files",
+        "id": "5d5bea65-0c2a-44db-9bc5-7fc1ef2a75d9",
+        "tool_call_id": "call_fiwu3557asbu155mzi3ore72",
+        "artifact": null,
+        "status": "success"
+      },
+      {
+        "content": "",
+        "additional_kwargs": {
+          "reasoning_content": "The comprehensive research document is now available for you to download. It contains detailed notes from Diana Hu's talk, her background information, deep dives into the companies and concepts mentioned, and actionable advice for technical founders. The document is organized with timestamps, key takeaways, and specific examples that you can apply directly to your startup journey.\n\nIs there any particular aspect of the research you'd like me to elaborate on, or any other specific information that would be helpful for your role as a tech lead?"
+        },
+        "response_metadata": {
+          "finish_reason": "stop",
+          "model_name": "deepseek-v3-2-251201",
+          "service_tier": "default",
+          "model_provider": "deepseek"
+        },
+        "type": "ai",
+        "name": null,
+        "id": "lc_run--019bf335-cc80-7ba2-be1f-af28bfe64fd3",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    ],
+    "thread_data": {
+      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/outputs"
+    },
+    "uploaded_files": [],
+    "title": "Startup Tech Lead's Video Analysis Request",
+    "artifacts": [
+      "/mnt/user-data/outputs/diana_hu_research.md"
+    ],
+    "todos": [
+      {
+        "content": "Analyze video transcript and extract key insights, advice, and frameworks",
+        "status": "completed"
+      },
+      {
+        "content": "Research Diana Hu's background (education, career path, achievements)",
+        "status": "completed"
+      },
+      {
+        "content": "Research Escher Reality (her startup) and its acquisition by Niantic",
+        "status": "completed"
+      },
+      {
+        "content": "Research companies and examples mentioned: Optimizely, Remora, Justin TV/Twitch, Stripe, DoorDash, WayUp, WePay, Segment, Algolia",
+        "status": "completed"
+      },
+      {
+        "content": "Research key concepts: 90/10 solution, technical debt in startups, MVP principles",
+        "status": "completed"
+      },
+      {
+        "content": "Compile comprehensive notes with timestamps, key takeaways, and actionable advice",
+        "status": "completed"
+      },
+      {
+        "content": "Present final research report with sources and insights",
+        "status": "completed"
+      }
+    ]
+  },
+  "next": [],
+  "tasks": [],
+  "metadata": {
+    "model_name": "deepseek-v3.2",
+    "thinking_enabled": true,
+    "is_plan_mode": true,
+    "graph_id": "lead_agent",
+    "assistant_id": "bee7d354-5df5-5f26-a978-10ea053f620d",
+    "user_id": "",
+    "created_by": "system",
+    "thread_id": "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
+    "run_id": "019bf330-9656-7b72-a91f-763826efb9ac",
+    "run_attempt": 1,
+    "langgraph_version": "1.0.6",
+    "langgraph_api_version": "0.6.38",
+    "langgraph_plan": "developer",
+    "langgraph_host": "self-hosted",
+    "langgraph_api_url": "http://127.0.0.1:2024",
+    "source": "loop",
+    "step": 81,
+    "parents": {},
+    "langgraph_auth_user_id": "",
+    "langgraph_request_id": "1a988c04-0263-492e-9930-cee93b30ac4b"
+  },
+  "created_at": "2026-01-25T03:32:41.025776+00:00",
+  "checkpoint": {
+    "checkpoint_id": "1f0f99e8-0d7c-62d2-8051-7cb8958145fe",
+    "thread_id": "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
+    "checkpoint_ns": ""
+  },
+  "parent_checkpoint": {
+    "checkpoint_id": "1f0f99e8-0437-6ac8-8050-ce8edd831bf1",
+    "thread_id": "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
+    "checkpoint_ns": ""
+  },
+  "interrupts": [],
+  "checkpoint_id": "1f0f99e8-0d7c-62d2-8051-7cb8958145fe",
+  "parent_checkpoint_id": "1f0f99e8-0437-6ac8-8050-ce8edd831bf1"
+}

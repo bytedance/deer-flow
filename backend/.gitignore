@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.coverage
+.coverage.*
+.ruff_cache
+agent_history.gif
+static/browser_history/*.gif
+
+# Virtual environments
+.venv
+venv/
+
+# User config file
+config.yaml
+
+# Langgraph
+.langgraph_api
+
+# Claude Code settings
+.claude/settings.local.json

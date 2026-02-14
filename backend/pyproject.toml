@@ -1,0 +1,35 @@
+[project]
+name = "deer-flow"
+version = "0.1.0"
+description = "LangGraph-based AI agent system with sandbox execution capabilities"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agent-sandbox>=0.0.19",
+    "dotenv>=0.9.9",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "kubernetes>=30.0.0",
+    "langchain>=1.2.3",
+    "langchain-deepseek>=1.0.1",
+    "langchain-mcp-adapters>=0.1.0",
+    "langchain-openai>=1.1.7",
+    "langgraph>=1.0.6",
+    "langgraph-cli[inmem]>=0.4.11",
+    "markdownify>=1.2.2",
+    "markitdown[all,xlsx]>=0.0.1a2",
+    "pydantic>=2.12.5",
+    "python-multipart>=0.0.20",
+    "pyyaml>=6.0.3",
+    "readabilipy>=0.3.0",
+    "sse-starlette>=2.1.0",
+    "tavily-python>=0.7.17",
+    "firecrawl-py>=1.15.0",
+    "tiktoken>=0.8.0",
+    "uvicorn[standard]>=0.34.0",
+    "ddgs>=9.10.0",
+    "duckdb>=1.4.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
