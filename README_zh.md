@@ -476,7 +476,34 @@ docker stop deer-flow-api-app
 
 ### Docker Compose
 
-您也可以使用 docker compose 设置此项目：
+您也可以使用 docker compose 同时运行后端和前端。
+
+#### 配置
+
+构建前，先配置根目录的 `.env` 文件（从 `.env.example` 复制）：
+
+```bash
+cp .env.example .env
+cp conf.yaml.example conf.yaml
+```
+
+> [!IMPORTANT]
+> `docker-compose.yml` 只使用**根目录的 `.env`** 文件（不使用 `web/.env`）。使用 Docker Compose 时，您**不需要**创建或修改 `web/.env`。
+
+如果您在**远程服务器**上部署或通过**局域网 IP**（非 `localhost`）访问，**必须**将根目录 `.env` 中的 `NEXT_PUBLIC_API_URL` 修改为实际的主机 IP 或域名：
+
+```bash
+# 示例：通过局域网 IP 访问
+NEXT_PUBLIC_API_URL=http://192.168.1.100:8000/api
+
+# 示例：使用域名的远程部署
+NEXT_PUBLIC_API_URL=https://your-domain.com/api
+```
+
+> [!NOTE]
+> `NEXT_PUBLIC_API_URL` 是 Next.js 的**构建时**变量——它会在 `docker compose build` 时被嵌入到前端 JavaScript 包中。如果之后修改了此值，必须重新执行 `docker compose build` 才能生效。
+
+#### 构建和运行
 
 ```bash
 # 构建docker镜像
