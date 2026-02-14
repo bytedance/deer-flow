@@ -523,7 +523,34 @@ docker stop deer-flow-api-app
 
 ### Docker Compose (include both backend and frontend)
 
-DeerFlow provides a docker-compose setup to easily run both the backend and frontend together:
+DeerFlow provides a docker-compose setup to easily run both the backend and frontend together.
+
+#### Configuration
+
+Before building, configure the root `.env` file (copied from `.env.example`):
+
+```bash
+cp .env.example .env
+cp conf.yaml.example conf.yaml
+```
+
+> [!IMPORTANT]
+> The `docker-compose.yml` only uses the **root `.env`** file (not `web/.env`). You do **not** need to create or modify `web/.env` when using Docker Compose.
+
+If you are deploying on a **remote server** or accessing from a **LAN IP** (not `localhost`), you **must** update `NEXT_PUBLIC_API_URL` in the root `.env` to your actual host IP or domain:
+
+```bash
+# Example: accessing from LAN IP
+NEXT_PUBLIC_API_URL=http://192.168.1.100:8000/api
+
+# Example: remote deployment with domain
+NEXT_PUBLIC_API_URL=https://your-domain.com/api
+```
+
+> [!NOTE]
+> `NEXT_PUBLIC_API_URL` is a **build-time** variable for Next.js — it gets embedded into the frontend JavaScript bundle during `docker compose build`. If you change this value later, you must rebuild with `docker compose build` for the change to take effect.
+
+#### Build and Run
 
 ```bash
 # building docker image
@@ -534,7 +561,7 @@ docker compose up
 ```
 
 > [!WARNING]
-> If you want to deploy the deer flow into production environments, please add authentication to the website and evaluate your security check of the MCPServer and Python Repl. 
+> If you want to deploy the deer flow into production environments, please add authentication to the website and evaluate your security check of the MCPServer and Python Repl.
 
 ## Examples
 

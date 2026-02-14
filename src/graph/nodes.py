@@ -853,7 +853,8 @@ def reporter_node(state: State, config: RunnableConfig):
     # Get collected citations for the report
     citations = state.get("citations", [])
 
-    # If we have collected citations, provide them to the reporter
+    # Build citation messages for the reporter
+    citation_list = ""
     if citations:
         citation_list = "\n\n## Available Source References (use these in References section):\n\n"
         for i, citation in enumerate(citations, 1):
@@ -868,13 +869,6 @@ def reporter_node(state: State, config: RunnableConfig):
             citation_list += "\n"
         
         logger.info(f"Providing {len(citations)} collected citations to reporter")
-
-        invoke_messages.append(
-            HumanMessage(
-                content=citation_list,
-                name="system",
-            )
-        )
 
     observation_messages = []
     for observation in observations:
@@ -891,6 +885,17 @@ def reporter_node(state: State, config: RunnableConfig):
         {"messages": observation_messages}
     )
     invoke_messages += compressed_state.get("messages", [])
+
+    # Append citations AFTER observations so they are closest to the LLM's
+    # generation point.  This reduces the chance of the model "forgetting"
+    # real URLs and fabricating plausible-looking ones instead.
+    if citation_list:
+        invoke_messages.append(
+            HumanMessage(
+                content=citation_list,
+                name="system",
+            )
+        )
 
     logger.debug(f"Current invoke messages: {invoke_messages}")
     response = get_llm_by_type(AGENT_LLM_MAP["reporter"]).invoke(invoke_messages)
