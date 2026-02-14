@@ -16,6 +16,7 @@ from langgraph.types import Command
 from src.config.report_style import ReportStyle
 from src.server.app import (
     _astream_workflow_generator,
+    _create_event_stream_message,
     _create_interrupt_event,
     _make_event,
     _stream_graph_events,
@@ -1680,3 +1681,53 @@ class TestGlobalConnectionPoolUsage:
         """Helper to create an empty async generator."""
         if False:
             yield
+
+
+class TestCreateEventStreamMessageThinkTagStripping:
+    """Tests for stripping <think> tags from streamed content (#781).
+
+    Some models (e.g. DeepSeek-R1, QwQ via ollama) embed reasoning in
+    content using <think>...</think> tags instead of the separate
+    reasoning_content field.
+    """
+
+    def _make_mock_chunk(self, content):
+        chunk = AIMessageChunk(content=content)
+        chunk.id = "msg_test"
+        chunk.response_metadata = {}
+        return chunk
+
+    def test_strips_think_tag_at_beginning(self):
+        chunk = self._make_mock_chunk(
+            "<think>\nLet me analyze...\n</think>\n\n# Report\n\nContent here."
+        )
+        result = _create_event_stream_message(chunk, {}, "thread-1", "reporter")
+        assert "<think>" not in result["content"]
+        assert "# Report" in result["content"]
+        assert "Content here." in result["content"]
+
+    def test_strips_multiple_think_blocks(self):
+        chunk = self._make_mock_chunk(
+            "<think>First thought</think>\nParagraph 1.\n<think>Second thought</think>\nParagraph 2."
+        )
+        result = _create_event_stream_message(chunk, {}, "thread-1", "coordinator")
+        assert "<think>" not in result["content"]
+        assert "Paragraph 1." in result["content"]
+        assert "Paragraph 2." in result["content"]
+
+    def test_preserves_content_without_think_tags(self):
+        chunk = self._make_mock_chunk("Normal content without think tags.")
+        result = _create_event_stream_message(chunk, {}, "thread-1", "planner")
+        assert result["content"] == "Normal content without think tags."
+
+    def test_empty_content_after_stripping(self):
+        chunk = self._make_mock_chunk("<think>Only thinking, no real content</think>")
+        result = _create_event_stream_message(chunk, {}, "thread-1", "reporter")
+        assert "<think>" not in result["content"]
+
+    def test_preserves_reasoning_content_field(self):
+        chunk = self._make_mock_chunk("Actual content")
+        chunk.additional_kwargs["reasoning_content"] = "This is reasoning"
+        result = _create_event_stream_message(chunk, {}, "thread-1", "planner")
+        assert result["content"] == "Actual content"
+        assert result["reasoning_content"] == "This is reasoning"
