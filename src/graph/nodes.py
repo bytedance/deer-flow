@@ -903,9 +903,10 @@ def reporter_node(state: State, config: RunnableConfig):
     response_content = response.content
     # Strip <think>...</think> tags that some models (e.g. QwQ, DeepSeek) embed
     # directly in content instead of using the reasoning_content field (#781)
-    response_content = re.sub(
-        r"<think>[\s\S]*?</think>", "", response_content
-    ).strip()
+    if isinstance(response_content, str) and "<think>" in response_content:
+        response_content = re.sub(
+            r"<think>[\s\S]*?</think>", "", response_content
+        ).strip()
     logger.info(f"reporter response: {response_content}")
 
     return {
