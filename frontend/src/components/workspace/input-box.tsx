@@ -12,7 +12,13 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentProps,
+} from "react";
 
 import {
   PromptInput,
@@ -62,6 +68,14 @@ import {
 
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
+
+type AgentMode = "flash" | "thinking" | "pro" | "ultra";
+
+const isAgentMode = (mode: unknown): mode is AgentMode =>
+  mode === "flash" ||
+  mode === "thinking" ||
+  mode === "pro" ||
+  mode === "ultra";
 
 export function InputBox({
   className,
@@ -122,6 +136,21 @@ export function InputBox({
     () => selectedModel?.supports_thinking ?? false,
     [selectedModel],
   );
+  const currentMode = useMemo<AgentMode>(() => {
+    if (isAgentMode(context.mode)) {
+      return context.mode;
+    }
+    return supportThinking ? "pro" : "flash";
+  }, [context.mode, supportThinking]);
+  useEffect(() => {
+    if (isAgentMode(context.mode)) {
+      return;
+    }
+    onContextChange?.({
+      ...context,
+      mode: currentMode,
+    });
+  }, [context, currentMode, onContextChange]);
   const handleModelSelect = useCallback(
     (model_name: string) => {
       onContextChange?.({
@@ -198,39 +227,31 @@ export function InputBox({
           </PromptInputActionMenu> */}
           <AddAttachmentsButton className="px-2!" />
           <PromptInputActionMenu>
-            <ModeHoverGuide
-              mode={
-                context.mode === "flash" ||
-                context.mode === "thinking" ||
-                context.mode === "pro" ||
-                context.mode === "ultra"
-                  ? context.mode
-                  : "flash"
-              }
-            >
+            <ModeHoverGuide mode={currentMode}>
               <PromptInputActionMenuTrigger className="gap-1! px-2!">
                 <div>
-                  {context.mode === "flash" && <ZapIcon className="size-3" />}
-                  {context.mode === "thinking" && (
+                  {currentMode === "flash" && <ZapIcon className="size-3" />}
+                  {currentMode === "thinking" && (
                     <LightbulbIcon className="size-3" />
                   )}
-                  {context.mode === "pro" && (
+                  {currentMode === "pro" && (
                     <GraduationCapIcon className="size-3" />
                   )}
-                  {context.mode === "ultra" && (
+                  {currentMode === "ultra" && (
                     <RocketIcon className="size-3 text-[#dabb5e]" />
                   )}
                 </div>
                 <div
                   className={cn(
                     "text-xs font-normal",
-                    context.mode === "ultra" ? "golden-text" : "",
+                    currentMode === "ultra" ? "golden-text" : "",
                   )}
                 >
-                  {(context.mode === "flash" && t.inputBox.flashMode) ||
-                    (context.mode === "thinking" && t.inputBox.reasoningMode) ||
-                    (context.mode === "pro" && t.inputBox.proMode) ||
-                    (context.mode === "ultra" && t.inputBox.ultraMode)}
+                  {(currentMode === "flash" && t.inputBox.flashMode) ||
+                    (currentMode === "thinking" &&
+                      t.inputBox.reasoningMode) ||
+                    (currentMode === "pro" && t.inputBox.proMode) ||
+                    (currentMode === "ultra" && t.inputBox.ultraMode)}
                 </div>
               </PromptInputActionMenuTrigger>
             </ModeHoverGuide>
@@ -242,7 +263,7 @@ export function InputBox({
                 <PromptInputActionMenu>
                   <PromptInputActionMenuItem
                     className={cn(
-                      context.mode === "flash"
+                      currentMode === "flash"
                         ? "text-accent-foreground"
                         : "text-muted-foreground/65",
                     )}
@@ -253,7 +274,7 @@ export function InputBox({
                         <ZapIcon
                           className={cn(
                             "mr-2 size-4",
-                            context.mode === "flash" &&
+                            currentMode === "flash" &&
                               "text-accent-foreground",
                           )}
                         />
@@ -263,7 +284,7 @@ export function InputBox({
                         {t.inputBox.flashModeDescription}
                       </div>
                     </div>
-                    {context.mode === "flash" ? (
+                    {currentMode === "flash" ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (
                       <div className="ml-auto size-4" />
@@ -272,7 +293,7 @@ export function InputBox({
                   {supportThinking && (
                     <PromptInputActionMenuItem
                       className={cn(
-                        context.mode === "thinking"
+                        currentMode === "thinking"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
                       )}
@@ -283,7 +304,7 @@ export function InputBox({
                           <LightbulbIcon
                             className={cn(
                               "mr-2 size-4",
-                              context.mode === "thinking" &&
+                              currentMode === "thinking" &&
                                 "text-accent-foreground",
                             )}
                           />
@@ -293,7 +314,7 @@ export function InputBox({
                           {t.inputBox.reasoningModeDescription}
                         </div>
                       </div>
-                      {context.mode === "thinking" ? (
+                      {currentMode === "thinking" ? (
                         <CheckIcon className="ml-auto size-4" />
                       ) : (
                         <div className="ml-auto size-4" />
@@ -302,7 +323,7 @@ export function InputBox({
                   )}
                   <PromptInputActionMenuItem
                     className={cn(
-                      context.mode === "pro"
+                      currentMode === "pro"
                         ? "text-accent-foreground"
                         : "text-muted-foreground/65",
                     )}
@@ -313,7 +334,8 @@ export function InputBox({
                         <GraduationCapIcon
                           className={cn(
                             "mr-2 size-4",
-                            context.mode === "pro" && "text-accent-foreground",
+                            currentMode === "pro" &&
+                              "text-accent-foreground",
                           )}
                         />
                         {t.inputBox.proMode}
@@ -322,7 +344,7 @@ export function InputBox({
                         {t.inputBox.proModeDescription}
                       </div>
                     </div>
-                    {context.mode === "pro" ? (
+                    {currentMode === "pro" ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (
                       <div className="ml-auto size-4" />
@@ -330,7 +352,7 @@ export function InputBox({
                   </PromptInputActionMenuItem>
                   <PromptInputActionMenuItem
                     className={cn(
-                      context.mode === "ultra"
+                      currentMode === "ultra"
                         ? "text-accent-foreground"
                         : "text-muted-foreground/65",
                     )}
@@ -341,13 +363,11 @@ export function InputBox({
                         <RocketIcon
                           className={cn(
                             "mr-2 size-4",
-                            context.mode === "ultra" && "text-[#dabb5e]",
+                            currentMode === "ultra" && "text-[#dabb5e]",
                           )}
                         />
                         <div
-                          className={cn(
-                            context.mode === "ultra" && "golden-text",
-                          )}
+                          className={cn(currentMode === "ultra" && "golden-text")}
                         >
                           {t.inputBox.ultraMode}
                         </div>
@@ -356,7 +376,7 @@ export function InputBox({
                         {t.inputBox.ultraModeDescription}
                       </div>
                     </div>
-                    {context.mode === "ultra" ? (
+                    {currentMode === "ultra" ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (
                       <div className="ml-auto size-4" />

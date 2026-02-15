@@ -178,6 +178,15 @@ export default function ChatPage() {
     }
     return artifactsOpen;
   }, [artifactsOpen, artifacts]);
+  const effectiveMode = useMemo(() => {
+    const mode = settings.context.mode;
+    return mode === "flash" ||
+      mode === "thinking" ||
+      mode === "pro" ||
+      mode === "ultra"
+      ? mode
+      : "flash";
+  }, [settings.context.mode]);
 
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
 
@@ -187,10 +196,10 @@ export default function ChatPage() {
     thread,
     threadContext: {
       ...settings.context,
-      thinking_enabled: settings.context.mode !== "flash",
-      is_plan_mode:
-        settings.context.mode === "pro" || settings.context.mode === "ultra",
-      subagent_enabled: settings.context.mode === "ultra",
+      mode: effectiveMode,
+      thinking_enabled: effectiveMode !== "flash",
+      is_plan_mode: effectiveMode === "pro" || effectiveMode === "ultra",
+      subagent_enabled: effectiveMode === "ultra",
     },
     afterSubmit() {
       router.push(pathOfThread(threadId!));
@@ -289,10 +298,8 @@ export default function ChatPage() {
                     isNewThread={isNewThread}
                     autoFocus={isNewThread}
                     status={thread.isLoading ? "streaming" : "ready"}
-                    context={settings.context}
-                    extraHeader={
-                      isNewThread && <Welcome mode={settings.context.mode} />
-                    }
+                    context={{ ...settings.context, mode: effectiveMode }}
+                    extraHeader={isNewThread && <Welcome mode={effectiveMode} />}
                     disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
                     onContextChange={(context) =>
                       setSettings("context", context)
