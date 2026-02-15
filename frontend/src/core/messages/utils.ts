@@ -138,25 +138,41 @@ export function extractTextFromMessage(message: Message) {
   return "";
 }
 
+/**
+ * Strip <think>...</think> tags from model output.
+ *
+ * Some models (e.g. DeepSeek-R1, QwQ via ollama) embed reasoning in
+ * content using <think>...</think> tags instead of the separate
+ * reasoning_content field (#781).
+ */
+function stripThinkTags(content: string): string {
+  if (content.includes("<think>")) {
+    return content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  }
+  return content;
+}
+
 export function extractContentFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return message.content.trim();
+    return stripThinkTags(message.content.trim());
   }
   if (Array.isArray(message.content)) {
-    return message.content
-      .map((content) => {
-        switch (content.type) {
-          case "text":
-            return content.text;
-          case "image_url":
-            const imageURL = extractURLFromImageURLContent(content.image_url);
-            return `![image](${imageURL})`;
-          default:
-            return "";
-        }
-      })
-      .join("\n")
-      .trim();
+    return stripThinkTags(
+      message.content
+        .map((content) => {
+          switch (content.type) {
+            case "text":
+              return content.text;
+            case "image_url":
+              const imageURL = extractURLFromImageURLContent(content.image_url);
+              return `![image](${imageURL})`;
+            default:
+              return "";
+          }
+        })
+        .join("\n")
+        .trim(),
+    );
   }
   return "";
 }

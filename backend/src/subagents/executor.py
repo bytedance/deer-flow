@@ -1,6 +1,7 @@
 """Subagent execution engine."""
 
 import logging
+import re
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -72,6 +73,18 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+
+
+def _strip_think_tags(content: str) -> str:
+    """Strip <think>...</think> tags from model output.
+
+    Some models (e.g. DeepSeek-R1, QwQ via ollama) embed reasoning in
+    content using <think>...</think> tags instead of the separate
+    reasoning_content field (#781).
+    """
+    if isinstance(content, str) and "<think>" in content:
+        return re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+    return content
 
 
 def _filter_tools(
@@ -290,7 +303,7 @@ class SubagentExecutor:
                     content = last_ai_message.content
                     # Handle both str and list content types for the final result
                     if isinstance(content, str):
-                        result.result = content
+                        result.result = _strip_think_tags(content)
                     elif isinstance(content, list):
                         # Extract text from list of content blocks for final result only
                         text_parts = []
@@ -299,7 +312,7 @@ class SubagentExecutor:
                                 text_parts.append(block)
                             elif isinstance(block, dict) and "text" in block:
                                 text_parts.append(block["text"])
-                        result.result = "\n".join(text_parts) if text_parts else "No text content in response"
+                        result.result = _strip_think_tags("\n".join(text_parts)) if text_parts else "No text content in response"
                     else:
                         result.result = str(content)
                 elif messages:
