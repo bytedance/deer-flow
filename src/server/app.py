@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Annotated, Any, List, Optional, cast
 from uuid import uuid4
 
@@ -422,6 +423,11 @@ def _create_event_stream_message(
     content = message_chunk.content
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False)
+
+    # Strip <think>...</think> tags that some models (e.g. DeepSeek-R1, QwQ via ollama)
+    # embed directly in content instead of using the reasoning_content field (#781)
+    if isinstance(content, str) and "<think>" in content:
+        content = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
 
     event_stream_message = {
         "thread_id": thread_id,

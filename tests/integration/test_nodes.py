@@ -2823,3 +2823,115 @@ async def test_execute_agent_step_no_tool_calls_still_works():
     
     # Verify step execution result is set
     assert state["current_plan"].steps[0].execution_res == "Based on my knowledge, here is the answer without needing to search."
+
+
+class TestReporterNodeThinkTagStripping:
+    """Tests for stripping <think> tags from reporter_node output (#781).
+
+    Some models (e.g. DeepSeek-R1, QwQ via ollama) embed reasoning in
+    content using <think>...</think> tags instead of the separate
+    reasoning_content field.
+    """
+
+    def _make_mock_state(self):
+        plan = MagicMock()
+        plan.title = "Test Plan"
+        plan.thought = "Test Thought"
+        return {
+            "current_plan": plan,
+            "observations": [],
+            "citations": [],
+            "locale": "en-US",
+        }
+
+    def _run_reporter_node(self, response_content):
+        state = self._make_mock_state()
+        mock_response = MagicMock()
+        mock_response.content = response_content
+
+        mock_configurable = MagicMock()
+
+        with (
+            patch(
+                "src.graph.nodes.Configuration.from_runnable_config",
+                return_value=mock_configurable,
+            ),
+            patch(
+                "src.graph.nodes.apply_prompt_template",
+                return_value=[{"role": "user", "content": "test"}],
+            ),
+            patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
+            patch("src.graph.nodes.get_llm_token_limit_by_type", return_value=4096),
+            patch("src.graph.nodes.AGENT_LLM_MAP", {"reporter": "basic"}),
+            patch(
+                "src.graph.nodes.ContextManager"
+            ) as mock_ctx_mgr,
+        ):
+            mock_ctx_mgr.return_value.compress_messages.return_value = {"messages": []}
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value = mock_response
+            mock_get_llm.return_value = mock_llm
+
+            result = reporter_node(state, MagicMock())
+        return result
+
+    def test_strips_think_tag_at_beginning(self):
+        result = self._run_reporter_node(
+            "<think>\nLet me analyze...\n</think>\n\n# Report\n\nContent here."
+        )
+        assert "<think>" not in result["final_report"]
+        assert "# Report" in result["final_report"]
+        assert "Content here." in result["final_report"]
+
+    def test_strips_multiple_think_blocks(self):
+        result = self._run_reporter_node(
+            "<think>First thought</think>\nParagraph 1.\n<think>Second thought</think>\nParagraph 2."
+        )
+        assert "<think>" not in result["final_report"]
+        assert "Paragraph 1." in result["final_report"]
+        assert "Paragraph 2." in result["final_report"]
+
+    def test_preserves_content_without_think_tags(self):
+        result = self._run_reporter_node("Normal content without think tags.")
+        assert result["final_report"] == "Normal content without think tags."
+
+    def test_empty_content_after_stripping(self):
+        result = self._run_reporter_node(
+            "<think>Only thinking, no real content</think>"
+        )
+        assert "<think>" not in result["final_report"]
+
+    def test_non_string_content_passes_through(self):
+        """Verify non-string content is not broken by the stripping logic."""
+        state = self._make_mock_state()
+        mock_response = MagicMock()
+        # Simulate non-string content (e.g. list from multimodal model)
+        mock_response.content = ["some", "list"]
+
+        mock_configurable = MagicMock()
+
+        with (
+            patch(
+                "src.graph.nodes.Configuration.from_runnable_config",
+                return_value=mock_configurable,
+            ),
+            patch(
+                "src.graph.nodes.apply_prompt_template",
+                return_value=[{"role": "user", "content": "test"}],
+            ),
+            patch("src.graph.nodes.get_llm_by_type") as mock_get_llm,
+            patch("src.graph.nodes.get_llm_token_limit_by_type", return_value=4096),
+            patch("src.graph.nodes.AGENT_LLM_MAP", {"reporter": "basic"}),
+            patch(
+                "src.graph.nodes.ContextManager"
+            ) as mock_ctx_mgr,
+        ):
+            mock_ctx_mgr.return_value.compress_messages.return_value = {"messages": []}
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value = mock_response
+            mock_get_llm.return_value = mock_llm
+
+            result = reporter_node(state, MagicMock())
+
+        # Non-string content should pass through unchanged
+        assert result["final_report"] == ["some", "list"]
