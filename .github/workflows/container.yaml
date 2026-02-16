@@ -3,7 +3,7 @@ name: Publish Containers
 on:
   push:
     branches:
-      - main
+      - main-1.x
   release:
     types: [published]
   workflow_dispatch:
