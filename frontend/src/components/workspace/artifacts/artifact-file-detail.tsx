@@ -43,6 +43,11 @@ import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
 
+/**
+ * Displays a single artifact file with a code editor or preview mode.
+ * Supports code viewing, markdown rendering, HTML preview via iframe,
+ * and actions like copy, download, open in new window, and skill installation.
+ */
 export function ArtifactFileDetail({
   className,
   filepath: filepathFromProps,
@@ -260,6 +265,12 @@ export function ArtifactFileDetail({
   );
 }
 
+/**
+ * Renders a preview of an artifact file based on its language type.
+ * - Markdown files are rendered using the Streamdown component.
+ * - HTML files are rendered in a sandboxed iframe via the artifact URL.
+ * - Other file types are not previewable and return null.
+ */
 export function ArtifactFilePreview({
   filepath,
   threadId,

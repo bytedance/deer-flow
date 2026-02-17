@@ -11,8 +11,10 @@ import { cn } from "@/lib/utils";
 import { type LucideIcon, XIcon } from "lucide-react";
 import type { ComponentProps, HTMLAttributes } from "react";
 
+/** Props for the root artifact container. */
 export type ArtifactProps = HTMLAttributes<HTMLDivElement>;
 
+/** Root container for an artifact card with border and shadow styling. */
 export const Artifact = ({ className, ...props }: ArtifactProps) => (
   <div
     className={cn(
@@ -23,8 +25,10 @@ export const Artifact = ({ className, ...props }: ArtifactProps) => (
   />
 );
 
+/** Props for the artifact header bar. */
 export type ArtifactHeaderProps = HTMLAttributes<HTMLDivElement>;
 
+/** Header bar displayed at the top of an artifact, containing title and actions. */
 export const ArtifactHeader = ({
   className,
   ...props
@@ -38,8 +42,10 @@ export const ArtifactHeader = ({
   />
 );
 
+/** Props for the artifact close button. */
 export type ArtifactCloseProps = ComponentProps<typeof Button>;
 
+/** Close button that dismisses the artifact panel. Renders an X icon by default. */
 export const ArtifactClose = ({
   className,
   children,
@@ -62,8 +68,10 @@ export const ArtifactClose = ({
   </Button>
 );
 
+/** Props for the artifact title text. */
 export type ArtifactTitleProps = HTMLAttributes<HTMLParagraphElement>;
 
+/** Title label displayed in the artifact header. */
 export const ArtifactTitle = ({ className, ...props }: ArtifactTitleProps) => (
   <div
     className={cn("text-foreground text-sm font-medium", className)}
@@ -71,8 +79,10 @@ export const ArtifactTitle = ({ className, ...props }: ArtifactTitleProps) => (
   />
 );
 
+/** Props for the artifact description text. */
 export type ArtifactDescriptionProps = HTMLAttributes<HTMLParagraphElement>;
 
+/** Secondary description text displayed below the artifact title. */
 export const ArtifactDescription = ({
   className,
   ...props
@@ -80,8 +90,10 @@ export const ArtifactDescription = ({
   <p className={cn("text-muted-foreground text-sm", className)} {...props} />
 );
 
+/** Props for the artifact action button group container. */
 export type ArtifactActionsProps = HTMLAttributes<HTMLDivElement>;
 
+/** Horizontal row of action buttons in the artifact header. */
 export const ArtifactActions = ({
   className,
   ...props
@@ -89,12 +101,20 @@ export const ArtifactActions = ({
   <div className={cn("flex items-center gap-1", className)} {...props} />
 );
 
+/** Props for an individual artifact action button. */
 export type ArtifactActionProps = ComponentProps<typeof Button> & {
+  /** Tooltip text shown on hover. */
   tooltip?: string;
+  /** Accessible label for screen readers. Falls back to `tooltip` if omitted. */
   label?: string;
+  /** Lucide icon component rendered inside the button. */
   icon?: LucideIcon;
 };
 
+/**
+ * Icon button for artifact actions (copy, download, open, etc.).
+ * Wraps itself in a tooltip when `tooltip` is provided.
+ */
 export const ArtifactAction = ({
   tooltip,
   label,
@@ -137,8 +157,10 @@ export const ArtifactAction = ({
   return button;
 };
 
+/** Props for the scrollable artifact body area. */
 export type ArtifactContentProps = HTMLAttributes<HTMLDivElement>;
 
+/** Scrollable content area that fills the remaining space of an artifact card. */
 export const ArtifactContent = ({
   className,
   ...props

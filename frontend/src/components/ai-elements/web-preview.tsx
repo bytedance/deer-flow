@@ -18,10 +18,15 @@ import { ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, useContext, useEffect, useState } from "react";
 
+/** Context value shared across all WebPreview compound components. */
 export type WebPreviewContextValue = {
+  /** The current URL being previewed. */
   url: string;
+  /** Updates the preview URL and notifies parent via `onUrlChange`. */
   setUrl: (url: string) => void;
+  /** Whether the developer console panel is expanded. */
   consoleOpen: boolean;
+  /** Toggles the developer console panel. */
   setConsoleOpen: (open: boolean) => void;
 };
 
@@ -35,11 +40,18 @@ const useWebPreview = () => {
   return context;
 };
 
+/** Props for the root WebPreview container that provides context to child components. */
 export type WebPreviewProps = ComponentProps<"div"> & {
+  /** Initial URL to load when the preview mounts. */
   defaultUrl?: string;
+  /** Callback fired whenever the preview URL changes. */
   onUrlChange?: (url: string) => void;
 };
 
+/**
+ * Root container for the web preview compound component.
+ * Provides URL and console state context to all child components.
+ */
 export const WebPreview = ({
   className,
   children,
@@ -77,8 +89,10 @@ export const WebPreview = ({
   );
 };
 
+/** Props for the navigation bar displayed above the preview iframe. */
 export type WebPreviewNavigationProps = ComponentProps<"div">;
 
+/** Navigation bar containing buttons and the URL input for the preview. */
 export const WebPreviewNavigation = ({
   className,
   children,
@@ -92,10 +106,13 @@ export const WebPreviewNavigation = ({
   </div>
 );
 
+/** Props for a navigation action button (e.g. back, forward, refresh). */
 export type WebPreviewNavigationButtonProps = ComponentProps<typeof Button> & {
+  /** Tooltip text shown on hover. */
   tooltip?: string;
 };
 
+/** Icon button used in the preview navigation bar with a tooltip. */
 export const WebPreviewNavigationButton = ({
   onClick,
   disabled,
@@ -124,8 +141,13 @@ export const WebPreviewNavigationButton = ({
   </TooltipProvider>
 );
 
+/** Props for the URL address bar input. */
 export type WebPreviewUrlProps = ComponentProps<typeof Input>;
 
+/**
+ * URL address bar that syncs with the WebPreview context.
+ * Navigates to the entered URL on Enter key press.
+ */
 export const WebPreviewUrl = ({
   value,
   onChange,
@@ -165,10 +187,16 @@ export const WebPreviewUrl = ({
   );
 };
 
+/** Props for the iframe that renders the previewed content. */
 export type WebPreviewBodyProps = ComponentProps<"iframe"> & {
+  /** Optional loading indicator displayed while the iframe loads. */
   loading?: ReactNode;
 };
 
+/**
+ * Sandboxed iframe that displays the preview content.
+ * Uses the URL from WebPreview context unless an explicit `src` is provided.
+ */
 export const WebPreviewBody = ({
   className,
   loading,
@@ -191,7 +219,9 @@ export const WebPreviewBody = ({
   );
 };
 
+/** Props for the collapsible developer console panel. */
 export type WebPreviewConsoleProps = ComponentProps<"div"> & {
+  /** Log entries to display, each with a severity level, message, and timestamp. */
   logs?: Array<{
     level: "log" | "warn" | "error";
     message: string;
@@ -199,6 +229,10 @@ export type WebPreviewConsoleProps = ComponentProps<"div"> & {
   }>;
 };
 
+/**
+ * Collapsible console panel that displays log output from the previewed page.
+ * Logs are color-coded by severity: errors in red, warnings in yellow.
+ */
 export const WebPreviewConsole = ({
   className,
   logs = [],
