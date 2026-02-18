@@ -37,13 +37,17 @@ Learn more and see **real demos** on our official website.
 
 ### Configuration
 
-1. **Copy the example config**:
+1. Clone the git repo of DeerFlow
+   ```bash
+   git clone https://github.com/bytedance/deer-flow.git && cd deer-flow
+   ```
+3. **Copy the example config**:
    ```bash
    cp config.example.yaml config.yaml
    cp .env.example .env
    ```
 
-2. **Edit `config.yaml`** and set your API keys in `.env` and preferred sandbox mode.
+4. **Edit `config.yaml`** and set your API keys in `.env` and preferred sandbox mode.
 
 #### Sandbox Configuration
 
