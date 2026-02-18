@@ -234,8 +234,7 @@ export function ArtifactFileDetail({
       <ArtifactContent className="p-0">
         {previewable &&
           viewMode === "preview" &&
-          language === "markdown" &&
-          content && (
+          (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
               filepath={filepath}
               threadId={threadId}
