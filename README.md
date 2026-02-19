@@ -37,17 +37,23 @@ Learn more and see **real demos** on our official website.
 
 ### Configuration
 
-1. Clone the git repo of DeerFlow
+1. Clone the git repo of DeerFlow:
    ```bash
    git clone https://github.com/bytedance/deer-flow.git && cd deer-flow
    ```
-3. **Copy the example config**:
+2. Create local config files by copying the example files:
    ```bash
-   cp config.example.yaml config.yaml
-   cp .env.example .env
+   make config
    ```
 
-4. **Edit `config.yaml`** and set your API keys in `.env` and preferred sandbox mode.
+3. Update the configs:
+
+- **Required**
+   - `config.yaml`: configure your preferred models.
+   - `.env`: configure your API keys.
+- **Optional**
+   - `frontend/.env`: configure backend API URLs.
+   - `extensions_config.json`: configure desired MCP servers and skills.
 
 #### Sandbox Configuration
 

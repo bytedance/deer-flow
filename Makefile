@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -18,6 +18,12 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+
+config:
+	@test -f config.yaml || cp config.example.yaml config.yaml
+	@test -f .env || cp .env.example .env
+	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@test -f extensions_config.json || cp extensions_config.example.json extensions_config.json
 
 # Check required tools
 check:
