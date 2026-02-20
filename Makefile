@@ -23,7 +23,6 @@ config:
 	@test -f config.yaml || cp config.example.yaml config.yaml
 	@test -f .env || cp .env.example .env
 	@test -f frontend/.env || cp frontend/.env.example frontend/.env
-	@test -f extensions_config.json || cp extensions_config.example.json extensions_config.json
 
 # Check required tools
 check:
