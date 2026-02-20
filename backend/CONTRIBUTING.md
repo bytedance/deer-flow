@@ -38,7 +38,6 @@ Thank you for your interest in contributing to DeerFlow! This document provides 
 ```bash
 # From project root
 cp config.example.yaml config.yaml
-cp extensions_config.example.json extensions_config.json
 
 # Install backend dependencies
 cd backend

@@ -2,35 +2,6 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
-## Quick Start
-
-1. **Copy the example configuration** (from project root):
-   ```bash
-   # From project root directory (deer-flow/)
-   cp config.example.yaml config.yaml
-   ```
-
-2. **Set your API keys**:
-
-   Option A: Use environment variables (recommended):
-   ```bash
-   export OPENAI_API_KEY="your-api-key-here"
-   export ANTHROPIC_API_KEY="your-api-key-here"
-   # Add other keys as needed
-   ```
-
-   Option B: Edit `config.yaml` directly (not recommended for production):
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
-
-3. **Start the application**:
-   ```bash
-   make dev
-   ```
-
 ## Configuration Sections
 
 ### Models
@@ -102,6 +73,32 @@ tools:
 - `bash` - Execute bash commands
 
 ### Sandbox
+
+DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
+
+**Local Execution** (runs sandbox code directly on the host machine):
+```yaml
+sandbox:
+   use: src.sandbox.local:LocalSandboxProvider # Local execution
+```
+
+**Docker Execution** (runs sandbox code in isolated Docker containers):
+```yaml
+sandbox:
+   use: src.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+```
+
+**Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
+
+This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.
+
+```yaml
+sandbox:
+   use: src.community.aio_sandbox:AioSandboxProvider
+   provisioner_url: http://provisioner:8002
+```
+
+See [Provisioner Setup Guide](docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
 Choose between local execution or Docker-based isolation:
 

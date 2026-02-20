@@ -25,10 +25,6 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    # Set your API keys
    export OPENAI_API_KEY="your-key-here"
    # or edit config.yaml directly
-
-   # Optional: Enable MCP servers and skills
-   cp extensions_config.example.json extensions_config.json
-   # Edit extensions_config.json to enable desired MCP servers and skills
    ```
 
 2. **Initialize Docker environment** (first time only):
@@ -58,17 +54,18 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Docker Commands
 
 ```bash
-# View all logs
-make docker-logs
-
-# Restart services
-make docker-restart
-
-# Stop services
+# Build the custom k3s image (with pre-cached sandbox image)
+make docker-init
+# Start all services in Docker (localhost:2026)
+make docker-start
+# Stop Docker development services
 make docker-stop
-
-# Get help
-make docker-help
+# View Docker development logs
+make docker-logs
+# View Docker frontend logs
+make docker-logs-frontend
+# View Docker gateway logs
+make docker-logs-gateway
 ```
 
 #### Docker Architecture
