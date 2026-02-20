@@ -18,7 +18,7 @@ Learn more and see **real demos** on our official website.
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Sandbox Configuration](#sandbox-configuration)
+- [Sandbox Mode](#sandbox-mode)
 - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
 - [Core Features](#core-features)
   - [Skills & Tools](#skills--tools)
@@ -37,51 +37,64 @@ Learn more and see **real demos** on our official website.
 
 ### Configuration
 
-1. Clone the git repo of DeerFlow:
+1. **Clone the DeerFlow repository**
+
    ```bash
-   git clone https://github.com/bytedance/deer-flow.git && cd deer-flow
+   git clone https://github.com/bytedance/deer-flow.git
+   cd deer-flow
    ```
-2. Create local config files by copying the example files:
+
+2. **Generate local configuration files**
+
+   From the project root directory (`deer-flow/`), run:
+
    ```bash
    make config
    ```
 
-3. Update the configs:
+   This command creates local configuration files based on the provided example templates.
 
-- **Required**
-   - `config.yaml`: configure your preferred models.
-   - `.env`: configure your API keys.
-- **Optional**
-   - `frontend/.env`: configure backend API URLs.
-   - `extensions_config.json`: configure desired MCP servers and skills.
+3. **Configure your preferred model(s)**
 
-#### Sandbox Configuration
+   Edit `config.yaml` and define at least one model:
 
-DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
+   ```yaml
+   models:
+     - name: gpt-4                       # Internal identifier
+       display_name: GPT-4               # Human-readable name
+       use: langchain_openai:ChatOpenAI  # LangChain class path
+       model: gpt-4                      # Model identifier for API
+       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
+       max_tokens: 4096                  # Maximum tokens per request
+       temperature: 0.7                  # Sampling temperature
+   ```
 
-**Local Execution** (runs sandbox code directly on the host machine):
-```yaml
-sandbox:
-   use: src.sandbox.local:LocalSandboxProvider # Local execution
-```
+4. **Set API keys for your configured model(s)**
 
-**Docker Execution** (runs sandbox code in isolated Docker containers):
-```yaml
-sandbox:
-   use: src.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
-```
+   Choose one of the following methods:
 
-**Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
+- Option A: Edit the `.env` file in the project root (Recommended)
 
-This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.
 
-```yaml
-sandbox:
-   use: src.community.aio_sandbox:AioSandboxProvider
-   provisioner_url: http://provisioner:8002
-```
+   ```bash
+   TAVILY_API_KEY=your-tavily-api-key
+   OPENAI_API_KEY=your-openai-api-key
+   # Add other provider keys as needed
+   ```
 
-See [Provisioner Setup Guide](docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
+- Option B: Export environment variables in your shell
+
+   ```bash
+   export OPENAI_API_KEY=your-openai-api-key
+   ```
+
+- Option C: Edit `config.yaml` directly (Not recommended for production)
+
+   ```yaml
+   models:
+     - name: gpt-4
+       api_key: your-actual-api-key-here  # Replace placeholder
+   ```
 
 ### Running the Application
 
@@ -120,6 +133,21 @@ If you prefer running services locally:
    ```
 
 4. **Access**: http://localhost:2026
+
+### Advanced
+#### Sandbox Mode
+
+DeerFlow supports multiple sandbox execution modes:
+- **Local Execution** (runs sandbox code directly on the host machine)
+- **Docker Execution** (runs sandbox code in isolated Docker containers)
+- **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+
+See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
+
+#### MCP Server
+
+DeerFlow supports configurable MCP servers and skills to extend its capabilities.
+See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 ## From Deep Research to Super Agent Harness
 

@@ -268,28 +268,6 @@ summarization:
   summary_prompt: null
 
 # ============================================================================
-# MCP (Model Context Protocol) Configuration
-# ============================================================================
-# Configure MCP servers to provide additional tools and capabilities
-# MCP configuration is loaded from a separate `mcp_config.json` file
-#
-# Setup:
-# 1. Copy `mcp_config.example.json` to `mcp_config.json` in the project root
-# 2. Enable desired MCP servers by setting `enabled: true`
-# 3. Configure server commands, arguments, and environment variables
-# 4. Restart the application to load MCP tools
-#
-# MCP servers provide tools that are automatically discovered and integrated
-# with DeerFlow's agent system. Examples include:
-# - File system access
-# - Database connections (PostgreSQL, etc.)
-# - External APIs (GitHub, Brave Search, etc.)
-# - Browser automation (Puppeteer)
-# - Custom MCP server implementations
-#
-# For more information, see: https://modelcontextprotocol.io
-
-# ============================================================================
 # Memory Configuration
 # ============================================================================
 # Global memory mechanism
