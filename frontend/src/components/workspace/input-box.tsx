@@ -28,6 +28,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
+  PromptInputSpeechButton,
   usePromptInputAttachments,
   usePromptInputController,
   type PromptInputMessage,
@@ -46,6 +47,8 @@ import { cn } from "@/lib/utils";
 import {
   ModelSelector,
   ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
   ModelSelectorInput,
   ModelSelectorItem,
   ModelSelectorList,
@@ -157,7 +160,7 @@ export function InputBox({
   return (
     <PromptInput
       className={cn(
-        "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+        "bg-zinc-100 text-black border shadow-sm rounded-[26px] backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:border-0 *:data-[slot='input-group']:shadow-none *:data-[slot='input-group']:bg-transparent *:data-[slot='input-group']:has-[[data-slot=input-group-control]:focus-visible]:ring-0",
         className,
       )}
       disabled={disabled}
@@ -176,27 +179,20 @@ export function InputBox({
       <PromptInputAttachments>
         {(attachment) => <PromptInputAttachment data={attachment} />}
       </PromptInputAttachments>
-      <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
+      <PromptInputBody className="relative z-3 pb-4">
         <PromptInputTextarea
-          className={cn("size-full")}
+          className={cn(
+            "size-full min-h-[112px] max-h-[240px] resize-none border-0 bg-transparent pl-4 pr-10 py-5 text-base focus-visible:ring-0 placeholder:text-neutral-500",
+          )}
           disabled={disabled}
           placeholder={t.inputBox.placeholder}
           autoFocus={autoFocus}
           defaultValue={initialValue}
         />
       </PromptInputBody>
-      <PromptInputFooter className="flex">
-        <PromptInputTools>
-          {/* TODO: Add more connectors here
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger className="px-2!" />
-            <PromptInputActionMenuContent>
-              <PromptInputActionAddAttachments
-                label={t.inputBox.addAttachments}
-              />
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu> */}
-          <AddAttachmentsButton className="px-2!" />
+      <PromptInputFooter className="absolute bottom-3 left-4 right-4 w-auto flex justify-between p-0">
+        <PromptInputTools className="gap-3">
+          <AddAttachmentsButton className="rounded-full size-9 border hover:bg-muted text-neutral-500 p-0 flex items-center justify-center" />
           <PromptInputActionMenu>
             <ModeHoverGuide
               mode={
@@ -208,29 +204,18 @@ export function InputBox({
                   : "flash"
               }
             >
-              <PromptInputActionMenuTrigger className="gap-1! px-2!">
+              <PromptInputActionMenuTrigger className="rounded-full size-9 border hover:bg-muted p-0 flex items-center justify-center gap-0!">
                 <div>
-                  {context.mode === "flash" && <ZapIcon className="size-3" />}
+                  {context.mode === "flash" && <ZapIcon className="size-4" />}
                   {context.mode === "thinking" && (
-                    <LightbulbIcon className="size-3" />
+                    <LightbulbIcon className="size-4" />
                   )}
                   {context.mode === "pro" && (
-                    <GraduationCapIcon className="size-3" />
+                    <GraduationCapIcon className="size-4" />
                   )}
                   {context.mode === "ultra" && (
-                    <RocketIcon className="size-3 text-[#dabb5e]" />
+                    <RocketIcon className="size-4 text-[#dabb5e]" />
                   )}
-                </div>
-                <div
-                  className={cn(
-                    "text-xs font-normal",
-                    context.mode === "ultra" ? "golden-text" : "",
-                  )}
-                >
-                  {(context.mode === "flash" && t.inputBox.flashMode) ||
-                    (context.mode === "thinking" && t.inputBox.reasoningMode) ||
-                    (context.mode === "pro" && t.inputBox.proMode) ||
-                    (context.mode === "ultra" && t.inputBox.ultraMode)}
                 </div>
               </PromptInputActionMenuTrigger>
             </ModeHoverGuide>
@@ -366,43 +351,70 @@ export function InputBox({
               </DropdownMenuGroup>
             </PromptInputActionMenuContent>
           </PromptInputActionMenu>
-        </PromptInputTools>
-        <PromptInputTools>
           <ModelSelector
             open={modelDialogOpen}
             onOpenChange={setModelDialogOpen}
           >
             <ModelSelectorTrigger asChild>
-              <PromptInputButton>
-                <ModelSelectorName className="text-xs font-normal">
+              <PromptInputButton className="rounded-full h-9 border hover:bg-muted px-4 flex items-center gap-2">
+                <ModelSelectorName className="text-xs font-medium">
                   {selectedModel?.display_name}
                 </ModelSelectorName>
               </PromptInputButton>
             </ModelSelectorTrigger>
             <ModelSelectorContent>
-              <ModelSelectorInput placeholder={t.inputBox.searchModels} />
+              <ModelSelectorInput autoFocus placeholder={t.inputBox.searchModels} />
               <ModelSelectorList>
-                {models.map((m) => (
-                  <ModelSelectorItem
-                    key={m.name}
-                    value={m.name}
-                    onSelect={() => handleModelSelect(m.name)}
-                  >
-                    <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                    {m.name === context.model_name ? (
-                      <CheckIcon className="ml-auto size-4" />
-                    ) : (
-                      <div className="ml-auto size-4" />
-                    )}
-                  </ModelSelectorItem>
-                ))}
+                <ModelSelectorEmpty>{t.inputBox.noModelsFound}</ModelSelectorEmpty>
+                <ModelSelectorGroup heading={t.inputBox.models}>
+                  {models.map((m) => (
+                    <ModelSelectorItem
+                      key={m.name}
+                      value={m.name}
+                      onSelect={() => handleModelSelect(m.name)}
+                      className={cn(
+                        "data-[selected=true]:text-accent-foreground",
+                        m.name === context.model_name
+                          ? "text-accent-foreground"
+                          : "text-muted-foreground/65",
+                      )}
+                    >
+                      <div className="flex flex-col gap-1 w-full">
+                        <div className="flex items-center justify-between">
+                          <ModelSelectorName
+                            className={cn(
+                              "text-sm font-medium",
+                              m.name === context.model_name &&
+                                "text-accent-foreground",
+                            )}
+                          >
+                            {m.display_name}
+                          </ModelSelectorName>
+                          {m.name === context.model_name ? (
+                            <CheckIcon className="size-4" />
+                          ) : (
+                            <div className="size-4" />
+                          )}
+                        </div>
+                        {m.description && (
+                          <div className="text-muted-foreground text-xs line-clamp-2 font-normal">
+                            {m.description}
+                          </div>
+                        )}
+                      </div>
+                    </ModelSelectorItem>
+                  ))}
+                </ModelSelectorGroup>
               </ModelSelectorList>
             </ModelSelectorContent>
           </ModelSelector>
+        </PromptInputTools>
+        <PromptInputTools className="gap-3">
+          <PromptInputSpeechButton className="rounded-full size-9 hover:bg-muted text-neutral-500" />
           <PromptInputSubmit
-            className="rounded-full"
+            className="rounded-full size-9 bg-muted hover:bg-muted/80 text-foreground"
             disabled={disabled}
-            variant="outline"
+            variant="ghost"
             status={status}
           />
         </PromptInputTools>
@@ -412,9 +424,7 @@ export function InputBox({
           <SuggestionList />
         </div>
       )}
-      {!isNewThread && (
-        <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
-      )}
+
     </PromptInput>
   );
 }
@@ -445,9 +455,9 @@ function SuggestionList() {
   return (
     <Suggestions className="min-h-16 w-fit items-start">
       <ConfettiButton
-        className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
+        className="text-muted-foreground cursor-pointer rounded-full font-normal"
         variant="outline"
-        size="sm"
+        size="lg"
         onClick={() => handleSuggestionClick(t.inputBox.surpriseMePrompt)}
       >
         <SparklesIcon className="size-4" /> {t.inputBox.surpriseMe}
@@ -494,10 +504,10 @@ function AddAttachmentsButton({ className }: { className?: string }) {
   return (
     <Tooltip content={t.inputBox.addAttachments}>
       <PromptInputButton
-        className={cn("px-2!", className)}
+        className={cn("px-2", className)}
         onClick={() => attachments.openFileDialog()}
       >
-        <PaperclipIcon className="size-3" />
+        <PlusIcon className="size-4" />
       </PromptInputButton>
     </Tooltip>
   );
