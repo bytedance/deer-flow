@@ -1,18 +1,17 @@
 import logging
 import os
-from dataclasses import dataclass
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class TracingConfig:
+class TracingConfig(BaseModel):
     """Configuration for LangSmith tracing."""
 
-    enabled: bool
-    api_key: str | None
-    project: str
-    endpoint: str
+    enabled: bool = Field(...)
+    api_key: str | None = Field(...)
+    project: str = Field(...)
+    endpoint: str = Field(...)
 
     @property
     def is_configured(self) -> bool:
