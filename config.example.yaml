@@ -35,8 +35,8 @@ models:
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
   #   display_name: DeepSeek V3 (Thinking)
-  #   use: langchain_deepseek:ChatDeepSeek
-  #   model: deepseek-chat
+  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
   #   max_tokens: 16384
   #   supports_thinking: true
