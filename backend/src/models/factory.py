@@ -39,15 +39,20 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
         model_settings_from_config.update(model_config.when_thinking_enabled)
     model_instance = model_class(**kwargs, **model_settings_from_config)
-    
-    if is_tracing_enabled():
-        from langchain_core.tracers.langchain import LangChainTracer
 
-        tracing_config = get_tracing_config()
-        tracer = LangChainTracer(
-            project_name=tracing_config.project,
-        )
-        existing_callbacks = model_instance.callbacks or []
-        model_instance.callbacks = [*existing_callbacks, tracer]
-        logger.debug(f"LangSmith tracing attached to model '{name}' (project='{tracing_config.project}')")
+    if is_tracing_enabled():
+        try:
+            from langchain_core.tracers.langchain import LangChainTracer
+
+            tracing_config = get_tracing_config()
+            tracer = LangChainTracer(
+                project_name=tracing_config.project,
+            )
+            existing_callbacks = model_instance.callbacks or []
+            model_instance.callbacks = [*existing_callbacks, tracer]
+            logger.debug(
+                f"LangSmith tracing attached to model '{name}' (project='{tracing_config.project}')"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to attach LangSmith tracing to model '{name}': {e}")
     return model_instance
