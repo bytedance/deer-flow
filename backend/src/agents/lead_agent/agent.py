@@ -251,9 +251,9 @@ def make_lead_agent(config: RunnableConfig):
         config["metadata"] = {}
     config["metadata"].update({
         "model_name": model_name or "default",
-        "thinking_enabled": str(thinking_enabled),
-        "is_plan_mode": str(is_plan_mode),
-        "subagent_enabled": str(subagent_enabled),
+        "thinking_enabled": thinking_enabled,
+        "is_plan_mode": is_plan_mode,
+        "subagent_enabled": subagent_enabled,
     })
     
     return create_agent(
