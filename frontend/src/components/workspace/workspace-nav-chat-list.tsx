@@ -1,11 +1,10 @@
 "use client";
 
-import { MessagesSquare } from "lucide-react";
+import { Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import {
-  SidebarGroup,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -16,17 +15,19 @@ export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   return (
-    <SidebarGroup className="pt-1">
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
-            <Link className="text-muted-foreground" href="/workspace/chats">
-              <MessagesSquare />
-              <span>{t.sidebar.chats}</span>
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    </SidebarGroup>
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton
+          isActive={pathname === "/workspace/chats"}
+          asChild
+          className="font-medium"
+        >
+          <Link href="/workspace/chats">
+            <Search className="size-4" />
+            <span>{t.common.search}</span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }

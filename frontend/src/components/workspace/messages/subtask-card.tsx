@@ -73,7 +73,7 @@ export function SubtaskCard({
       <div className="bg-background/95 flex w-full flex-col rounded-lg">
         <div className="flex w-full items-center justify-between p-0.5">
           <Button
-            className="w-full items-start justify-start text-left"
+            className="w-full items-center justify-start text-left"
             variant="ghost"
             onClick={() => setCollapsed(!collapsed)}
           >
