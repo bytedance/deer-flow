@@ -14,7 +14,7 @@ Usage::
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -230,7 +230,7 @@ class TiamatMemoryStore:
         """Create an empty DeerFlow-compatible memory structure."""
         return {
             "version": "1.0",
-            "lastUpdated": datetime.utcnow().isoformat() + "Z",
+            "lastUpdated": datetime.now(timezone.utc).isoformat(),
             "user": {
                 "workContext": {"summary": "", "updatedAt": ""},
                 "personalContext": {"summary": "", "updatedAt": ""},
