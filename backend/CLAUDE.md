@@ -84,7 +84,12 @@ make dev        # Run LangGraph server only (port 2024)
 make gateway    # Run Gateway API only (port 8001)
 make lint       # Lint with ruff
 make format     # Format code with ruff
+uv run pytest   # Run backend tests
 ```
+
+Regression tests related to Docker/provisioner behavior:
+- `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
+- `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
 
 ## Architecture
 

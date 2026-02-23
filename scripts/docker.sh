@@ -221,30 +221,36 @@ help() {
     echo ""
 }
 
-# Main command dispatcher
-case "$1" in
-    init)
-        init
-        ;;
-    start)
-        start
-        ;;
-    restart)
-        restart
-        ;;
-    logs)
-        logs "$2"
-        ;;
-    stop)
-        stop
-        ;;
-    help|--help|-h|"")
-        help
-        ;;
-    *)
-        echo -e "${YELLOW}Unknown command: $1${NC}"
-        echo ""
-        help
-        exit 1
-        ;;
-esac
+main() {
+    # Main command dispatcher
+    case "$1" in
+        init)
+            init
+            ;;
+        start)
+            start
+            ;;
+        restart)
+            restart
+            ;;
+        logs)
+            logs "$2"
+            ;;
+        stop)
+            stop
+            ;;
+        help|--help|-h|"")
+            help
+            ;;
+        *)
+            echo -e "${YELLOW}Unknown command: $1${NC}"
+            echo ""
+            help
+            exit 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

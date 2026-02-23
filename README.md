@@ -246,6 +246,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+
 ## License
 
 This project is open source and available under the [MIT License](./LICENSE).
