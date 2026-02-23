@@ -243,7 +243,7 @@ pnpm test
 
 ### PR Regression Checks
 
-Every pull request runs the backend regression workflow at [.github/workflows/regression-tests.yml](.github/workflows/regression-tests.yml), including:
+Every pull request runs the backend regression workflow at [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml), including:
 
 - `tests/test_provisioner_kubeconfig.py`
 - `tests/test_docker_sandbox_mode_detection.py`

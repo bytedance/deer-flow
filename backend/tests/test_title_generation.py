@@ -1,6 +1,6 @@
 """Tests for automatic thread title generation."""
 
-import pytestcat
+import pytest
 
 from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.config.title_config import TitleConfig, get_title_config, set_title_config
