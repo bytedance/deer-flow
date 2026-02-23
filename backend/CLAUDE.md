@@ -91,6 +91,8 @@ Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
 
+CI runs these regression tests for every pull request via [.github/workflows/regression-tests.yml](../.github/workflows/regression-tests.yml).
+
 ## Architecture
 
 ### Agent System
