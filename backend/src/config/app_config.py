@@ -108,8 +108,8 @@ class AppConfig(BaseModel):
         """
         if isinstance(config, str):
             if config.startswith("$"):
-                env_value = os.getenv(config[1:], config)
-                if not env_value or env_value == config:
+                env_value = os.getenv(config[1:])
+                if env_value is None:
                     raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
                 return env_value
             return config
