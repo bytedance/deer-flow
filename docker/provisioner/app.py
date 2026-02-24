@@ -80,12 +80,29 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
     Tries the mounted kubeconfig first, then falls back to in-cluster
     config (useful if the provisioner itself runs inside K8s).
     """
-    try:
-        k8s_config.load_kube_config(config_file=KUBECONFIG_PATH)
-        logger.info(f"Loaded kubeconfig from {KUBECONFIG_PATH}")
-    except Exception:
-        logger.warning("Could not load kubeconfig from file, trying in-cluster config")
-        k8s_config.load_incluster_config()
+    if os.path.exists(KUBECONFIG_PATH):
+        if os.path.isdir(KUBECONFIG_PATH):
+            raise RuntimeError(
+                f"KUBECONFIG_PATH points to a directory, expected a file: {KUBECONFIG_PATH}"
+            )
+        try:
+            k8s_config.load_kube_config(config_file=KUBECONFIG_PATH)
+            logger.info(f"Loaded kubeconfig from {KUBECONFIG_PATH}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load kubeconfig from {KUBECONFIG_PATH}: {exc}"
+            ) from exc
+    else:
+        logger.warning(
+            f"Kubeconfig not found at {KUBECONFIG_PATH}; trying in-cluster config"
+        )
+        try:
+            k8s_config.load_incluster_config()
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize Kubernetes client. "
+                f"No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}"
+            ) from exc
 
     # When connecting from inside Docker to the host's K8s API, the
     # kubeconfig may reference ``localhost`` or ``127.0.0.1``.  We
@@ -103,15 +120,27 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
 
 
 def _wait_for_kubeconfig(timeout: int = 30) -> None:
-    """Block until the kubeconfig file is available."""
+    """Wait for kubeconfig file if configured, then continue with fallback support."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(KUBECONFIG_PATH):
-            logger.info(f"Found kubeconfig at {KUBECONFIG_PATH}")
-            return
+            if os.path.isfile(KUBECONFIG_PATH):
+                logger.info(f"Found kubeconfig file at {KUBECONFIG_PATH}")
+                return
+            if os.path.isdir(KUBECONFIG_PATH):
+                raise RuntimeError(
+                    "Kubeconfig path is a directory. "
+                    f"Please mount a kubeconfig file at {KUBECONFIG_PATH}."
+                )
+            raise RuntimeError(
+                f"Kubeconfig path exists but is not a regular file: {KUBECONFIG_PATH}"
+            )
         logger.info(f"Waiting for kubeconfig at {KUBECONFIG_PATH} …")
         time.sleep(2)
-    raise RuntimeError(f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s")
+    logger.warning(
+        f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s; "
+        "will attempt in-cluster Kubernetes config"
+    )
 
 
 def _ensure_namespace() -> None:

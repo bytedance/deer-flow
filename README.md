@@ -105,8 +105,10 @@ The fastest way to get started with a consistent environment:
 1. **Initialize and start**:
    ```bash
    make docker-init    # Pull sandbox image (Only once or when image updates)
-   make docker-start   # Start all services and watch for code changes
+   make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
    ```
+
+   `make docker-start` now starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
 2. **Access**: http://localhost:2026
 
@@ -141,6 +143,8 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+
+For Docker development, service startup follows `config.yaml` sandbox mode. In Local/Docker modes, `provisioner` is not started.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
@@ -241,6 +245,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
+
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
 
 ## License
 

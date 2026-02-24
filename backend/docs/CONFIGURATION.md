@@ -98,6 +98,8 @@ sandbox:
    provisioner_url: http://provisioner:8002
 ```
 
+When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
+
 See [Provisioner Setup Guide](docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
 Choose between local execution or Docker-based isolation:

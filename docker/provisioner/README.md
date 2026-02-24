@@ -188,7 +188,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 The provisioner runs as part of the docker-compose-dev stack:
 
 ```bash
-# Start all services including provisioner
+# Start Docker services (provisioner starts only when config.yaml enables provisioner mode)
 make docker-start
 
 # Or start just the provisioner
@@ -248,6 +248,18 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 - Ensure `~/.kube/config` exists on your host machine
 - Run `kubectl config view` to verify
 - Check the volume mount in docker-compose-dev.yaml
+
+### Issue: "Kubeconfig path is a directory"
+
+**Cause**: The mounted `KUBECONFIG_PATH` points to a directory instead of a file.
+
+**Solution**:
+- Ensure the compose mount source is a file (e.g., `~/.kube/config`) not a directory
+- Verify inside container:
+  ```bash
+  docker exec deer-flow-provisioner ls -ld /root/.kube/config
+  ```
+- Expected output should indicate a regular file (`-`), not a directory (`d`)
 
 ### Issue: "Connection refused" to K8s API
 

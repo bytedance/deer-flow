@@ -11,6 +11,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Gateway API** (port 8001): REST API for models, MCP, skills, memory, artifacts, and uploads
 - **Frontend** (port 3000): Next.js web interface
 - **Nginx** (port 2026): Unified reverse proxy entry point
+- **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Project Structure**:
 ```
@@ -83,7 +84,14 @@ make dev        # Run LangGraph server only (port 2024)
 make gateway    # Run Gateway API only (port 8001)
 make lint       # Lint with ruff
 make format     # Format code with ruff
+uv run pytest   # Run backend tests
 ```
+
+Regression tests related to Docker/provisioner behavior:
+- `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
+- `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
 ## Architecture
 
