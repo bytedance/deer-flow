@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_app_config()
         logger.info("Configuration loaded successfully")
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
