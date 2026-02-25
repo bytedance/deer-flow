@@ -66,7 +66,7 @@ services:
     ports:
       - "2026:2026"
     volumes:
-      - ./nginx/${NGINX_CONF:-nginx.local.conf}:/etc/nginx/nginx.conf:ro
+      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
     depends_on:
       - frontend
       - gateway
