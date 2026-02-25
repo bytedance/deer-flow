@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.agents.lead_agent import agent as lead_agent_module
 from src.config.app_config import AppConfig
 from src.config.model_config import ModelConfig
@@ -26,7 +28,7 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
     )
 
 
-def test_resolve_model_name_falls_back_to_default(monkeypatch):
+def test_resolve_model_name_falls_back_to_default(monkeypatch, caplog):
     app_config = _make_app_config(
         [
             _make_model("default-model", supports_thinking=False),
@@ -38,9 +40,42 @@ def test_resolve_model_name_falls_back_to_default(monkeypatch):
 
     monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
 
-    resolved = lead_agent_module._resolve_model_name("missing-model")
+    with caplog.at_level("WARNING"):
+        resolved = lead_agent_module._resolve_model_name("missing-model")
 
     assert resolved == "default-model"
+    assert "fallback to default model 'default-model'" in caplog.text
+
+
+def test_resolve_model_name_uses_default_when_none(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model("default-model", supports_thinking=False),
+            _make_model("other-model", supports_thinking=True),
+        ]
+    )
+
+    import src.config as config_module
+
+    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+
+    resolved = lead_agent_module._resolve_model_name(None)
+
+    assert resolved == "default-model"
+
+
+def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
+    app_config = _make_app_config([])
+
+    import src.config as config_module
+
+    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+
+    with pytest.raises(
+        ValueError,
+        match="No chat models are configured",
+    ):
+        lead_agent_module._resolve_model_name("missing-model")
 
 
 def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkeypatch):

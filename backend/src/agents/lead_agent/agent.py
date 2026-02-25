@@ -22,20 +22,22 @@ from src.sandbox.middleware import SandboxMiddleware
 logger = logging.getLogger(__name__)
 
 
-def _resolve_model_name(requested_model_name: str | None) -> str | None:
+def _resolve_model_name(requested_model_name: str | None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid."""
     from src.config import get_app_config
 
     app_config = get_app_config()
+    default_model_name = app_config.models[0].name if app_config.models else None
+    if default_model_name is None:
+        raise ValueError(
+            "No chat models are configured. Please configure at least one model in config.yaml."
+        )
+
     if requested_model_name and app_config.get_model_config(requested_model_name):
         return requested_model_name
 
-    default_model_name = app_config.models[0].name if app_config.models else None
     if requested_model_name and requested_model_name != default_model_name:
-        if default_model_name is not None:
-            logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
-        else:
-            logger.warning(f"Model '{requested_model_name}' not found in config and no default model is available.")
+        logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
     return default_model_name
 
 
@@ -272,7 +274,14 @@ def make_lead_agent(config: RunnableConfig):
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
 
-    print(f"thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
+    logger.info(
+        "thinking_enabled: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        thinking_enabled,
+        model_name,
+        is_plan_mode,
+        subagent_enabled,
+        max_concurrent_subagents,
+    )
 
     # Inject run metadata for LangSmith trace tagging
     if "metadata" not in config:
