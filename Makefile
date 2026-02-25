@@ -187,7 +187,12 @@ dev:
 	echo "✓ LangGraph server started on localhost:2024"; \
 	echo "Starting Gateway API..."; \
 	cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1 & \
-	sleep 2; \
+	sleep 3; \
+	if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		echo "✗ Gateway API failed to start. Last log output:"; \
+		tail -30 logs/gateway.log; \
+		cleanup; \
+	fi; \
 	echo "✓ Gateway API started on localhost:8001"; \
 	echo "Starting Frontend..."; \
 	cd frontend && pnpm run dev > ../logs/frontend.log 2>&1 & \

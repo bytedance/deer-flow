@@ -14,6 +14,7 @@ from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
+from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
@@ -233,8 +234,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None):
     middlewares.append(MemoryMiddleware())
 
     # Add ViewImageMiddleware only if the current model supports vision
-    from src.config import get_app_config
+    model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
 
+    from src.config import get_app_config
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
