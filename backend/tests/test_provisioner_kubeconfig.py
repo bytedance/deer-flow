@@ -90,9 +90,7 @@ def test_init_k8s_client_uses_file_kubeconfig(tmp_path, monkeypatch):
     assert result == "core-v1"
 
 
-def test_init_k8s_client_falls_back_to_incluster_when_missing(
-    tmp_path, monkeypatch
-):
+def test_init_k8s_client_falls_back_to_incluster_when_missing(tmp_path, monkeypatch):
     """When kubeconfig file is missing, in-cluster config should be attempted."""
     provisioner_module = _load_provisioner_module()
     missing_path = tmp_path / "missing-config"

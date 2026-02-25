@@ -1,10 +1,12 @@
 import logging
 import os
-from pydantic import BaseModel, Field
 import threading
+
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 _config_lock = threading.Lock()
+
 
 class TracingConfig(BaseModel):
     """Configuration for LangSmith tracing."""
@@ -41,11 +43,11 @@ def get_tracing_config() -> TracingConfig:
             endpoint=os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"),
         )
         return _tracing_config
-    
+
+
 def is_tracing_enabled() -> bool:
     """Check if LangSmith tracing is enabled and configured.
     Returns:
         True if tracing is enabled and has an API key.
     """
     return get_tracing_config().is_configured
-

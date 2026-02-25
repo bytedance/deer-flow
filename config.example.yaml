@@ -193,6 +193,23 @@ sandbox:
 #   provisioner_url: http://provisioner:8002
 
 # ============================================================================
+# Subagents Configuration
+# ============================================================================
+# Configure timeouts for subagent execution
+# Subagents are background workers delegated tasks by the lead agent
+
+# subagents:
+#   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
+#   timeout_seconds: 900
+#
+#   # Optional per-agent timeout overrides
+#   agents:
+#     general-purpose:
+#       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
+#     bash:
+#       timeout_seconds: 300   # 5 minutes for quick command execution
+
+# ============================================================================
 # Skills Configuration
 # ============================================================================
 # Configure skills directory for specialized agent workflows

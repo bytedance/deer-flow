@@ -245,17 +245,19 @@ def make_lead_agent(config: RunnableConfig):
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
     print(f"thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
-    
+
     # Inject run metadata for LangSmith trace tagging
     if "metadata" not in config:
         config["metadata"] = {}
-    config["metadata"].update({
-        "model_name": model_name or "default",
-        "thinking_enabled": thinking_enabled,
-        "is_plan_mode": is_plan_mode,
-        "subagent_enabled": subagent_enabled,
-    })
-    
+    config["metadata"].update(
+        {
+            "model_name": model_name or "default",
+            "thinking_enabled": thinking_enabled,
+            "is_plan_mode": is_plan_mode,
+            "subagent_enabled": subagent_enabled,
+        }
+    )
+
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
         tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled),

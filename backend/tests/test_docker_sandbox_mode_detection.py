@@ -16,11 +16,7 @@ def _detect_mode_with_config(config_content: str) -> str:
         tmp_root = Path(tmpdir)
         (tmp_root / "config.yaml").write_text(config_content)
 
-        command = (
-            f"source '{SCRIPT_PATH}' && "
-            f"PROJECT_ROOT='{tmp_root}' && "
-            "detect_sandbox_mode"
-        )
+        command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmp_root}' && detect_sandbox_mode"
 
         output = subprocess.check_output(
             ["bash", "-lc", command],
@@ -33,11 +29,7 @@ def _detect_mode_with_config(config_content: str) -> str:
 def test_detect_mode_defaults_to_local_when_config_missing():
     """No config file should default to local mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        command = (
-            f"source '{SCRIPT_PATH}' && "
-            f"PROJECT_ROOT='{tmpdir}' && "
-            "detect_sandbox_mode"
-        )
+        command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmpdir}' && detect_sandbox_mode"
         output = subprocess.check_output(["bash", "-lc", command], text=True).strip()
 
     assert output == "local"
