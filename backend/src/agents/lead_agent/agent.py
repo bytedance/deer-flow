@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 def _resolve_model_name(requested_model_name: str | None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid."""
-    from src.config import get_app_config
-
     app_config = get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
     if default_model_name is None:
@@ -238,7 +236,6 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None):
     # Add ViewImageMiddleware only if the current model supports vision
     model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
 
-    from src.config import get_app_config
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
@@ -265,8 +262,6 @@ def make_lead_agent(config: RunnableConfig):
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
-
-    from src.config import get_app_config
 
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
