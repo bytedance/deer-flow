@@ -30,6 +30,10 @@ jobs:
         working-directory: backend
         run: uv sync --group dev
 
+      - name: Lint backend
+        working-directory: backend
+        run: make lint
+
       - name: Run unit tests of backend
         working-directory: backend
-        run: uv run pytest tests/test_provisioner_kubeconfig.py tests/test_docker_sandbox_mode_detection.py
+        run: make test

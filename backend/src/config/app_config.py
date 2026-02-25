@@ -11,6 +11,7 @@ from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
 from src.config.sandbox_config import SandboxConfig
 from src.config.skills_config import SkillsConfig
+from src.config.subagents_config import load_subagents_config_from_dict
 from src.config.summarization_config import load_summarization_config_from_dict
 from src.config.title_config import load_title_config_from_dict
 from src.config.tool_config import ToolConfig, ToolGroupConfig
@@ -86,6 +87,10 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Load subagents config if present
+        if "subagents" in config_data:
+            load_subagents_config_from_dict(config_data["subagents"])
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()
