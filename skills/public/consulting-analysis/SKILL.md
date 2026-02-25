@@ -14,6 +14,12 @@ This skill produces professional, consulting-grade research reports in Markdown 
 
 The output adheres to McKinsey/BCG consulting voice standards. The report language follows the `output_locale` setting (default: `zh_CN` for Chinese).
 
+## Data Authenticity Protocol
+
+**Strict Adherence Rule**: All data presented in the report and visualized in charts MUST be derived directly from the provided **Data Summary** or **External Search Findings**.
+- **NO Hallucinations**: Do not invent, estimate, or simulate data. If data is missing, state "Data not available" rather than fabricating numbers.
+- **Traceable Sources**: Every major claim and chart must be traceable back to the input data package.
+
 ## Core Capabilities
 
 - **Design analysis frameworks** from scratch given only a research subject and scope
@@ -370,7 +376,8 @@ Before writing the report, generate all planned charts from the Analysis Framewo
 | 2 | 3.1 | Pie chart | Consumer Age Distribution | Segments: Age groups, Values: Share % | Data Requirement #5 |
 | ... | ... | ... | ... | ... | ... |
 
-2. **Prepare Chart Data**: For each chart task, extract the corresponding data points from the **Data Summary** and structure them into the format required by the visualization skill (e.g., CSV, JSON, or tabular format).
+2. **Prepare Chart Data**: For each chart task, extract the corresponding data points from the **Data Summary**.
+   > **CRITICAL**: Use ONLY the numbers provided in the Data Summary. Do NOT invent or "smooth" data to make charts look better. If data points are missing, the chart must reflect that reality (e.g., broken line or missing bar), or the chart type must be adjusted.
 
 3. **Delegate to Visualization Skill**: Invoke the available visualization/charting skill (e.g., `data-analysis`) for each chart task with:
    - Chart type and title
@@ -398,7 +405,9 @@ For each sub-chapter, follow the **"Visual Anchor → Data Contrast → Integrat
 
 1. **Visual Evidence Block**: Embed charts using `![Image Description](Actual_File_Path)` — use the file paths collected in Step 2.3
 2. **Data Contrast Table**: Create a Markdown comparison table for key metrics
+   > **Source Rule**: Every number in the table must come from the Data Summary. No hallucinations.
 3. **Integrated Narrative Analysis**: Write analytical text following "What → Why → So What"
+   > **Narrative Rule**: Narrative must explain the *provided* data. Do not make claims unsupported by the inputs.
 
 Each sub-chapter must end with a robust analytical paragraph (min. 200 words) that:
 - Synthesizes conflicting or reinforcing data points
@@ -580,6 +589,7 @@ After data collection, user provides: Analysis Framework + Data Summary with bra
 
 ### Phase 2 Quality Checklist (Final Report)
 
+- [ ] **NO HALLUCINATION**: All numbers and charts are verified against the input Data Summary
 - [ ] All planned charts generated before report writing (Step 2.3 completed first)
 - [ ] All sections present in correct order (Abstract → Introduction → Body → Conclusion → References)
 - [ ] Every sub-chapter follows "Visual Anchor → Data Contrast → Integrated Analysis"
@@ -615,6 +625,7 @@ reasoning_locale = en
   - **Phase 2** receives the collected data and produces the final report
 - Dynamic titling: **Rewrite** topics from the Framework into professional, concise subject-based headers
 - The Conclusion section must contain **NO** detailed recommendations — those belong in the preceding body chapters
-- Each statement in the report must be supported by data points from the input Data Summary
+- **ZERO HALLUCINATION POLICY**: Each statement, chart, and number in the report must be supported by data points from the input Data Summary. If data is missing, admit it.
+- **Traceability**: If requested, you must be able to point to the specific line in the Data Summary or External Search Findings that supports a claim.
 - The framework should adapt its analytical dimensions and depth to the specific domain (financial analysis uses different frameworks than consumer insights)
 - When the research subject is ambiguous, default to the broadest reasonable scope and note assumptions
