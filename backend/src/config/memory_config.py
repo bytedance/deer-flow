@@ -12,7 +12,16 @@ class MemoryConfig(BaseModel):
     )
     storage_path: str = Field(
         default="",
-        description=("Path to store memory data. If empty, defaults to Paths.memory_file (i.e. {base_dir}/memory.json). Can be overridden with an absolute or relative path."),
+        description=(
+            "Path to store memory data. "
+            "If empty, defaults to `{base_dir}/memory.json` (see Paths.memory_file). "
+            "Absolute paths are used as-is. "
+            "Relative paths are resolved against `Paths.base_dir` "
+            "(not the backend working directory). "
+            "Note: if you previously set this to `.deer-flow/memory.json`, "
+            "the file will now be resolved as `{base_dir}/.deer-flow/memory.json`; "
+            "migrate existing data or use an absolute path to preserve the old location."
+        ),
     )
     debounce_seconds: int = Field(
         default=30,

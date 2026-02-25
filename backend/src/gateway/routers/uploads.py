@@ -105,24 +105,30 @@ async def upload_files(
             continue
 
         try:
+            # Normalize filename to prevent path traversal
+            safe_filename = Path(file.filename).name
+            if not safe_filename:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
+
             # Save the original file
-            file_path = uploads_dir / file.filename
+            file_path = uploads_dir / safe_filename
             content = await file.read()
 
             # Build relative path from backend root
-            relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / file.filename)
-            virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{file.filename}"
+            relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / safe_filename)
+            virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
             sandbox.update_file(virtual_path, content)
 
             file_info = {
-                "filename": file.filename,
+                "filename": safe_filename,
                 "size": str(len(content)),
                 "path": relative_path,  # Actual filesystem path (relative to backend/)
                 "virtual_path": virtual_path,  # Path for Agent in sandbox
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{file.filename}",  # HTTP URL
+                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",  # HTTP URL
             }
 
-            logger.info(f"Saved file: {file.filename} ({len(content)} bytes) to {relative_path}")
+            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {relative_path}")
 
             # Check if file should be converted to markdown
             file_ext = file_path.suffix.lower()

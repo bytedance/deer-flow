@@ -1,8 +1,11 @@
 import os
+import re
 from pathlib import Path
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
+
+_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 class Paths:
@@ -13,8 +16,8 @@ class Paths:
         {base_dir}/
         ├── memory.json
         └── threads/
-            └── {thread_id}/          <-- mounted as /mnt/ inside sandbox
-                └── user-data/
+            └── {thread_id}/
+                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
                     ├── workspace/     <-- /mnt/user-data/workspace/
                     ├── uploads/       <-- /mnt/user-data/uploads/
                     └── outputs/       <-- /mnt/user-data/outputs/
@@ -53,8 +56,18 @@ class Paths:
         """
         Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
 
-        This directory is mounted as `/mnt/` inside the sandbox.
+        This directory contains a `user-data/` subdirectory that is mounted
+        as `/mnt/user-data/` inside the sandbox.
+
+        Raises:
+            ValueError: If `thread_id` contains unsafe characters (path separators
+                        or `..`) that could cause directory traversal.
         """
+        if not _SAFE_THREAD_ID_RE.match(thread_id):
+            raise ValueError(
+                f"Invalid thread_id {thread_id!r}: only alphanumeric characters, "
+                "hyphens, and underscores are allowed."
+            )
         return self.base_dir / "threads" / thread_id
 
     def sandbox_work_dir(self, thread_id: str) -> Path:
@@ -114,14 +127,18 @@ class Paths:
         stripped = virtual_path.lstrip("/")
         prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
-        if not stripped.startswith(prefix):
+        # Require an exact segment-boundary match to avoid prefix confusion
+        # (e.g. reject paths like "mnt/user-dataX/...").
+        if stripped != prefix and not stripped.startswith(prefix + "/"):
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id)
+        base = self.sandbox_user_data_dir(thread_id).resolve()
         actual = (base / relative).resolve()
 
-        if not str(actual).startswith(str(base.resolve())):
+        try:
+            actual.relative_to(base)
+        except ValueError:
             raise ValueError("Access denied: path traversal detected")
 
         return actual
