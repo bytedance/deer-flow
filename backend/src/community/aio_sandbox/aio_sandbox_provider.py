@@ -20,10 +20,9 @@ import signal
 import threading
 import time
 import uuid
-from pathlib import Path
 
 from src.config import get_app_config
-from src.sandbox.consts import THREAD_DATA_BASE_DIR, VIRTUAL_PATH_PREFIX
+from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import SandboxProvider
 
@@ -135,7 +134,7 @@ class AioSandboxProvider(SandboxProvider):
         #       redis_url: redis://localhost:6379/0
         #   This would enable cross-host sandbox discovery (e.g., multiple K8s pods
         #   without shared PVC, or multi-node Docker Swarm).
-        return FileSandboxStateStore(base_dir=os.getcwd())
+        return FileSandboxStateStore(base_dir=str(get_paths().base_dir))
 
     # ── Configuration ────────────────────────────────────────────────────
 
@@ -203,17 +202,14 @@ class AioSandboxProvider(SandboxProvider):
 
         Creates directories if they don't exist (lazy initialization).
         """
-        base_dir = os.getcwd()
-        thread_dir = Path(base_dir) / THREAD_DATA_BASE_DIR / thread_id / "user-data"
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id)
 
         mounts = [
-            (str(thread_dir / "workspace"), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (str(thread_dir / "uploads"), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (str(thread_dir / "outputs"), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (str(paths.sandbox_work_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (str(paths.sandbox_uploads_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (str(paths.sandbox_outputs_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
         ]
-
-        for host_path, _, _ in mounts:
-            os.makedirs(host_path, exist_ok=True)
 
         return mounts
 

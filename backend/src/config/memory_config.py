@@ -11,8 +11,8 @@ class MemoryConfig(BaseModel):
         description="Whether to enable memory mechanism",
     )
     storage_path: str = Field(
-        default=".deer-flow/memory.json",
-        description="Path to store memory data (relative to backend directory)",
+        default="",
+        description=("Path to store memory data. If empty, defaults to Paths.memory_file (i.e. {base_dir}/memory.json). Can be overridden with an absolute or relative path."),
     )
     debounce_seconds: int = Field(
         default=30,
