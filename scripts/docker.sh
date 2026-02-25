@@ -95,7 +95,6 @@ init() {
 # Start Docker development environment
 start() {
     local sandbox_mode
-    local nginx_conf
     local services
 
     echo "=========================================="
@@ -106,10 +105,8 @@ start() {
     sandbox_mode="$(detect_sandbox_mode)"
 
     if [ "$sandbox_mode" = "provisioner" ]; then
-        nginx_conf="nginx.conf"
         services="frontend gateway langgraph provisioner nginx"
     else
-        nginx_conf="nginx.local.conf"
         services="frontend gateway langgraph nginx"
     fi
 
@@ -129,7 +126,7 @@ start() {
     fi
     
     echo "Building and starting containers..."
-    cd "$DOCKER_DIR" && NGINX_CONF="$nginx_conf" $COMPOSE_CMD up --build -d --remove-orphans $services
+    cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
     echo "=========================================="
     echo "  DeerFlow Docker is starting!"
