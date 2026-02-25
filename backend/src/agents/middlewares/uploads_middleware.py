@@ -1,6 +1,5 @@
 """Middleware to inject uploaded files information into agent context."""
 
-import os
 import re
 from pathlib import Path
 from typing import NotRequired, override
@@ -10,7 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from src.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
+from src.config.paths import Paths, get_paths
 
 
 class UploadsMiddlewareState(AgentState):
@@ -32,10 +31,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Initialize the middleware.
 
         Args:
-            base_dir: Base directory for thread data. Defaults to the current working directory.
+            base_dir: Base directory for thread data. Defaults to Paths resolution.
         """
         super().__init__()
-        self._base_dir = base_dir or os.getcwd()
+        self._paths = Paths(base_dir) if base_dir else get_paths()
 
     def _get_uploads_dir(self, thread_id: str) -> Path:
         """Get the uploads directory for a thread.
@@ -46,7 +45,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         Returns:
             Path to the uploads directory.
         """
-        return Path(self._base_dir) / THREAD_DATA_BASE_DIR / thread_id / "user-data" / "uploads"
+        return self._paths.sandbox_uploads_dir(thread_id)
 
     def _list_newly_uploaded_files(self, thread_id: str, last_message_files: set[str]) -> list[dict]:
         """List only newly uploaded files that weren't in the last message.

@@ -15,6 +15,8 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
+from src.config.paths import Paths
+
 from .sandbox_info import SandboxInfo
 from .state_store import SandboxStateStore
 
@@ -27,26 +29,24 @@ SANDBOX_LOCK_FILE = "sandbox.lock"
 class FileSandboxStateStore(SandboxStateStore):
     """File-based state store using JSON files and fcntl file locking.
 
-    State is stored at: {base_dir}/{threads_subdir}/{thread_id}/sandbox.json
-    Lock files at:      {base_dir}/{threads_subdir}/{thread_id}/sandbox.lock
+    State is stored at: {base_dir}/threads/{thread_id}/sandbox.json
+    Lock files at:      {base_dir}/threads/{thread_id}/sandbox.lock
 
     This works across processes on the same machine sharing a filesystem.
     For K8s multi-pod scenarios, requires a shared PVC mount at base_dir.
     """
 
-    def __init__(self, base_dir: str, threads_subdir: str = ".deer-flow/threads"):
+    def __init__(self, base_dir: str):
         """Initialize the file-based state store.
 
         Args:
-            base_dir: Root directory for state files (typically the project root / cwd).
-            threads_subdir: Subdirectory path for thread state (default: ".deer-flow/threads").
+            base_dir: Root directory for state files (typically Paths.base_dir).
         """
-        self._base_dir = Path(base_dir)
-        self._threads_subdir = threads_subdir
+        self._paths = Paths(base_dir)
 
     def _thread_dir(self, thread_id: str) -> Path:
         """Get the directory for a thread's state files."""
-        return self._base_dir / self._threads_subdir / thread_id
+        return self._paths.thread_dir(thread_id)
 
     def save(self, thread_id: str, info: SandboxInfo) -> None:
         thread_dir = self._thread_dir(thread_id)

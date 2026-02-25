@@ -1,7 +1,6 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -12,14 +11,18 @@ from src.agents.memory.prompt import (
     format_conversation_for_update,
 )
 from src.config.memory_config import get_memory_config
+from src.config.paths import get_paths
 from src.models import create_chat_model
 
 
 def _get_memory_file_path() -> Path:
     """Get the path to the memory file."""
     config = get_memory_config()
-    # Resolve relative to current working directory (backend/)
-    return Path(os.getcwd()) / config.storage_path
+    if config.storage_path:
+        p = Path(config.storage_path)
+        # Absolute path: use as-is; relative path: resolve against base_dir
+        return p if p.is_absolute() else get_paths().base_dir / p
+    return get_paths().memory_file
 
 
 def _create_empty_memory() -> dict[str, Any]:
