@@ -4,7 +4,7 @@ from langchain.tools import ToolRuntime, tool
 from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadDataState, ThreadState
-from src.sandbox.consts import VIRTUAL_PATH_PREFIX
+from src.config.paths import VIRTUAL_PATH_PREFIX
 from src.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
