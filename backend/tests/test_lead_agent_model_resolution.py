@@ -25,6 +25,7 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
         use="langchain_openai:ChatOpenAI",
         model=name,
         supports_thinking=supports_thinking,
+        supports_vision=False,
     )
 
 
@@ -36,9 +37,7 @@ def test_resolve_model_name_falls_back_to_default(monkeypatch, caplog):
         ]
     )
 
-    import src.config as config_module
-
-    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
 
     with caplog.at_level("WARNING"):
         resolved = lead_agent_module._resolve_model_name("missing-model")
@@ -55,9 +54,7 @@ def test_resolve_model_name_uses_default_when_none(monkeypatch):
         ]
     )
 
-    import src.config as config_module
-
-    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
 
     resolved = lead_agent_module._resolve_model_name(None)
 
@@ -67,9 +64,7 @@ def test_resolve_model_name_uses_default_when_none(monkeypatch):
 def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
     app_config = _make_app_config([])
 
-    import src.config as config_module
-
-    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
 
     with pytest.raises(
         ValueError,
@@ -81,10 +76,9 @@ def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
 def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
-    import src.config as config_module
     import src.tools as tools_module
 
-    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name: [])
 
@@ -112,3 +106,31 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert captured["name"] == "safe-model"
     assert captured["thinking_enabled"] is False
     assert result["model"] is not None
+
+
+def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
+    app_config = _make_app_config(
+        [
+            _make_model("stale-model", supports_thinking=False),
+            ModelConfig(
+                name="vision-model",
+                display_name="vision-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="vision-model",
+                supports_thinking=False,
+                supports_vision=True,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module._build_middlewares(
+        {"configurable": {"model_name": "stale-model", "is_plan_mode": False, "subagent_enabled": False}},
+        model_name="vision-model",
+    )
+
+    assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)

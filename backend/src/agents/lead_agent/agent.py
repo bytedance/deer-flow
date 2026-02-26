@@ -233,9 +233,8 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None):
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware())
 
-    # Add ViewImageMiddleware only if the current model supports vision
-    model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
-
+    # Add ViewImageMiddleware only if the current model supports vision.
+    # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
