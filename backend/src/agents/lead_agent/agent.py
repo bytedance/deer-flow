@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_model_name(requested_model_name: str | None) -> str:
-    """Resolve a runtime model name safely, falling back to default if invalid."""
+    """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
     app_config = get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
     if default_model_name is None:
@@ -258,6 +258,11 @@ def make_lead_agent(config: RunnableConfig):
     thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
     requested_model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
     model_name = _resolve_model_name(requested_model_name)
+    if model_name is None:
+        raise ValueError(
+            "No chat model could be resolved. Please configure at least one model in "
+            "config.yaml or provide a valid 'model_name'/'model' in the request."
+        )
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
