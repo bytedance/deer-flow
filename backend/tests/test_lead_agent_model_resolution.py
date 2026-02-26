@@ -61,21 +61,6 @@ def test_resolve_model_name_uses_default_when_none(monkeypatch):
     assert resolved == "default-model"
 
 
-def test_resolve_model_name_uses_default_when_none(monkeypatch):
-    app_config = _make_app_config(
-        [
-            _make_model("default-model", supports_thinking=False),
-            _make_model("other-model", supports_thinking=True),
-        ]
-    )
-
-    import src.config as config_module
-
-    monkeypatch.setattr(config_module, "get_app_config", lambda: app_config)
-
-    resolved = lead_agent_module._resolve_model_name(None)
-
-    assert resolved == "default-model"
 def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
     app_config = _make_app_config([])
 
