@@ -69,23 +69,7 @@ Learn more and see **real demos** on our official website.
        temperature: 0.7                  # Sampling temperature
    ```
 
-   For OpenAI-compatible providers (for example Novita), keep `use: langchain_openai:ChatOpenAI` and set a custom `base_url`:
-
-   ```yaml
-   models:
-     - name: novita-deepseek-v3.2
-       display_name: Novita DeepSeek V3.2
-       use: langchain_openai:ChatOpenAI
-       model: deepseek/deepseek-v3.2
-       api_key: $NOVITA_API_KEY
-       base_url: https://api.novita.ai/openai
-       supports_thinking: true
-       when_thinking_enabled:
-         extra_body:
-           thinking:
-             type: enabled
-   ```
-
+  
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -96,7 +80,6 @@ Learn more and see **real demos** on our official website.
    ```bash
    TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   NOVITA_API_KEY=your-novita-api-key
    # Add other provider keys as needed
    ```
 
