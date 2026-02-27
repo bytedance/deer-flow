@@ -25,6 +25,23 @@ models:
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
 - Any LangChain-compatible provider
 
+For OpenAI-compatible gateways (for example Novita), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
+
+```yaml
+models:
+  - name: novita-deepseek-v3.2
+    display_name: Novita DeepSeek V3.2
+    use: langchain_openai:ChatOpenAI
+    model: deepseek/deepseek-v3.2
+    api_key: $NOVITA_API_KEY
+    base_url: https://api.novita.ai/openai
+    supports_thinking: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+```
+
 **Thinking Models**:
 Some models support "thinking" mode for complex reasoning:
 
@@ -169,6 +186,7 @@ models:
 - `OPENAI_API_KEY` - OpenAI API key
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `DEEPSEEK_API_KEY` - DeepSeek API key
+- `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 
