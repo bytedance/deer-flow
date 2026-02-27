@@ -69,6 +69,7 @@ Learn more and see **real demos** on our official website.
        temperature: 0.7                  # Sampling temperature
    ```
 
+  
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:

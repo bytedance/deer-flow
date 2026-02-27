@@ -23,6 +23,24 @@ models:
     temperature: 0.7
     supports_vision: true # Enable vision support for view_image tool
 
+  # Example: Novita AI (OpenAI-compatible)
+  # Novita provides an OpenAI-compatible API with competitive pricing
+  # See: https://novita.ai
+  - name: novita-deepseek-v3.2
+    display_name: Novita DeepSeek V3.2
+    use: langchain_openai:ChatOpenAI
+    model: deepseek/deepseek-v3.2
+    api_key: $NOVITA_API_KEY
+    base_url: https://api.novita.ai/openai
+    max_tokens: 4096
+    temperature: 0.7
+    supports_thinking: true
+    supports_vision: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
   #   display_name: Claude 3.5 Sonnet
