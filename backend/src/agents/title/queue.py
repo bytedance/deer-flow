@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
 from src.agents.title.updater import TitleGenerationTask, TitleGenerationUpdater
+
+logger = logging.getLogger(__name__)
 
 
 class TitleGenerationQueue:
@@ -25,7 +28,7 @@ class TitleGenerationQueue:
         try:
             self._updater.process(TitleGenerationTask(thread_id=thread_id, messages=messages))
         except Exception as e:
-            print(f"Async title worker failed for thread {thread_id}: {e}")
+            logger.error("Async title worker failed for thread %s: %s", thread_id, e)
         finally:
             with self._lock:
                 self._pending.discard(thread_id)

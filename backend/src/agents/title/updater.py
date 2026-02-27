@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import threading
 from concurrent.futures import TimeoutError
@@ -9,6 +10,8 @@ from typing import Any, Callable
 
 from src.config.title_config import TitleConfig, get_title_config
 from src.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 
@@ -52,9 +55,18 @@ class TitleGenerationUpdater:
             try:
                 return self._invoke_with_timeout(prompt=prompt, config=config)
             except TimeoutError:
-                print(f"Title generation timed out (attempt {attempt + 1}/{config.max_retries + 1})")
+                logger.warning(
+                    "Title generation timed out (attempt %s/%s)",
+                    attempt + 1,
+                    config.max_retries + 1,
+                )
             except Exception as e:
-                print(f"Title generation failed (attempt {attempt + 1}/{config.max_retries + 1}): {e}")
+                logger.warning(
+                    "Title generation failed (attempt %s/%s): %s",
+                    attempt + 1,
+                    config.max_retries + 1,
+                    e,
+                )
 
         return self._fallback_title(user_msg, config)
 
@@ -91,13 +103,17 @@ class TitleGenerationUpdater:
         try:
             client = self._create_client(self._langgraph_url)
             if client is None:
-                print("langgraph_sdk is not available, skipping async title write-back")
+                logger.warning("langgraph_sdk is not available, skipping async title write-back")
                 return
 
             state = client.threads.get_state(thread_id)
             current_title = self._normalize_existing_title(state)
             if current_title and current_title != "Untitled":
-                print(f"Skip title write-back for thread {thread_id}: title already set to '{current_title}'")
+                logger.info(
+                    "Skip title write-back for thread %s: title already set to '%s'",
+                    thread_id,
+                    current_title,
+                )
                 return
 
             client.threads.update_state(
@@ -106,9 +122,9 @@ class TitleGenerationUpdater:
                 checkpoint=state.get("checkpoint"),
                 as_node="title_middleware",
             )
-            print(f"Async title updated for thread {thread_id}: {title}")
+            logger.info("Async title updated for thread %s: %s", thread_id, title)
         except Exception as e:
-            print(f"Failed to write async title for thread {thread_id}: {e}")
+            logger.error("Failed to write async title for thread %s: %s", thread_id, e)
         finally:
             if client is not None and hasattr(client, "close"):
                 client.close()
