@@ -12,7 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { enUS, zhCN, type Locale } from "@/core/i18n";
+import { enUS, isLocale, zhCN, type Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -89,7 +89,11 @@ export function AppearanceSettingsPage() {
       >
         <Select
           value={locale}
-          onValueChange={(value) => changeLocale(value as Locale)}
+          onValueChange={(value) => {
+            if (isLocale(value)) {
+              changeLocale(value);
+            }
+          }}
         >
           <SelectTrigger className="w-[220px]">
             <SelectValue />
