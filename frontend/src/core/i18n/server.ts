@@ -1,9 +1,17 @@
 import { cookies } from "next/headers";
 
-export type Locale = "en-US" | "zh-CN";
+import { normalizeLocale, type Locale } from "./locale";
 
 export async function detectLocaleServer(): Promise<Locale> {
   const cookieStore = await cookies();
-  const locale = cookieStore.get("locale")?.value ?? "en-US";
-  return locale as Locale;
+  let locale = cookieStore.get("locale")?.value;
+  if (locale !== undefined) {
+    try {
+      locale = decodeURIComponent(locale);
+    } catch {
+      // Keep raw cookie value when decoding fails.
+    }
+  }
+
+  return normalizeLocale(locale);
 }
