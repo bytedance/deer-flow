@@ -13,7 +13,7 @@ help:
 	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
-	@echo "  make docker-start    - Start all services in Docker (localhost:2026)"
+	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
@@ -187,7 +187,12 @@ dev:
 	echo "✓ LangGraph server started on localhost:2024"; \
 	echo "Starting Gateway API..."; \
 	cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1 & \
-	sleep 2; \
+	sleep 3; \
+	if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		echo "✗ Gateway API failed to start. Last log output:"; \
+		tail -30 logs/gateway.log; \
+		cleanup; \
+	fi; \
 	echo "✓ Gateway API started on localhost:8001"; \
 	echo "Starting Frontend..."; \
 	cd frontend && pnpm run dev > ../logs/frontend.log 2>&1 & \

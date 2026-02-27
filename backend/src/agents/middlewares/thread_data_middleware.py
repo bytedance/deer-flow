@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -7,7 +5,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from src.agents.thread_state import ThreadDataState
-from src.sandbox.consts import THREAD_DATA_BASE_DIR
+from src.config.paths import Paths, get_paths
 
 
 class ThreadDataMiddlewareState(AgentState):
@@ -20,9 +18,9 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
     """Create thread data directories for each thread execution.
 
     Creates the following directory structure:
-    - backend/.deer-flow/threads/{thread_id}/user-data/workspace
-    - backend/.deer-flow/threads/{thread_id}/user-data/uploads
-    - backend/.deer-flow/threads/{thread_id}/user-data/outputs
+    - {base_dir}/threads/{thread_id}/user-data/workspace
+    - {base_dir}/threads/{thread_id}/user-data/uploads
+    - {base_dir}/threads/{thread_id}/user-data/outputs
 
     Lifecycle Management:
     - With lazy_init=True (default): Only compute paths, directories created on-demand
@@ -35,13 +33,13 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         """Initialize the middleware.
 
         Args:
-            base_dir: Base directory for thread data. Defaults to the current working directory.
+            base_dir: Base directory for thread data. Defaults to Paths resolution.
             lazy_init: If True, defer directory creation until needed.
                       If False, create directories eagerly in before_agent().
                       Default is True for optimal performance.
         """
         super().__init__()
-        self._base_dir = base_dir or os.getcwd()
+        self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
 
     def _get_thread_paths(self, thread_id: str) -> dict[str, str]:
@@ -53,11 +51,10 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with workspace_path, uploads_path, and outputs_path.
         """
-        thread_dir = Path(self._base_dir) / THREAD_DATA_BASE_DIR / thread_id / "user-data"
         return {
-            "workspace_path": str(thread_dir / "workspace"),
-            "uploads_path": str(thread_dir / "uploads"),
-            "outputs_path": str(thread_dir / "outputs"),
+            "workspace_path": str(self._paths.sandbox_work_dir(thread_id)),
+            "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id)),
+            "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id)),
         }
 
     def _create_thread_directories(self, thread_id: str) -> dict[str, str]:
@@ -69,10 +66,8 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with the created directory paths.
         """
-        paths = self._get_thread_paths(thread_id)
-        for path in paths.values():
-            os.makedirs(path, exist_ok=True)
-        return paths
+        self._paths.ensure_thread_dirs(thread_id)
+        return self._get_thread_paths(thread_id)
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:

@@ -6,11 +6,10 @@
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API (port 8001)
 #   - langgraph: LangGraph server (port 2024)
-#   - provisioner: Sandbox provisioner (creates Pods in host Kubernetes)
+#   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
-#   - Host machine must have a running Kubernetes cluster (Docker Desktop K8s,
-#     minikube, kind, etc.) with kubectl configured (~/.kube/config).
+#   - Kubernetes cluster + kubeconfig are only required when using provisioner mode.
 #
 # Access: http://localhost:2026
 
@@ -20,6 +19,8 @@ services:
   # cluster via the K8s API.
   # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
   provisioner:
+    profiles:
+      - provisioner
     build:
       context: ./provisioner
       dockerfile: Dockerfile
@@ -55,19 +56,21 @@ services:
       start_period: 15s
 
   # ── Reverse Proxy ──────────────────────────────────────────────────────
-  # Routes API traffic to gateway, langgraph, and provisioner services.
+  # Routes API traffic to gateway/langgraph and (optionally) provisioner.
+  # Select nginx config via NGINX_CONF:
+  # - nginx.local.conf (default): no provisioner route (local/aio modes)
+  # - nginx.conf: includes provisioner route (provisioner mode)
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
     ports:
       - "2026:2026"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
     depends_on:
       - frontend
       - gateway
       - langgraph
-      - provisioner
     networks:
       - deer-flow-dev
     restart: unless-stopped

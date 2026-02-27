@@ -15,6 +15,51 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
 
+detect_sandbox_mode() {
+    local config_file="$PROJECT_ROOT/config.yaml"
+    local sandbox_use=""
+    local provisioner_url=""
+
+    if [ ! -f "$config_file" ]; then
+        echo "local"
+        return
+    fi
+
+    sandbox_use=$(awk '
+        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
+        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
+        in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*use:[[:space:]]*/, "", line)
+            print line
+            exit
+        }
+    ' "$config_file")
+
+    provisioner_url=$(awk '
+        /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
+        in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
+        in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line)
+            print line
+            exit
+        }
+    ' "$config_file")
+
+    if [[ "$sandbox_use" == *"src.sandbox.local:LocalSandboxProvider"* ]]; then
+        echo "local"
+    elif [[ "$sandbox_use" == *"src.community.aio_sandbox:AioSandboxProvider"* ]]; then
+        if [ -n "$provisioner_url" ]; then
+            echo "provisioner"
+        else
+            echo "aio"
+        fi
+    else
+        echo "local"
+    fi
+}
+
 # Cleanup function for Ctrl+C
 cleanup() {
     echo ""
@@ -49,9 +94,28 @@ init() {
 
 # Start Docker development environment
 start() {
+    local sandbox_mode
+    local services
+
     echo "=========================================="
     echo "  Starting DeerFlow Docker Development"
     echo "=========================================="
+    echo ""
+
+    sandbox_mode="$(detect_sandbox_mode)"
+
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        services="frontend gateway langgraph provisioner nginx"
+    else
+        services="frontend gateway langgraph nginx"
+    fi
+
+    echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
+    if [ "$sandbox_mode" = "provisioner" ]; then
+        echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"
+    else
+        echo -e "${BLUE}Provisioner disabled (not required for this sandbox mode).${NC}"
+    fi
     echo ""
     
     # Set DEER_FLOW_ROOT for provisioner if not already set
@@ -62,7 +126,7 @@ start() {
     fi
     
     echo "Building and starting containers..."
-    cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans
+    cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
     echo "=========================================="
     echo "  DeerFlow Docker is starting!"
@@ -94,12 +158,16 @@ logs() {
             service="nginx"
             echo -e "${BLUE}Viewing nginx logs...${NC}"
             ;;
+        --provisioner)
+            service="provisioner"
+            echo -e "${BLUE}Viewing provisioner logs...${NC}"
+            ;;
         "")
             echo -e "${BLUE}Viewing all logs...${NC}"
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway]"
+            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
             exit 1
             ;;
     esac
@@ -138,40 +206,48 @@ help() {
     echo ""
     echo "Commands:"
     echo "  init          - Pull the sandbox image (speeds up first Pod startup)"
-    echo "  start         - Start all services in Docker (localhost:2026)"
+    echo "  start         - Start Docker services (auto-detects sandbox mode from config.yaml)"
     echo "  restart       - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
     echo "                  --frontend   View frontend logs only"
-    echo "                  --gateway   View gateway logs only"
+    echo "                  --gateway    View gateway logs only"
+    echo "                  --nginx      View nginx logs only"
+    echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"
     echo ""
 }
 
-# Main command dispatcher
-case "$1" in
-    init)
-        init
-        ;;
-    start)
-        start
-        ;;
-    restart)
-        restart
-        ;;
-    logs)
-        logs "$2"
-        ;;
-    stop)
-        stop
-        ;;
-    help|--help|-h|"")
-        help
-        ;;
-    *)
-        echo -e "${YELLOW}Unknown command: $1${NC}"
-        echo ""
-        help
-        exit 1
-        ;;
-esac
+main() {
+    # Main command dispatcher
+    case "$1" in
+        init)
+            init
+            ;;
+        start)
+            start
+            ;;
+        restart)
+            restart
+            ;;
+        logs)
+            logs "$2"
+            ;;
+        stop)
+            stop
+            ;;
+        help|--help|-h|"")
+            help
+            ;;
+        *)
+            echo -e "${YELLOW}Unknown command: $1${NC}"
+            echo ""
+            help
+            exit 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

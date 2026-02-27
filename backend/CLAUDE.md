@@ -11,6 +11,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Gateway API** (port 8001): REST API for models, MCP, skills, memory, artifacts, and uploads
 - **Frontend** (port 3000): Next.js web interface
 - **Nginx** (port 2026): Unified reverse proxy entry point
+- **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Project Structure**:
 ```
@@ -81,9 +82,16 @@ make stop       # Stop all services
 make install    # Install backend dependencies
 make dev        # Run LangGraph server only (port 2024)
 make gateway    # Run Gateway API only (port 8001)
+make test       # Run all backend tests
 make lint       # Lint with ruff
 make format     # Format code with ruff
 ```
+
+Regression tests related to Docker/provisioner behavior:
+- `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
+- `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+
+CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
 ## Architecture
 
@@ -284,6 +292,24 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 Both can be modified at runtime via Gateway API endpoints.
 
 ## Development Workflow
+
+### Test-Driven Development (TDD) — MANDATORY
+
+**Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
+
+- Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
+- Run the full suite before and after your change: `make test`
+- Tests must pass before a feature is considered complete
+- For lightweight config/utility modules, prefer pure unit tests with no external dependencies
+- If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `src.subagents.executor`)
+
+```bash
+# Run all tests
+make test
+
+# Run a specific test file
+PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
+```
 
 ### Running the Full Application
 
