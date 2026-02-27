@@ -50,3 +50,18 @@ export async function deleteAgent(name: string): Promise<void> {
   });
   if (!res.ok) throw new Error(`Failed to delete agent: ${res.statusText}`);
 }
+
+export async function checkAgentName(
+  name: string,
+): Promise<{ available: boolean; name: string }> {
+  const res = await fetch(
+    `${getBackendBaseURL()}/api/agents/check?name=${encodeURIComponent(name)}`,
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to check agent name: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<{ available: boolean; name: string }>;
+}

@@ -13,6 +13,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { useSidebar } from "@/components/ui/sidebar";
+import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import {
   ArtifactFileDetail,
   ArtifactFileList,
@@ -172,9 +173,7 @@ export default function AgentChatPage() {
     },
     afterSubmit() {
       // Navigate to the permanent thread URL under the agent route
-      router.push(
-        `/workspace/agents/${agent_name}/chats/${threadId!}`,
-      );
+      router.push(`/workspace/agents/${agent_name}/chats/${threadId!}`);
     },
   });
 
@@ -259,15 +258,6 @@ export default function AgentChatPage() {
                       : "max-w-(--container-width-md)",
                   )}
                 >
-                  {/* Agent description shown when starting a new thread */}
-                  {isNewThread && agent?.description && (
-                    <div className="mb-4 text-center">
-                      <p className="text-muted-foreground text-sm">
-                        {agent.description}
-                      </p>
-                    </div>
-                  )}
-
                   <div className="absolute -top-4 right-0 left-0 z-0">
                     <div className="absolute right-0 bottom-0 left-0">
                       <TodoList
@@ -291,6 +281,11 @@ export default function AgentChatPage() {
                     autoFocus={isNewThread}
                     status={thread.isLoading ? "streaming" : "ready"}
                     context={settings.context}
+                    extraHeader={
+                      isNewThread && (
+                        <AgentWelcome agent={agent} agentName={agent_name} />
+                      )
+                    }
                     disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
                     onContextChange={(context) =>
                       setSettings("context", context)

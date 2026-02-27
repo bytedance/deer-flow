@@ -10,16 +10,7 @@ from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
-AGENT_NAME_PATTERN = r"^[a-z0-9-]+$"
-
 SOUL_FILENAME = "SOUL.md"
-
-DEFAULT_USER_MD = """\
-# User Profile
-
-This user is exploring DeerFlow's custom AI agents. \
-Please be helpful, clear, and focused on their goals.\
-"""
 
 
 class AgentConfig(BaseModel):
@@ -70,40 +61,24 @@ def load_agent_config(name: str) -> AgentConfig:
     return AgentConfig(**data)
 
 
-def load_agent_soul(agent_config: AgentConfig) -> str | None:
+def load_agent_soul(agent_name: str | None) -> str | None:
     """Read the SOUL.md file for a custom agent, if it exists.
 
     SOUL.md defines the agent's personality, values, and behavioral guardrails.
     It is injected into the lead agent's system prompt as additional context.
 
     Args:
-        agent_config: The agent's configuration.
+        agent_name: The name of the agent or None for the default agent.
 
     Returns:
         The SOUL.md content as a string, or None if the file does not exist.
     """
-    soul_path = get_paths().agent_dir(agent_config.name) / SOUL_FILENAME
+    agent_dir = get_paths().agent_dir(agent_name) if agent_name else get_paths().base_dir
+    soul_path = agent_dir / SOUL_FILENAME
     if not soul_path.exists():
         return None
     content = soul_path.read_text(encoding="utf-8").strip()
     return content or None
-
-
-def load_user_md() -> str:
-    """Read the global USER.md file, returning a default if it does not exist.
-
-    USER.md describes the user's preferences, environment, and working style.
-    It is injected into the lead agent's system prompt for all agents.
-
-    Returns:
-        The USER.md content as a string. Falls back to DEFAULT_USER_MD if the
-        file is missing or empty.
-    """
-    user_md_path = get_paths().user_md_file
-    if not user_md_path.exists():
-        return DEFAULT_USER_MD
-    content = user_md_path.read_text(encoding="utf-8").strip()
-    return content or DEFAULT_USER_MD
 
 
 def list_custom_agents() -> list[AgentConfig]:

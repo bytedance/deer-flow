@@ -1,5 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
-import type { UseStream } from "@langchain/langgraph-sdk/react";
+import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import {
   Conversation,
@@ -34,13 +33,11 @@ export function MessageList({
   className,
   threadId,
   thread,
-  messages,
   paddingBottom = 160,
 }: {
   className?: string;
   threadId: string;
-  thread: UseStream<AgentThreadState>;
-  messages: Message[];
+  thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
@@ -54,7 +51,7 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
-        {groupMessages(messages, (group) => {
+        {groupMessages(thread.messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return (
               <MessageListItem

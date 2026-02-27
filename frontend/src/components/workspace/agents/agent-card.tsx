@@ -26,7 +26,6 @@ import {
 import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
-import { uuid } from "@/core/utils/uuid";
 
 import { AgentFormDialog } from "./agent-form-dialog";
 
@@ -42,8 +41,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   function handleChat() {
-    const threadId = uuid();
-    router.push(`/workspace/agents/${agent.name}/chats/${threadId}`);
+    router.push(`/workspace/agents/${agent.name}/chats/new`);
   }
 
   async function handleDelete() {
@@ -85,7 +83,7 @@ export function AgentCard({ agent }: AgentCardProps) {
         </CardHeader>
 
         {agent.tool_groups && agent.tool_groups.length > 0 && (
-          <CardContent className="pb-3 pt-0">
+          <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups.map((group) => (
                 <Badge key={group} variant="outline" className="text-xs">
@@ -97,11 +95,7 @@ export function AgentCard({ agent }: AgentCardProps) {
         )}
 
         <CardFooter className="mt-auto flex items-center justify-between gap-2 pt-3">
-          <Button
-            size="sm"
-            className="flex-1"
-            onClick={handleChat}
-          >
+          <Button size="sm" className="flex-1" onClick={handleChat}>
             <MessageSquareIcon className="mr-1.5 h-3.5 w-3.5" />
             {t.agents.chat}
           </Button>

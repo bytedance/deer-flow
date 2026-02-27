@@ -19,16 +19,16 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ArtifactsProvider } from "@/components/workspace/artifacts";
+import { MessageList } from "@/components/workspace/messages";
+import { ThreadContext } from "@/components/workspace/messages/context";
+import { checkAgentName } from "@/core/agents/api";
 import { getAPIClient } from "@/core/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { extractTextFromMessage } from "@/core/messages/utils";
+import type { AgentThreadState } from "@/core/threads";
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
-
-interface AgentCreatorState extends Record<string, unknown> {
-  messages: Message[];
-  created_agent_name: string | null;
-}
 
 // Messages that carry tool_calls but may or may not have text
 interface AIMessageRaw {
@@ -38,7 +38,7 @@ interface AIMessageRaw {
 
 type Step = "name" | "chat";
 
-const NAME_RE = /^[a-z0-9-]+$/;
+const NAME_RE = /^[A-Za-z0-9-]+$/;
 
 function BotAvatar() {
   return (
@@ -49,13 +49,14 @@ function BotAvatar() {
 }
 
 export default function NewAgentPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const router = useRouter();
 
   // ── Step 1: name form ──────────────────────────────────────────────────────
   const [step, setStep] = useState<Step>("name");
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
+  const [isCheckingName, setIsCheckingName] = useState(false);
   const [agentName, setAgentName] = useState("");
 
   // ── Step 2: chat ───────────────────────────────────────────────────────────
@@ -64,19 +65,16 @@ export default function NewAgentPage() {
   // Stable thread ID — all turns belong to the same thread
   const threadId = useMemo(() => uuid(), []);
 
-  const thread = useStream<AgentCreatorState>({
+  const thread = useStream<AgentThreadState>({
     client: getAPIClient(),
-    assistantId: "agent_creator",
-    fetchStateHistory: false,
+    assistantId: "lead_agent",
+    fetchStateHistory: true,
     reconnectOnMount: false,
   });
-
-  const createdAgentName = thread.values?.created_agent_name ?? null;
 
   // True when the AI has emitted a create_custom_agent tool call but the
   // result hasn't arrived yet (or just arrived — until createdAgentName is set).
   const isCreating = useMemo(() => {
-    if (createdAgentName) return false;
     return (thread.messages ?? []).some((msg) => {
       const raw = msg as AIMessageRaw;
       return (
@@ -85,7 +83,7 @@ export default function NewAgentPage() {
         raw.tool_calls.some((tc) => tc.name === "create_custom_agent")
       );
     });
-  }, [thread.messages, createdAgentName]);
+  }, [thread.messages]);
 
   // Human + AI-text messages only; first human message (the auto-submitted
   // agent-name bootstrap) is hidden since the mocked opening covers it.
@@ -108,7 +106,7 @@ export default function NewAgentPage() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [displayMessages, thread.isLoading, isCreating, createdAgentName]);
+  }, [displayMessages, thread.isLoading, isCreating]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -120,6 +118,19 @@ export default function NewAgentPage() {
       return;
     }
     setNameError("");
+    setIsCheckingName(true);
+    try {
+      const result = await checkAgentName(trimmed);
+      if (!result.available) {
+        setNameError(t.agents.nameStepAlreadyExistsError);
+        return;
+      }
+    } catch {
+      setNameError(t.agents.nameStepCheckError);
+      return;
+    } finally {
+      setIsCheckingName(false);
+    }
     setAgentName(trimmed);
     setStep("chat");
     await thread.submit(
@@ -127,15 +138,36 @@ export default function NewAgentPage() {
         messages: [
           {
             type: "human",
-            content: [
-              { type: "text", text: `I want to create an agent named "${trimmed}".` },
-            ],
+            content: `The agent name is ${trimmed}. Let's bootstrap it's **SOUL** with the \`bootstrap\` SKILL.`,
           },
         ],
       },
-      { threadId, streamMode: ["values", "messages-tuple"] },
+      {
+        threadId,
+        streamMode: ["values", "messages-tuple", "custom"],
+        config: {
+          recursion_limit: 1000,
+        },
+        context: {
+          thread_id: threadId,
+          locale,
+          agent_name: trimmed,
+          is_bootstrap: true,
+          thinking_enabled: true,
+          is_plan_mode: false,
+          subagent_enabled: false,
+        },
+      },
     );
-  }, [nameInput, thread, threadId, t.agents.nameStepInvalidError]);
+  }, [
+    nameInput,
+    thread,
+    threadId,
+    locale,
+    t.agents.nameStepInvalidError,
+    t.agents.nameStepAlreadyExistsError,
+    t.agents.nameStepCheckError,
+  ]);
 
   const handleNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -144,16 +176,36 @@ export default function NewAgentPage() {
     }
   };
 
-  const handleChatSubmit = useCallback(async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || thread.isLoading) return;
-    await thread.submit(
-      {
-        messages: [{ type: "human", content: [{ type: "text", text: trimmed }] }],
-      },
-      { threadId, streamMode: ["values", "messages-tuple"] },
-    );
-  }, [thread, threadId]);
+  const handleChatSubmit = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || thread.isLoading) return;
+      await thread.submit(
+        {
+          messages: [{ type: "human", content: trimmed }],
+        },
+        {
+          threadId,
+          streamSubgraphs: true,
+          streamResumable: true,
+          streamMode: ["values", "messages-tuple", "custom"],
+          config: {
+            recursion_limit: 1000,
+          },
+          context: {
+            thread_id: threadId,
+            locale,
+            agent_name: agentName,
+            is_bootstrap: true,
+            thinking_enabled: true,
+            is_plan_mode: false,
+            subagent_enabled: false,
+          },
+        },
+      );
+    },
+    [thread, threadId, locale, agentName],
+  );
 
   // ── Shared header ──────────────────────────────────────────────────────────
 
@@ -183,8 +235,12 @@ export default function NewAgentPage() {
                 <BotIcon className="text-primary h-7 w-7" />
               </div>
               <div className="space-y-1">
-                <h2 className="text-xl font-semibold">{t.agents.nameStepTitle}</h2>
-                <p className="text-muted-foreground text-sm">{t.agents.nameStepHint}</p>
+                <h2 className="text-xl font-semibold">
+                  {t.agents.nameStepTitle}
+                </h2>
+                <p className="text-muted-foreground text-sm">
+                  {t.agents.nameStepHint}
+                </p>
               </div>
             </div>
 
@@ -194,7 +250,7 @@ export default function NewAgentPage() {
                 placeholder={t.agents.nameStepPlaceholder}
                 value={nameInput}
                 onChange={(e) => {
-                  setNameInput(e.target.value.toLowerCase());
+                  setNameInput(e.target.value);
                   setNameError("");
                 }}
                 onKeyDown={handleNameKeyDown}
@@ -206,7 +262,7 @@ export default function NewAgentPage() {
               <Button
                 className="w-full"
                 onClick={() => void handleConfirmName()}
-                disabled={!nameInput.trim()}
+                disabled={!nameInput.trim() || isCheckingName}
               >
                 {t.agents.nameStepContinue}
               </Button>
@@ -220,113 +276,85 @@ export default function NewAgentPage() {
   // ── Step 2: chat ───────────────────────────────────────────────────────────
 
   return (
-    <div className="flex size-full flex-col">
-      {header}
+    <ThreadContext.Provider value={{ thread }}>
+      <ArtifactsProvider>
+        <div className="flex size-full flex-col">
+          {header}
 
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-6">
-          {/* Mocked AI opening — shown immediately, never sent to backend */}
-          <div className="flex items-start gap-3">
-            <BotAvatar />
-            <div className="bg-muted max-w-[85%] rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm whitespace-pre-wrap">
-              {t.agents.chatOpening.replace("{name}", agentName)}
-            </div>
-          </div>
-
-          {/* Streamed messages (first human bootstrap message is hidden) */}
-          {displayMessages.map((msg) => {
-            const isHuman = msg.type === "human";
-            const text = extractTextFromMessage(msg);
-            return (
-              <div
-                key={msg.id}
-                className={cn(
-                  "flex items-start gap-3",
-                  isHuman && "flex-row-reverse",
-                )}
-              >
-                {!isHuman && <BotAvatar />}
-                <div
-                  className={cn(
-                    "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap",
-                    isHuman
-                      ? "bg-primary text-primary-foreground rounded-tr-sm"
-                      : "bg-muted rounded-tl-sm",
-                  )}
-                >
-                  {text}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* Typing indicator */}
-          {showTypingIndicator && (
-            <div className="flex items-start gap-3">
-              <BotAvatar />
-              <div className="bg-muted rounded-2xl rounded-tl-sm px-4 py-3">
-                <div className="flex gap-1">
-                  <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:0ms]" />
-                  <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:150ms]" />
-                  <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:300ms]" />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── Bottom action area ── */}
-
-          {createdAgentName ? (
-            // ✅ Inline success card
-            <div className="flex flex-col items-center gap-4 rounded-2xl border py-10 text-center">
-              <CheckCircleIcon className="text-primary h-10 w-10" />
-              <div className="space-y-1">
-                <p className="font-semibold">{t.agents.agentCreated}</p>
-                <p className="text-muted-foreground font-mono text-sm">
-                  {createdAgentName}
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={() =>
-                    router.push(`/workspace/agents/${createdAgentName}/chats/new`)
-                  }
-                >
-                  {t.agents.startChatting}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => router.push("/workspace/agents")}
-                >
-                  {t.agents.backToGallery}
-                </Button>
-              </div>
-            </div>
-          ) : isCreating ? (
-            // ⏳ Tool in flight — spinner
-            <div className="text-muted-foreground flex items-center gap-2 py-2">
-              <Loader2Icon className="h-4 w-4 animate-spin" />
-              <span className="text-sm">{t.agents.creating}</span>
-            </div>
-          ) : (
-            // 📝 Normal input
-            <PromptInput
-              onSubmit={({ text }) => void handleChatSubmit(text)}
-            >
-              <PromptInputTextarea
-                autoFocus
-                placeholder={t.agents.createPageSubtitle}
-                disabled={thread.isLoading}
+          <main className="min-h-0 flex-1 overflow-y-auto">
+            <div className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-6">
+              <MessageList
+                className={cn("size-full", "pt-10")}
+                threadId={threadId}
+                thread={thread}
               />
-              <PromptInputFooter className="justify-end">
-                <PromptInputSubmit disabled={thread.isLoading} />
-              </PromptInputFooter>
-            </PromptInput>
-          )}
 
-          <div ref={bottomRef} />
+              {/* Typing indicator */}
+              {showTypingIndicator && (
+                <div className="flex items-start gap-3">
+                  <BotAvatar />
+                  <div className="bg-muted rounded-2xl rounded-tl-sm px-4 py-3">
+                    <div className="flex gap-1">
+                      <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:0ms]" />
+                      <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:150ms]" />
+                      <span className="bg-muted-foreground/50 h-2 w-2 animate-bounce rounded-full [animation-delay:300ms]" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Bottom action area ── */}
+
+              {isCreating && !thread.isLoading ? (
+                // ✅ Inline success card
+                <div className="flex flex-col items-center gap-4 rounded-2xl border py-10 text-center">
+                  <CheckCircleIcon className="text-primary h-10 w-10" />
+                  <div className="space-y-1">
+                    <p className="font-semibold">{t.agents.agentCreated}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() =>
+                        router.push(`/workspace/agents/${agentName}/chats/new`)
+                      }
+                    >
+                      {t.agents.startChatting}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => router.push("/workspace/agents")}
+                    >
+                      {t.agents.backToGallery}
+                    </Button>
+                  </div>
+                </div>
+              ) : isCreating ? (
+                // ⏳ Tool in flight — spinner
+                <div className="text-muted-foreground flex items-center gap-2 py-2">
+                  <Loader2Icon className="h-4 w-4 animate-spin" />
+                  <span className="text-sm">{t.agents.creating}</span>
+                </div>
+              ) : (
+                // 📝 Normal input
+                <PromptInput
+                  onSubmit={({ text }) => void handleChatSubmit(text)}
+                >
+                  <PromptInputTextarea
+                    autoFocus
+                    placeholder={t.agents.createPageSubtitle}
+                    disabled={thread.isLoading}
+                  />
+                  <PromptInputFooter className="justify-end">
+                    <PromptInputSubmit disabled={thread.isLoading} />
+                  </PromptInputFooter>
+                </PromptInput>
+              )}
+
+              <div ref={bottomRef} />
+            </div>
+          </main>
         </div>
-      </main>
-    </div>
+      </ArtifactsProvider>
+    </ThreadContext.Provider>
   );
 }

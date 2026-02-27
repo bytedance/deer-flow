@@ -176,25 +176,34 @@ export const enUS: Translations = {
     toolGroupsAll: "All tools",
     name: "Name",
     namePlaceholder: "my-agent",
-    nameHint: "Lowercase letters, digits, and hyphens only (e.g. code-reviewer)",
+    nameHint:
+      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
     descriptionLabel: "Description",
     descriptionPlaceholder: "What does this agent specialize in?",
     soul: "Soul (SOUL.md)",
-    soulPlaceholder: "Describe the agent's personality, values, and behavioral guardrails...",
-    soulHint: "Injected alongside the lead agent's system prompt. Defines who this agent is.",
+    soulPlaceholder:
+      "Describe the agent's personality, values, and behavioral guardrails...",
+    soulHint:
+      "Injected alongside the lead agent's system prompt. Defines who this agent is.",
     createTitle: "Create Agent",
     editTitle: "Edit Agent",
     createSuccess: "Agent created successfully",
     updateSuccess: "Agent updated successfully",
     deleteSuccess: "Agent deleted",
     createPageTitle: "Design your Agent",
-    createPageSubtitle: "Describe the agent you want — I'll help you create it through conversation.",
+    createPageSubtitle:
+      "Describe the agent you want — I'll help you create it through conversation.",
     nameStepTitle: "Name your new Agent",
-    nameStepHint: "Lowercase letters, numbers, and hyphens only (e.g. code-reviewer)",
+    nameStepHint:
+      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
     nameStepPlaceholder: "e.g. code-reviewer",
     nameStepContinue: "Continue",
-    nameStepInvalidError: "Invalid name — use only lowercase letters, numbers, and hyphens",
-    chatOpening: "Now tell me what \"{name}\" should do — describe its purpose, personality, and any areas it specializes in.",
+    nameStepInvalidError:
+      "Invalid name — use only letters, digits, and hyphens",
+    nameStepAlreadyExistsError: "An agent with this name already exists",
+    nameStepCheckError: "Could not verify name availability — please try again",
+    chatOpening:
+      'Now tell me what "{name}" should do — describe its purpose, personality, and any areas it specializes in.',
     creating: "Creating your agent…",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",

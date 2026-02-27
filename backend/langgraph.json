@@ -5,7 +5,6 @@
   ],
   "env": ".env",
   "graphs": {
-    "lead_agent": "src.agents:make_lead_agent",
-    "agent_creator": "src.agents.agent_creator:make_agent_creator"
+    "lead_agent": "src.agents:make_lead_agent"
   }
 }

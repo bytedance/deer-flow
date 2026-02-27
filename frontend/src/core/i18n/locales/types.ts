@@ -139,6 +139,8 @@ export interface Translations {
     nameStepPlaceholder: string;
     nameStepContinue: string;
     nameStepInvalidError: string;
+    nameStepAlreadyExistsError: string;
+    nameStepCheckError: string;
     chatOpening: string;
     creating: string;
     agentCreated: string;

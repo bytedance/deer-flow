@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from src.config.agents_config import load_agent_soul
 from src.skills import load_skills
 
 
@@ -151,6 +152,7 @@ SYSTEM_PROMPT_TEMPLATE = """
 You are DeerFlow 2.0, an open-source super agent.
 </role>
 
+{soul}
 {memory_context}
 
 <thinking_style>
@@ -312,7 +314,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         return ""
 
 
-def get_skills_prompt_section() -> str:
+def get_skills_prompt_section(available_skills: set[str] | None = None) -> str:
     """Generate the skills prompt section with available skills list.
 
     Returns the <skill_system>...</skill_system> block listing all enabled skills,
@@ -330,6 +332,9 @@ def get_skills_prompt_section() -> str:
 
     if not skills:
         return ""
+
+    if available_skills is not None:
+        skills = [skill for skill in skills if skill.name in available_skills]
 
     skill_items = "\n".join(
         f"    <skill>\n        <name>{skill.name}</name>\n        <description>{skill.description}</description>\n        <location>{skill.get_container_file_path(container_base_path)}</location>\n    </skill>" for skill in skills
@@ -353,7 +358,15 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, agent_name: str | None = None) -> str:
+def get_agent_soul(agent_name: str | None) -> str:
+    # Append SOUL.md (agent personality) if present
+    soul = load_agent_soul(agent_name)
+    if soul:
+        return f"<soul>\n{soul}\n</soul>\n" if soul else ""
+    return ""
+
+
+def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
 
@@ -380,10 +393,11 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     )
 
     # Get skills section
-    skills_section = get_skills_prompt_section()
+    skills_section = get_skills_prompt_section(available_skills)
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        soul=get_agent_soul(agent_name),
         skills_section=skills_section,
         memory_context=memory_context,
         subagent_section=subagent_section,

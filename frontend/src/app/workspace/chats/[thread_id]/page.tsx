@@ -32,10 +32,7 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
 import { type AgentThreadState } from "@/core/threads";
 import { useSubmitThread, useThreadStream } from "@/core/threads/hooks";
-import {
-  pathOfThread,
-  textOfMessage,
-} from "@/core/threads/utils";
+import { pathOfThread, textOfMessage } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -66,7 +63,10 @@ export default function ChatPage() {
   const setInputRef = useRef(promptInputController.textInput.setInput);
   setInputRef.current = promptInputController.textInput.setInput;
   useEffect(() => {
-    if (inputInitialValue && inputInitialValue !== lastInitialValueRef.current) {
+    if (
+      inputInitialValue &&
+      inputInitialValue !== lastInitialValueRef.current
+    ) {
       lastInitialValueRef.current = inputInitialValue;
       setTimeout(() => {
         setInputRef.current(inputInitialValue);
@@ -128,7 +128,9 @@ export default function ChatPage() {
       ? t.pages.newChat
       : thread.isThreadLoading
         ? "Loading..."
-        : title === "Untitled" ? t.pages.untitled : title;
+        : title === "Untitled"
+          ? t.pages.untitled
+          : title;
     document.title = `${pageTitle} - ${t.pages.appName}`;
   }, [
     isNewThread,
@@ -192,7 +194,7 @@ export default function ChatPage() {
   }
 
   return (
-    <ThreadContext.Provider value={{ threadId, thread }}>
+    <ThreadContext.Provider value={{ thread }}>
       <ResizablePanelGroup orientation="horizontal">
         <ResizablePanel
           className="relative"
@@ -237,10 +239,7 @@ export default function ChatPage() {
                   className={cn("size-full", !isNewThread && "pt-10")}
                   threadId={threadId}
                   thread={thread}
-                  messages={
-                    (finalState?.messages as Message[])
-                      ?? thread.messages
-                  }
+                  messages={thread.messages}
                   paddingBottom={todoListCollapsed ? 160 : 280}
                 />
               </div>

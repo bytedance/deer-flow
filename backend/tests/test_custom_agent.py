@@ -227,43 +227,7 @@ class TestLoadAgentSoul:
 
 
 # ===========================================================================
-# 5. load_user_md
-# ===========================================================================
-
-
-class TestLoadUserMd:
-    def test_returns_default_when_missing(self, tmp_path):
-        with patch("src.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
-            from src.config.agents_config import DEFAULT_USER_MD, load_user_md
-
-            result = load_user_md()
-
-        assert result == DEFAULT_USER_MD
-        assert "User Profile" in result
-
-    def test_reads_user_md(self, tmp_path):
-        (tmp_path / "USER.md").write_text("# User Profile\n\nI am a developer.", encoding="utf-8")
-
-        with patch("src.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
-            from src.config.agents_config import load_user_md
-
-            content = load_user_md()
-
-        assert content == "# User Profile\n\nI am a developer."
-
-    def test_empty_user_md_returns_default(self, tmp_path):
-        (tmp_path / "USER.md").write_text("   \n", encoding="utf-8")
-
-        with patch("src.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
-            from src.config.agents_config import DEFAULT_USER_MD, load_user_md
-
-            result = load_user_md()
-
-        assert result == DEFAULT_USER_MD
-
-
-# ===========================================================================
-# 6. list_custom_agents
+# 5. list_custom_agents
 # ===========================================================================
 
 

@@ -14,7 +14,7 @@ from src.config.paths import get_paths
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
-AGENT_NAME_PATTERN = re.compile(r"^[a-z0-9-]+$")
+AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentResponse(BaseModel):
@@ -36,7 +36,7 @@ class AgentsListResponse(BaseModel):
 class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
-    name: str = Field(..., description="Agent name (must match ^[a-z0-9-]+$)")
+    name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -64,8 +64,13 @@ def _validate_agent_name(name: str) -> None:
     if not AGENT_NAME_PATTERN.match(name):
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid agent name '{name}'. Must match ^[a-z0-9-]+$ (lowercase letters, digits, and hyphens only).",
+            detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
         )
+
+
+def _normalize_agent_name(name: str) -> str:
+    """Normalize agent name to lowercase for filesystem storage."""
+    return name.lower()
 
 
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False) -> AgentResponse:
@@ -104,6 +109,29 @@ async def list_agents() -> AgentsListResponse:
 
 
 @router.get(
+    "/agents/check",
+    summary="Check Agent Name",
+    description="Validate an agent name and check if it is available (case-insensitive).",
+)
+async def check_agent_name(name: str) -> dict:
+    """Check whether an agent name is valid and not yet taken.
+
+    Args:
+        name: The agent name to check.
+
+    Returns:
+        ``{"available": true/false, "name": "<normalized>"}``
+
+    Raises:
+        HTTPException: 422 if the name is invalid.
+    """
+    _validate_agent_name(name)
+    normalized = _normalize_agent_name(name)
+    available = not get_paths().agent_dir(normalized).exists()
+    return {"available": available, "name": normalized}
+
+
+@router.get(
     "/agents/{name}",
     response_model=AgentResponse,
     summary="Get Custom Agent",
@@ -122,6 +150,7 @@ async def get_agent(name: str) -> AgentResponse:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
+    name = _normalize_agent_name(name)
 
     try:
         agent_cfg = load_agent_config(name)
@@ -153,17 +182,18 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
     _validate_agent_name(request.name)
+    normalized_name = _normalize_agent_name(request.name)
 
-    agent_dir = get_paths().agent_dir(request.name)
+    agent_dir = get_paths().agent_dir(normalized_name)
 
     if agent_dir.exists():
-        raise HTTPException(status_code=409, detail=f"Agent '{request.name}' already exists")
+        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
 
     try:
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         # Write config.yaml
-        config_data: dict = {"name": request.name}
+        config_data: dict = {"name": normalized_name}
         if request.description:
             config_data["description"] = request.description
         if request.model is not None:
@@ -179,9 +209,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         soul_file = agent_dir / "SOUL.md"
         soul_file.write_text(request.soul, encoding="utf-8")
 
-        logger.info(f"Created agent '{request.name}' at {agent_dir}")
+        logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
 
-        agent_cfg = load_agent_config(request.name)
+        agent_cfg = load_agent_config(normalized_name)
         return _agent_config_to_response(agent_cfg, include_soul=True)
 
     except HTTPException:
@@ -214,6 +244,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
+    name = _normalize_agent_name(name)
 
     try:
         agent_cfg = load_agent_config(name)
@@ -337,6 +368,7 @@ async def delete_agent(name: str) -> None:
         HTTPException: 404 if agent not found.
     """
     _validate_agent_name(name)
+    name = _normalize_agent_name(name)
 
     agent_dir = get_paths().agent_dir(name)
 

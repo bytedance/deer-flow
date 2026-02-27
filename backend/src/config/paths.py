@@ -70,7 +70,7 @@ class Paths:
 
     def agent_dir(self, name: str) -> Path:
         """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
-        return self.agents_dir / name
+        return self.agents_dir / name.lower()
 
     def agent_memory_file(self, name: str) -> Path:
         """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
@@ -88,10 +88,7 @@ class Paths:
                         or `..`) that could cause directory traversal.
         """
         if not _SAFE_THREAD_ID_RE.match(thread_id):
-            raise ValueError(
-                f"Invalid thread_id {thread_id!r}: only alphanumeric characters, "
-                "hyphens, and underscores are allowed."
-            )
+            raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
         return self.base_dir / "threads" / thread_id
 
     def sandbox_work_dir(self, thread_id: str) -> Path:

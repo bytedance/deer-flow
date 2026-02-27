@@ -1,11 +1,10 @@
-import { type BaseMessage } from "@langchain/core/messages";
-import type { Thread } from "@langchain/langgraph-sdk";
+import type { Message, Thread } from "@langchain/langgraph-sdk";
 
 import type { Todo } from "../todos";
 
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
-  messages: BaseMessage[];
+  messages: Message[];
   artifacts: string[];
   todos?: Todo[];
 }

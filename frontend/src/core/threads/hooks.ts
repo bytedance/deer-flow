@@ -1,4 +1,3 @@
-import type { HumanMessage } from "@langchain/core/messages";
 import type { AIMessage } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream, type UseStream } from "@langchain/langgraph-sdk/react";
@@ -163,7 +162,7 @@ export function useSubmitThread({
                 },
               ],
             },
-          ] as HumanMessage[],
+          ],
         },
         {
           threadId: isNewThread ? threadId! : undefined,
@@ -197,9 +196,12 @@ export function useThreads(
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params],
+    queryKey: ["threads", "search", "lead_agent", params],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>(params);
+      const response = await apiClient.threads.search<AgentThreadState>({
+        ...params,
+        metadata: { graph_id: "lead_agent" },
+      });
       return response as AgentThread[];
     },
     refetchOnWindowFocus: false,
@@ -216,7 +218,7 @@ export function useDeleteThread() {
     onSuccess(_, { threadId }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: ["threads", "search", "lead_agent"],
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
@@ -245,7 +247,7 @@ export function useRenameThread() {
     onSuccess(_, { threadId, title }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: ["threads", "search", "lead_agent"],
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
