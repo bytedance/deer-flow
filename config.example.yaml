@@ -253,6 +253,8 @@ title:
   max_words: 6
   max_chars: 60
   model_name: null # Use default model (first model in models list)
+  timeout_seconds: 3.0
+  max_retries: 1
 
 # ============================================================================
 # Summarization Configuration
