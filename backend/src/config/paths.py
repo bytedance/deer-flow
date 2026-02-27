@@ -15,6 +15,12 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
+        ├── USER.md          <-- global user profile (injected into all agents)
+        ├── agents/
+        │   └── {agent_name}/
+        │       ├── config.yaml
+        │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
+        │       └── memory.json
         └── threads/
             └── {thread_id}/
                 └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
@@ -51,6 +57,24 @@ class Paths:
     def memory_file(self) -> Path:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
+
+    @property
+    def user_md_file(self) -> Path:
+        """Path to the global user profile file: `{base_dir}/USER.md`."""
+        return self.base_dir / "USER.md"
+
+    @property
+    def agents_dir(self) -> Path:
+        """Root directory for all custom agents: `{base_dir}/agents/`."""
+        return self.base_dir / "agents"
+
+    def agent_dir(self, name: str) -> Path:
+        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
+        return self.agents_dir / name
+
+    def agent_memory_file(self, name: str) -> Path:
+        """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
+        return self.agent_dir(name) / "memory.json"
 
     def thread_dir(self, thread_id: str) -> Path:
         """

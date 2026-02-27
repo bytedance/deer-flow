@@ -14,6 +14,7 @@ from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
+from src.config.agents_config import load_agent_config, load_agent_soul, load_user_md
 from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
@@ -27,9 +28,7 @@ def _resolve_model_name(requested_model_name: str | None) -> str:
     app_config = get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
     if default_model_name is None:
-        raise ValueError(
-            "No chat models are configured. Please configure at least one model in config.yaml."
-        )
+        raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
 
     if requested_model_name and app_config.get_model_config(requested_model_name):
         return requested_model_name
@@ -205,11 +204,12 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None):
+def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
+        agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
 
     Returns:
         List of middleware instances.
@@ -231,7 +231,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None):
     middlewares.append(TitleMiddleware())
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware())
+    middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -260,10 +260,7 @@ def make_lead_agent(config: RunnableConfig):
     requested_model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
     model_name = _resolve_model_name(requested_model_name)
     if model_name is None:
-        raise ValueError(
-            "No chat model could be resolved. Please configure at least one model in "
-            "config.yaml or provide a valid 'model_name'/'model' in the request."
-        )
+        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
@@ -283,6 +280,8 @@ def make_lead_agent(config: RunnableConfig):
         subagent_enabled,
         max_concurrent_subagents,
     )
+    agent_name = config.get("configurable", {}).get("agent_name")
+    print(f"Agent({agent_name or 'default'}) -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
 
     # Inject run metadata for LangSmith trace tagging
     if "metadata" not in config:
@@ -297,6 +296,37 @@ def make_lead_agent(config: RunnableConfig):
         }
     )
 
+    if agent_name:
+        # Custom agent mode: reuse the full lead agent prompt, then inject SOUL.md + USER.md
+        agent_cfg = load_agent_config(agent_name)
+
+        # Resolve effective model: configurable > agent config > default
+        effective_model_name = model_name or agent_cfg.model
+
+        # Base prompt: standard lead agent (all capabilities intact)
+        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name)
+
+        # Append SOUL.md (agent personality) if present
+        soul = load_agent_soul(agent_cfg)
+        if soul:
+            system_prompt += f"\n\n<soul>\n{soul}\n</soul>"
+
+        # Append USER.md (global user profile) if present
+        user_md = load_user_md()
+        if user_md:
+            system_prompt += f"\n\n<user_profile>\n{user_md}\n</user_profile>"
+
+        tool_groups = agent_cfg.tool_groups
+
+        return create_agent(
+            model=create_chat_model(name=effective_model_name, thinking_enabled=thinking_enabled),
+            tools=get_available_tools(groups=tool_groups, model_name=effective_model_name, subagent_enabled=subagent_enabled),
+            middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+            system_prompt=system_prompt,
+            state_schema=ThreadState,
+        )
+
+    # Default lead agent (unchanged behavior)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled),

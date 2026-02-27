@@ -99,6 +99,51 @@ export interface Translations {
     newChat: string;
     chats: string;
     demoChats: string;
+    agents: string;
+  };
+
+  // Agents
+  agents: {
+    title: string;
+    description: string;
+    newAgent: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    chat: string;
+    edit: string;
+    delete: string;
+    deleteConfirm: string;
+    model: string;
+    modelPlaceholder: string;
+    modelInherited: string;
+    toolGroups: string;
+    toolGroupsPlaceholder: string;
+    toolGroupsAll: string;
+    name: string;
+    namePlaceholder: string;
+    nameHint: string;
+    descriptionLabel: string;
+    descriptionPlaceholder: string;
+    soul: string;
+    soulPlaceholder: string;
+    soulHint: string;
+    createTitle: string;
+    editTitle: string;
+    createSuccess: string;
+    updateSuccess: string;
+    deleteSuccess: string;
+    createPageTitle: string;
+    createPageSubtitle: string;
+    nameStepTitle: string;
+    nameStepHint: string;
+    nameStepPlaceholder: string;
+    nameStepContinue: string;
+    nameStepInvalidError: string;
+    chatOpening: string;
+    creating: string;
+    agentCreated: string;
+    startChatting: string;
+    backToGallery: string;
   };
 
   // Breadcrumb

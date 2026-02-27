@@ -280,8 +280,11 @@ Recent breakthroughs in language models have also accelerated progress
 """
 
 
-def _get_memory_context() -> str:
+def _get_memory_context(agent_name: str | None = None) -> str:
     """Get memory context for injection into system prompt.
+
+    Args:
+        agent_name: If provided, loads per-agent memory. If None, loads global memory.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -294,7 +297,7 @@ def _get_memory_context() -> str:
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data()
+        memory_data = get_memory_data(agent_name)
         memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():
@@ -350,9 +353,9 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
-def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3) -> str:
+def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, agent_name: str | None = None) -> str:
     # Get memory context
-    memory_context = _get_memory_context()
+    memory_context = _get_memory_context(agent_name)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
