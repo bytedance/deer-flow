@@ -102,7 +102,7 @@ export default function ChatPage() {
       setFinalState(state);
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
+        const lastMessage = state.messages.at(-1);
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {
@@ -124,32 +124,22 @@ export default function ChatPage() {
   }, [thread.isLoading]);
 
   const title = useMemo(() => {
-    let result = isNewThread
-      ? ""
-      : titleOfThread(thread as unknown as AgentThread);
-    if (result === "Untitled") {
-      result = "";
-    }
-    return result;
-  }, [thread, isNewThread]);
+    return titleOfThread(thread as unknown as AgentThread);
+  }, [thread.values?.title]);
 
   useEffect(() => {
     const pageTitle = isNewThread
       ? t.pages.newChat
-      : thread.values?.title && thread.values.title !== "Untitled"
-        ? thread.values.title
-        : t.pages.untitled;
-    if (thread.isThreadLoading) {
-      document.title = `Loading... - ${t.pages.appName}`;
-    } else {
-      document.title = `${pageTitle} - ${t.pages.appName}`;
-    }
+      : thread.isThreadLoading
+        ? "Loading..."
+        : title === "Untitled" ? t.pages.untitled : title;
+    document.title = `${pageTitle} - ${t.pages.appName}`;
   }, [
     isNewThread,
     t.pages.newChat,
     t.pages.untitled,
     t.pages.appName,
-    thread.values.title,
+    title,
     thread.isThreadLoading,
   ]);
 
