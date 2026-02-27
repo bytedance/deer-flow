@@ -30,12 +30,11 @@ import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
-import { type AgentThread, type AgentThreadState } from "@/core/threads";
+import { type AgentThreadState } from "@/core/threads";
 import { useSubmitThread, useThreadStream } from "@/core/threads/hooks";
 import {
   pathOfThread,
   textOfMessage,
-  titleOfThread,
 } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
@@ -123,10 +122,7 @@ export default function ChatPage() {
     if (thread.isLoading) setFinalState(null);
   }, [thread.isLoading]);
 
-  const title = useMemo(() => {
-    return titleOfThread(thread as unknown as AgentThread);
-  }, [thread.values?.title]);
-
+  const title = thread.values?.title ?? "Untitled";
   useEffect(() => {
     const pageTitle = isNewThread
       ? t.pages.newChat
