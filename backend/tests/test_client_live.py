@@ -8,7 +8,6 @@ They are skipped in CI and must be run explicitly:
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -68,26 +67,27 @@ class TestLiveBasicChat:
 # ===========================================================================
 
 class TestLiveStreaming:
-    def test_stream_yields_message_and_done(self, client):
-        """stream() produces at least one message event and ends with done."""
+    def test_stream_yields_messages_tuple_and_end(self, client):
+        """stream() produces at least one messages-tuple event and ends with end."""
         events = list(client.stream("Say hi in one word."))
 
         types = [e.type for e in events]
-        assert "message" in types, f"Expected 'message' event, got: {types}"
-        assert types[-1] == "done"
+        assert "messages-tuple" in types, f"Expected 'messages-tuple' event, got: {types}"
+        assert "values" in types, f"Expected 'values' event, got: {types}"
+        assert types[-1] == "end"
 
         for e in events:
             assert isinstance(e, StreamEvent)
             print(f"  [{e.type}] {e.data}")
 
-    def test_stream_message_content_nonempty(self, client):
-        """Streamed message events contain non-empty content."""
-        messages = [
+    def test_stream_ai_content_nonempty(self, client):
+        """Streamed messages-tuple AI events contain non-empty content."""
+        ai_messages = [
             e for e in client.stream("What color is the sky? One word.")
-            if e.type == "message"
+            if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")
         ]
-        assert len(messages) >= 1
-        for m in messages:
+        assert len(ai_messages) >= 1
+        for m in ai_messages:
             assert len(m.data.get("content", "")) > 0
 
 
@@ -108,16 +108,18 @@ class TestLiveToolUse:
         for e in events:
             print(f"  [{e.type}] {e.data}")
 
-        # Should have tool_call + tool_result + message
-        assert "tool_call" in types, f"Expected tool_call, got: {types}"
-        assert "tool_result" in types, f"Expected tool_result, got: {types}"
-        assert "message" in types
+        # All message events are now messages-tuple
+        mt_events = [e for e in events if e.type == "messages-tuple"]
+        tc_events = [e for e in mt_events if e.data.get("type") == "ai" and "tool_calls" in e.data]
+        tr_events = [e for e in mt_events if e.data.get("type") == "tool"]
+        ai_events = [e for e in mt_events if e.data.get("type") == "ai" and e.data.get("content")]
 
-        tc = next(e for e in events if e.type == "tool_call")
-        assert tc.data["name"] == "bash"
+        assert len(tc_events) >= 1, f"Expected tool_call event, got types: {types}"
+        assert len(tr_events) >= 1, f"Expected tool result event, got types: {types}"
+        assert len(ai_events) >= 1
 
-        tr = next(e for e in events if e.type == "tool_result")
-        assert "LIVE_TEST_OK" in tr.data["content"]
+        assert tc_events[0].data["tool_calls"][0]["name"] == "bash"
+        assert "LIVE_TEST_OK" in tr_events[0].data["content"]
 
     def test_agent_uses_ls_tool(self, client):
         """Agent uses ls tool to list a directory."""
@@ -129,9 +131,9 @@ class TestLiveToolUse:
         types = [e.type for e in events]
         print(f"  event types: {types}")
 
-        assert "tool_call" in types
-        tc = next(e for e in events if e.type == "tool_call")
-        assert tc.data["name"] == "ls"
+        tc_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
+        assert len(tc_events) >= 1
+        assert tc_events[0].data["tool_calls"][0]["name"] == "ls"
 
 
 # ===========================================================================
@@ -153,18 +155,19 @@ class TestLiveMultiToolChain:
         for e in events:
             print(f"  [{e.type}] {e.data}")
 
-        tool_calls = [e for e in events if e.type == "tool_call"]
-        tool_names = [tc.data["name"] for tc in tool_calls]
+        tc_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
+        tool_names = [tc.data["tool_calls"][0]["name"] for tc in tc_events]
 
         assert "write_file" in tool_names, f"Expected write_file, got: {tool_names}"
         assert "read_file" in tool_names, f"Expected read_file, got: {tool_names}"
 
-        # Final message should mention the content
-        messages = [e for e in events if e.type == "message"]
-        final_text = messages[-1].data["content"] if messages else ""
+        # Final AI message or tool result should mention the content
+        ai_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
+        tr_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
+        final_text = ai_events[-1].data["content"] if ai_events else ""
         assert "integration_test_content" in final_text.lower() or any(
             "integration_test_content" in e.data.get("content", "")
-            for e in events if e.type == "tool_result"
+            for e in tr_events
         )
 
 
@@ -184,30 +187,35 @@ class TestLiveFileUpload:
         f2.write_text("content B")
 
         # Upload
-        results = client.upload_files(thread_id, [f1, f2])
-        assert len(results) == 2
-        filenames = {r["filename"] for r in results}
+        result = client.upload_files(thread_id, [f1, f2])
+        assert result["success"] is True
+        assert len(result["files"]) == 2
+        filenames = {r["filename"] for r in result["files"]}
         assert filenames == {"test_upload_a.txt", "test_upload_b.txt"}
-        for r in results:
-            assert r["size"] > 0
+        for r in result["files"]:
+            assert int(r["size"]) > 0
             assert r["virtual_path"].startswith("/mnt/user-data/uploads/")
+            assert "artifact_url" in r
         print(f"  uploaded: {filenames}")
 
         # List
         listed = client.list_uploads(thread_id)
-        assert len(listed) == 2
-        print(f"  listed: {[f['filename'] for f in listed]}")
+        assert listed["count"] == 2
+        print(f"  listed: {[f['filename'] for f in listed['files']]}")
 
         # Delete one
-        client.delete_upload(thread_id, "test_upload_a.txt")
+        del_result = client.delete_upload(thread_id, "test_upload_a.txt")
+        assert del_result["success"] is True
         remaining = client.list_uploads(thread_id)
-        assert len(remaining) == 1
-        assert remaining[0]["filename"] == "test_upload_b.txt"
-        print(f"  after delete: {[f['filename'] for f in remaining]}")
+        assert remaining["count"] == 1
+        assert remaining["files"][0]["filename"] == "test_upload_b.txt"
+        print(f"  after delete: {[f['filename'] for f in remaining['files']]}")
 
         # Delete the other
         client.delete_upload(thread_id, "test_upload_b.txt")
-        assert client.list_uploads(thread_id) == []
+        empty = client.list_uploads(thread_id)
+        assert empty["count"] == 0
+        assert empty["files"] == []
 
     def test_upload_nonexistent_file_raises(self, client):
         with pytest.raises(FileNotFoundError):
@@ -221,10 +229,15 @@ class TestLiveFileUpload:
 class TestLiveConfigQueries:
     def test_list_models_returns_ark(self, client):
         """list_models() returns the configured ARK model."""
-        models = client.list_models()
-        assert len(models) >= 1
-        names = [m["name"] for m in models]
+        result = client.list_models()
+        assert "models" in result
+        assert len(result["models"]) >= 1
+        names = [m["name"] for m in result["models"]]
         assert "ark-model" in names
+        # Verify Gateway-aligned fields
+        for m in result["models"]:
+            assert "display_name" in m
+            assert "supports_thinking" in m
         print(f"  models: {names}")
 
     def test_get_model_found(self, client):
@@ -232,6 +245,8 @@ class TestLiveConfigQueries:
         model = client.get_model("ark-model")
         assert model is not None
         assert model["name"] == "ark-model"
+        assert "display_name" in model
+        assert "supports_thinking" in model
         print(f"  model detail: {model}")
 
     def test_get_model_not_found(self, client):
@@ -239,10 +254,11 @@ class TestLiveConfigQueries:
 
     def test_list_skills(self, client):
         """list_skills() runs without error."""
-        skills = client.list_skills()
-        assert isinstance(skills, list)
-        print(f"  skills count: {len(skills)}")
-        for s in skills[:3]:
+        result = client.list_skills()
+        assert "skills" in result
+        assert isinstance(result["skills"], list)
+        print(f"  skills count: {len(result['skills'])}")
+        for s in result["skills"][:3]:
             print(f"    - {s['name']}: {s['enabled']}")
 
 
@@ -264,8 +280,11 @@ class TestLiveArtifact:
         ))
 
         # Verify write happened
-        tool_calls = [e for e in events if e.type == "tool_call"]
-        assert any(tc.data["name"] == "write_file" for tc in tool_calls)
+        tc_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
+        assert any(
+            any(tc["name"] == "write_file" for tc in e.data["tool_calls"])
+            for e in tc_events
+        )
 
         # Read artifact
         content, mime = client.get_artifact(thread_id, "mnt/user-data/outputs/artifact_test.json")

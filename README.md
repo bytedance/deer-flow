@@ -238,7 +238,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 ## Embedded Python Client
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API:
 
 ```python
 from src.client import DeerFlowClient
@@ -248,18 +248,19 @@ client = DeerFlowClient()
 # Chat
 response = client.chat("Analyze this paper for me", thread_id="my-thread")
 
-# Streaming
+# Streaming (LangGraph SSE protocol: values, messages-tuple, end)
 for event in client.stream("hello"):
-    print(event.type, event.data)
+    if event.type == "messages-tuple" and event.data.get("type") == "ai":
+        print(event.data["content"])
 
-# Configuration & management
-print(client.list_models())
-print(client.list_skills())
+# Configuration & management — returns Gateway-aligned dicts
+models = client.list_models()        # {"models": [...]}
+skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])
+client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
 ```
 
-See `backend/src/client.py` for full API documentation.
+All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/src/client.py` for full API documentation.
 
 ## Documentation
 
