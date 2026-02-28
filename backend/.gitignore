@@ -11,6 +11,9 @@ wheels/
 agent_history.gif
 static/browser_history/*.gif
 
+log/
+log/*
+
 # Virtual environments
 .venv
 venv/

@@ -36,6 +36,7 @@ coverage/
 .claude/
 skills/custom/*
 logs/
+log/
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
