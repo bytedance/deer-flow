@@ -10,6 +10,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: F401
 
 from src.client import DeerFlowClient
+from src.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
+from src.gateway.routers.mcp import McpConfigResponse
+from src.gateway.routers.models import ModelResponse, ModelsListResponse
+from src.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
+from src.gateway.routers.uploads import UploadResponse
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -81,14 +86,19 @@ class TestClientInit:
 
 class TestConfigQueries:
     def test_list_models(self, client):
-        models = client.list_models()
-        assert len(models) == 1
-        assert models[0]["name"] == "test-model"
+        result = client.list_models()
+        assert "models" in result
+        assert len(result["models"]) == 1
+        assert result["models"][0]["name"] == "test-model"
+        # Verify Gateway-aligned fields are present
+        assert "display_name" in result["models"][0]
+        assert "supports_thinking" in result["models"][0]
 
     def test_list_skills(self, client):
         skill = MagicMock()
         skill.name = "web-search"
         skill.description = "Search the web"
+        skill.license = "MIT"
         skill.category = "public"
         skill.enabled = True
 
@@ -96,10 +106,12 @@ class TestConfigQueries:
             result = client.list_skills()
             mock_load.assert_called_once_with(enabled_only=False)
 
-        assert len(result) == 1
-        assert result[0] == {
+        assert "skills" in result
+        assert len(result["skills"]) == 1
+        assert result["skills"][0] == {
             "name": "web-search",
             "description": "Search the web",
+            "license": "MIT",
             "category": "public",
             "enabled": True,
         }
@@ -128,9 +140,24 @@ def _make_agent_mock(chunks: list[dict]):
     return agent
 
 
+def _ai_events(events):
+    """Filter messages-tuple events with type=ai and non-empty content."""
+    return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
+
+
+def _tool_call_events(events):
+    """Filter messages-tuple events with type=ai and tool_calls."""
+    return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
+
+
+def _tool_result_events(events):
+    """Filter messages-tuple events with type=tool."""
+    return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
+
+
 class TestStream:
     def test_basic_message(self, client):
-        """stream() emits message + done for a simple AI reply."""
+        """stream() emits messages-tuple + values + end for a simple AI reply."""
         ai = AIMessage(content="Hello!", id="ai-1")
         chunks = [
             {"messages": [HumanMessage(content="hi", id="h-1")]},
@@ -145,13 +172,14 @@ class TestStream:
             events = list(client.stream("hi", thread_id="t1"))
 
         types = [e.type for e in events]
-        assert "message" in types
-        assert types[-1] == "done"
-        msg_events = [e for e in events if e.type == "message"]
+        assert "messages-tuple" in types
+        assert "values" in types
+        assert types[-1] == "end"
+        msg_events = _ai_events(events)
         assert msg_events[0].data["content"] == "Hello!"
 
     def test_tool_call_and_result(self, client):
-        """stream() emits tool_call and tool_result events."""
+        """stream() emits messages-tuple events for tool calls and results."""
         ai = AIMessage(content="", id="ai-1", tool_calls=[{"name": "bash", "args": {"cmd": "ls"}, "id": "tc-1"}])
         tool = ToolMessage(content="file.txt", id="tm-1", tool_call_id="tc-1", name="bash")
         ai2 = AIMessage(content="Here are the files.", id="ai-2")
@@ -169,14 +197,13 @@ class TestStream:
         ):
             events = list(client.stream("list files", thread_id="t2"))
 
-        types = [e.type for e in events]
-        assert "tool_call" in types
-        assert "tool_result" in types
-        assert "message" in types
-        assert types[-1] == "done"
+        assert len(_tool_call_events(events)) >= 1
+        assert len(_tool_result_events(events)) >= 1
+        assert len(_ai_events(events)) >= 1
+        assert events[-1].type == "end"
 
-    def test_title_event(self, client):
-        """stream() emits title event when title appears in state."""
+    def test_values_event_with_title(self, client):
+        """stream() emits values event containing title when present in state."""
         ai = AIMessage(content="ok", id="ai-1")
         chunks = [
             {"messages": [HumanMessage(content="hi", id="h-1"), ai], "title": "Greeting"},
@@ -189,9 +216,10 @@ class TestStream:
         ):
             events = list(client.stream("hi", thread_id="t3"))
 
-        title_events = [e for e in events if e.type == "title"]
-        assert len(title_events) == 1
-        assert title_events[0].data["title"] == "Greeting"
+        values_events = [e for e in events if e.type == "values"]
+        assert len(values_events) >= 1
+        assert values_events[-1].data["title"] == "Greeting"
+        assert "messages" in values_events[-1].data
 
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
@@ -208,7 +236,7 @@ class TestStream:
         ):
             events = list(client.stream("hi", thread_id="t4"))
 
-        msg_events = [e for e in events if e.type == "message"]
+        msg_events = _ai_events(events)
         assert len(msg_events) == 1
 
     def test_auto_thread_id(self, client):
@@ -221,8 +249,8 @@ class TestStream:
         ):
             events = list(client.stream("hi"))
 
-        # Should not raise; done event proves it completed
-        assert events[-1].type == "done"
+        # Should not raise; end event proves it completed
+        assert events[-1].type == "end"
 
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
@@ -242,7 +270,7 @@ class TestStream:
         ):
             events = list(client.stream("hi", thread_id="t5"))
 
-        msg_events = [e for e in events if e.type == "message"]
+        msg_events = _ai_events(events)
         assert len(msg_events) == 1
         assert msg_events[0].data["content"] == "result"
 
@@ -347,11 +375,19 @@ class TestEnsureAgent:
 class TestGetModel:
     def test_found(self, client):
         model_cfg = MagicMock()
-        model_cfg.model_dump.return_value = {"name": "test-model"}
+        model_cfg.name = "test-model"
+        model_cfg.display_name = "Test Model"
+        model_cfg.description = "A test model"
+        model_cfg.supports_thinking = True
         client._app_config.get_model_config.return_value = model_cfg
 
         result = client.get_model("test-model")
-        assert result == {"name": "test-model"}
+        assert result == {
+            "name": "test-model",
+            "display_name": "Test Model",
+            "description": "A test model",
+            "supports_thinking": True,
+        }
 
     def test_not_found(self, client):
         client._app_config.get_model_config.return_value = None
@@ -372,8 +408,9 @@ class TestMcpConfig:
         with patch("src.client.get_extensions_config", return_value=ext_config):
             result = client.get_mcp_config()
 
-        assert "github" in result
-        assert result["github"]["enabled"] is True
+        assert "mcp_servers" in result
+        assert "github" in result["mcp_servers"]
+        assert result["mcp_servers"]["github"]["enabled"] is True
 
     def test_update_mcp_config(self, client):
         # Set up current config with skills
@@ -400,7 +437,8 @@ class TestMcpConfig:
             ):
                 result = client.update_mcp_config({"new-server": {"enabled": True, "type": "sse"}})
 
-            assert "new-server" in result
+            assert "mcp_servers" in result
+            assert "new-server" in result["mcp_servers"]
             assert client._agent is None  # M2: agent invalidated
 
             # Verify file was actually written
@@ -578,8 +616,11 @@ class TestUploads:
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files("thread-1", [src_file])
 
-            assert len(result) == 1
-            assert result[0]["filename"] == "test.txt"
+            assert result["success"] is True
+            assert len(result["files"]) == 1
+            assert result["files"][0]["filename"] == "test.txt"
+            assert "artifact_url" in result["files"][0]
+            assert "message" in result
             assert (uploads_dir / "test.txt").exists()
 
     def test_upload_files_not_found(self, client):
@@ -595,9 +636,13 @@ class TestUploads:
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
                 result = client.list_uploads("thread-1")
 
-            assert len(result) == 2
-            names = {f["filename"] for f in result}
+            assert result["count"] == 2
+            assert len(result["files"]) == 2
+            names = {f["filename"] for f in result["files"]}
             assert names == {"a.txt", "b.txt"}
+            # Verify artifact_url is present
+            for f in result["files"]:
+                assert "artifact_url" in f
 
     def test_delete_upload(self, client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,8 +650,10 @@ class TestUploads:
             (uploads_dir / "delete-me.txt").write_text("gone")
 
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
-                client.delete_upload("thread-1", "delete-me.txt")
+                result = client.delete_upload("thread-1", "delete-me.txt")
 
+            assert result["success"] is True
+            assert "delete-me.txt" in result["message"]
             assert not (uploads_dir / "delete-me.txt").exists()
 
     def test_delete_upload_not_found(self, client):
@@ -707,7 +754,7 @@ class TestScenarioMultiTurnConversation:
         assert agent.stream.call_count == 2
 
     def test_stream_collects_all_event_types_across_turns(self, client):
-        """A full turn with tool_call → tool_result → message → title → done."""
+        """A full turn emits messages-tuple (tool_call, tool_result, ai text) + values + end."""
         ai_tc = AIMessage(content="", id="ai-1", tool_calls=[
             {"name": "web_search", "args": {"query": "LangGraph"}, "id": "tc-1"},
         ])
@@ -727,23 +774,30 @@ class TestScenarioMultiTurnConversation:
         ):
             events = list(client.stream("search", thread_id="t-full"))
 
-        types = [e.type for e in events]
-        assert types == ["tool_call", "tool_result", "message", "title", "done"]
+        # Verify expected event types
+        types = set(e.type for e in events)
+        assert types == {"messages-tuple", "values", "end"}
+        assert events[-1].type == "end"
 
-        # Verify event data integrity
-        tc_event = events[0]
-        assert tc_event.data["name"] == "web_search"
-        assert tc_event.data["args"] == {"query": "LangGraph"}
+        # Verify tool_call data
+        tc_events = _tool_call_events(events)
+        assert len(tc_events) == 1
+        assert tc_events[0].data["tool_calls"][0]["name"] == "web_search"
+        assert tc_events[0].data["tool_calls"][0]["args"] == {"query": "LangGraph"}
 
-        tr_event = events[1]
-        assert tr_event.data["tool_call_id"] == "tc-1"
-        assert "LangGraph" in tr_event.data["content"]
+        # Verify tool_result data
+        tr_events = _tool_result_events(events)
+        assert len(tr_events) == 1
+        assert tr_events[0].data["tool_call_id"] == "tc-1"
+        assert "LangGraph" in tr_events[0].data["content"]
 
-        msg_event = events[2]
-        assert "framework" in msg_event.data["content"]
+        # Verify AI text
+        msg_events = _ai_events(events)
+        assert any("framework" in e.data["content"] for e in msg_events)
 
-        title_event = events[3]
-        assert title_event.data["title"] == "LangGraph Search"
+        # Verify values event contains title
+        values_events = [e for e in events if e.type == "values"]
+        assert any(e.data.get("title") == "LangGraph Search" for e in values_events)
 
 
 class TestScenarioToolChain:
@@ -776,16 +830,16 @@ class TestScenarioToolChain:
         ):
             events = list(client.stream("list and save", thread_id="t-chain"))
 
-        tool_calls = [e for e in events if e.type == "tool_call"]
-        tool_results = [e for e in events if e.type == "tool_result"]
-        messages = [e for e in events if e.type == "message"]
+        tool_calls = _tool_call_events(events)
+        tool_results = _tool_result_events(events)
+        messages = _ai_events(events)
 
         assert len(tool_calls) == 2
-        assert tool_calls[0].data["name"] == "bash"
-        assert tool_calls[1].data["name"] == "write_file"
+        assert tool_calls[0].data["tool_calls"][0]["name"] == "bash"
+        assert tool_calls[1].data["tool_calls"][0]["name"] == "write_file"
         assert len(tool_results) == 2
         assert len(messages) == 1
-        assert events[-1].type == "done"
+        assert events[-1].type == "end"
 
 
 class TestScenarioFileLifecycle:
@@ -804,25 +858,27 @@ class TestScenarioFileLifecycle:
 
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
                 # Step 1: Upload
-                uploaded = client.upload_files("t-lifecycle", [
+                result = client.upload_files("t-lifecycle", [
                     tmp_path / "report.txt",
                     tmp_path / "data.csv",
                 ])
-                assert len(uploaded) == 2
-                assert {f["filename"] for f in uploaded} == {"report.txt", "data.csv"}
+                assert result["success"] is True
+                assert len(result["files"]) == 2
+                assert {f["filename"] for f in result["files"]} == {"report.txt", "data.csv"}
 
                 # Step 2: List
-                files = client.list_uploads("t-lifecycle")
-                assert len(files) == 2
-                assert all("virtual_path" in f for f in files)
+                listed = client.list_uploads("t-lifecycle")
+                assert listed["count"] == 2
+                assert all("virtual_path" in f for f in listed["files"])
 
                 # Step 3: Delete one
-                client.delete_upload("t-lifecycle", "report.txt")
+                del_result = client.delete_upload("t-lifecycle", "report.txt")
+                assert del_result["success"] is True
 
                 # Step 4: Verify deletion
-                files = client.list_uploads("t-lifecycle")
-                assert len(files) == 1
-                assert files[0]["filename"] == "data.csv"
+                listed = client.list_uploads("t-lifecycle")
+                assert listed["count"] == 1
+                assert listed["files"][0]["filename"] == "data.csv"
 
     def test_upload_then_read_artifact(self, client):
         """Upload a file, simulate agent producing artifact, read it back."""
@@ -840,7 +896,7 @@ class TestScenarioFileLifecycle:
 
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
                 uploaded = client.upload_files("t-artifact", [src_file])
-                assert len(uploaded) == 1
+                assert len(uploaded["files"]) == 1
 
             # Simulate agent writing an artifact
             (outputs_dir / "analysis.json").write_text('{"result": "processed"}')
@@ -862,13 +918,16 @@ class TestScenarioConfigManagement:
     def test_model_and_skill_discovery(self, client):
         """List models → get specific model → list skills → get specific skill."""
         # List models
-        models = client.list_models()
-        assert len(models) >= 1
-        model_name = models[0]["name"]
+        result = client.list_models()
+        assert len(result["models"]) >= 1
+        model_name = result["models"][0]["name"]
 
         # Get specific model
         model_cfg = MagicMock()
-        model_cfg.model_dump.return_value = {"name": model_name, "use": "langchain_openai:ChatOpenAI"}
+        model_cfg.name = model_name
+        model_cfg.display_name = None
+        model_cfg.description = None
+        model_cfg.supports_thinking = False
         client._app_config.get_model_config.return_value = model_cfg
         detail = client.get_model(model_name)
         assert detail["name"] == model_name
@@ -877,12 +936,13 @@ class TestScenarioConfigManagement:
         skill = MagicMock()
         skill.name = "web-search"
         skill.description = "Search the web"
+        skill.license = "MIT"
         skill.category = "public"
         skill.enabled = True
 
         with patch("src.skills.loader.load_skills", return_value=[skill]):
-            skills = client.list_skills()
-        assert len(skills) == 1
+            skills_result = client.list_skills()
+        assert len(skills_result["skills"]) == 1
 
         # Get specific skill
         with patch("src.skills.loader.load_skills", return_value=[skill]):
@@ -912,7 +972,7 @@ class TestScenarioConfigManagement:
                 patch("src.client.reload_extensions_config", return_value=reloaded_config),
             ):
                 mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True}})
-            assert "my-mcp" in mcp_result
+            assert "my-mcp" in mcp_result["mcp_servers"]
             assert client._agent is None  # Agent invalidated
 
             # --- Skill toggle ---
@@ -1072,8 +1132,8 @@ class TestScenarioThreadIsolation:
                 files_a = client.list_uploads("thread-a")
                 files_b = client.list_uploads("thread-b")
 
-            assert len(files_a) == 1
-            assert len(files_b) == 0
+            assert files_a["count"] == 1
+            assert files_b["count"] == 0
 
     def test_artifacts_isolated_per_thread(self, client):
         """Artifacts in thread-A are not accessible from thread-B."""
@@ -1168,12 +1228,13 @@ class TestScenarioSkillInstallAndUse:
             installed_skill = MagicMock()
             installed_skill.name = "my-analyzer"
             installed_skill.description = "Analyze code"
+            installed_skill.license = "MIT"
             installed_skill.category = "custom"
             installed_skill.enabled = True
 
             with patch("src.skills.loader.load_skills", return_value=[installed_skill]):
-                skills = client.list_skills()
-            assert any(s["name"] == "my-analyzer" for s in skills)
+                skills_result = client.list_skills()
+            assert any(s["name"] == "my-analyzer" for s in skills_result["skills"])
 
             # Step 3: Disable it
             disabled_skill = MagicMock()
@@ -1204,7 +1265,7 @@ class TestScenarioEdgeCases:
     """Scenario: Edge cases and error boundaries in realistic workflows."""
 
     def test_empty_stream_response(self, client):
-        """Agent produces no messages — only done event."""
+        """Agent produces no messages — only values + end events."""
         agent = _make_agent_mock([{"messages": []}])
 
         with (
@@ -1213,8 +1274,10 @@ class TestScenarioEdgeCases:
         ):
             events = list(client.stream("hi", thread_id="t-empty"))
 
-        assert len(events) == 1
-        assert events[0].type == "done"
+        # values event (empty messages) + end
+        assert len(events) == 2
+        assert events[0].type == "values"
+        assert events[-1].type == "end"
 
     def test_chat_on_empty_response(self, client):
         """chat() returns empty string for no-message response."""
@@ -1229,12 +1292,12 @@ class TestScenarioEdgeCases:
         assert result == ""
 
     def test_multiple_title_changes(self, client):
-        """Only distinct title changes produce events."""
+        """Title changes are carried in values events."""
         ai = AIMessage(content="ok", id="ai-1")
         chunks = [
             {"messages": [ai], "title": "First Title"},
-            {"messages": [], "title": "First Title"},  # same — should NOT emit
-            {"messages": [], "title": "Second Title"},  # different — should emit
+            {"messages": [], "title": "First Title"},  # same title repeated
+            {"messages": [], "title": "Second Title"},  # different title
         ]
         agent = _make_agent_mock(chunks)
 
@@ -1244,13 +1307,15 @@ class TestScenarioEdgeCases:
         ):
             events = list(client.stream("hi", thread_id="t-titles"))
 
-        title_events = [e for e in events if e.type == "title"]
-        assert len(title_events) == 2
-        assert title_events[0].data["title"] == "First Title"
-        assert title_events[1].data["title"] == "Second Title"
+        # Every chunk produces a values event with the title
+        values_events = [e for e in events if e.type == "values"]
+        assert len(values_events) == 3
+        assert values_events[0].data["title"] == "First Title"
+        assert values_events[1].data["title"] == "First Title"
+        assert values_events[2].data["title"] == "Second Title"
 
     def test_concurrent_tool_calls_in_single_message(self, client):
-        """Agent produces multiple tool_calls in one AIMessage."""
+        """Agent produces multiple tool_calls in one AIMessage — emitted as single messages-tuple."""
         ai = AIMessage(content="", id="ai-1", tool_calls=[
             {"name": "web_search", "args": {"q": "a"}, "id": "tc-1"},
             {"name": "web_search", "args": {"q": "b"}, "id": "tc-2"},
@@ -1265,9 +1330,11 @@ class TestScenarioEdgeCases:
         ):
             events = list(client.stream("do things", thread_id="t-parallel"))
 
-        tc_events = [e for e in events if e.type == "tool_call"]
-        assert len(tc_events) == 3
-        assert {e.data["id"] for e in tc_events} == {"tc-1", "tc-2", "tc-3"}
+        tc_events = _tool_call_events(events)
+        assert len(tc_events) == 1  # One messages-tuple event for the AIMessage
+        tool_calls = tc_events[0].data["tool_calls"]
+        assert len(tool_calls) == 3
+        assert {tc["id"] for tc in tool_calls} == {"tc-1", "tc-2", "tc-3"}
 
     def test_upload_convertible_file_conversion_failure(self, client):
         """Upload a .pdf file where conversion fails — file still uploaded, no markdown."""
@@ -1284,9 +1351,223 @@ class TestScenarioEdgeCases:
                 patch("src.gateway.routers.uploads.CONVERTIBLE_EXTENSIONS", {".pdf"}),
                 patch("src.gateway.routers.uploads.convert_file_to_markdown", side_effect=Exception("conversion failed")),
             ):
-                results = client.upload_files("t-pdf-fail", [pdf_file])
+                result = client.upload_files("t-pdf-fail", [pdf_file])
 
-            assert len(results) == 1
-            assert results[0]["filename"] == "doc.pdf"
-            assert "markdown_file" not in results[0]  # Conversion failed gracefully
+            assert result["success"] is True
+            assert len(result["files"]) == 1
+            assert result["files"][0]["filename"] == "doc.pdf"
+            assert "markdown_file" not in result["files"][0]  # Conversion failed gracefully
             assert (uploads_dir / "doc.pdf").exists()  # File still uploaded
+
+
+# ---------------------------------------------------------------------------
+# Gateway conformance — validate client output against Gateway Pydantic models
+# ---------------------------------------------------------------------------
+
+class TestGatewayConformance:
+    """Validate that DeerFlowClient return dicts conform to Gateway Pydantic response models.
+
+    Each test calls a client method, then parses the result through the
+    corresponding Gateway response model. If the client drifts (missing or
+    wrong-typed fields), Pydantic raises ``ValidationError`` and CI catches it.
+    """
+
+    def test_list_models(self, mock_app_config):
+        model = MagicMock()
+        model.name = "test-model"
+        model.display_name = "Test Model"
+        model.description = "A test model"
+        model.supports_thinking = False
+        mock_app_config.models = [model]
+
+        with patch("src.client.get_app_config", return_value=mock_app_config):
+            client = DeerFlowClient()
+
+        result = client.list_models()
+        parsed = ModelsListResponse(**result)
+        assert len(parsed.models) == 1
+        assert parsed.models[0].name == "test-model"
+
+    def test_get_model(self, mock_app_config):
+        model = MagicMock()
+        model.name = "test-model"
+        model.display_name = "Test Model"
+        model.description = "A test model"
+        model.supports_thinking = True
+        mock_app_config.models = [model]
+        mock_app_config.get_model_config.return_value = model
+
+        with patch("src.client.get_app_config", return_value=mock_app_config):
+            client = DeerFlowClient()
+
+        result = client.get_model("test-model")
+        assert result is not None
+        parsed = ModelResponse(**result)
+        assert parsed.name == "test-model"
+
+    def test_list_skills(self, client):
+        skill = MagicMock()
+        skill.name = "web-search"
+        skill.description = "Search the web"
+        skill.license = "MIT"
+        skill.category = "public"
+        skill.enabled = True
+
+        with patch("src.skills.loader.load_skills", return_value=[skill]):
+            result = client.list_skills()
+
+        parsed = SkillsListResponse(**result)
+        assert len(parsed.skills) == 1
+        assert parsed.skills[0].name == "web-search"
+
+    def test_get_skill(self, client):
+        skill = MagicMock()
+        skill.name = "web-search"
+        skill.description = "Search the web"
+        skill.license = "MIT"
+        skill.category = "public"
+        skill.enabled = True
+
+        with patch("src.skills.loader.load_skills", return_value=[skill]):
+            result = client.get_skill("web-search")
+
+        assert result is not None
+        parsed = SkillResponse(**result)
+        assert parsed.name == "web-search"
+
+    def test_install_skill(self, client, tmp_path):
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: my-skill\ndescription: A test skill\n---\nBody\n"
+        )
+
+        archive = tmp_path / "my-skill.skill"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.write(skill_dir / "SKILL.md", "my-skill/SKILL.md")
+
+        custom_dir = tmp_path / "custom"
+        custom_dir.mkdir()
+        with patch("src.skills.loader.get_skills_root_path", return_value=tmp_path):
+            result = client.install_skill(archive)
+
+        parsed = SkillInstallResponse(**result)
+        assert parsed.success is True
+        assert parsed.skill_name == "my-skill"
+
+    def test_get_mcp_config(self, client):
+        server = MagicMock()
+        server.model_dump.return_value = {
+            "enabled": True,
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "server"],
+            "env": {},
+            "url": None,
+            "headers": {},
+            "description": "test server",
+        }
+        ext_config = MagicMock()
+        ext_config.mcp_servers = {"test": server}
+
+        with patch("src.client.get_extensions_config", return_value=ext_config):
+            result = client.get_mcp_config()
+
+        parsed = McpConfigResponse(**result)
+        assert "test" in parsed.mcp_servers
+
+    def test_update_mcp_config(self, client, tmp_path):
+        server = MagicMock()
+        server.model_dump.return_value = {
+            "enabled": True,
+            "type": "stdio",
+            "command": "npx",
+            "args": [],
+            "env": {},
+            "url": None,
+            "headers": {},
+            "description": "",
+        }
+        ext_config = MagicMock()
+        ext_config.mcp_servers = {"srv": server}
+        ext_config.skills = {}
+
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text("{}")
+
+        with (
+            patch("src.client.get_extensions_config", return_value=ext_config),
+            patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("src.client.reload_extensions_config", return_value=ext_config),
+        ):
+            result = client.update_mcp_config({"srv": server.model_dump.return_value})
+
+        parsed = McpConfigResponse(**result)
+        assert "srv" in parsed.mcp_servers
+
+    def test_upload_files(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+
+        src_file = tmp_path / "hello.txt"
+        src_file.write_text("hello")
+
+        with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            result = client.upload_files("t-conform", [src_file])
+
+        parsed = UploadResponse(**result)
+        assert parsed.success is True
+        assert len(parsed.files) == 1
+
+    def test_get_memory_config(self, client):
+        mem_cfg = MagicMock()
+        mem_cfg.enabled = True
+        mem_cfg.storage_path = ".deer-flow/memory.json"
+        mem_cfg.debounce_seconds = 30
+        mem_cfg.max_facts = 100
+        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.injection_enabled = True
+        mem_cfg.max_injection_tokens = 2000
+
+        with patch("src.config.memory_config.get_memory_config", return_value=mem_cfg):
+            result = client.get_memory_config()
+
+        parsed = MemoryConfigResponse(**result)
+        assert parsed.enabled is True
+        assert parsed.max_facts == 100
+
+    def test_get_memory_status(self, client):
+        mem_cfg = MagicMock()
+        mem_cfg.enabled = True
+        mem_cfg.storage_path = ".deer-flow/memory.json"
+        mem_cfg.debounce_seconds = 30
+        mem_cfg.max_facts = 100
+        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.injection_enabled = True
+        mem_cfg.max_injection_tokens = 2000
+
+        memory_data = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {
+                "workContext": {"summary": "", "updatedAt": ""},
+                "personalContext": {"summary": "", "updatedAt": ""},
+                "topOfMind": {"summary": "", "updatedAt": ""},
+            },
+            "history": {
+                "recentMonths": {"summary": "", "updatedAt": ""},
+                "earlierContext": {"summary": "", "updatedAt": ""},
+                "longTermBackground": {"summary": "", "updatedAt": ""},
+            },
+            "facts": [],
+        }
+
+        with (
+            patch("src.config.memory_config.get_memory_config", return_value=mem_cfg),
+            patch("src.agents.memory.updater.get_memory_data", return_value=memory_data),
+        ):
+            result = client.get_memory_status()
+
+        parsed = MemoryStatusResponse(**result)
+        assert parsed.config.enabled is True
+        assert parsed.data.version == "1.0"
