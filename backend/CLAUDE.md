@@ -294,31 +294,36 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 
 ### Embedded Client (`src/client.py`)
 
-`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services.
+`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
 
 **Architecture**: Imports the same `src/` modules that LangGraph Server and Gateway API use. Shares the same config files and data directories. No FastAPI dependency.
 
 **Agent Conversation** (replaces LangGraph Server):
 - `chat(message, thread_id)` — synchronous, returns final text
-- `stream(message, thread_id)` — yields `StreamEvent` (message, tool_call, tool_result, title, done)
+- `stream(message, thread_id)` — yields `StreamEvent` aligned with LangGraph SSE protocol:
+  - `"values"` — full state snapshot (title, messages, artifacts)
+  - `"messages-tuple"` — per-message update (AI text, tool calls, tool results)
+  - `"end"` — stream finished
 - Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
 - Supports `checkpointer` parameter for state persistence across turns
-- Invocation pattern: `agent.stream(state, config, context, stream_mode="values")`
+- `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
 
 **Gateway Equivalent Methods** (replaces Gateway API):
 
-| Category | Methods |
-|----------|---------|
-| Models | `list_models()`, `get_model(name)` |
-| MCP | `get_mcp_config()`, `update_mcp_config(servers)` |
-| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` |
-| Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` |
-| Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` |
-| Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` |
+| Category | Methods | Return format |
+|----------|---------|---------------|
+| Models | `list_models()`, `get_model(name)` | `{"models": [...]}`, `{name, display_name, ...}` |
+| MCP | `get_mcp_config()`, `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
+| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` | `{"skills": [...]}` |
+| Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
+| Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
+| Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
-**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`. Artifact returns `(bytes, mime_type)` instead of HTTP Response.
+**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`. Artifact returns `(bytes, mime_type)` instead of HTTP Response. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
 
-**Tests**: `tests/test_client.py` (45 unit tests)
+**Tests**: `tests/test_client.py` (77 unit tests including `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests, requires config.yaml)
+
+**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
 ## Development Workflow
 
