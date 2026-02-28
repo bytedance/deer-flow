@@ -47,7 +47,8 @@ deer-flow/
 │   │   ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
 │   │   ├── community/         # Community tools (tavily, jina_ai, firecrawl, image_search, aio_sandbox)
 │   │   ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │   └── utils/             # Utilities (network, readability)
+│   │   ├── utils/             # Utilities (network, readability)
+│   │   └── client.py          # Embedded Python client (DeerFlowClient)
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
 ├── frontend/                   # Next.js frontend application
@@ -289,7 +290,35 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, description)
 - `skills` - Map of skill name → state (enabled)
 
-Both can be modified at runtime via Gateway API endpoints.
+Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` methods.
+
+### Embedded Client (`src/client.py`)
+
+`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services.
+
+**Architecture**: Imports the same `src/` modules that LangGraph Server and Gateway API use. Shares the same config files and data directories. No FastAPI dependency.
+
+**Agent Conversation** (replaces LangGraph Server):
+- `chat(message, thread_id)` — synchronous, returns final text
+- `stream(message, thread_id)` — yields `StreamEvent` (message, tool_call, tool_result, title, done)
+- Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
+- Supports `checkpointer` parameter for state persistence across turns
+- Invocation pattern: `agent.stream(state, config, context, stream_mode="values")`
+
+**Gateway Equivalent Methods** (replaces Gateway API):
+
+| Category | Methods |
+|----------|---------|
+| Models | `list_models()`, `get_model(name)` |
+| MCP | `get_mcp_config()`, `update_mcp_config(servers)` |
+| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` |
+| Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` |
+| Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` |
+| Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` |
+
+**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`. Artifact returns `(bytes, mime_type)` instead of HTTP Response.
+
+**Tests**: `tests/test_client.py` (45 unit tests)
 
 ## Development Workflow
 

@@ -236,6 +236,31 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
+## Embedded Python Client
+
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities:
+
+```python
+from src.client import DeerFlowClient
+
+client = DeerFlowClient()
+
+# Chat
+response = client.chat("Analyze this paper for me", thread_id="my-thread")
+
+# Streaming
+for event in client.stream("hello"):
+    print(event.type, event.data)
+
+# Configuration & management
+print(client.list_models())
+print(client.list_skills())
+client.update_skill("web-search", enabled=True)
+client.upload_files("thread-1", ["./report.pdf"])
+```
+
+See `backend/src/client.py` for full API documentation.
+
 ## Documentation
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
