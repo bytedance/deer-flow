@@ -340,6 +340,11 @@ class SubagentExecutor:
         # This is necessary because:
         # 1. We may have async-only tools (like MCP tools)
         # 2. We're running inside a ThreadPoolExecutor which doesn't have an event loop
+        #
+        # Note: _aexecute() catches all exceptions internally, so this outer
+        # try-except only handles asyncio.run() failures (e.g., if called from
+        # an async context where an event loop already exists). Subagent execution
+        # errors are handled within _aexecute() and returned as FAILED status.
         try:
             return asyncio.run(self._aexecute(task, result_holder))
         except Exception as e:
