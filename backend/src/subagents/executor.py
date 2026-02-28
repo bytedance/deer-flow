@@ -1,12 +1,13 @@
 """Subagent execution engine."""
 
+import atexit
 import logging
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -45,6 +46,7 @@ class SubagentResult:
         started_at: When execution started.
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
+        created_at: When this result object was created (for TTL cleanup).
     """
 
     task_id: str
@@ -55,11 +57,14 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    created_at: datetime | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+        if self.created_at is None:
+            self.created_at = datetime.now()
 
 
 # Global storage for background task results
@@ -72,6 +77,53 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+
+# TTL for background tasks (in hours)
+TASK_TTL_HOURS = 1
+
+
+def cleanup_thread_pools():
+    """Clean up thread pools on application exit."""
+    logger.info("Shutting down subagent thread pools...")
+    try:
+        _scheduler_pool.shutdown(wait=True, cancel_futures=True)
+        _execution_pool.shutdown(wait=True, cancel_futures=True)
+        logger.info("Thread pools shut down successfully")
+    except Exception as e:
+        logger.error(f"Error during thread pool shutdown: {e}")
+
+
+def cleanup_old_tasks():
+    """Remove background tasks older than TTL.
+    
+    This should be called periodically to prevent memory leaks
+    from accumulating completed tasks.
+    """
+    with _background_tasks_lock:
+        if not _background_tasks:
+            return
+            
+        cutoff = datetime.now() - timedelta(hours=TASK_TTL_HOURS)
+        initial_count = len(_background_tasks)
+        
+        # Find tasks to remove (completed/failed/timed_out and older than TTL)
+        to_remove = []
+        for task_id, result in _background_tasks.items():
+            # Only clean up completed tasks that are old enough
+            if result.status in (SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
+                if result.created_at and result.created_at < cutoff:
+                    to_remove.append(task_id)
+        
+        # Remove old tasks
+        for task_id in to_remove:
+            del _background_tasks[task_id]
+        
+        if to_remove:
+            logger.info(f"Cleaned up {len(to_remove)} old background tasks (kept {initial_count - len(to_remove)})")
+
+
+# Register cleanup function to run on application exit
+atexit.register(cleanup_thread_pools)
 
 
 def _filter_tools(
@@ -347,6 +399,12 @@ class SubagentExecutor:
 
         with _background_tasks_lock:
             _background_tasks[task_id] = result
+        
+        # Clean up old tasks periodically (non-blocking)
+        try:
+            cleanup_old_tasks()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup old tasks: {e}")
 
         # Submit to scheduler pool
         def run_task():
@@ -399,6 +457,12 @@ def get_background_task_result(task_id: str) -> SubagentResult | None:
     Returns:
         SubagentResult if found, None otherwise.
     """
+    # Opportunistically clean up old tasks when checking status
+    try:
+        cleanup_old_tasks()
+    except Exception as e:
+        logger.debug(f"Failed to cleanup old tasks during get: {e}")
+    
     with _background_tasks_lock:
         return _background_tasks.get(task_id)
 

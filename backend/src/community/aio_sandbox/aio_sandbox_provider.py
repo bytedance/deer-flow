@@ -250,6 +250,7 @@ class AioSandboxProvider(SandboxProvider):
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         current_time = time.time()
         sandboxes_to_release = []
+        orphaned_thread_locks = []
 
         with self._lock:
             for sandbox_id, last_activity in self._last_activity.items():
@@ -257,6 +258,11 @@ class AioSandboxProvider(SandboxProvider):
                 if idle_duration > idle_timeout:
                     sandboxes_to_release.append(sandbox_id)
                     logger.info(f"Sandbox {sandbox_id} idle for {idle_duration:.1f}s, marking for release")
+            
+            # Also clean up orphaned thread locks (threads with no associated sandbox)
+            for thread_id in list(self._thread_locks.keys()):
+                if thread_id not in self._thread_sandboxes:
+                    orphaned_thread_locks.append(thread_id)
 
         for sandbox_id in sandboxes_to_release:
             try:
@@ -264,6 +270,13 @@ class AioSandboxProvider(SandboxProvider):
                 self.release(sandbox_id)
             except Exception as e:
                 logger.error(f"Failed to release idle sandbox {sandbox_id}: {e}")
+        
+        # Clean up orphaned thread locks
+        if orphaned_thread_locks:
+            with self._lock:
+                for thread_id in orphaned_thread_locks:
+                    self._thread_locks.pop(thread_id, None)
+            logger.debug(f"Cleaned up {len(orphaned_thread_locks)} orphaned thread locks")
 
     # ── Signal handling ──────────────────────────────────────────────────
 
@@ -459,6 +472,8 @@ class AioSandboxProvider(SandboxProvider):
             thread_ids_to_remove = [tid for tid, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for tid in thread_ids_to_remove:
                 del self._thread_sandboxes[tid]
+                # Clean up thread lock to prevent unbounded memory growth
+                self._thread_locks.pop(tid, None)
             self._last_activity.pop(sandbox_id, None)
 
         # Clean up persisted state (outside lock, involves file I/O)

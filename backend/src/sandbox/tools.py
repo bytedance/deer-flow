@@ -172,10 +172,13 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
                 return sandbox
             # Sandbox was released, fall through to acquire new one
 
-    # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    # Lazy acquisition: get thread_id from RunnableConfig
+    from langgraph.config import get_config
+    config = get_config()
+    thread_id = config.get("configurable", {}).get("thread_id")
+    
     if thread_id is None:
-        raise SandboxRuntimeError("Thread ID not available in runtime context")
+        raise SandboxRuntimeError("Thread ID not available in the configurable")
 
     provider = get_sandbox_provider()
     print(f"Lazy acquiring sandbox for thread {thread_id}")

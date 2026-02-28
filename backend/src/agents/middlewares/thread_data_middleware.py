@@ -71,9 +71,13 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        # Get thread_id from the RunnableConfig
+        from langgraph.config import get_config
+        config = get_config()
+        thread_id = config.get("configurable", {}).get("thread_id")
+        
         if thread_id is None:
-            raise ValueError("Thread ID is required in the context")
+            raise ValueError("Thread ID is required in the configurable")
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories

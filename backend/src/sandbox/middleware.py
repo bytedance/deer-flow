@@ -53,7 +53,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         # Eager initialization (original behavior)
         if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = runtime.context["thread_id"]
+            # Get thread_id from the RunnableConfig
+            from langgraph.config import get_config
+            config = get_config()
+            thread_id = config.get("configurable", {}).get("thread_id")
+            
+            if thread_id is None:
+                raise ValueError("Thread ID is required in the configurable")
+            
             print(f"Thread ID: {thread_id}")
             sandbox_id = self._acquire_sandbox(thread_id)
             return {"sandbox": {"sandbox_id": sandbox_id}}

@@ -85,10 +85,14 @@ def task_tool(
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id")
+        
+        # Get thread_id from the RunnableConfig
+        from langgraph.config import get_config
+        config = get_config()
+        thread_id = config.get("configurable", {}).get("thread_id")
 
         # Try to get parent model from configurable
-        metadata = runtime.config.get("metadata", {})
+        metadata = config.get("metadata", {})
         parent_model = metadata.get("model_name")
 
         # Get or generate trace_id for distributed tracing

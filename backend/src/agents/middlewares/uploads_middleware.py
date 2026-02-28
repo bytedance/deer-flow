@@ -153,7 +153,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         logger = logging.getLogger(__name__)
 
-        thread_id = runtime.context.get("thread_id")
+        # Get thread_id from the RunnableConfig
+        from langgraph.config import get_config
+        config = get_config()
+        thread_id = config.get("configurable", {}).get("thread_id")
+        
         if thread_id is None:
             return None
 
