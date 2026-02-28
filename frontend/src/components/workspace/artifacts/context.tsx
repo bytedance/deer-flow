@@ -58,6 +58,7 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     autoOpen,
     autoSelect,
     setOpen: (isOpen: boolean) => {
+      console.log("Setting artifacts panel open:", isOpen);
       if (!isOpen && autoOpen) {
         setAutoOpen(false);
         setAutoSelect(false);

@@ -164,32 +164,11 @@ export const enUS: Translations = {
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
     chat: "Chat",
-    edit: "Edit",
     delete: "Delete",
     deleteConfirm:
       "Are you sure you want to delete this agent? This action cannot be undone.",
-    model: "Model",
-    modelPlaceholder: "Select a model...",
-    modelInherited: "Inherited (default)",
-    toolGroups: "Tool Groups",
-    toolGroupsPlaceholder: "e.g. file:read, bash (leave empty for all tools)",
-    toolGroupsAll: "All tools",
-    name: "Name",
-    namePlaceholder: "my-agent",
-    nameHint:
-      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
-    descriptionLabel: "Description",
-    descriptionPlaceholder: "What does this agent specialize in?",
-    soul: "Soul (SOUL.md)",
-    soulPlaceholder:
-      "Describe the agent's personality, values, and behavioral guardrails...",
-    soulHint:
-      "Injected alongside the lead agent's system prompt. Defines who this agent is.",
-    createTitle: "Create Agent",
-    editTitle: "Edit Agent",
-    createSuccess: "Agent created successfully",
-    updateSuccess: "Agent updated successfully",
     deleteSuccess: "Agent deleted",
+    newChat: "New chat",
     createPageTitle: "Design your Agent",
     createPageSubtitle:
       "Describe the agent you want — I'll help you create it through conversation.",
@@ -202,9 +181,8 @@ export const enUS: Translations = {
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
     nameStepCheckError: "Could not verify name availability — please try again",
-    chatOpening:
-      'Now tell me what "{name}" should do — describe its purpose, personality, and any areas it specializes in.',
-    creating: "Creating your agent…",
+    nameStepBootstrapMessage:
+      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",

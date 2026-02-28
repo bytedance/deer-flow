@@ -77,7 +77,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
     if include_soul:
-        soul = load_agent_soul(agent_cfg) or ""
+        soul = load_agent_soul(agent_cfg.name) or ""
 
     return AgentResponse(
         name=agent_cfg.name,

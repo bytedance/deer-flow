@@ -149,7 +149,7 @@ bash("npm test")  # Direct execution, not task()
 
 SYSTEM_PROMPT_TEMPLATE = """
 <role>
-You are DeerFlow 2.0, an open-source super agent.
+You are {agent_name}, an open-source super agent.
 </role>
 
 {soul}
@@ -397,6 +397,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
         memory_context=memory_context,
@@ -405,4 +406,4 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_thinking=subagent_thinking,
     )
 
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
+    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d %H:%M, %A')}</current_date>"

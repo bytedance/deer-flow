@@ -12,23 +12,19 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def bootstrap_agent(
+def setup_agent(
     soul: str,
     description: str = "",
     runtime: ToolRuntime = None,
 ) -> Command:
-    """Create a custom DeerFlow agent by writing its config.yaml and SOUL.md.
-
-    Call this once you have gathered enough information from the user conversation
-    to fully describe the agent's identity and capabilities.
+    """Setup the custom DeerFlow agent.
 
     Args:
         soul: Full SOUL.md content defining the agent's personality and behavior.
         description: One-line description of what the agent does.
     """
 
-    configurable = runtime.config.get("configurable", {})
-    agent_name: str | None = configurable.get("agent_name")
+    agent_name: str | None = runtime.context.get("agent_name")
 
     try:
         paths = get_paths()

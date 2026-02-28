@@ -19,7 +19,7 @@ from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
-from src.tools.builtins import ask_clarification_tool, bootstrap_agent
+from src.tools.builtins import setup_agent
 
 logger = logging.getLogger(__name__)
 
@@ -299,12 +299,12 @@ def make_lead_agent(config: RunnableConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents)
+        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"]))
 
         logger.info(f"Bootstrap Agent -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [bootstrap_agent],
+            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=system_prompt,
             state_schema=ThreadState,
@@ -314,6 +314,8 @@ def make_lead_agent(config: RunnableConfig):
         # Custom agent mode: reuse the full lead agent prompt, then inject SOUL.md + USER.md
         agent = load_agent_config(agent_name)
 
+        print(f"Custom Agent({agent_name}) -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
+
         # Resolve effective model: configurable > agent config > default
         effective_model_name = model_name or agent.model
 
@@ -322,6 +324,8 @@ def make_lead_agent(config: RunnableConfig):
 
         tool_groups = agent.tool_groups
 
+        print(f"Custom Prompt:\n{system_prompt}")
+
         return create_agent(
             model=create_chat_model(name=effective_model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(groups=tool_groups, model_name=effective_model_name, subagent_enabled=subagent_enabled),
@@ -329,6 +333,8 @@ def make_lead_agent(config: RunnableConfig):
             system_prompt=system_prompt,
             state_schema=ThreadState,
         )
+
+    print(f"Default Agent -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
 
     # Default lead agent (unchanged behavior)
     return create_agent(

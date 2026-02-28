@@ -1,11 +1,16 @@
 "use client";
 
-import type { Message } from "@langchain/langgraph-sdk";
-import type { UseStream } from "@langchain/langgraph-sdk/react";
-import { BotIcon, FilesIcon, XIcon } from "lucide-react";
+import {
+  BotIcon,
+  FilesIcon,
+  PlusIcon,
+  SquarePenIcon,
+  XIcon,
+} from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import {
   ResizableHandle,
@@ -29,9 +34,8 @@ import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
-import { type AgentThread, type AgentThreadState } from "@/core/threads";
-import { useSubmitThread, useThreadStream } from "@/core/threads/hooks";
-import { textOfMessage, titleOfThread } from "@/core/threads/utils";
+import { useThreadStream } from "@/core/threads/hooks";
+import { textOfMessage } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -56,30 +60,30 @@ export default function AgentChatPage() {
     thread_id: string;
   }>();
 
-  // Agent info
   const { agent } = useAgent(agent_name);
 
-  const isNewThread = useMemo(
-    () => threadIdFromPath === "new",
+  const threadId = useMemo(
+    () => (threadIdFromPath === "new" ? uuid() : threadIdFromPath),
     [threadIdFromPath],
   );
 
-  const [threadId, setThreadId] = useState<string | null>(null);
-  useEffect(() => {
-    if (threadIdFromPath !== "new") {
-      setThreadId(threadIdFromPath);
-    } else {
-      setThreadId(uuid());
-    }
-  }, [threadIdFromPath]);
+  const [isNewThread, setIsNewThread] = useState(
+    () => threadIdFromPath === "new",
+  );
 
   const { showNotification } = useNotification();
-  const [finalState, setFinalState] = useState<AgentThreadState | null>(null);
-  const thread = useThreadStream({
-    isNewThread,
-    threadId,
+  const [thread, sendMessage] = useThreadStream({
+    threadId: threadIdFromPath !== "new" ? threadIdFromPath : undefined,
+    context: { ...settings.context, agent_name: agent_name },
+    onStart: () => {
+      setIsNewThread(false);
+      history.replaceState(
+        null,
+        "",
+        `/workspace/agents/${agent_name}/chats/${threadId}`,
+      );
+    },
     onFinish: (state) => {
-      setFinalState(state);
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages[state.messages.length - 1];
@@ -95,19 +99,13 @@ export default function AgentChatPage() {
         showNotification(state.title, { body });
       }
     },
-  }) as unknown as UseStream<AgentThreadState>;
-
-  useEffect(() => {
-    if (thread.isLoading) setFinalState(null);
-  }, [thread.isLoading]);
+  });
 
   const title = useMemo(() => {
-    let result = isNewThread
-      ? ""
-      : titleOfThread(thread as unknown as AgentThread);
+    let result = isNewThread ? "" : (thread.values?.title ?? "");
     if (result === "Untitled") result = "";
     return result;
-  }, [thread, isNewThread]);
+  }, [thread.values?.title, isNewThread]);
 
   useEffect(() => {
     const agentLabel = agent?.name ? `[${agent.name}] ` : "";
@@ -159,37 +157,28 @@ export default function AgentChatPage() {
 
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
 
-  const handleSubmit = useSubmitThread({
-    isNewThread,
-    threadId,
-    thread,
-    threadContext: {
-      ...settings.context,
-      thinking_enabled: settings.context.mode !== "flash",
-      is_plan_mode:
-        settings.context.mode === "pro" || settings.context.mode === "ultra",
-      subagent_enabled: settings.context.mode === "ultra",
-      agent_name,
+  const handleSubmit = useCallback(
+    (message: PromptInputMessage) => {
+      void sendMessage(threadId, message, { agent_name });
     },
-    afterSubmit() {
-      // Navigate to the permanent thread URL under the agent route
-      router.push(`/workspace/agents/${agent_name}/chats/${threadId!}`);
-    },
-  });
+    [sendMessage, threadId, agent_name],
+  );
 
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
 
-  if (!threadId) return null;
-
   return (
-    <ThreadContext.Provider value={{ threadId, thread }}>
-      <ResizablePanelGroup orientation="horizontal">
+    <ThreadContext.Provider value={{ thread }}>
+      <ResizablePanelGroup
+        orientation="horizontal"
+        defaultLayout={{ chat: 100, artifacts: 0 }}
+      >
         <ResizablePanel
           className="relative"
           defaultSize={artifactPanelOpen ? 46 : 100}
           minSize={artifactPanelOpen ? 30 : 100}
+          id="chat"
         >
           <div className="relative flex size-full min-h-0 justify-between">
             <header
@@ -214,7 +203,15 @@ export default function AgentChatPage() {
                 )}
               </div>
 
-              <div>
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    router.push(`/workspace/agents/${agent_name}/chats/new`)
+                  }
+                >
+                  <PlusIcon /> {t.agents.newChat}
+                </Button>
                 {artifacts?.length > 0 && !artifactsOpen && (
                   <Tooltip content="Show artifacts of this conversation">
                     <Button
@@ -239,11 +236,6 @@ export default function AgentChatPage() {
                   className={cn("size-full", !isNewThread && "pt-10")}
                   threadId={threadId}
                   thread={thread}
-                  messagesOverride={
-                    !thread.isLoading && finalState?.messages
-                      ? (finalState.messages as Message[])
-                      : undefined
-                  }
                   paddingBottom={todoListCollapsed ? 160 : 280}
                 />
               </div>
@@ -316,6 +308,7 @@ export default function AgentChatPage() {
             "transition-all duration-300 ease-in-out",
             !artifactsOpen && "opacity-0",
           )}
+          id="artifacts"
           defaultSize={artifactPanelOpen ? 64 : 0}
           minSize={0}
           maxSize={artifactPanelOpen ? undefined : 0}

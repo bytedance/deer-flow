@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, EditIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
+import { BotIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -27,8 +27,6 @@ import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
-import { AgentFormDialog } from "./agent-form-dialog";
-
 interface AgentCardProps {
   agent: Agent;
 }
@@ -37,7 +35,6 @@ export function AgentCard({ agent }: AgentCardProps) {
   const { t } = useI18n();
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
-  const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   function handleChat() {
@@ -103,15 +100,6 @@ export function AgentCard({ agent }: AgentCardProps) {
             <Button
               size="icon"
               variant="ghost"
-              className="h-8 w-8 shrink-0"
-              onClick={() => setEditOpen(true)}
-              title={t.agents.edit}
-            >
-              <EditIcon className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
               className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
               onClick={() => setDeleteOpen(true)}
               title={t.agents.delete}
@@ -121,13 +109,6 @@ export function AgentCard({ agent }: AgentCardProps) {
           </div>
         </CardFooter>
       </Card>
-
-      {/* Edit Dialog */}
-      <AgentFormDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        agent={agent}
-      />
 
       {/* Delete Confirm */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>

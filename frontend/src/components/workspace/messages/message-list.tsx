@@ -43,7 +43,8 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  if (thread.isThreadLoading) {
+  const messages = thread.messages;
+  if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
   return (
@@ -51,7 +52,7 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
-        {groupMessages(thread.messages, (group) => {
+        {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return (
               <MessageListItem
