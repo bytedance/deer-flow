@@ -43,6 +43,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         model_settings_from_config.update(model_config.when_thinking_enabled)
     if not thinking_enabled and model_config.when_thinking_enabled and model_config.when_thinking_enabled.get("extra_body", {}).get("thinking", {}).get("type"):
         kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
+        kwargs.update({"reasoning_effort": "minimal"})
+    if not model_config.supports_reasoning_effort:
         kwargs.update({"reasoning_effort": None})
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
