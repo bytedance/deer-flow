@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from src.client import DeerFlowClient, StreamEvent
+
 # Skip entire module in CI or when no config.yaml exists
 _skip_reason = None
 if os.environ.get("CI"):
@@ -21,9 +23,6 @@ elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
 
 if _skip_reason:
     pytest.skip(_skip_reason, allow_module_level=True)
-
-from src.client import DeerFlowClient, StreamEvent
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
