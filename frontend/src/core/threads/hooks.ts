@@ -144,9 +144,9 @@ export function useSubmitThread({
           }
         } catch (error) {
           console.error("Failed to upload files:", error);
-          const message =
+          const errorMessage =
             error instanceof Error ? error.message : "Failed to upload files.";
-          toast.error(message);
+          toast.error(errorMessage);
           throw error;
         }
       }
