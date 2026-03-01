@@ -10,8 +10,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: F401
 
 from src.client import DeerFlowClient
-from src.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from src.gateway.routers.mcp import McpConfigResponse
+from src.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from src.gateway.routers.models import ModelResponse, ModelsListResponse
 from src.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from src.gateway.routers.uploads import UploadResponse
@@ -1011,8 +1011,6 @@ class TestScenarioAgentRecreation:
 
     def test_different_model_triggers_rebuild(self, client):
         """Switching model_name between calls forces agent rebuild."""
-        mock_agent_1 = MagicMock(name="agent-v1")
-        mock_agent_2 = MagicMock(name="agent-v2")
         agents_created = []
 
         def fake_create_agent(**kwargs):
