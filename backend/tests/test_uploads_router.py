@@ -67,3 +67,34 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
+
+
+def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.acquire.return_value = "local"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        # These filenames must be rejected outright
+        for bad_name in ["..", "."]:
+            file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
+            result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+            assert result.success is True
+            assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
+
+        # Path-traversal prefixes are stripped to the basename and accepted safely
+        file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
+        result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
+        assert result.success is True
+        assert len(result.files) == 1
+        assert result.files[0]["filename"] == "passwd"
+
+    # Only the safely normalised file should exist
+    assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
