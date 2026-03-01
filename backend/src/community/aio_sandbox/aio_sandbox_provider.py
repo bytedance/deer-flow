@@ -218,10 +218,18 @@ class AioSandboxProvider(SandboxProvider):
         """Get the skills directory mount configuration."""
         try:
             config = get_app_config()
+            
+            # Check for explicit host path override (required for Docker-out-of-Docker)
+            host_skills_path = os.environ.get("HOST_SKILLS_PATH")
+            if host_skills_path:
+                logger.info(f"Using HOST_SKILLS_PATH for sandbox mount: {host_skills_path}")
+                return (host_skills_path, config.skills.container_path, True)
+
             skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
 
             if skills_path.exists():
+                logger.info(f"Using default skills path for sandbox mount: {skills_path}")
                 return (str(skills_path), container_path, True)  # Read-only for security
         except Exception as e:
             logger.warning(f"Could not setup skills mount: {e}")
