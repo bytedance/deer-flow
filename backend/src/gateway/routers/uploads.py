@@ -94,6 +94,7 @@ async def upload_files(
         raise HTTPException(status_code=400, detail="No files provided")
 
     uploads_dir = get_uploads_dir(thread_id)
+    paths = get_paths()
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
@@ -107,18 +108,22 @@ async def upload_files(
         try:
             # Normalize filename to prevent path traversal
             safe_filename = Path(file.filename).name
-            if not safe_filename:
+            if not safe_filename or safe_filename in {".", ".."} or "/" in safe_filename or "\\" in safe_filename:
                 logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
                 continue
 
-            # Save the original file
-            file_path = uploads_dir / safe_filename
             content = await file.read()
+            file_path = uploads_dir / safe_filename
+            file_path.write_bytes(content)
 
             # Build relative path from backend root
-            relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / safe_filename)
+            relative_path = str(paths.sandbox_uploads_dir(thread_id) / safe_filename)
             virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
-            sandbox.update_file(virtual_path, content)
+
+            # Keep local sandbox source of truth in thread-scoped host storage.
+            # For non-local sandboxes, also sync to virtual path for runtime visibility.
+            if sandbox_id != "local":
+                sandbox.update_file(virtual_path, content)
 
             file_info = {
                 "filename": safe_filename,
@@ -135,10 +140,15 @@ async def upload_files(
             if file_ext in CONVERTIBLE_EXTENSIONS:
                 md_path = await convert_file_to_markdown(file_path)
                 if md_path:
-                    md_relative_path = str(get_paths().sandbox_uploads_dir(thread_id) / md_path.name)
+                    md_relative_path = str(paths.sandbox_uploads_dir(thread_id) / md_path.name)
+                    md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+
+                    if sandbox_id != "local":
+                        sandbox.update_file(md_virtual_path, md_path.read_bytes())
+
                     file_info["markdown_file"] = md_path.name
                     file_info["markdown_path"] = md_relative_path
-                    file_info["markdown_virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+                    file_info["markdown_virtual_path"] = md_virtual_path
                     file_info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
             uploaded_files.append(file_info)
