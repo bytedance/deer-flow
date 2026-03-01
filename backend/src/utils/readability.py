@@ -1,4 +1,6 @@
+import logging
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -8,6 +10,8 @@ from readabilipy import simple_json_from_html_string
 from readabilipy.utils import run_npm_install
 
 _READABILITY_DEPS_READY: bool | None = None
+
+logger = logging.getLogger(__name__)
 
 
 class Article:
@@ -97,8 +101,17 @@ class ReadabilityExtractor:
 
         try:
             article = simple_json_from_html_string(html, use_readability=True)
-        except Exception:
-            # Fall back to basic extraction when Readability JS parsing fails.
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            stderr = getattr(exc, "stderr", None)
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
+            logger.warning(
+                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
+                type(exc).__name__,
+                stderr_info,
+                exc_info=True,
+            )
             article = simple_json_from_html_string(html, use_readability=False)
 
         html_content = article.get("content")
