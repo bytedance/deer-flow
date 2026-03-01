@@ -1,3 +1,5 @@
+import logging
+
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware, TodoListMiddleware
 from langchain_core.runnables import RunnableConfig
@@ -16,6 +18,25 @@ from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_model_name(requested_model_name: str | None) -> str:
+    """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
+    app_config = get_app_config()
+    default_model_name = app_config.models[0].name if app_config.models else None
+    if default_model_name is None:
+        raise ValueError(
+            "No chat models are configured. Please configure at least one model in config.yaml."
+        )
+
+    if requested_model_name and app_config.get_model_config(requested_model_name):
+        return requested_model_name
+
+    if requested_model_name and requested_model_name != default_model_name:
+        logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
+    return default_model_name
 
 
 def _create_summarization_middleware() -> SummarizationMiddleware | None:
@@ -184,7 +205,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig):
+def _build_middlewares(config: RunnableConfig, model_name: str | None):
     """Build middleware chain based on runtime configuration.
 
     Args:
@@ -212,14 +233,9 @@ def _build_middlewares(config: RunnableConfig):
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware())
 
-    # Add ViewImageMiddleware only if the current model supports vision
-    model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
-
+    # Add ViewImageMiddleware only if the current model supports vision.
+    # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     app_config = get_app_config()
-    # If no model_name specified, use the first model (default)
-    if model_name is None and app_config.models:
-        model_name = app_config.models[0].name
-
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
@@ -240,11 +256,31 @@ def make_lead_agent(config: RunnableConfig):
     from src.tools import get_available_tools
 
     thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
-    model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
+    requested_model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
+    model_name = _resolve_model_name(requested_model_name)
+    if model_name is None:
+        raise ValueError(
+            "No chat model could be resolved. Please configure at least one model in "
+            "config.yaml or provide a valid 'model_name'/'model' in the request."
+        )
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
-    print(f"thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
+
+    app_config = get_app_config()
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    if thinking_enabled and model_config is not None and not model_config.supports_thinking:
+        logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
+        thinking_enabled = False
+
+    logger.info(
+        "thinking_enabled: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        thinking_enabled,
+        model_name,
+        is_plan_mode,
+        subagent_enabled,
+        max_concurrent_subagents,
+    )
 
     # Inject run metadata for LangSmith trace tagging
     if "metadata" not in config:
@@ -261,7 +297,7 @@ def make_lead_agent(config: RunnableConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
         tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config),
+        middleware=_build_middlewares(config, model_name=model_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents),
         state_schema=ThreadState,
     )

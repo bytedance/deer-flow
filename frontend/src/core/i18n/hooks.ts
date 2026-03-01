@@ -7,7 +7,13 @@ import { getLocaleFromCookie, setLocaleInCookie } from "./cookies";
 import { enUS } from "./locales/en-US";
 import { zhCN } from "./locales/zh-CN";
 
-import { detectLocale, type Locale, type Translations } from "./index";
+import {
+  DEFAULT_LOCALE,
+  detectLocale,
+  normalizeLocale,
+  type Locale,
+  type Translations,
+} from "./index";
 
 const translations: Record<Locale, Translations> = {
   "en-US": enUS,
@@ -17,7 +23,7 @@ const translations: Record<Locale, Translations> = {
 export function useI18n() {
   const { locale, setLocale } = useI18nContext();
 
-  const t = translations[locale];
+  const t = translations[locale] ?? translations[DEFAULT_LOCALE];
 
   const changeLocale = (newLocale: Locale) => {
     setLocale(newLocale);
@@ -26,12 +32,19 @@ export function useI18n() {
 
   // Initialize locale on mount
   useEffect(() => {
-    const saved = getLocaleFromCookie() as Locale | null;
-    if (!saved) {
-      const detected = detectLocale();
-      setLocale(detected);
-      setLocaleInCookie(detected);
+    const saved = getLocaleFromCookie();
+    if (saved) {
+      const normalizedSaved = normalizeLocale(saved);
+      setLocale(normalizedSaved);
+      if (saved !== normalizedSaved) {
+        setLocaleInCookie(normalizedSaved);
+      }
+      return;
     }
+
+    const detected = detectLocale();
+    setLocale(detected);
+    setLocaleInCookie(detected);
   }, [setLocale]);
 
   return {

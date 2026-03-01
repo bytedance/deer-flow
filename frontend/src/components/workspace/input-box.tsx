@@ -12,7 +12,13 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentProps,
+} from "react";
 
 import {
   PromptInput,
@@ -63,6 +69,21 @@ import {
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
 
+type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+function getResolvedMode(
+  mode: InputMode | undefined,
+  supportsThinking: boolean,
+): InputMode {
+  if (!supportsThinking && mode !== "flash") {
+    return "flash";
+  }
+  if (mode) {
+    return mode;
+  }
+  return supportsThinking ? "pro" : "flash";
+}
+
 export function InputBox({
   className,
   disabled,
@@ -104,42 +125,64 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
-  const selectedModel = useMemo(() => {
-    if (!context.model_name && models.length > 0) {
-      const model = models[0]!;
-      setTimeout(() => {
-        onContextChange?.({
-          ...context,
-          model_name: model.name,
-          mode: model.supports_thinking ? "pro" : "flash",
-        });
-      }, 0);
-      return model;
+
+  useEffect(() => {
+    if (models.length === 0) {
+      return;
     }
-    return models.find((m) => m.name === context.model_name);
+    const currentModel = models.find((m) => m.name === context.model_name);
+    const fallbackModel = currentModel ?? models[0]!;
+    const supportsThinking = fallbackModel.supports_thinking ?? false;
+    const nextModelName = fallbackModel.name;
+    const nextMode = getResolvedMode(context.mode, supportsThinking);
+
+    if (context.model_name === nextModelName && context.mode === nextMode) {
+      return;
+    }
+
+    onContextChange?.({
+      ...context,
+      model_name: nextModelName,
+      mode: nextMode,
+    });
   }, [context, models, onContextChange]);
+
+  const selectedModel = useMemo(() => {
+    if (models.length === 0) {
+      return undefined;
+    }
+    return models.find((m) => m.name === context.model_name) ?? models[0];
+  }, [context.model_name, models]);
+
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
     [selectedModel],
   );
+
   const handleModelSelect = useCallback(
     (model_name: string) => {
+      const model = models.find((m) => m.name === model_name);
+      if (!model) {
+        return;
+      }
       onContextChange?.({
         ...context,
         model_name,
+        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
       });
       setModelDialogOpen(false);
     },
-    [onContextChange, context],
+    [onContextChange, context, models],
   );
+
   const handleModeSelect = useCallback(
-    (mode: "flash" | "thinking" | "pro" | "ultra") => {
+    (mode: InputMode) => {
       onContextChange?.({
         ...context,
-        mode,
+        mode: getResolvedMode(mode, supportThinking),
       });
     },
-    [onContextChange, context],
+    [onContextChange, context, supportThinking],
   );
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
