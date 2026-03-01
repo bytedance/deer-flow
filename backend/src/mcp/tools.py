@@ -6,6 +6,7 @@ from langchain_core.tools import BaseTool
 
 from src.config.extensions_config import ExtensionsConfig
 from src.mcp.client import build_servers_config
+from src.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,23 @@ async def get_mcp_tools() -> list[BaseTool]:
     try:
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
-        client = MultiServerMCPClient(servers_config)
+
+        # Inject initial OAuth headers for server connections (tool discovery/session init)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        for server_name, auth_header in initial_oauth_headers.items():
+            if server_name not in servers_config:
+                continue
+            if servers_config[server_name].get("transport") in ("sse", "http"):
+                existing_headers = dict(servers_config[server_name].get("headers", {}))
+                existing_headers["Authorization"] = auth_header
+                servers_config[server_name]["headers"] = existing_headers
+
+        tool_interceptors = []
+        oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
+        if oauth_interceptor is not None:
+            tool_interceptors.append(oauth_interceptor)
+
+        client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors)
 
         # Get all tools from all servers
         tools = await client.get_tools()

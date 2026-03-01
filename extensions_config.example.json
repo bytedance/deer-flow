@@ -32,7 +32,17 @@
         "headers": {                                                                                                                                           
           "Authorization": "Bearer $API_TOKEN",                                                                                                                
           "X-Custom-Header": "value"                                                                                                                           
-        }                                                                                                                                                      
+        },
+        "oauth": {
+          "enabled": true,
+          "token_url": "https://auth.example.com/oauth/token",
+          "grant_type": "client_credentials",
+          "client_id": "$MCP_OAUTH_CLIENT_ID",
+          "client_secret": "$MCP_OAUTH_CLIENT_SECRET",
+          "scope": "mcp.read mcp.write",
+          "audience": "https://api.example.com",
+          "refresh_skew_seconds": 60
+        }
     },
     "my-http-server": {                                                                                                                                       
         "type": "http",                                                                                                                                         
@@ -40,7 +50,14 @@
         "headers": {                                                                                                                                           
           "Authorization": "Bearer $API_TOKEN",                                                                                                                
           "X-Custom-Header": "value"                                                                                                                           
-        }                                                                                                                                                      
+        },
+        "oauth": {
+          "enabled": true,
+          "token_url": "https://auth.example.com/oauth/token",
+          "grant_type": "client_credentials",
+          "client_id": "$MCP_OAUTH_CLIENT_ID",
+          "client_secret": "$MCP_OAUTH_CLIENT_SECRET"
+        }
     }  
   },
   "skills": {

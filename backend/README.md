@@ -264,6 +264,18 @@ MCP servers and skill states in a single file:
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"}
+    },
+    "secure-http": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "oauth": {
+        "enabled": true,
+        "token_url": "https://auth.example.com/oauth/token",
+        "grant_type": "client_credentials",
+        "client_id": "$MCP_OAUTH_CLIENT_ID",
+        "client_secret": "$MCP_OAUTH_CLIENT_SECRET"
+      }
     }
   },
   "skills": {
