@@ -108,7 +108,7 @@ async def upload_files(
         try:
             # Normalize filename to prevent path traversal
             safe_filename = Path(file.filename).name
-            if not safe_filename:
+            if not safe_filename or safe_filename in {".", ".."} or "/" in safe_filename or "\\" in safe_filename:
                 logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
                 continue
 
