@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -132,13 +133,26 @@ class LocalSandbox(Sandbox):
 
         return pattern.sub(replace_match, command)
 
+    @staticmethod
+    def _get_shell() -> str:
+        """Detect available shell executable with fallback.
+
+        Returns the first available shell in order of preference:
+        /bin/zsh → /bin/bash → /bin/sh. This ensures compatibility
+        across different environments (macOS, Docker containers, etc.).
+        """
+        for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
+            if os.path.isfile(shell) and os.access(shell, os.X_OK):
+                return shell
+        return shutil.which("sh") or "/bin/sh"
+
     def execute_command(self, command: str) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
 
         result = subprocess.run(
             resolved_command,
-            executable="/bin/zsh",
+            executable=self._get_shell(),
             shell=True,
             capture_output=True,
             text=True,
