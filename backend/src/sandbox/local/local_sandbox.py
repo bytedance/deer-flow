@@ -138,13 +138,19 @@ class LocalSandbox(Sandbox):
         """Detect available shell executable with fallback.
 
         Returns the first available shell in order of preference:
-        /bin/zsh → /bin/bash → /bin/sh. This ensures compatibility
-        across different environments (macOS, Docker containers, etc.).
+        /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
+        Raises a RuntimeError if no suitable shell is found.
         """
         for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
             if os.path.isfile(shell) and os.access(shell, os.X_OK):
                 return shell
-        return shutil.which("sh") or "/bin/sh"
+        shell_from_path = shutil.which("sh")
+        if shell_from_path is not None:
+            return shell_from_path
+        raise RuntimeError(
+            "No suitable shell executable found. Tried /bin/zsh, /bin/bash, "
+            "/bin/sh, and `sh` on PATH."
+        )
 
     def execute_command(self, command: str) -> str:
         # Resolve container paths in command before execution
