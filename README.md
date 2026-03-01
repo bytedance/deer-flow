@@ -11,6 +11,7 @@ Thinktank.ai is an open-source **super agent harness** that orchestrates **sub-a
 
 - [Quick Start](#quick-start)
 - [Sandbox Configuration](#sandbox-configuration)
+- [MCP Server](#mcp-server)
 - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
 - [Core Features](#core-features)
   - [Skills & Tools](#skills--tools)
@@ -135,6 +136,12 @@ If you prefer running services locally:
    - Frontend lint rules enforce explicit async handling (`no-floating-promises`) and nullish coalescing for defaults.
 
 ## Thinktank.ai as Super Agent Harness for the Public Sector
+
+#### MCP Server
+
+Thinktank.ai supports configurable MCP servers and skills to extend its capabilities.
+For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
+See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 Thinktank.ai 1.0 is a super agent harness — batteries included, fully extensible. Built on LangGraph and LangChain, it ships with everything an agent needs out of the box: a filesystem, memory, skills, sandboxed execution, and the ability to plan and spawn sub-agents for complex, multi-step tasks.
 
