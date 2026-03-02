@@ -1,90 +1,37 @@
 "use client";
 
-import { FilesIcon, XIcon } from "lucide-react";
-import { useParams, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback } from "react";
 
-import { ConversationEmptyState } from "@/components/ai-elements/conversation";
+import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
-  usePromptInputController,
-  type PromptInputMessage,
-} from "@/components/ai-elements/prompt-input";
-import { Button } from "@/components/ui/button";
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
-import { useSidebar } from "@/components/ui/sidebar";
-import {
-  ArtifactFileDetail,
-  ArtifactFileList,
-  ArtifactTrigger,
-  useArtifacts,
-} from "@/components/workspace/artifacts";
-import ChatBox from "@/components/workspace/chats/chat-box";
+  ChatBox,
+  useSpecificChatMode,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
-import { Tooltip } from "@/components/workspace/tooltip";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
-import { type AgentThread } from "@/core/threads";
 import { useThreadStream } from "@/core/threads/hooks";
-import { textOfMessage, titleOfThread } from "@/core/threads/utils";
-import { uuid } from "@/core/utils/uuid";
+import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
-  const { setOpen: setSidebarOpen } = useSidebar();
 
-  const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
-  const searchParams = useSearchParams();
-  const promptInputController = usePromptInputController();
-  const inputInitialValue = useMemo(() => {
-    if (threadIdFromPath !== "new" || searchParams.get("mode") !== "skill") {
-      return undefined;
-    }
-    return t.inputBox.createSkillPrompt;
-  }, [threadIdFromPath, searchParams, t.inputBox.createSkillPrompt]);
-  const lastInitialValueRef = useRef<string | undefined>(undefined);
-  const setInputRef = useRef(promptInputController.textInput.setInput);
-  setInputRef.current = promptInputController.textInput.setInput;
-  useEffect(() => {
-    if (
-      inputInitialValue &&
-      inputInitialValue !== lastInitialValueRef.current
-    ) {
-      lastInitialValueRef.current = inputInitialValue;
-      setTimeout(() => {
-        setInputRef.current(inputInitialValue);
-        const textarea = document.querySelector("textarea");
-        if (textarea) {
-          textarea.focus();
-          textarea.selectionStart = textarea.value.length;
-          textarea.selectionEnd = textarea.value.length;
-        }
-      }, 100);
-    }
-  }, [inputInitialValue]);
-
-  const threadId = useMemo(
-    () => (threadIdFromPath === "new" ? uuid() : threadIdFromPath),
-    [threadIdFromPath],
-  );
-
-  const [isNewThread, setIsNewThread] = useState(
-    () => threadIdFromPath === "new",
-  );
+  const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  useSpecificChatMode();
 
   const { showNotification } = useNotification();
+
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
@@ -109,35 +56,6 @@ export default function ChatPage() {
       }
     },
   });
-  const title = useMemo(() => {
-    let result = isNewThread
-      ? ""
-      : titleOfThread(thread as unknown as AgentThread);
-    if (result === "Untitled") {
-      result = "";
-    }
-    return result;
-  }, [thread, isNewThread]);
-
-  useEffect(() => {
-    const pageTitle = isNewThread
-      ? t.pages.newChat
-      : thread.isThreadLoading
-        ? "Loading..."
-        : title === "Untitled"
-          ? t.pages.untitled
-          : title;
-    document.title = `${pageTitle} - ${t.pages.appName}`;
-  }, [
-    isNewThread,
-    t.pages.newChat,
-    t.pages.untitled,
-    t.pages.appName,
-    title,
-    thread.isThreadLoading,
-  ]);
-
-  const [todoListCollapsed, setTodoListCollapsed] = useState(true);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
@@ -162,9 +80,7 @@ export default function ChatPage() {
             )}
           >
             <div className="flex w-full items-center text-sm font-medium">
-              {title !== "Untitled" && (
-                <ThreadTitle threadId={threadId} threadTitle={title} />
-              )}
+              <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div>
               <ArtifactTrigger />
@@ -176,7 +92,6 @@ export default function ChatPage() {
                 className={cn("size-full", !isNewThread && "pt-10")}
                 threadId={threadId}
                 thread={thread}
-                paddingBottom={todoListCollapsed ? 160 : 280}
               />
             </div>
             <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
@@ -194,11 +109,9 @@ export default function ChatPage() {
                     <TodoList
                       className="bg-background/5"
                       todos={thread.values.todos ?? []}
-                      collapsed={todoListCollapsed}
                       hidden={
                         !thread.values.todos || thread.values.todos.length === 0
                       }
-                      onToggle={() => setTodoListCollapsed(!todoListCollapsed)}
                     />
                   </div>
                 </div>

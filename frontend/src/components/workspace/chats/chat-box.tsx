@@ -161,4 +161,4 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   );
 };
 
-export default ChatBox;
+export { ChatBox };
