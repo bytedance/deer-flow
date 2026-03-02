@@ -19,7 +19,6 @@ from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
-from src.tools.builtins import setup_agent
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +254,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 def make_lead_agent(config: RunnableConfig):
     # Lazy import to avoid circular dependency
     from src.tools import get_available_tools
+    from src.tools.builtins import setup_agent
 
     thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
     reasoning_effort = config.get("configurable", {}).get("reasoning_effort", None)
@@ -275,7 +275,8 @@ def make_lead_agent(config: RunnableConfig):
         thinking_enabled = False
 
     logger.info(
-        "thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        agent_name or "default",
         thinking_enabled,
         reasoning_effort,
         model_name,
@@ -289,6 +290,7 @@ def make_lead_agent(config: RunnableConfig):
         config["metadata"] = {}
     config["metadata"].update(
         {
+            "agent_name": agent_name or "default",
             "model_name": model_name or "default",
             "thinking_enabled": thinking_enabled,
             "reasoning_effort": reasoning_effort,
@@ -301,7 +303,6 @@ def make_lead_agent(config: RunnableConfig):
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"]))
 
-        logger.info(f"Bootstrap Agent -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
@@ -314,8 +315,6 @@ def make_lead_agent(config: RunnableConfig):
         # Custom agent mode: reuse the full lead agent prompt, then inject SOUL.md + USER.md
         agent = load_agent_config(agent_name)
 
-        print(f"Custom Agent({agent_name}) -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
-
         # Resolve effective model: configurable > agent config > default
         effective_model_name = model_name or agent.model
 
@@ -324,8 +323,6 @@ def make_lead_agent(config: RunnableConfig):
 
         tool_groups = agent.tool_groups
 
-        print(f"Custom Prompt:\n{system_prompt}")
-
         return create_agent(
             model=create_chat_model(name=effective_model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(groups=tool_groups, model_name=effective_model_name, subagent_enabled=subagent_enabled),
@@ -333,8 +330,6 @@ def make_lead_agent(config: RunnableConfig):
             system_prompt=system_prompt,
             state_schema=ThreadState,
         )
-
-    print(f"Default Agent -- thinking_enabled: {thinking_enabled}, model_name: {model_name}, is_plan_mode: {is_plan_mode}, subagent_enabled: {subagent_enabled}, max_concurrent_subagents: {max_concurrent_subagents}")
 
     # Default lead agent (unchanged behavior)
     return create_agent(
