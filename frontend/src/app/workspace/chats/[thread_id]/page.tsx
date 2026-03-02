@@ -177,6 +177,7 @@ export default function ChatPage() {
       is_plan_mode:
         settings.context.mode === "pro" || settings.context.mode === "ultra",
       subagent_enabled: settings.context.mode === "ultra",
+      reasoning_effort: settings.context.reasoning_effort,
     },
     afterSubmit() {
       router.push(pathOfThread(threadId!));
@@ -236,10 +237,9 @@ export default function ChatPage() {
                   className={cn("size-full", !isNewThread && "pt-10")}
                   threadId={threadId}
                   thread={thread}
-                  messagesOverride={
-                    !thread.isLoading && finalState?.messages
-                      ? (finalState.messages as Message[])
-                      : undefined
+                  messages={
+                    (finalState?.messages as Message[])
+                      ?? thread.messages
                   }
                   paddingBottom={todoListCollapsed ? 160 : 280}
                 />

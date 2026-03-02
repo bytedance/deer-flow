@@ -133,7 +133,7 @@ class ExtensionsConfig(BaseModel):
             # Return empty config if extensions config file is not found
             return cls(mcp_servers={}, skills={})
 
-        with open(resolved_path) as f:
+        with open(resolved_path, encoding="utf-8") as f:
             config_data = json.load(f)
 
         cls.resolve_env_variables(config_data)

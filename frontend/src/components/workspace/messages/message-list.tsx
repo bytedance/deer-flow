@@ -34,20 +34,18 @@ export function MessageList({
   className,
   threadId,
   thread,
-  messagesOverride,
+  messages,
   paddingBottom = 160,
 }: {
   className?: string;
   threadId: string;
   thread: UseStream<AgentThreadState>;
-  /** When set (e.g. from onFinish), use instead of thread.messages so SSE end shows complete state. */
-  messagesOverride?: Message[];
+  messages: Message[];
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = messagesOverride ?? thread.messages;
   if (thread.isThreadLoading) {
     return <MessageListSkeleton />;
   }
