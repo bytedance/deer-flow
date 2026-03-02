@@ -1,7 +1,4 @@
 from importlib import import_module
-from typing import TypeVar
-
-T = TypeVar("T")
 
 MODULE_TO_PACKAGE_HINTS = {
     "langchain_google_genai": "langchain-google-genai",

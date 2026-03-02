@@ -256,6 +256,7 @@ def make_lead_agent(config: RunnableConfig):
     from src.tools import get_available_tools
 
     thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
+    reasoning_effort = config.get("configurable", {}).get("reasoning_effort", None)
     requested_model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
     model_name = _resolve_model_name(requested_model_name)
     if model_name is None:
@@ -274,8 +275,9 @@ def make_lead_agent(config: RunnableConfig):
         thinking_enabled = False
 
     logger.info(
-        "thinking_enabled: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
         thinking_enabled,
+        reasoning_effort,
         model_name,
         is_plan_mode,
         subagent_enabled,
@@ -289,13 +291,14 @@ def make_lead_agent(config: RunnableConfig):
         {
             "model_name": model_name or "default",
             "thinking_enabled": thinking_enabled,
+            "reasoning_effort": reasoning_effort,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
         }
     )
 
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents),

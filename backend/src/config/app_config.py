@@ -72,7 +72,7 @@ class AppConfig(BaseModel):
             AppConfig: The loaded config.
         """
         resolved_path = cls.resolve_config_path(config_path)
-        with open(resolved_path) as f:
+        with open(resolved_path, encoding="utf-8") as f:
             config_data = yaml.safe_load(f)
         config_data = cls.resolve_env_variables(config_data)
 
