@@ -79,7 +79,7 @@ export function ArtifactFileDetail({
     }
     return checkCodeFile(filepath);
   }, [filepath, isWriteFile, isSkillFile]);
-  const previewable = useMemo(() => {
+  const isSupportPreview = useMemo(() => {
     return (language === "html" && !isWriteFile) || language === "markdown";
   }, [isWriteFile, language]);
   const { content } = useArtifactContent({
@@ -94,12 +94,12 @@ export function ArtifactFileDetail({
   const [isInstalling, setIsInstalling] = useState(false);
 
   useEffect(() => {
-    if (previewable) {
+    if (isSupportPreview) {
       setViewMode("preview");
     } else {
       setViewMode("code");
     }
-  }, [previewable]);
+  }, [isSupportPreview]);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -148,16 +148,18 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center">
-          {previewable && (
+          {isSupportPreview && (
             <ToggleGroup
               className="mx-auto"
               type="single"
               variant="outline"
               size="sm"
               value={viewMode}
-              onValueChange={(value) =>
-                setViewMode(value as "code" | "preview")
-              }
+              onValueChange={(value) => {
+                if (value) {
+                  setViewMode(value as "code" | "preview");
+                }
+              }}
             >
               <ToggleGroupItem value="code">
                 <Code2Icon />
@@ -232,7 +234,7 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="p-0">
-        {previewable &&
+        {isSupportPreview &&
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
@@ -294,4 +296,3 @@ export function ArtifactFilePreview({
   }
   return null;
 }
-

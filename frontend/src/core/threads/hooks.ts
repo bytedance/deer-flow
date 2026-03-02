@@ -49,7 +49,6 @@ export function useThreadStream({
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
-        console.log(event.name, event.data);
         onToolEnd?.({
           name: event.name,
           data: event.data,
@@ -57,7 +56,6 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
-      console.info("onCustomEvent", event);
       if (
         typeof event === "object" &&
         event !== null &&

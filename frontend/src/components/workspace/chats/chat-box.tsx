@@ -65,10 +65,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   useEffect(() => {
     if (layoutRef.current) {
-      console.log(
-        "Setting layout to:",
-        artifactPanelOpen ? "OPEN_MODE" : "CLOSE_MODE",
-      );
       if (artifactPanelOpen) {
         layoutRef.current.setLayout(OPEN_MODE);
       } else {
@@ -76,15 +72,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       }
     }
   }, [artifactPanelOpen]);
-
-  console.log(
-    "Rendering ChatBox with artifacts:",
-    artifacts,
-    "selectedArtifact:",
-    selectedArtifact,
-    "artifactsOpen:",
-    artifactsOpen,
-  );
 
   return (
     <ResizablePanelGroup
