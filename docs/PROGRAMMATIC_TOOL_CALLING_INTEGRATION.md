@@ -494,16 +494,16 @@ After PTC execution:
 
 ```
 Step 1.7 (Config)  ──────────────────────────────────────────┐
-                                                              │
-Step 1.1 (Schema Extractor) ─┬─ Step 1.2 (Code Gen) ────┐   │
-                              │                           │   │
-                              └─ Step 1.8 (Prompt) ──┐   │   │
-                                                      │   │   │
-Step 1.3 (Proxy) ─── Step 1.4 (Client Gen + Auth) ──┐│   │   │
-                                                      │   │   │
-                   Step 1.5 (Sandbox Setup) ◄─────────┴───┘   │
-                              │                                │
-                   Step 1.6 (execute_python update) ◄──────────┘
+                                                             │
+Step 1.1 (Schema Extractor) ─┬─ Step 1.2 (Code Gen) ──────┐  │
+                              │                           │  │
+                              └─ Step 1.8 (Prompt) ───┐   │  │
+                                                      │   │  │
+Step 1.3 (Proxy) ─── Step 1.4 (Client Gen + Auth) ──┐ │   │  │
+                                                    │ │   │  │
+                   Step 1.5 (Sandbox Setup) ◄─────────┴───┘  │
+                              │                              │
+                   Step 1.6 (execute_python update) ◄────────┘
                               │
               ┌───────────────┴───────────────┐
               │                               │
