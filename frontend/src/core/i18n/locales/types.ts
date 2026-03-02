@@ -64,6 +64,15 @@ export interface Translations {
     proModeDescription: string;
     ultraMode: string;
     ultraModeDescription: string;
+    reasoningEffort: string;
+    reasoningEffortMinimal: string;
+    reasoningEffortMinimalDescription: string;
+    reasoningEffortLow: string;
+    reasoningEffortLowDescription: string;
+    reasoningEffortMedium: string;
+    reasoningEffortMediumDescription: string;
+    reasoningEffortHigh: string;
+    reasoningEffortHighDescription: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
