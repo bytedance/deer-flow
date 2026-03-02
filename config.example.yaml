@@ -50,6 +50,15 @@ models:
   #   max_tokens: 8192
   #   supports_vision: true  # Enable vision support for view_image tool
 
+  # Example: Google Gemini model
+  # - name: gemini-2.5-pro
+  #   display_name: Gemini 2.5 Pro
+  #   use: langchain_google_genai:ChatGoogleGenerativeAI
+  #   model: gemini-2.5-pro
+  #   google_api_key: $GOOGLE_API_KEY
+  #   max_tokens: 8192
+  #   supports_vision: true
+
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
   #   display_name: DeepSeek V3 (Thinking)

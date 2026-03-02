@@ -3,6 +3,24 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
+MODULE_TO_PACKAGE_HINTS = {
+    "langchain_google_genai": "langchain-google-genai",
+    "langchain_anthropic": "langchain-anthropic",
+    "langchain_openai": "langchain-openai",
+    "langchain_deepseek": "langchain-deepseek",
+}
+
+
+def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
+    """Build an actionable hint when module import fails."""
+    module_root = module_path.split(".", 1)[0]
+    missing_module = getattr(err, "name", None) or module_root
+    package_name = MODULE_TO_PACKAGE_HINTS.get(missing_module, missing_module.replace("_", "-"))
+    return (
+        f"Missing dependency '{missing_module}'. "
+        f"Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
+    )
+
 
 def resolve_variable[T](
     variable_path: str,
@@ -30,7 +48,8 @@ def resolve_variable[T](
     try:
         module = import_module(module_path)
     except ImportError as err:
-        raise ImportError(f"Could not import module {module_path}") from err
+        hint = _build_missing_dependency_hint(module_path, err)
+        raise ImportError(f"Could not import module {module_path}. {hint}") from err
 
     try:
         variable = getattr(module, variable_name)
