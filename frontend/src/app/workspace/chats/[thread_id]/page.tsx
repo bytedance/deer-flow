@@ -285,7 +285,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                   <InputBox
-                    className={cn("bg-background/5 w-full -translate-y-4")}
+                    className={cn("bg-background/5 w-full -translate-y-8")}
                     isNewThread={isNewThread}
                     autoFocus={isNewThread}
                     status={thread.isLoading ? "streaming" : "ready"}

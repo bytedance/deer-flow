@@ -1,12 +1,17 @@
 "use client";
 
-import { MoreHorizontal, Pencil, Share2, Trash2 } from "lucide-react";
+import { ChevronRight, MessageCircle, MoreHorizontal, Pencil, Share2, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -22,25 +27,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import {
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuAction,
-  SidebarMenuButton,
-  SidebarMenuItem,
-} from "@/components/ui/sidebar";
+import { SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuAction, SidebarMenuButton, SidebarMenuItem, useSidebar } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  useDeleteThread,
-  useRenameThread,
-  useThreads,
-} from "@/core/threads/hooks";
+import { useDeleteThread, useRenameThread, useThreads } from "@/core/threads/hooks";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
+import { cn } from "@/lib/utils";
 
 export function RecentChatList() {
+  const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   const router = useRouter();
   const pathname = usePathname();
@@ -115,16 +110,23 @@ export function RecentChatList() {
   }
   return (
     <>
-      <SidebarGroup>
-        <SidebarGroupLabel>
-          {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true"
-            ? t.sidebar.recentChats
-            : t.sidebar.demoChats}
-        </SidebarGroupLabel>
-        <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
-          <SidebarMenu>
-            <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+      <Collapsible defaultOpen className="group/collapsible">
+        <SidebarGroup>
+          {isSidebarOpen && (
+            <SidebarGroupLabel asChild>
+              <CollapsibleTrigger>
+                {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true"
+                  ? t.sidebar.recentChats
+                  : t.sidebar.demoChats}
+                <ChevronRight className="ml-auto transition-transform group-data-[state=open]/collapsible:rotate-90" />
+              </CollapsibleTrigger>
+            </SidebarGroupLabel>
+          )}
+          <CollapsibleContent>
+            <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
+              <SidebarMenu>
+                <div className="flex w-full flex-col gap-1">
+                  {threads.map((thread) => {
                 const isActive = pathOfThread(thread.thread_id) === pathname;
                 return (
                   <SidebarMenuItem
@@ -134,10 +136,14 @@ export function RecentChatList() {
                     <SidebarMenuButton isActive={isActive} asChild>
                       <div>
                         <Link
-                          className="text-muted-foreground block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
-                          href={pathOfThread(thread.thread_id)}
-                        >
-                          {titleOfThread(thread)}
+                        className={cn(
+                          "block w-full whitespace-nowrap group-hover/side-menu-item:overflow-hidden flex items-center gap-2",
+                          isActive ? "text-black" : "text-muted-foreground",
+                        )}
+                        href={pathOfThread(thread.thread_id)}
+                      >
+                          <MessageCircle className="size-4 shrink-0" />
+                          <span className="truncate flex-1">{titleOfThread(thread)}</span>
                         </Link>
                         {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                           <DropdownMenu>
@@ -190,7 +196,9 @@ export function RecentChatList() {
             </div>
           </SidebarMenu>
         </SidebarGroupContent>
-      </SidebarGroup>
+          </CollapsibleContent>
+        </SidebarGroup>
+      </Collapsible>
 
       {/* Rename Dialog */}
       <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>

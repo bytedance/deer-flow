@@ -83,6 +83,8 @@ export const enUS: Translations = {
     ultraModeDescription:
       "Pro mode with subagents to divide work; best for complex multi-step tasks",
     searchModels: "Search models...",
+    noModelsFound: "No models found",
+    models: "Models",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     suggestions: [

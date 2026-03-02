@@ -65,6 +65,8 @@ export interface Translations {
     ultraMode: string;
     ultraModeDescription: string;
     searchModels: string;
+    noModelsFound: string;
+    models: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     suggestions: {
