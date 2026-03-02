@@ -34,7 +34,7 @@ export function useThreadStream({
     assistantId: "lead_agent",
     threadId: isNewThread ? undefined : threadId,
     reconnectOnMount: true,
-    fetchStateHistory: true,
+    fetchStateHistory: { limit: 1 },
     onCustomEvent(event: unknown) {
       console.info(event);
       if (
@@ -192,6 +192,7 @@ export function useThreads(
     limit: 50,
     sortBy: "updated_at",
     sortOrder: "desc",
+    select: ["thread_id", "updated_at", "values"],
   },
 ) {
   const apiClient = getAPIClient();
@@ -201,6 +202,7 @@ export function useThreads(
       const response = await apiClient.threads.search<AgentThreadState>(params);
       return response as AgentThread[];
     },
+    refetchOnWindowFocus: false,
   });
 }
 
