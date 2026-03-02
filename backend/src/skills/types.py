@@ -17,7 +17,7 @@ class Skill:
 
     @property
     def skill_path(self) -> str:
-        """Returns the relative path from skills root to this skill's directory"""
+        """Returns the relative path from the category root (skills/{category}) to this skill's directory"""
         path = self.relative_path.as_posix()
         return "" if path == "." else path
 
