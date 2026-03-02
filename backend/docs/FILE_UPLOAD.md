@@ -131,6 +131,11 @@ read_file(path="/mnt/user-data/uploads/document.md")
 - Physical storage: `backend/.think-tank/threads/{thread_id}/user-data/uploads/document.pdf`
 - Frontend access: `/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf` (HTTP URL)
 
+The upload flow uses a "thread directory first" strategy:
+- Files are first written to `backend/.think-tank/threads/{thread_id}/user-data/uploads/` as canonical storage
+- Local sandbox (`sandbox_id=local`) uses the thread directory content directly
+- Non-local sandboxes additionally sync to `/mnt/user-data/uploads/*` for runtime visibility
+
 ## Test Examples
 
 ### Test with curl
@@ -243,7 +248,8 @@ backend/.think-tank/threads/
 
 1. Confirm `UploadsMiddleware` is registered in `agent.py`
 2. Verify `thread_id` is correct
-3. Confirm the files were uploaded to the correct directory
+3. Confirm the files were uploaded to `backend/.think-tank/threads/{thread_id}/user-data/uploads/`
+4. For non-local sandbox scenarios, confirm the upload endpoint returned no errors (sandbox sync must succeed)
 
 ## Development Suggestions
 

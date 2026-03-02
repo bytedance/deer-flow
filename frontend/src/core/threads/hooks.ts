@@ -3,6 +3,7 @@ import type { AIMessage } from "@langchain/langgraph-sdk";
 import { useStream, type UseStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect } from "react";
+import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
@@ -156,17 +157,31 @@ export function useSubmitThread({
             return null;
           });
 
-          const files = (await Promise.all(filePromises)).filter(
+          const conversionResults = await Promise.all(filePromises);
+          const files = conversionResults.filter(
             (file): file is File => file !== null,
           );
+          const failedConversions = conversionResults.length - files.length;
 
-          if (files.length > 0 && threadId) {
+          if (failedConversions > 0) {
+            throw new Error(
+              `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
+            );
+          }
+
+          if (!threadId) {
+            throw new Error("Thread is not ready for file upload.");
+          }
+
+          if (files.length > 0) {
             await uploadFiles(threadId, files);
           }
         } catch (error) {
           console.error("Failed to upload files:", error);
-          // Continue with message submission even if upload fails
-          // You might want to show an error toast here
+          const errorMessage =
+            error instanceof Error ? error.message : "Failed to upload files.";
+          toast.error(errorMessage);
+          throw error;
         }
       }
 

@@ -1,7 +1,6 @@
 # Secure Database Access Architecture for Government Deployments
 
-> Research report compiled February 2026. Covers SOTA protocols and design patterns
-> for AI agents accessing sensitive relational databases via MCP in government settings.
+> Proposed protocols and design patterns for Thinktank.ai agents accessing sensitive relational databases via MCP in government settings.
 
 ---
 
