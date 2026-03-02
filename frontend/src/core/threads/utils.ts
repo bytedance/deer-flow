@@ -17,5 +17,5 @@ export function textOfMessage(message: BaseMessage) {
 }
 
 export function titleOfThread(thread: AgentThread) {
-  return thread?.values?.title ?? "Untitled";
+  return thread.values?.title ?? "Untitled";
 }
