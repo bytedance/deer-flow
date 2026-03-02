@@ -17,8 +17,5 @@ export function textOfMessage(message: BaseMessage) {
 }
 
 export function titleOfThread(thread: AgentThread) {
-  if (thread.values && "title" in thread.values) {
-    return thread.values.title;
-  }
-  return "Untitled";
+  return thread.values?.title ?? "Untitled";
 }
