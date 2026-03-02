@@ -30,12 +30,11 @@ import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
-import { type AgentThread, type AgentThreadState } from "@/core/threads";
+import { type AgentThreadState } from "@/core/threads";
 import { useSubmitThread, useThreadStream } from "@/core/threads/hooks";
 import {
   pathOfThread,
   textOfMessage,
-  titleOfThread,
 } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
@@ -102,7 +101,7 @@ export default function ChatPage() {
       setFinalState(state);
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
+        const lastMessage = state.messages.at(-1);
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {
@@ -123,33 +122,20 @@ export default function ChatPage() {
     if (thread.isLoading) setFinalState(null);
   }, [thread.isLoading]);
 
-  const title = useMemo(() => {
-    let result = isNewThread
-      ? ""
-      : titleOfThread(thread as unknown as AgentThread);
-    if (result === "Untitled") {
-      result = "";
-    }
-    return result;
-  }, [thread, isNewThread]);
-
+  const title = thread.values?.title ?? "Untitled";
   useEffect(() => {
     const pageTitle = isNewThread
       ? t.pages.newChat
-      : thread.values?.title && thread.values.title !== "Untitled"
-        ? thread.values.title
-        : t.pages.untitled;
-    if (thread.isThreadLoading) {
-      document.title = `Loading... - ${t.pages.appName}`;
-    } else {
-      document.title = `${pageTitle} - ${t.pages.appName}`;
-    }
+      : thread.isThreadLoading
+        ? "Loading..."
+        : title === "Untitled" ? t.pages.untitled : title;
+    document.title = `${pageTitle} - ${t.pages.appName}`;
   }, [
     isNewThread,
     t.pages.newChat,
     t.pages.untitled,
     t.pages.appName,
-    thread.values.title,
+    title,
     thread.isThreadLoading,
   ]);
 
