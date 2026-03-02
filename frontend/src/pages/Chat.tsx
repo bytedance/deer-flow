@@ -151,7 +151,7 @@ function ChatInner() {
       }
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
+        const lastMessage = state.messages.at(-1);
         if (lastMessage) {
           const textContent = textOfMessage(lastMessage);
           if (textContent) {

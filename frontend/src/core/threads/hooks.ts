@@ -54,7 +54,7 @@ export function useThreadStream({
     assistantId: "lead_agent",
     threadId: isNewThread ? undefined : threadId,
     reconnectOnMount: true,
-    fetchStateHistory: true,
+    fetchStateHistory: { limit: 1 },
     onCustomEvent(event: unknown) {
       console.info(event);
       if (
@@ -244,6 +244,7 @@ export function useThreads() {
       }
       return response.json();
     },
+    refetchOnWindowFocus: false,
   });
 }
 
