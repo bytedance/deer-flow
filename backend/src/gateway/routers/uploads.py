@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from src.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
+from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.gateway.auth.middleware import get_current_user
 from src.gateway.auth.ownership import verify_thread_ownership
 from src.gateway.rate_limiter import check_user_api_rate
@@ -139,7 +139,7 @@ class UploadResponse(BaseModel):
 
 def get_uploads_dir(thread_id: str) -> Path:
     """Get the uploads directory for a thread."""
-    base_dir = Path(os.getcwd()) / THREAD_DATA_BASE_DIR / thread_id / "user-data" / "uploads"
+    base_dir = get_paths().sandbox_uploads_dir(thread_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
 
@@ -194,10 +194,10 @@ def _get_user_total_upload_bytes(user_id: str) -> int:
             return int(total)
 
     # File-based fallback: walk all thread upload directories
-    base = Path(os.getcwd()) / THREAD_DATA_BASE_DIR
+    threads_dir = get_paths().base_dir / "threads"
     total = 0
-    if base.exists():
-        for upload_dir in base.glob("*/user-data/uploads"):
+    if threads_dir.exists():
+        for upload_dir in threads_dir.glob("*/user-data/uploads"):
             for f in upload_dir.iterdir():
                 if f.is_file():
                     total += f.stat().st_size
@@ -279,53 +279,68 @@ async def upload_files(
         raise HTTPException(status_code=400, detail="No files provided")
 
     # Read all file contents and validate before writing anything
-    file_contents: list[tuple[UploadFile, bytes]] = []
+    file_contents: list[tuple[UploadFile, bytes, str]] = []
     total_new_bytes = 0
 
     for file in files:
         if not file.filename:
             continue
 
+        # Normalize filename to prevent path traversal
+        safe_filename = Path(file.filename).name
+        if not safe_filename or safe_filename in {".", ".."} or "/" in safe_filename or "\\" in safe_filename:
+            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+            continue
+
         content = await file.read()
-        _validate_upload(file.filename, file.content_type, len(content))
-        file_contents.append((file, content))
+        _validate_upload(safe_filename, file.content_type, len(content))
+        file_contents.append((file, content, safe_filename))
         total_new_bytes += len(content)
 
     if not file_contents:
-        raise HTTPException(status_code=400, detail="No valid files to upload")
+        # If all files were filtered by safety checks, return success with empty list
+        # (rather than erroring) so callers know no files were dangerously processed.
+        return UploadResponse(success=True, files=[], message="No valid files to upload")
 
     # Check quota before writing
     _check_upload_quota(current_user["id"], total_new_bytes)
 
     uploads_dir = get_uploads_dir(thread_id)
+    paths = get_paths()
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
     sandbox_id = sandbox_provider.acquire(thread_id)
     sandbox = sandbox_provider.get(sandbox_id)
 
-    for file, content in file_contents:
+    for file, content, safe_filename in file_contents:
         try:
-            file_path = uploads_dir / file.filename
-            relative_path = f".think-tank/threads/{thread_id}/user-data/uploads/{file.filename}"
-            virtual_path = f"/mnt/user-data/uploads/{file.filename}"
-            sandbox.update_file(virtual_path, content)
+            # Write to thread-scoped host storage first (canonical copy)
+            file_path = uploads_dir / safe_filename
+            file_path.write_bytes(content)
+
+            relative_path = str(paths.sandbox_uploads_dir(thread_id) / safe_filename)
+            virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
+
+            # For non-local sandboxes, also sync to virtual path for runtime visibility
+            if sandbox_id != "local":
+                sandbox.update_file(virtual_path, content)
 
             file_info = {
-                "filename": file.filename,
+                "filename": safe_filename,
                 "size": str(len(content)),
                 "path": relative_path,
                 "virtual_path": virtual_path,
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{file.filename}",
+                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
             }
 
-            logger.info(f"Saved file: {file.filename} ({len(content)} bytes) to {relative_path}")
+            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {relative_path}")
 
             # Record upload in database
             _record_upload(
                 user_id=current_user["id"],
                 thread_id=thread_id,
-                filename=file.filename,
+                filename=safe_filename,
                 content_type=file.content_type,
                 size_bytes=len(content),
                 storage_path=relative_path,
@@ -336,10 +351,15 @@ async def upload_files(
             if file_ext in CONVERTIBLE_EXTENSIONS:
                 md_path = await convert_file_to_markdown(file_path)
                 if md_path:
-                    md_relative_path = f".think-tank/threads/{thread_id}/user-data/uploads/{md_path.name}"
+                    md_relative_path = str(paths.sandbox_uploads_dir(thread_id) / md_path.name)
+                    md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+
+                    if sandbox_id != "local":
+                        sandbox.update_file(md_virtual_path, md_path.read_bytes())
+
                     file_info["markdown_file"] = md_path.name
                     file_info["markdown_path"] = md_relative_path
-                    file_info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
+                    file_info["markdown_virtual_path"] = md_virtual_path
                     file_info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
             uploaded_files.append(file_info)
@@ -347,8 +367,8 @@ async def upload_files(
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+            logger.error(f"Failed to upload {safe_filename}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to upload {safe_filename}: {str(e)}")
 
     return UploadResponse(
         success=True,
