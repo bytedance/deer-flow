@@ -55,8 +55,9 @@ services:
     command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8003 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/src:/app/backend/src
-      - ../backend/.env:/app/backend/.env
+      - ../.env:/app/backend/.env
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
@@ -84,8 +85,9 @@ services:
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/src:/app/backend/src
-      - ../backend/.env:/app/backend/.env
+      - ../.env:/app/backend/.env
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
