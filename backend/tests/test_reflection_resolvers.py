@@ -21,6 +21,23 @@ def test_resolve_variable_reports_install_hint_for_missing_google_provider(monke
     assert "uv add langchain-google-genai" in message
 
 
+def test_resolve_variable_reports_install_hint_for_missing_google_transitive_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing transitive dependency should still return actionable install guidance."""
+
+    def fake_import_module(module_path: str):
+        # Simulate provider module existing but a transitive dependency (e.g. `google`) missing.
+        raise ModuleNotFoundError("No module named 'google'", name="google")
+
+    monkeypatch.setattr(resolvers, "import_module", fake_import_module)
+
+    with pytest.raises(ImportError) as exc_info:
+        resolve_variable("langchain_google_genai:ChatGoogleGenerativeAI")
+
+    message = str(exc_info.value)
+    # Even when a transitive dependency is missing, the hint should still point to the provider package.
+    assert "uv add langchain-google-genai" in message
 def test_resolve_variable_invalid_path_format():
     """Invalid variable path should fail with format guidance."""
     with pytest.raises(ImportError) as exc_info:

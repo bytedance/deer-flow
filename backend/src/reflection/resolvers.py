@@ -45,8 +45,13 @@ def resolve_variable[T](
     try:
         module = import_module(module_path)
     except ImportError as err:
-        hint = _build_missing_dependency_hint(module_path, err)
-        raise ImportError(f"Could not import module {module_path}. {hint}") from err
+        module_root = module_path.split(".", 1)[0]
+        err_name = getattr(err, "name", None)
+        if isinstance(err, ModuleNotFoundError) or err_name == module_root:
+            hint = _build_missing_dependency_hint(module_path, err)
+            raise ImportError(f"Could not import module {module_path}. {hint}") from err
+        # Preserve the original ImportError message for non-missing-module failures.
+        raise ImportError(f"Error importing module {module_path}: {err}") from err
 
     try:
         variable = getattr(module, variable_name)
