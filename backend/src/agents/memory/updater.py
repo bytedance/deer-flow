@@ -17,6 +17,7 @@ from src.agents.memory.prompt import (
     format_conversation_for_update,
 )
 from src.config.memory_config import get_memory_config
+from src.config.paths import get_paths
 from src.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,7 @@ def _get_memory_file_path(user_id: str = DEFAULT_USER_ID) -> Path:
     Returns:
         Path to the user's memory JSON file.
     """
-    config = get_memory_config()
-    base_dir = Path(os.getcwd()) / Path(config.storage_path).parent / "memory"
+    base_dir = get_paths().base_dir / "memory"
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / f"{user_id}.json"
 

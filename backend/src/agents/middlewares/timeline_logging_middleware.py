@@ -21,7 +21,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from src.sandbox.consts import THREAD_DATA_BASE_DIR
+from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def _resolve_outputs_path(state: AgentState, thread_id: str) -> str:
     if outputs_path:
         os.makedirs(outputs_path, exist_ok=True)
         return outputs_path
-    fallback_path = Path(os.getcwd()) / THREAD_DATA_BASE_DIR / thread_id / "user-data" / "outputs"
+    fallback_path = get_paths().sandbox_outputs_dir(thread_id)
     fallback_path.mkdir(parents=True, exist_ok=True)
     return str(fallback_path)
 
