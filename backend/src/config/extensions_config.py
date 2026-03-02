@@ -130,9 +130,10 @@ class ExtensionsConfig(BaseModel):
         for key, value in config.items():
             if isinstance(value, str):
                 if value.startswith("$"):
-                    env_value = os.getenv(value[1:], None)
-                    if env_value is not None:
-                        config[key] = env_value
+                    env_value = os.getenv(value[1:])
+                    if env_value is None:
+                        raise ValueError(f"Environment variable {value[1:]} not found for config value {value}")
+                    config[key] = env_value
                 else:
                     config[key] = value
             elif isinstance(value, dict):
