@@ -438,7 +438,6 @@ export function InputBox({
                   {context.reasoning_effort === "low" && " " + t.inputBox.reasoningEffortLow}
                   {context.reasoning_effort === "medium" && " " + t.inputBox.reasoningEffortMedium}
                   {context.reasoning_effort === "high" && " " + t.inputBox.reasoningEffortHigh}
-                  {!context.reasoning_effort && " " + t.inputBox.reasoningEffortMedium}
                 </div>
               </PromptInputActionMenuTrigger>
               <PromptInputActionMenuContent className="w-70">
