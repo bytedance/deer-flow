@@ -60,7 +60,7 @@ class TestFragmentContent:
     def test_identity_has_role_tag(self):
         content = _load_fragment("system/identity.md")
         assert "<role>" in content
-        assert "DeerFlow" in content
+        assert "Thinktank" in content
 
     def test_thinking_style_has_tag_and_variable(self):
         content = _load_fragment("system/thinking_style.md")
@@ -142,7 +142,7 @@ class TestPromptComposer:
         composer = self._make_composer()
         result = composer.compose(current_date="2026-02-28, Saturday")
         assert "<role>" in result
-        assert "DeerFlow" in result
+        assert "Thinktank" in result
 
     def test_compose_includes_date(self):
         composer = self._make_composer()

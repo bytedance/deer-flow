@@ -126,8 +126,8 @@ class TestEnvVariableResolution:
         resolved_uri = config_data["mcpServers"]["postgres"]["env"]["DATABASE_URI"]
         assert resolved_uri == test_uri
 
-    def test_env_variable_not_set_stays_raw(self):
-        """Config values with $VAR where VAR is not set should stay as-is."""
+    def test_env_variable_not_set_raises_error(self):
+        """Config values with $VAR where VAR is not set should raise ValueError (fail-fast)."""
         config_data = {
             "mcpServers": {
                 "postgres": {
@@ -138,7 +138,6 @@ class TestEnvVariableResolution:
 
         # Remove the var if it somehow exists
         os.environ.pop("NONEXISTENT_VAR_12345", None)
-        ExtensionsConfig.resolve_env_variables(config_data)
 
-        # Should stay as the raw string since env var doesn't exist
-        assert config_data["mcpServers"]["postgres"]["env"]["DATABASE_URI"] == "$NONEXISTENT_VAR_12345"
+        with pytest.raises(ValueError, match="NONEXISTENT_VAR_12345"):
+            ExtensionsConfig.resolve_env_variables(config_data)
