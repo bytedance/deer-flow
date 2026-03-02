@@ -62,6 +62,12 @@ class TestUploadQuotaCheck:
 class TestUserTotalUploadBytes:
     """Test upload size tracking via filesystem fallback."""
 
+    def _mock_paths(self, tmp_path):
+        """Return a Paths instance rooted at tmp_path/.think-tank."""
+        from src.config.paths import Paths
+
+        return Paths(tmp_path / ".think-tank")
+
     def test_empty_directory_returns_zero(self, tmp_path):
         """No uploads should return 0 bytes."""
         with (
@@ -70,10 +76,9 @@ class TestUserTotalUploadBytes:
                 return_value=False,
             ),
             patch(
-                "src.gateway.routers.uploads.THREAD_DATA_BASE_DIR",
-                ".think-tank/threads",
+                "src.gateway.routers.uploads.get_paths",
+                return_value=self._mock_paths(tmp_path),
             ),
-            patch("os.getcwd", return_value=str(tmp_path)),
         ):
             total = _get_user_total_upload_bytes("user1")
             assert total == 0
@@ -94,10 +99,9 @@ class TestUserTotalUploadBytes:
                 return_value=False,
             ),
             patch(
-                "src.gateway.routers.uploads.THREAD_DATA_BASE_DIR",
-                ".think-tank/threads",
+                "src.gateway.routers.uploads.get_paths",
+                return_value=self._mock_paths(tmp_path),
             ),
-            patch("os.getcwd", return_value=str(tmp_path)),
         ):
             total = _get_user_total_upload_bytes("user1")
             assert total == 5 + 6  # "hello" + "world!"
@@ -117,10 +121,9 @@ class TestUserTotalUploadBytes:
                 return_value=False,
             ),
             patch(
-                "src.gateway.routers.uploads.THREAD_DATA_BASE_DIR",
-                ".think-tank/threads",
+                "src.gateway.routers.uploads.get_paths",
+                return_value=self._mock_paths(tmp_path),
             ),
-            patch("os.getcwd", return_value=str(tmp_path)),
         ):
             total = _get_user_total_upload_bytes("user1")
             assert total == 200

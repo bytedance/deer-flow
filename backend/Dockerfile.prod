@@ -15,12 +15,15 @@ ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Copy backend source
-COPY backend ./backend
+# Copy dependency files first (cached unless deps change)
+COPY backend/pyproject.toml backend/uv.lock ./backend/
 
 # Install production dependencies only (no dev deps like pytest, ruff)
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync --no-dev"
+
+# Copy backend source (only this layer rebuilds on code-only changes)
+COPY backend ./backend
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim

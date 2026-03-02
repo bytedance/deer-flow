@@ -17,7 +17,7 @@ from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.usage_tracking_middleware import UsageTrackingMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
-from src.config import get_app_config
+from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
@@ -79,7 +79,6 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoListMiddleware | Non
     if not is_plan_mode:
         return None
 
-    # Custom prompts matching DeerFlow's style
     system_prompt = """
 <todo_list_system>
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.

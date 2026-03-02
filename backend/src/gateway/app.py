@@ -1,9 +1,11 @@
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from src.config.app_config import get_app_config
 from src.gateway.auth.routes import router as auth_router
 from src.gateway.config import get_gateway_config
 from src.gateway.routers import agent, artifacts, keys, mcp, memory, models, providers, skills, threads, uploads
@@ -18,6 +20,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+
+    # Load config and check necessary environment variables at startup
+    try:
+        get_app_config()
+        logger.info("Configuration loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load configuration: {e}")
+        sys.exit(1)
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
