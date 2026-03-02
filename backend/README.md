@@ -77,6 +77,7 @@ Per-thread isolated execution with virtual path translation:
 - **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
+- **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
 - **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace`
 
 ### Subagent System
