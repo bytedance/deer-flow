@@ -335,6 +335,16 @@ Both can be modified at runtime via Gateway API endpoints.
 
 ## Development Workflow
 
+### Test-Driven Development (TDD) — MANDATORY
+
+**Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
+
+- Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
+- Run the full suite before and after your change: `make test`
+- Tests must pass before a feature is considered complete
+- For lightweight config/utility modules, prefer pure unit tests with no external dependencies
+- If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `src.subagents.executor`)
+
 ### Running the Full Application
 
 From the **project root** directory:
