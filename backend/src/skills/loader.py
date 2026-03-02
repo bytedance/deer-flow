@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from .parser import parse_skill_file
@@ -59,16 +60,16 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         if not category_path.exists() or not category_path.is_dir():
             continue
 
-        # Each subdirectory is a potential skill
-        for skill_dir in category_path.iterdir():
-            if not skill_dir.is_dir():
+        for current_root, dir_names, file_names in os.walk(category_path):
+            # Keep traversal deterministic and skip hidden directories.
+            dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+            if "SKILL.md" not in file_names:
                 continue
 
-            skill_file = skill_dir / "SKILL.md"
-            if not skill_file.exists():
-                continue
+            skill_file = Path(current_root) / "SKILL.md"
+            relative_path = skill_file.parent.relative_to(category_path)
 
-            skill = parse_skill_file(skill_file, category=category)
+            skill = parse_skill_file(skill_file, category=category, relative_path=relative_path)
             if skill:
                 skills.append(skill)
 

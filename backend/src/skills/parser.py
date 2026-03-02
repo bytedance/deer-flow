@@ -4,7 +4,7 @@ from pathlib import Path
 from .types import Skill
 
 
-def parse_skill_file(skill_file: Path, category: str) -> Skill | None:
+def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
     """
     Parse a SKILL.md file and extract metadata.
 
@@ -55,6 +55,7 @@ def parse_skill_file(skill_file: Path, category: str) -> Skill | None:
             license=license_text,
             skill_dir=skill_file.parent,
             skill_file=skill_file,
+            relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
             enabled=True,  # Default to enabled, actual state comes from config file
         )
