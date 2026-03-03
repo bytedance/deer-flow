@@ -156,6 +156,7 @@ export const MessageGroup = memo(function MessageGroup({
                 )}
               />
             }
+            showConnector={false}
           ></ChainOfThoughtStep>
         </Button>
       )}
@@ -216,6 +217,7 @@ export const MessageGroup = memo(function MessageGroup({
                 className="my-0 font-normal"
                 label={t.common.thinking}
                 icon={LightbulbIcon}
+                showConnector={false}
               ></ChainOfThoughtStep>
               <div>
                 <ChevronUp
@@ -258,6 +260,7 @@ export const MessageGroup = memo(function MessageGroup({
               <CheckCircle2Icon className="text-emerald-500 dark:text-emerald-400 size-4" />
             }
             label={t.toolCalls.done}
+            showConnector={false}
           />
         </div>
       )}
@@ -296,6 +299,7 @@ const ToolCall = memo(function ToolCall({
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const headerOnlyToolStepClass = hideContent ? "mb-7" : undefined;
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -310,7 +314,12 @@ const ToolCall = memo(function ToolCall({
       }
     };
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
+        key={id}
+        label={label}
+        icon={SearchIcon}
+      >
         {!hideContent && Array.isArray(result) && (
           <div className="bg-background/80 mt-2 overflow-hidden rounded-lg border">
             <ul className="divide-y divide-border/70">
@@ -353,7 +362,12 @@ const ToolCall = memo(function ToolCall({
       }
     )?.results;
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
+        key={id}
+        label={label}
+        icon={SearchIcon}
+      >
         {!hideContent && Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
@@ -393,7 +407,7 @@ const ToolCall = memo(function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={cn("cursor-pointer", headerOnlyToolStepClass)}
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
         onClick={() => {
@@ -419,7 +433,12 @@ const ToolCall = memo(function ToolCall({
     }
     const path: string | undefined = (args as { path: string })?.path;
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
+      <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
+        key={id}
+        label={description}
+        icon={FolderOpenIcon}
+      >
         {!hideContent && path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -435,7 +454,12 @@ const ToolCall = memo(function ToolCall({
     }
     const { path } = args as { path: string; content: string };
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
+      <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
+        key={id}
+        label={description}
+        icon={BookOpenTextIcon}
+      >
         {!hideContent && path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
@@ -452,6 +476,7 @@ const ToolCall = memo(function ToolCall({
           : "";
     return (
       <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
         key={id}
         label={t.common.reflecting}
         icon={SparklesIcon}
@@ -488,7 +513,7 @@ const ToolCall = memo(function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={cn("cursor-pointer", headerOnlyToolStepClass)}
         label={description}
         icon={NotebookPenIcon}
         onClick={() => {
@@ -518,6 +543,7 @@ const ToolCall = memo(function ToolCall({
     const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
+        className={headerOnlyToolStepClass}
         key={id}
         label={description}
         icon={SquareTerminalIcon}
@@ -535,6 +561,7 @@ const ToolCall = memo(function ToolCall({
   } else if (name === "ask_clarification") {
     return (
       <ChainOfThoughtStep
+        className="mb-7"
         key={id}
         label={t.toolCalls.needYourHelp}
         icon={MessageCircleQuestionMarkIcon}
@@ -543,6 +570,7 @@ const ToolCall = memo(function ToolCall({
   } else if (name === "write_todos") {
     return (
       <ChainOfThoughtStep
+        className="mb-7"
         key={id}
         label={t.toolCalls.writeTodos}
         icon={ListTodoIcon}
@@ -564,6 +592,7 @@ const ToolCall = memo(function ToolCall({
       ?.description;
     return (
       <ChainOfThoughtStep
+        className="mb-7"
         key={id}
         label={description ?? t.toolCalls.useTool(name)}
         icon={WrenchIcon}
@@ -599,6 +628,7 @@ const McpDataToolCall = memo(function McpDataToolCall({
 }) {
   const { t } = useI18n();
   const { setOpen, select } = useArtifacts();
+  const headerOnlyToolStepClass = hideContent ? "mb-7" : undefined;
 
   const label = useMemo(
     () => describeMcpTool(name, args, t.toolCalls.useTool(name)),
@@ -632,7 +662,12 @@ const McpDataToolCall = memo(function McpDataToolCall({
   }, [id, name, messageId, select, setOpen]);
 
   return (
-    <ChainOfThoughtStep key={id} label={label} icon={DatabaseIcon}>
+    <ChainOfThoughtStep
+      className={headerOnlyToolStepClass}
+      key={id}
+      label={label}
+      icon={DatabaseIcon}
+    >
       <ChainOfThoughtSearchResults>
         <ChainOfThoughtSearchResult>
           {t.toolCalls.mcpDataResults(meta.count, meta.total)}
