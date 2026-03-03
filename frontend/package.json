@@ -56,6 +56,7 @@
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@streamdown/math": "^1.0.2",
     "@tanstack/react-query": "^5.90.17",
+    "@tanstack/react-table": "^8.21.3",
     "@types/hast": "^3.0.4",
     "@uiw/codemirror-theme-basic": "^4.25.4",
     "@uiw/codemirror-theme-monokai": "^4.25.4",
