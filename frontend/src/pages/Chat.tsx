@@ -48,7 +48,7 @@ import {
   useSubmitThread,
   useThreadStream,
 } from "@/core/threads/hooks";
-import { resetTurnUsage, useTurnUsage } from "@/core/threads/usage-context";
+import { resetTurnUsage } from "@/core/threads/usage-context";
 import {
   pathOfThread,
   textOfMessage,
@@ -60,6 +60,9 @@ import { cn } from "@/lib/utils";
 
 const RESUBMIT_TTL_MS = 60_000;
 const RESUBMIT_DELAY_MS = 150;
+const RIGHT_PANEL_WIDTH_STORAGE_KEY = "right_panel_width_px";
+const RIGHT_PANEL_MIN_WIDTH_PX = 280;
+const RIGHT_PANEL_MAX_WIDTH_PX = 520;
 
 interface TruncateMessagesResponse {
   success: boolean;
@@ -81,11 +84,6 @@ function ChatInner() {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [settings, setSettings] = useLocalSettings();
-  const [streamingVerbSeed, setStreamingVerbSeed] = useState(0);
-  const turnUsage = useTurnUsage();
-  const lastUsageRef = useRef<{ input_tokens: number; output_tokens: number } | null>(
-    null,
-  );
   const { setOpen: setSidebarOpen } = useSidebar();
   const {
     artifacts,
@@ -241,6 +239,24 @@ function ChatInner() {
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
   const { open: todoPanelOpen, setOpen: setTodoPanelOpen } = useRightPanel();
   const showTodoPanel = todoPanelOpen;
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
+    if (typeof window === "undefined") {
+      return 320;
+    }
+    const raw = window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY);
+    const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    if (!Number.isFinite(parsed)) {
+      return 320;
+    }
+    return Math.min(
+      RIGHT_PANEL_MAX_WIDTH_PX,
+      Math.max(RIGHT_PANEL_MIN_WIDTH_PX, parsed),
+    );
+  });
+  const rightPanelPointerStateRef = useRef<{
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const contextModelName =
     typeof settings.context.model_name === "string"
       ? settings.context.model_name
@@ -281,39 +297,10 @@ function ChatInner() {
       if (isNewThread && !hasConversation) {
         setHasPendingSubmit(true);
       }
-      setStreamingVerbSeed((prev) => prev + 1);
       return handleSubmit(message);
     },
     [handleSubmit, hasConversation, isNewThread],
   );
-
-  useEffect(() => {
-    if (!thread.isLoading) {
-      lastUsageRef.current = null;
-      return;
-    }
-    if (!turnUsage) {
-      return;
-    }
-    const nextUsage = {
-      input_tokens: turnUsage.input_tokens,
-      output_tokens: turnUsage.output_tokens,
-    };
-    const prevUsage = lastUsageRef.current;
-    if (prevUsage) {
-      if (
-        prevUsage.input_tokens === nextUsage.input_tokens &&
-        prevUsage.output_tokens === nextUsage.output_tokens
-      ) {
-        return;
-      }
-    } else if (nextUsage.input_tokens === 0 && nextUsage.output_tokens === 0) {
-      lastUsageRef.current = nextUsage;
-      return;
-    }
-    setStreamingVerbSeed((prev) => prev + 1);
-    lastUsageRef.current = nextUsage;
-  }, [thread.isLoading, turnUsage?.input_tokens, turnUsage?.output_tokens]);
 
   // Handle automatic resubmission after truncation and remount
   useEffect(() => {
@@ -417,6 +404,55 @@ function ChatInner() {
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
+
+  const setRightPanelWidthClamped = useCallback((nextWidth: number) => {
+    const clamped = Math.min(
+      RIGHT_PANEL_MAX_WIDTH_PX,
+      Math.max(RIGHT_PANEL_MIN_WIDTH_PX, Math.round(nextWidth)),
+    );
+    setRightPanelWidth(clamped);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(clamped));
+    }
+  }, []);
+
+  const handleRightPanelResizeStart = useCallback(
+    (event: { clientX: number }) => {
+      rightPanelPointerStateRef.current = {
+        startX: event.clientX,
+        startWidth: rightPanelWidth,
+      };
+
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        const pointerState = rightPanelPointerStateRef.current;
+        if (!pointerState) {
+          return;
+        }
+        // Right panel is anchored on the right; moving left increases width.
+        const delta = pointerState.startX - moveEvent.clientX;
+        setRightPanelWidthClamped(pointerState.startWidth + delta);
+      };
+
+      const cleanup = () => {
+        rightPanelPointerStateRef.current = null;
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+      };
+
+      const onPointerUp = () => {
+        cleanup();
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+    },
+    [rightPanelWidth, setRightPanelWidthClamped],
+  );
 
   const truncateAndQueueResubmit = useCallback(
     async (messageId: string, text: string) => {
@@ -527,8 +563,13 @@ function ChatInner() {
     return null;
   }
 
+  const threadContextValue = useMemo(
+    () => ({ threadId, thread }),
+    [threadId, thread],
+  );
+
   return (
-    <ThreadContext.Provider value={{ threadId, thread }}>
+    <ThreadContext.Provider value={threadContextValue}>
       <ResizablePanelGroup orientation="horizontal">
         <ResizablePanel
           className="relative"
@@ -541,7 +582,7 @@ function ChatInner() {
                 "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
                 showLanding
                   ? "bg-background/0 backdrop-blur-none"
-                  : "bg-[rgb(21,21,21)] shadow-xs backdrop-blur",
+                  : "bg-background/80 shadow-xs backdrop-blur dark:bg-[rgb(21,21,21)]",
               )}
             >
               <div className="flex w-full items-center justify-between text-sm font-medium">
@@ -596,7 +637,6 @@ function ChatInner() {
                       paddingBottom={showLanding ? 400 : 160}
                       isRegenerating={isRegenerating}
                       isTransitioning={isTransitioningConversation}
-                      streamingVerbSeed={streamingVerbSeed}
                       onEditMessage={handleEditMessage}
                       onRegenerateMessage={handleRegenerateMessage}
                     />
@@ -653,7 +693,18 @@ function ChatInner() {
                 </div>
               </div>
               {showTodoPanel && (
-                <aside className="relative min-h-0 w-80 shrink-0 pt-12 pr-4">
+                <aside
+                  className="relative min-h-0 shrink-0 pt-12 pr-4"
+                  style={{ width: `${rightPanelWidth}px` }}
+                >
+                  <button
+                    aria-label="Resize right panel"
+                    className="hover:after:bg-border absolute inset-y-0 -left-2 z-20 hidden w-4 cursor-col-resize transition-all ease-linear after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] md:block"
+                    onPointerDown={handleRightPanelResizeStart}
+                    tabIndex={-1}
+                    title="Resize panel"
+                    type="button"
+                  />
                   <div className="flex flex-col gap-3">
                     <TodoList
                       className="mt-4 w-full max-w-[calc(100vw-2rem)]"
