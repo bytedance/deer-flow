@@ -7,7 +7,6 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-from src.agents.lead_agent.agent import _resolve_model_name
 from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
