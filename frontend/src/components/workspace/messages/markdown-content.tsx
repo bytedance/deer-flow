@@ -1,13 +1,13 @@
 "use client";
 
-import { useMemo } from "react";
-import type { HTMLAttributes } from "react";
+import { useMemo, type ComponentProps, type HTMLAttributes } from "react";
 
 import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
 import { streamdownPlugins } from "@/core/streamdown";
+import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
 
@@ -32,7 +32,7 @@ export function MarkdownContent({
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
-      a: (props: HTMLAttributes<HTMLAnchorElement>) => {
+      a: (props: ComponentProps<"a">) => {
         if (typeof props.children === "string") {
           const match = /^citation:(.+)$/.exec(props.children);
           if (match) {
@@ -40,7 +40,22 @@ export function MarkdownContent({
             return <CitationLink {...props}>{text}</CitationLink>;
           }
         }
-        return <a {...props} />;
+        const { className: linkClassName, href, ...linkProps } = props;
+
+        return (
+          <a
+            {...linkProps}
+            href={href}
+            rel="noopener noreferrer"
+            target="_blank"
+            className={cn(
+              "inline rounded-sm bg-primary/10 px-1 py-0.5 text-primary underline decoration-primary/80 decoration-2 underline-offset-4 transition-colors",
+              "hover:bg-primary/15 hover:text-primary hover:decoration-primary",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1",
+              linkClassName,
+            )}
+          />
+        );
       },
       pre: (props: HTMLAttributes<HTMLPreElement>) => (
         <CollapsibleCodeBlock {...props} />

@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
+  CheckCircle2Icon,
   ClockIcon,
   ChevronUp,
   FolderOpenIcon,
@@ -103,6 +104,7 @@ export function MessageGroup({
     container.scrollTop = container.scrollHeight;
   }, [isLoading, aboveLastToolCallSteps.length, lastToolCallStep?.id, showAbove]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const showDoneStep = !isLoading && steps.length > 0;
   return (
     <ChainOfThought
       className={cn(
@@ -131,7 +133,7 @@ export function MessageGroup({
               <ChevronUp
                 className={cn(
                   "size-4 opacity-60 transition-transform duration-200",
-                  showAbove ? "rotate-180" : "",
+                  showAbove ? "" : "rotate-180",
                 )}
               />
             }
@@ -170,6 +172,7 @@ export function MessageGroup({
                   {...lastToolCallStep}
                   isLast={true}
                   isLoading={isLoading}
+                  hideContent={aboveLastToolCallSteps.length > 0 && !showAbove}
                 />
               </FlipDisplay>
             )}
@@ -228,6 +231,17 @@ export function MessageGroup({
           )}
         </>
       )}
+      {showDoneStep && (
+        <div className="px-4 pb-2">
+          <ChainOfThoughtStep
+            className="my-0"
+            icon={
+              <CheckCircle2Icon className="text-emerald-500 dark:text-emerald-400 size-4" />
+            }
+            label={t.toolCalls.done}
+          />
+        </div>
+      )}
     </ChainOfThought>
   );
 }
@@ -240,6 +254,7 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  hideContent = false,
 }: {
   id?: string;
   messageId?: string;
@@ -248,6 +263,7 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  hideContent?: boolean;
 }) {
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
@@ -268,7 +284,7 @@ function ToolCall({
     };
     return (
       <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
-        {Array.isArray(result) && (
+        {!hideContent && Array.isArray(result) && (
           <div className="bg-background/80 mt-2 overflow-hidden rounded-lg border">
             <ul className="divide-y divide-border/70">
               {result.map((item) => (
@@ -311,7 +327,7 @@ function ToolCall({
     )?.results;
     return (
       <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
-        {Array.isArray(results) && (
+        {!hideContent && Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
               results.map((item) => (
@@ -357,13 +373,15 @@ function ToolCall({
           window.open(url, "_blank");
         }}
       >
-        <ChainOfThoughtSearchResult>
-          {url && (
-            <a href={url} target="_blank" rel="noreferrer">
-              {title}
-            </a>
-          )}
-        </ChainOfThoughtSearchResult>
+        {!hideContent && (
+          <ChainOfThoughtSearchResult>
+            {url && (
+              <a href={url} target="_blank" rel="noreferrer">
+                {title}
+              </a>
+            )}
+          </ChainOfThoughtSearchResult>
+        )}
       </ChainOfThoughtStep>
     );
   } else if (name === "ls") {
@@ -375,7 +393,7 @@ function ToolCall({
     const path: string | undefined = (args as { path: string })?.path;
     return (
       <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
-        {path && (
+        {!hideContent && path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
           </ChainOfThoughtSearchResult>
@@ -391,7 +409,7 @@ function ToolCall({
     const { path } = args as { path: string; content: string };
     return (
       <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
-        {path && (
+        {!hideContent && path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
           </ChainOfThoughtSearchResult>
@@ -411,7 +429,7 @@ function ToolCall({
         label={t.common.reflecting}
         icon={SparklesIcon}
       >
-        {content ? (
+        {!hideContent && content ? (
           <MarkdownContent
             content={content}
             isLoading={isLoading}
@@ -455,7 +473,7 @@ function ToolCall({
           setOpen(true);
         }}
       >
-        {path && (
+        {!hideContent && path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
             {path}
           </ChainOfThoughtSearchResult>
@@ -475,7 +493,7 @@ function ToolCall({
         label={description}
         icon={SquareTerminalIcon}
       >
-        {command && (
+        {!hideContent && command && (
           <CodeBlock
             className="mx-0 cursor-pointer border-none px-0"
             showLineNumbers={false}
