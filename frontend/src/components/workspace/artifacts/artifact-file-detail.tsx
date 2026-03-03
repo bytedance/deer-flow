@@ -39,6 +39,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
@@ -273,6 +274,7 @@ export function ArtifactFilePreview({
   content: string;
   language: string;
 }) {
+  const { isMock } = useThread();
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
@@ -290,7 +292,7 @@ export function ArtifactFilePreview({
     return (
       <iframe
         className="size-full"
-        src={urlOfArtifact({ filepath, threadId })}
+        src={urlOfArtifact({ filepath, threadId, isMock })}
       />
     );
   }

@@ -27,7 +27,7 @@ export default function ChatPage() {
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
 
-  const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
@@ -35,6 +35,7 @@ export default function ChatPage() {
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
+    isMock,
     onStart: () => {
       setIsNewThread(false);
       history.replaceState(null, "", `/workspace/chats/${threadId}`);
@@ -68,7 +69,7 @@ export default function ChatPage() {
   }, [thread]);
 
   return (
-    <ThreadContext.Provider value={{ thread }}>
+    <ThreadContext.Provider value={{ thread, isMock }}>
       <ChatBox threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header

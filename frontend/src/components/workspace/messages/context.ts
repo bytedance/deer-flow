@@ -5,6 +5,7 @@ import type { AgentThreadState } from "@/core/threads";
 
 export interface ThreadContextType {
   thread: BaseStream<AgentThreadState>;
+  isMock?: boolean;
 }
 
 export const ThreadContext = createContext<ThreadContextType | undefined>(

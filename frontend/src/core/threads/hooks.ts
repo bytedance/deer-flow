@@ -22,6 +22,7 @@ export type ToolEndEvent = {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   context: LocalSettings["context"];
+  isMock?: boolean;
   onStart?: (threadId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
@@ -30,6 +31,7 @@ export type ThreadStreamOptions = {
 export function useThreadStream({
   threadId,
   context,
+  isMock,
   onStart,
   onFinish,
   onToolEnd,
@@ -38,7 +40,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(),
+    client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: _threadId,
     reconnectOnMount: true,
