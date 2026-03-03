@@ -150,6 +150,7 @@ export interface Translations {
     listFolder: string;
     readFile: string;
     writeFile: string;
+    done: string;
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
