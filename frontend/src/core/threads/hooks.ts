@@ -208,12 +208,9 @@ export function useThreads(
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", "lead_agent", params],
+    queryKey: ["threads", "search", params],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>({
-        ...params,
-        metadata: { graph_id: "lead_agent" },
-      });
+      const response = await apiClient.threads.search<AgentThreadState>(params);
       return response as AgentThread[];
     },
     refetchOnWindowFocus: false,
