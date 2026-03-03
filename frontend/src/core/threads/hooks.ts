@@ -227,7 +227,7 @@ export function useDeleteThread() {
     onSuccess(_, { threadId }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search", "lead_agent"],
+          queryKey: ["threads", "search"],
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
@@ -256,7 +256,7 @@ export function useRenameThread() {
     onSuccess(_, { threadId, title }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search", "lead_agent"],
+          queryKey: ["threads", "search"],
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
