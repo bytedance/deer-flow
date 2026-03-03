@@ -406,4 +406,4 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_thinking=subagent_thinking,
     )
 
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d %H:%M, %A')}</current_date>"
+    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
