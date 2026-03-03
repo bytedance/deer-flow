@@ -42,7 +42,7 @@ export function useThreadStream({
     assistantId: "lead_agent",
     threadId: _threadId,
     reconnectOnMount: true,
-    fetchStateHistory: true,
+    fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       setThreadId(meta.thread_id);
       onStart?.(meta.thread_id);

@@ -34,7 +34,7 @@ export function ThreadTitle({
     thread.values,
   ]);
 
-  if (!thread.values.title) {
+  if (!thread.values?.title) {
     return null;
   }
   return (

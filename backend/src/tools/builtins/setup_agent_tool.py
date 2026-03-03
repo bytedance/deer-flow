@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 @tool
 def setup_agent(
     soul: str,
-    description: str = "",
-    runtime: ToolRuntime = None,
+    description: str,
+    runtime: ToolRuntime,
 ) -> Command:
     """Setup the custom DeerFlow agent.
 
@@ -55,7 +55,8 @@ def setup_agent(
     except Exception as e:
         import shutil
 
-        if agent_dir.exists():
+        if agent_name and agent_dir.exists():
+            # Cleanup the custom agent directory only if it was created but an error occurred during setup
             shutil.rmtree(agent_dir)
         logger.error(f"[agent_creator] Failed to create agent '{agent_name}': {e}", exc_info=True)
         return Command(update={"messages": [ToolMessage(content=f"Error: {e}", tool_call_id=runtime.tool_call_id)]})

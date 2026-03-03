@@ -1,6 +1,7 @@
 """Configuration and loaders for custom agents."""
 
 import logging
+import re
 from typing import Any
 
 import yaml
@@ -11,6 +12,7 @@ from src.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
+AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentConfig(BaseModel):
@@ -35,6 +37,8 @@ def load_agent_config(name: str) -> AgentConfig:
         FileNotFoundError: If the agent directory or config.yaml does not exist.
         ValueError: If config.yaml cannot be parsed.
     """
+    if not AGENT_NAME_PATTERN.match(name):
+        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
     agent_dir = get_paths().agent_dir(name)
     config_file = agent_dir / "config.yaml"
 
