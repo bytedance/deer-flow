@@ -351,7 +351,7 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: #222220;
+  --sidebar: rgb(21, 21, 21);
   --sidebar-foreground: #e8e6e3;
   --sidebar-primary: #c26a4a;
   --sidebar-primary-foreground: #e8e6e3;
@@ -488,20 +488,33 @@
     text-fill-color: transparent;
   }
 
-  /* Grid background pattern */
+  .gradient-text {
+    background: linear-gradient(135deg, #d19e1d 0%, #e9c665 50%, #e3a812 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-fill-color: transparent;
+  }
+
+  /* Dot grid background pattern */
   .bg-dot-grid {
-    background-color: oklch(0.975 0.003 90);
-    background-image:
-      linear-gradient(to right, oklch(0.86 0.003 90 / 55%) 1px, transparent 1px),
-      linear-gradient(to bottom, oklch(0.86 0.003 90 / 55%) 1px, transparent 1px);
-    background-size: 36px 36px;
+    background-color: rgb(10, 10, 10);
+    background-image: radial-gradient(
+      circle at center,
+      rgba(255, 255, 255, 0.12) 1px,
+      transparent 1px
+    );
+    background-size: 24px 24px;
   }
 
   .dark .bg-dot-grid {
-    background-color: #242422;
-    background-image:
-      linear-gradient(to right, #161615 1px, transparent 1px),
-      linear-gradient(to bottom, #161615 1px, transparent 1px);
+    background-color: rgb(10, 10, 10);
+    background-image: radial-gradient(
+      circle at center,
+      rgba(255, 255, 255, 0.12) 1px,
+      transparent 1px
+    );
+    background-size: 24px 24px;
   }
 }
 
