@@ -36,6 +36,34 @@ PROVIDER_BASE_URLS = {
 }
 
 ANTHROPIC_ADAPTIVE_THINKING_MODELS = {"claude-opus-4-6"}
+ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS = 16384
+
+
+def _normalize_anthropic_thinking_config(thinking_config: Any) -> Any:
+    """Normalize Anthropic thinking config to a payload shape currently accepted by the API."""
+    if not isinstance(thinking_config, dict):
+        return thinking_config
+
+    budget_tokens = thinking_config.get("budget_tokens")
+    normalized_budget = (
+        budget_tokens
+        if isinstance(budget_tokens, int) and budget_tokens > 0
+        else ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS
+    )
+
+    # Anthropic rejects adaptive effort in some deployments/libraries.
+    # Fall back to explicit enabled thinking with a concrete token budget.
+    if thinking_config.get("type") == "adaptive":
+        return {"type": "enabled", "budget_tokens": normalized_budget}
+
+    adaptive = thinking_config.get("adaptive")
+    if isinstance(adaptive, dict) and adaptive.get("effort") is not None:
+        return {"type": "enabled", "budget_tokens": normalized_budget}
+
+    if thinking_config.get("type") == "enabled":
+        return {"type": "enabled", "budget_tokens": normalized_budget}
+
+    return thinking_config
 
 
 def _runtime_tier_settings(spec: RuntimeModelSpec, thinking_enabled: bool) -> dict[str, Any]:
@@ -46,9 +74,12 @@ def _runtime_tier_settings(spec: RuntimeModelSpec, thinking_enabled: bool) -> di
         effort = spec.tier.replace("reasoning-", "")
         return {"reasoning": {"effort": effort, "summary": "auto"}}
     if provider == "anthropic" and spec.tier == "thinking":
-        if spec.model_id in ANTHROPIC_ADAPTIVE_THINKING_MODELS:
-            return {"thinking": {"type": "adaptive", "effort": "medium"}}
-        return {"thinking": {"type": "enabled", "budget_tokens": 10000}}
+        return {
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS,
+            }
+        }
     if provider in {"deepseek", "kimi", "zai"} and spec.tier == "thinking":
         return {"extra_body": {"thinking": {"type": "enabled"}}}
     if provider == "deepseek" and spec.model_id.endswith("reasoner"):
@@ -81,7 +112,9 @@ def _create_runtime_model(spec: RuntimeModelSpec, thinking_enabled: bool, **kwar
 
     settings.setdefault("max_tokens", 128000)
     if provider == "anthropic":
-        thinking_config = settings.get("thinking")
+        thinking_config = _normalize_anthropic_thinking_config(settings.get("thinking"))
+        if thinking_config is not None:
+            settings["thinking"] = thinking_config
         if isinstance(thinking_config, dict):
             budget_tokens = thinking_config.get("budget_tokens")
             if isinstance(budget_tokens, int) and budget_tokens > settings["max_tokens"]:
