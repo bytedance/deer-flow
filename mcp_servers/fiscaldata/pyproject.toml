@@ -1,0 +1,6 @@
+[project]
+name = "fiscaldata-mcp"
+version = "0.1.0"
+description = "MCP server for U.S. Treasury Fiscal Data API"
+requires-python = ">=3.12"
+dependencies = ["mcp>=1.0.0", "httpx>=0.28.0", "tenacity>=9.0.0"]
