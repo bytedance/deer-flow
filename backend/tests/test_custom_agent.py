@@ -193,7 +193,7 @@ class TestLoadAgentSoul:
             from src.config.agents_config import AgentConfig, load_agent_soul
 
             cfg = AgentConfig(name="code-reviewer")
-            soul = load_agent_soul(cfg)
+            soul = load_agent_soul(cfg.name)
 
         assert soul == expected_soul
 
@@ -207,7 +207,7 @@ class TestLoadAgentSoul:
             from src.config.agents_config import AgentConfig, load_agent_soul
 
             cfg = AgentConfig(name="no-soul")
-            soul = load_agent_soul(cfg)
+            soul = load_agent_soul(cfg.name)
 
         assert soul is None
 
@@ -221,7 +221,7 @@ class TestLoadAgentSoul:
             from src.config.agents_config import AgentConfig, load_agent_soul
 
             cfg = AgentConfig(name="empty-soul")
-            soul = load_agent_soul(cfg)
+            soul = load_agent_soul(cfg.name)
 
         assert soul is None
 
