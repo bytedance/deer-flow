@@ -37,6 +37,9 @@ export function groupMessages<T>(
 
   for (const message of messages) {
     const lastGroup = groups[groups.length - 1];
+    const lastProcessingGroup = [...groups]
+      .reverse()
+      .find((group): group is AssistantProcessingGroup => group.type === "assistant:processing");
     if (message.type === "human") {
       groups.push({
         id: message.id,
@@ -47,13 +50,8 @@ export function groupMessages<T>(
       // Check if this is a clarification tool message
       if (isClarificationToolMessage(message)) {
         // Add to processing group if available (to maintain tool call association)
-        if (
-          lastGroup &&
-          lastGroup.type !== "human" &&
-          lastGroup.type !== "assistant" &&
-          lastGroup.type !== "assistant:clarification"
-        ) {
-          lastGroup.messages.push(message);
+        if (lastProcessingGroup) {
+          lastProcessingGroup.messages.push(message);
         }
         // Also create a separate clarification group for prominent display
         groups.push({
@@ -61,27 +59,26 @@ export function groupMessages<T>(
           type: "assistant:clarification",
           messages: [message],
         });
-      } else if (
-        lastGroup &&
-        lastGroup.type !== "human" &&
-        lastGroup.type !== "assistant" &&
-        lastGroup.type !== "assistant:clarification"
-      ) {
-        lastGroup.messages.push(message);
+      } else if (lastProcessingGroup) {
+        lastProcessingGroup.messages.push(message);
       } else {
         throw new Error(
           "Tool message must be matched with a previous assistant message with tool calls",
         );
       }
     } else if (message.type === "ai") {
-      if (hasReasoning(message) || hasToolCalls(message)) {
-        if (hasPresentFiles(message)) {
+      const hasReasoningOrToolCalls = hasReasoning(message) || hasToolCalls(message);
+      const isPresentFilesMessage = hasPresentFiles(message);
+      const isSubagentMessage = hasSubagent(message);
+
+      if (hasReasoningOrToolCalls) {
+        if (isPresentFilesMessage) {
           groups.push({
             id: message.id,
             type: "assistant:present-files",
             messages: [message],
           });
-        } else if (hasSubagent(message)) {
+        } else if (isSubagentMessage) {
           groups.push({
             id: message.id,
             type: "assistant:subagent",
@@ -105,9 +102,14 @@ export function groupMessages<T>(
           }
         }
       }
-      if (hasContent(message) && !hasToolCalls(message)) {
+      // Some providers can persist assistant text and tool calls in the same AI
+      // message after refresh/reload. Keep rendering that assistant text.
+      if (hasContent(message) && !isPresentFilesMessage && !isSubagentMessage) {
         groups.push({
-          id: message.id,
+          id:
+            hasReasoningOrToolCalls && message.id
+              ? `${message.id}:content`
+              : message.id,
           type: "assistant",
           messages: [message],
         });
