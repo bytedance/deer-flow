@@ -47,10 +47,10 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
     config_file = agent_dir / "config.yaml"
 
     if not agent_dir.exists():
-        return None  # No custom agent, will use default config
+        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
 
     if not config_file.exists():
-        return None  # No custom agent, will use default config
+        raise FileNotFoundError(f"Agent config not found: {config_file}")
 
     try:
         with open(config_file, encoding="utf-8") as f:
