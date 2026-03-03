@@ -3,7 +3,12 @@ import { useMemo } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
 
-import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
+import {
+  type McpDataPayload,
+  loadArtifactContent,
+  loadArtifactContentFromToolCall,
+  loadMcpDataFromToolCall,
+} from "./loader";
 
 export function useArtifactContent({
   filepath,
@@ -34,4 +39,16 @@ export function useArtifactContent({
     staleTime: 5 * 60 * 1000,
   });
   return { content: isWriteFile ? content : data, isLoading, error };
+}
+
+export function useMcpDataContent({
+  filepath,
+}: {
+  filepath: string;
+}): McpDataPayload | undefined {
+  const { thread } = useThread();
+  return useMemo(() => {
+    if (!filepath.startsWith("mcp-data:")) return undefined;
+    return loadMcpDataFromToolCall({ url: filepath, thread });
+  }, [filepath, thread]);
 }

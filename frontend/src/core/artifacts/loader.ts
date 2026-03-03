@@ -1,6 +1,9 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import type { UseStream } from "@langchain/langgraph-sdk/react";
 
 import { authFetch } from "@/core/auth/fetch";
+import { type McpToolMeta, extractMcpMeta } from "@/core/mcp/tools";
+import { findToolCallResult } from "@/core/messages/utils";
 
 import type { AgentThreadState } from "../threads";
 
@@ -44,4 +47,43 @@ export function loadArtifactContentFromToolCall({
       }
     }
   }
+}
+
+export interface McpDataPayload {
+  toolName: string;
+  data: Record<string, unknown>[];
+  meta?: McpToolMeta;
+}
+
+export function loadMcpDataFromToolCall({
+  url: urlString,
+  thread,
+}: {
+  url: string;
+  thread: UseStream<AgentThreadState>;
+}): McpDataPayload | undefined {
+  const url = new URL(urlString);
+  const toolCallId = url.searchParams.get("tool_call_id");
+  if (!toolCallId) return undefined;
+
+  const resultStr = findToolCallResult(
+    toolCallId,
+    thread.messages as Message[],
+  );
+  if (!resultStr) return undefined;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(resultStr) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+
+  if (!Array.isArray(parsed.data)) return undefined;
+
+  const toolName = decodeURIComponent(url.pathname);
+  const data = parsed.data as Record<string, unknown>[];
+  const meta = extractMcpMeta(toolName, parsed);
+
+  return { toolName, data, meta };
 }
