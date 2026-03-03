@@ -12,7 +12,6 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Instruction intensity constants
 # ---------------------------------------------------------------------------

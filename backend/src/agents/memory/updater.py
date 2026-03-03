@@ -6,7 +6,6 @@ or file-based (local / Electron dev).
 
 import json
 import logging
-import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path

@@ -20,7 +20,6 @@ import signal
 import threading
 import time
 import uuid
-from pathlib import Path
 
 from src.config import get_app_config
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
