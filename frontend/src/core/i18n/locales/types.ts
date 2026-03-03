@@ -154,6 +154,9 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
+    mcpDataResults: (count: number, total?: number) => string;
+    mcpDataPage: (page: number, totalPages: number) => string;
+    mcpDataStale: string;
   };
 
   // Subtasks

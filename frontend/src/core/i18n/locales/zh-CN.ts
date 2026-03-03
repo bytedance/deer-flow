@@ -203,6 +203,13 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 Thinktank.ai 中使用",
+    mcpDataResults: (count: number, total?: number) =>
+      total && total > count
+        ? `${count} / ${total} 条记录`
+        : `${count} 条记录`,
+    mcpDataPage: (page: number, totalPages: number) =>
+      `第 ${page}/${totalPages} 页`,
+    mcpDataStale: "过期数据",
   },
 
   subtasks: {

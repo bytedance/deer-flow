@@ -208,6 +208,13 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to Thinktank.ai",
+    mcpDataResults: (count: number, total?: number) =>
+      total && total > count
+        ? `${count} of ${total} records`
+        : `${count} record${count === 1 ? "" : "s"}`,
+    mcpDataPage: (page: number, totalPages: number) =>
+      `Page ${page}/${totalPages}`,
+    mcpDataStale: "Stale data",
   },
 
   // Subtasks
