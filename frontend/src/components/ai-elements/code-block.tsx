@@ -121,12 +121,12 @@ export const CodeBlock = ({
         </div>
         <div className="relative size-full" data-code-body>
           <div
-            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! size-full overflow-auto dark:hidden [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
+            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! size-full overflow-auto dark:hidden [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:px-4 [&>pre]:py-3 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
             // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
             dangerouslySetInnerHTML={{ __html: html }}
           />
           <div
-            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! hidden size-full overflow-auto dark:block [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
+            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! hidden size-full overflow-auto dark:block [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:px-4 [&>pre]:py-3 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
             // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
             dangerouslySetInnerHTML={{ __html: darkHtml }}
           />
