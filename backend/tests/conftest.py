@@ -145,3 +145,77 @@ def db_enabled(db_engine) -> Generator[None, None, None]:
         p.stop()
 
     os.environ.pop("DATABASE_URL", None)
+
+
+# ---------------------------------------------------------------------------
+# Sandbox & Runtime test fixtures
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def mock_sandbox_provider(tmp_path: Path):
+    """Provide a mock SandboxProvider backed by a LocalSandbox on tmp_path.
+
+    Patches `get_sandbox_provider()` so sandbox tool tests never touch
+    the real filesystem outside of the test temp directory.
+    """
+    from unittest.mock import MagicMock
+
+    from src.sandbox.local.local_sandbox import LocalSandbox
+
+    sandbox = LocalSandbox(id="local", path_mappings={})
+    provider = MagicMock()
+    provider.acquire.return_value = "local"
+    provider.get.return_value = sandbox
+
+    with patch("src.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider):
+        with patch("src.sandbox.tools.get_sandbox_provider", return_value=provider):
+            yield provider
+
+
+@pytest.fixture()
+def mock_runtime(tmp_path: Path):
+    """Build a fake ToolRuntime with populated state and context.
+
+    The runtime has:
+    - state.sandbox = {"sandbox_id": "local"}
+    - state.thread_data with workspace/uploads/outputs paths under tmp_path
+    - context.thread_id = "test-thread-123"
+    - context.user_id = "test-user-456"
+    """
+    from unittest.mock import MagicMock
+
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+
+    state = {
+        "sandbox": {"sandbox_id": "local"},
+        "thread_data": {
+            "workspace_path": str(workspace),
+            "uploads_path": str(uploads),
+            "outputs_path": str(outputs),
+        },
+        "thread_directories_created": False,
+    }
+
+    context = {
+        "thread_id": "test-thread-123",
+        "user_id": "test-user-456",
+    }
+
+    runtime = MagicMock()
+    runtime.state = state
+    runtime.context = context
+
+    # Make state behave like a dict (support .get() and [] access)
+    runtime.state.__getitem__ = state.__getitem__
+    runtime.state.__setitem__ = state.__setitem__
+    runtime.state.__contains__ = state.__contains__
+    runtime.state.get = state.get
+
+    runtime.context.__getitem__ = context.__getitem__
+    runtime.context.get = context.get
+
+    yield runtime
