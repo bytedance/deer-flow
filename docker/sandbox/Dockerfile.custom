@@ -1,0 +1,64 @@
+# Use the official sandbox image as base
+FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+
+# Set environment variables for playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV CRAWL4AI_HEADLESS=true
+
+# Install system dependencies required for Playwright and data processing
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    libgconf-2-4 \
+    libxss1 \
+    libnss3 \
+    libnspr4 \
+    libasound2 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    xdg-utils \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies for custom skills
+RUN pip install --no-cache-dir \
+    # Financial Data
+    akshare \
+    tushare \
+    yfinance \
+    # Data Processing
+    pandas \
+    numpy \
+    openpyxl \
+    tabulate \
+    # Visualization
+    matplotlib \
+    seaborn \
+    plotly \
+    # Web Scraping & Browser Automation
+    requests \
+    beautifulsoup4 \
+    playwright \
+    crawl4ai \
+    # PDF & Document Processing
+    pypdf \
+    python-pptx \
+    # Utilities
+    rich \
+    python-dotenv
+
+# Install Playwright browsers (Chromium is usually sufficient for crawl4ai, but installing all ensures compatibility)
+# crawl4ai often relies on Playwright's browser management
+RUN playwright install --with-deps chromium
+
+# Verify crawl4ai installation
+RUN python -c "import crawl4ai; print('crawl4ai installed successfully')"

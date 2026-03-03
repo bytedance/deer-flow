@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  deer-flow-sandbox:
+    build:
+      context: .
+      dockerfile: docker/sandbox/Dockerfile.custom
+    image: deer-flow-sandbox:custom
+    container_name: deer-flow-sandbox
+    restart: unless-stopped
+    ports:
+      # 将宿主机的 29080 端口映射到容器的 8080 端口
+      - "29080:8080"
+    environment:
+      - SANDBOX_PORT=8080
+      # 确保容器内 Playwright 能找到浏览器
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - CRAWL4AI_HEADLESS=true
+    volumes:
+      # 挂载 skills 目录，确保容器内可以访问自定义 skill
+      - ./skills:/mnt/skills
+      # 挂载用户数据目录，用于持久化存储
+      - ./data:/mnt/user-data
+      # 挂载 .env 文件到容器内独立的 secrets 目录，避免污染 user-data
+      - ./.env:/mnt/secrets/.env
+      # 挂载 Playwright 浏览器缓存，避免重启容器后重新下载 (可选，但推荐)
+      - playwright-browsers:/ms-playwright
+    networks:
+      - 1panel-network
+
+networks:
+  1panel-network:
+    external: true
+
+volumes:
+  playwright-browsers:
