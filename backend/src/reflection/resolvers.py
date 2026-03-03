@@ -12,7 +12,13 @@ def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
     """Build an actionable hint when module import fails."""
     module_root = module_path.split(".", 1)[0]
     missing_module = getattr(err, "name", None) or module_root
-    package_name = MODULE_TO_PACKAGE_HINTS.get(missing_module, missing_module.replace("_", "-"))
+
+    # Prefer provider package hints for known integrations, even when the import
+    # error is triggered by a transitive dependency (e.g. `google`).
+    package_name = MODULE_TO_PACKAGE_HINTS.get(module_root)
+    if package_name is None:
+        package_name = MODULE_TO_PACKAGE_HINTS.get(missing_module, missing_module.replace("_", "-"))
+
     return (
         f"Missing dependency '{missing_module}'. "
         f"Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
