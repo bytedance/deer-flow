@@ -1,4 +1,5 @@
 import { ChevronUpIcon, ListTodoIcon } from "lucide-react";
+import { useState } from "react";
 
 import type { Todo } from "@/core/todos";
 import { cn } from "@/lib/utils";
@@ -13,7 +14,7 @@ import {
 export function TodoList({
   className,
   todos,
-  collapsed = false,
+  collapsed: controlledCollapsed,
   hidden = false,
   onToggle,
 }: {
@@ -23,6 +24,18 @@ export function TodoList({
   hidden?: boolean;
   onToggle?: () => void;
 }) {
+  const [internalCollapsed, setInternalCollapsed] = useState(true);
+  const isControlled = controlledCollapsed !== undefined;
+  const collapsed = isControlled ? controlledCollapsed : internalCollapsed;
+
+  const handleToggle = () => {
+    if (isControlled) {
+      onToggle?.();
+    } else {
+      setInternalCollapsed((prev) => !prev);
+    }
+  };
+
   return (
     <div
       className={cn(
@@ -35,9 +48,7 @@ export function TodoList({
         className={cn(
           "bg-accent flex min-h-8 shrink-0 cursor-pointer items-center justify-between px-4 text-sm transition-all duration-300 ease-out",
         )}
-        onClick={() => {
-          onToggle?.();
-        }}
+        onClick={handleToggle}
       >
         <div className="text-muted-foreground">
           <div className="flex items-center justify-center gap-2">

@@ -166,6 +166,7 @@ dev:
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
 	@cleanup() { \
+		trap - INT TERM; \
 		echo ""; \
 		echo "Shutting down services..."; \
 		pkill -f "langgraph dev" 2>/dev/null || true; \

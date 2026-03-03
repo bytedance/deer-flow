@@ -1,5 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
-import type { UseStream } from "@langchain/langgraph-sdk/react";
+import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import {
   Conversation,
@@ -34,19 +33,18 @@ export function MessageList({
   className,
   threadId,
   thread,
-  messages,
   paddingBottom = 160,
 }: {
   className?: string;
   threadId: string;
-  thread: UseStream<AgentThreadState>;
-  messages: Message[];
+  thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  if (thread.isThreadLoading) {
+  const messages = thread.messages;
+  if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
   return (

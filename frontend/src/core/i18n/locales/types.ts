@@ -99,6 +99,34 @@ export interface Translations {
     newChat: string;
     chats: string;
     demoChats: string;
+    agents: string;
+  };
+
+  // Agents
+  agents: {
+    title: string;
+    description: string;
+    newAgent: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    chat: string;
+    delete: string;
+    deleteConfirm: string;
+    deleteSuccess: string;
+    newChat: string;
+    createPageTitle: string;
+    createPageSubtitle: string;
+    nameStepTitle: string;
+    nameStepHint: string;
+    nameStepPlaceholder: string;
+    nameStepContinue: string;
+    nameStepInvalidError: string;
+    nameStepAlreadyExistsError: string;
+    nameStepCheckError: string;
+    nameStepBootstrapMessage: string;
+    agentCreated: string;
+    startChatting: string;
+    backToGallery: string;
   };
 
   // Breadcrumb
