@@ -1,7 +1,4 @@
 from importlib import import_module
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
 def resolve_variable[T](
