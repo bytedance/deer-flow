@@ -32,7 +32,7 @@ function ElapsedTime({ startTime, isLoading }: { startTime: number; isLoading: b
     }
     const interval = setInterval(() => {
       setElapsed(((Date.now() - startTime) / 1000).toFixed(1));
-    }, 100);
+    }, 500);
     return () => clearInterval(interval);
   }, [startTime, isLoading]);
 

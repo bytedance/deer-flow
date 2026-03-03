@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type ComponentProps, type HTMLAttributes } from "react";
+import { memo, useMemo, type ComponentProps, type HTMLAttributes } from "react";
 
 import {
   MessageResponse,
@@ -23,7 +23,7 @@ export type MarkdownContentProps = {
 };
 
 /** Renders markdown content. */
-export function MarkdownContent({
+export const MarkdownContent = memo(function MarkdownContent({
   content,
   rehypePlugins,
   className,
@@ -76,4 +76,4 @@ export function MarkdownContent({
       {content}
     </MessageResponse>
   );
-}
+});

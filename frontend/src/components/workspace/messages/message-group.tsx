@@ -2,8 +2,10 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
   CheckCircle2Icon,
+  ChevronRight,
   ClockIcon,
   ChevronUp,
+  DatabaseIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
@@ -15,7 +17,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ChainOfThought,
@@ -27,6 +29,11 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  describeMcpTool,
+  extractMcpMeta,
+  isMcpDataResult,
+} from "@/core/mcp/tools";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
@@ -42,21 +49,7 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 
-function summarizeReasoningText(reasoning: string | null, maxLength = 120) {
-  if (!reasoning) {
-    return "Thinking";
-  }
-  const normalized = reasoning.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "Thinking";
-  }
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, maxLength - 1)}…`;
-}
-
-export function MessageGroup({
+export const MessageGroup = memo(function MessageGroup({
   className,
   messages,
   isLoading = false,
@@ -119,13 +112,6 @@ export function MessageGroup({
   }, [isLoading, aboveLastToolCallSteps.length, lastToolCallStep?.id, showAbove]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const showDoneStep = !isLoading && steps.length > 0;
-  const shouldCollapseToolCallContent = aboveLastToolCallSteps.length > 0 && !showAbove;
-  const toolCallSteps = useMemo(() => {
-    if (!lastToolCallStep) {
-      return aboveLastToolCallSteps;
-    }
-    return [...aboveLastToolCallSteps, lastToolCallStep];
-  }, [aboveLastToolCallSteps, lastToolCallStep]);
   return (
     <ChainOfThought
       className={cn(
@@ -167,42 +153,35 @@ export function MessageGroup({
             ref={toolCallsScrollRef}
             className="max-h-[36rem] overflow-y-auto pr-2"
           >
-            {toolCallSteps.map((step) =>
-              step.type === "reasoning" ? (
-                <ChainOfThoughtStep
-                  key={step.id}
-                  icon={ClockIcon}
-                  className="text-[rgb(175,174,163)]"
-                  label={
-                    shouldCollapseToolCallContent ? (
-                      summarizeReasoningText(step.reasoning)
-                    ) : (
+            {showAbove &&
+              aboveLastToolCallSteps.map((step) =>
+                step.type === "reasoning" ? (
+                  <ChainOfThoughtStep
+                    key={step.id}
+                    icon={ClockIcon}
+                    className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
+                    label={
                       <MarkdownContent
                         content={step.reasoning ?? ""}
                         isLoading={isLoading}
                         rehypePlugins={rehypePlugins}
                       />
-                    )
-                  }
-                ></ChainOfThoughtStep>
-              ) : step.id === lastToolCallStep.id ? (
-                <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-                  <ToolCall
-                    key={step.id}
-                    {...step}
-                    isLast={true}
-                    isLoading={isLoading}
-                    hideContent={shouldCollapseToolCallContent}
-                  />
-                </FlipDisplay>
-              ) : (
+                    }
+                  ></ChainOfThoughtStep>
+                ) : (
+                  <ToolCall key={step.id} {...step} isLoading={isLoading} />
+                ),
+              )}
+            {lastToolCallStep && (
+              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
                 <ToolCall
-                  key={step.id}
-                  {...step}
+                  key={lastToolCallStep.id}
+                  {...lastToolCallStep}
+                  isLast={true}
                   isLoading={isLoading}
-                  hideContent={shouldCollapseToolCallContent}
+                  hideContent={aboveLastToolCallSteps.length > 0 && !showAbove}
                 />
-              ),
+              </FlipDisplay>
             )}
           </div>
         </ChainOfThoughtContent>
@@ -245,7 +224,7 @@ export function MessageGroup({
                 <ChainOfThoughtStep
                   key={lastReasoningStep.id}
                   icon={ClockIcon}
-                  className="text-[rgb(175,174,163)]"
+                  className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
                   label={
                     <MarkdownContent
                       content={lastReasoningStep.reasoning ?? ""}
@@ -272,9 +251,17 @@ export function MessageGroup({
       )}
     </ChainOfThought>
   );
-}
+}, (prev, next) => {
+  if (prev.isLoading !== next.isLoading) return false;
+  if (prev.className !== next.className) return false;
+  if (prev.messages.length !== next.messages.length) return false;
+  // Reference-compare the last message (only the streaming group changes)
+  const prevLast = prev.messages[prev.messages.length - 1];
+  const nextLast = next.messages[next.messages.length - 1];
+  return prevLast === nextLast;
+});
 
-function ToolCall({
+const ToolCall = memo(function ToolCall({
   id,
   messageId,
   name,
@@ -547,6 +534,17 @@ function ToolCall({
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
     );
+  } else if (isMcpDataResult(result)) {
+    return (
+      <McpDataToolCall
+        id={id}
+        messageId={messageId}
+        name={name}
+        args={args}
+        result={result}
+        hideContent={hideContent}
+      />
+    );
   } else {
     const description: string | undefined = (args as { description: string })
       ?.description;
@@ -558,7 +556,148 @@ function ToolCall({
       ></ChainOfThoughtStep>
     );
   }
-}
+}, (prev, next) => {
+  // Tool call results are immutable once set — only re-render when
+  // result arrives (undefined → defined) or display state changes.
+  return prev.id === next.id
+    && prev.isLast === next.isLast
+    && prev.isLoading === next.isLoading
+    && prev.hideContent === next.hideContent
+    && (prev.result == null) === (next.result == null);
+});
+
+const MAX_PREVIEW_COLUMNS = 6;
+
+const McpDataToolCall = memo(function McpDataToolCall({
+  id,
+  messageId,
+  name,
+  args,
+  result,
+  hideContent = false,
+}: {
+  id?: string;
+  messageId?: string;
+  name: string;
+  args: Record<string, unknown>;
+  result: Record<string, unknown>;
+  hideContent?: boolean;
+}) {
+  const { t } = useI18n();
+  const { setOpen, select } = useArtifacts();
+
+  const label = useMemo(
+    () => describeMcpTool(name, args, t.toolCalls.useTool(name)),
+    [name, args, t],
+  );
+  const meta = useMemo(() => extractMcpMeta(name, result), [name, result]);
+  const data = result.data as Record<string, unknown>[];
+
+  const { columns, previewRows, remaining } = useMemo(() => {
+    const firstRow = data[0];
+    const allCols = firstRow ? Object.keys(firstRow) : [];
+    const cols = allCols.length > MAX_PREVIEW_COLUMNS
+      ? allCols.slice(0, MAX_PREVIEW_COLUMNS)
+      : allCols;
+    return {
+      columns: cols,
+      previewRows: data.slice(0, 3),
+      remaining: data.length - 3,
+    };
+  }, [data]);
+
+  const handleExpand = useCallback(() => {
+    if (!id) return;
+    const url = new URL(
+      `mcp-data:${name}?tool_call_id=${id}${messageId ? `&message_id=${messageId}` : ""}`,
+    ).toString();
+    select(url);
+    setOpen(true);
+  }, [id, name, messageId, select, setOpen]);
+
+  return (
+    <ChainOfThoughtStep key={id} label={label} icon={DatabaseIcon}>
+      <ChainOfThoughtSearchResults>
+        <ChainOfThoughtSearchResult>
+          {t.toolCalls.mcpDataResults(meta.count, meta.total)}
+        </ChainOfThoughtSearchResult>
+        {meta.page != null && meta.totalPages != null && meta.totalPages > 1 && (
+          <ChainOfThoughtSearchResult>
+            {t.toolCalls.mcpDataPage(meta.page, meta.totalPages)}
+          </ChainOfThoughtSearchResult>
+        )}
+        {meta.warning && (
+          <ChainOfThoughtSearchResult className="bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">
+            {meta.warning}
+          </ChainOfThoughtSearchResult>
+        )}
+        {meta.error && (
+          <ChainOfThoughtSearchResult className="bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+            {meta.error}
+          </ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtSearchResults>
+      {!hideContent && previewRows.length > 0 && (
+        <div className="bg-background/80 mt-2 overflow-hidden rounded-lg border">
+          <table className="w-full table-auto text-xs">
+            <thead>
+              <tr className="bg-muted/50 text-muted-foreground">
+                {columns.map((col) => (
+                  <th
+                    key={col}
+                    className="max-w-[12rem] truncate px-3 py-1.5 text-left font-medium"
+                  >
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/70">
+              {previewRows.map((row, i) => (
+                <tr key={i}>
+                  {columns.map((col) => {
+                    const val = row[col];
+                    const display =
+                      val == null
+                        ? ""
+                        : typeof val === "string"
+                          ? val
+                          : JSON.stringify(val);
+                    return (
+                      <td
+                        key={col}
+                        className="max-w-[12rem] truncate px-3 py-1.5"
+                      >
+                        {display.length > 24
+                          ? display.slice(0, 24) + "..."
+                          : display}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button
+            className="text-muted-foreground hover:text-foreground hover:bg-muted/60 flex w-full items-center justify-center gap-1 border-t px-3 py-1.5 text-xs transition-colors"
+            onClick={handleExpand}
+            type="button"
+          >
+            {remaining > 0
+              ? `View all ${data.length} rows`
+              : `Expand table`}
+            <ChevronRight className="size-3" />
+          </button>
+        </div>
+      )}
+    </ChainOfThoughtStep>
+  );
+}, (prev, next) => {
+  // MCP tool call results are immutable once received.
+  return prev.id === next.id
+    && prev.name === next.name
+    && prev.hideContent === next.hideContent;
+});
 
 interface GenericCoTStep<T extends string = string> {
   id?: string;

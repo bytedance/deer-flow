@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
-import { useArtifactContent } from "@/core/artifacts/hooks";
+import { useArtifactContent, useMcpDataContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
@@ -42,8 +42,54 @@ import { CitationLink } from "../citations/citation-link";
 import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
+import { DataTableViewer } from "./data-table-viewer";
 
 export function ArtifactFileDetail({
+  className,
+  filepath: filepathFromProps,
+  threadId,
+}: {
+  className?: string;
+  filepath: string;
+  threadId: string;
+}) {
+  if (filepathFromProps.startsWith("mcp-data:")) {
+    return (
+      <McpDataArtifact
+        className={className}
+        filepath={filepathFromProps}
+      />
+    );
+  }
+  return (
+    <FileArtifactDetail
+      className={className}
+      filepath={filepathFromProps}
+      threadId={threadId}
+    />
+  );
+}
+
+function McpDataArtifact({
+  className,
+  filepath,
+}: {
+  className?: string;
+  filepath: string;
+}) {
+  const mcpData = useMcpDataContent({ filepath });
+  if (!mcpData) return null;
+  return (
+    <DataTableViewer
+      className={cn(className)}
+      toolName={mcpData.toolName}
+      data={mcpData.data}
+      meta={mcpData.meta}
+    />
+  );
+}
+
+function FileArtifactDetail({
   className,
   filepath: filepathFromProps,
   threadId,

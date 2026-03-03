@@ -182,7 +182,7 @@ export const ChainOfThoughtSearchResult = memo(
   ({ className, children, ...props }: ChainOfThoughtSearchResultProps) => (
     <Badge
       className={cn(
-        "bg-[rgb(16_16_15)] text-muted-foreground border-transparent gap-1 px-2 py-0.5 text-xs font-normal",
+        "bg-muted text-muted-foreground dark:bg-[rgb(16_16_15)] border-transparent gap-1 px-2 py-0.5 text-xs font-normal",
         className,
       )}
       variant="secondary"

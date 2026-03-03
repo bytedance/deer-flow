@@ -34,7 +34,10 @@ export function CollapsibleCodeBlock({
       ? String(children.props.children)
       : "";
 
-  const lineCount = codeContent ? codeContent.split("\n").length : 0;
+  const lineCount = useMemo(
+    () => (codeContent ? codeContent.split("\n").length : 0),
+    [codeContent],
+  );
   const shouldShowToggle = lineCount > MAX_LINES_COLLAPSED;
   const language = useMemo(() => {
     if (

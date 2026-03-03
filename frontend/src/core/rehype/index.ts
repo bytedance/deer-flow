@@ -3,6 +3,8 @@ import { useMemo } from "react";
 import { visit } from "unist-util-visit";
 import type { BuildVisitor } from "unist-util-visit";
 
+const wordSegmenter = new Intl.Segmenter("zh", { granularity: "word" });
+
 export function rehypeSplitWordsIntoSpans() {
   return (tree: Root) => {
     visit(tree, "element", ((node: Element) => {
@@ -15,8 +17,7 @@ export function rehypeSplitWordsIntoSpans() {
         const newChildren: Array<ElementContent> = [];
         node.children.forEach((child) => {
           if (child.type === "text") {
-            const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
-            const segments = segmenter.segment(child.value);
+            const segments = wordSegmenter.segment(child.value);
             const words = Array.from(segments)
               .map((segment) => segment.segment)
               .filter(Boolean);

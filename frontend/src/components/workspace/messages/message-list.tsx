@@ -45,7 +45,6 @@ export function MessageList({
   paddingBottom = 160,
   isRegenerating,
   isTransitioning,
-  streamingVerbSeed,
   onEditMessage,
   onRegenerateMessage,
 }: {
@@ -59,7 +58,6 @@ export function MessageList({
   paddingBottom?: number;
   isRegenerating?: boolean;
   isTransitioning?: boolean;
-  streamingVerbSeed?: number;
   onEditMessage?: (messageId: string, newContent: string) => void;
   onRegenerateMessage?: (messageId: string, content: string) => void;
 }) {
@@ -348,7 +346,6 @@ export function MessageList({
               showUsage
               isLoading={thread.isLoading}
               usageEstimate={streamingUsageEstimate}
-              verbSeed={streamingVerbSeed}
             />
           </div>
         )}

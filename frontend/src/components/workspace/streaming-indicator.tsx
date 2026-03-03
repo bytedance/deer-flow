@@ -65,14 +65,12 @@ export function StreamingIndicator({
   showUsage = false,
   isLoading = false,
   usageEstimate,
-  verbSeed,
 }: {
   className?: string;
   size?: "normal" | "sm";
   showUsage?: boolean;
   isLoading?: boolean;
   usageEstimate?: TurnUsageEstimate;
-  verbSeed?: number;
 }) {
   const dotSize = size === "sm" ? "w-1.5 h-1.5 mx-0.5" : "w-2 h-2 mx-1";
   const pickRandomVerb = () =>
@@ -99,11 +97,12 @@ export function StreamingIndicator({
   );
 
   useEffect(() => {
-    if (verbSeed === undefined) {
-      return;
-    }
-    setVerb((current) => pickNextVerb(current));
-  }, [verbSeed]);
+    if (!isLoading) return;
+    const interval = setInterval(() => {
+      setVerb((current) => pickNextVerb(current));
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [isLoading]);
 
   return (
     <div className={cn("flex flex-wrap items-center gap-3", className)}>
