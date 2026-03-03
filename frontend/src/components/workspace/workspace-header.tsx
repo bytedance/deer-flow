@@ -29,7 +29,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           {state === "collapsed" ? (
             // Non-Electron collapsed: TT logo + hover-to-reveal trigger
             <div className="group-has-data-[collapsible=icon]/sidebar-wrapper:-translate-y flex w-full cursor-pointer items-center justify-center">
-              <div className="text-primary block pt-1 font-serif group-hover/workspace-header:hidden">
+              <div className="gradient-text block pt-1 font-serif group-hover/workspace-header:hidden">
                 TT
               </div>
               <SidebarTrigger className="hidden pl-2 group-hover/workspace-header:block" />
@@ -38,11 +38,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             // Non-Electron expanded: brand + trigger
             <div className="flex items-center">
               {env.VITE_STATIC_WEBSITE_ONLY === "true" ? (
-                <Link to="/" className="text-primary ml-2 font-serif">
+                <Link to="/" className="gradient-text ml-2 font-serif">
                   Thinktank.ai
                 </Link>
               ) : (
-                <div className="text-primary ml-2 cursor-default font-serif">
+                <div className="gradient-text ml-2 cursor-default font-serif">
                   Thinktank.ai
                 </div>
               )}

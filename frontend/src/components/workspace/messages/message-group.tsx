@@ -42,6 +42,20 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 
+function summarizeReasoningText(reasoning: string | null, maxLength = 120) {
+  if (!reasoning) {
+    return "Thinking";
+  }
+  const normalized = reasoning.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "Thinking";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
 export function MessageGroup({
   className,
   messages,
@@ -105,6 +119,13 @@ export function MessageGroup({
   }, [isLoading, aboveLastToolCallSteps.length, lastToolCallStep?.id, showAbove]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const showDoneStep = !isLoading && steps.length > 0;
+  const shouldCollapseToolCallContent = aboveLastToolCallSteps.length > 0 && !showAbove;
+  const toolCallSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return aboveLastToolCallSteps;
+    }
+    return [...aboveLastToolCallSteps, lastToolCallStep];
+  }, [aboveLastToolCallSteps, lastToolCallStep]);
   return (
     <ChainOfThought
       className={cn(
@@ -146,35 +167,42 @@ export function MessageGroup({
             ref={toolCallsScrollRef}
             className="max-h-[36rem] overflow-y-auto pr-2"
           >
-            {showAbove &&
-              aboveLastToolCallSteps.map((step) =>
-                step.type === "reasoning" ? (
-                  <ChainOfThoughtStep
-                    key={step.id}
-                    icon={ClockIcon}
-                    className="text-[rgb(175,174,163)]"
-                    label={
+            {toolCallSteps.map((step) =>
+              step.type === "reasoning" ? (
+                <ChainOfThoughtStep
+                  key={step.id}
+                  icon={ClockIcon}
+                  className="text-[rgb(175,174,163)]"
+                  label={
+                    shouldCollapseToolCallContent ? (
+                      summarizeReasoningText(step.reasoning)
+                    ) : (
                       <MarkdownContent
                         content={step.reasoning ?? ""}
                         isLoading={isLoading}
                         rehypePlugins={rehypePlugins}
                       />
-                    }
-                  ></ChainOfThoughtStep>
-                ) : (
-                  <ToolCall key={step.id} {...step} isLoading={isLoading} />
-                ),
-              )}
-            {lastToolCallStep && (
-              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                    )
+                  }
+                ></ChainOfThoughtStep>
+              ) : step.id === lastToolCallStep.id ? (
+                <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                  <ToolCall
+                    key={step.id}
+                    {...step}
+                    isLast={true}
+                    isLoading={isLoading}
+                    hideContent={shouldCollapseToolCallContent}
+                  />
+                </FlipDisplay>
+              ) : (
                 <ToolCall
-                  key={lastToolCallStep.id}
-                  {...lastToolCallStep}
-                  isLast={true}
+                  key={step.id}
+                  {...step}
                   isLoading={isLoading}
-                  hideContent={aboveLastToolCallSteps.length > 0 && !showAbove}
+                  hideContent={shouldCollapseToolCallContent}
                 />
-              </FlipDisplay>
+              ),
             )}
           </div>
         </ChainOfThoughtContent>

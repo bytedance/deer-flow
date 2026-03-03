@@ -23,7 +23,7 @@ export function ContextPanel({
   modelName,
   subagentEnabled,
 }: ContextPanelProps) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const { context, isLoading, error } = useAgentContext({
     modelName,
     subagentEnabled,

@@ -16,7 +16,7 @@ export function WorkspaceTitleBar() {
 
   return (
     <div
-      className="fixed top-0 right-0 left-0 z-50 flex h-10 select-none items-center border-b border-border/50 bg-background/80 backdrop-blur-sm"
+      className="fixed top-0 right-0 left-0 z-50 flex h-10 select-none items-center border-b border-border/50 bg-[rgb(21,21,21)] backdrop-blur-sm"
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       style={{ WebkitAppRegion: "drag" } as any}
     >

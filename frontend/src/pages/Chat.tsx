@@ -541,7 +541,7 @@ function ChatInner() {
                 "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
                 showLanding
                   ? "bg-background/0 backdrop-blur-none"
-                  : "bg-background/80 shadow-xs backdrop-blur",
+                  : "bg-[rgb(21,21,21)] shadow-xs backdrop-blur",
               )}
             >
               <div className="flex w-full items-center justify-between text-sm font-medium">
@@ -575,9 +575,9 @@ function ChatInner() {
                       onClick={() => setTodoPanelOpen(!todoPanelOpen)}
                     >
                       {todoPanelOpen ? (
-                        <PanelLeftCloseIcon />
-                      ) : (
                         <PanelLeftOpenIcon />
+                      ) : (
+                        <PanelLeftCloseIcon />
                       )}
                       <span className="sr-only">Toggle todo panel</span>
                     </Button>
