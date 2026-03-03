@@ -1,0 +1,6 @@
+[project]
+name = "worldbank-mcp"
+version = "0.1.0"
+description = "MCP server for World Bank Open Data API"
+requires-python = ">=3.12"
+dependencies = ["mcp>=1.0.0", "httpx>=0.28.0"]
