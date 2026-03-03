@@ -93,7 +93,7 @@ export function ArtifactFileDetail({
 
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
   const [isInstalling, setIsInstalling] = useState(false);
-
+  const { isMock } = useThread();
   useEffect(() => {
     if (isSupportPreview) {
       setViewMode("preview");
@@ -255,7 +255,7 @@ export function ArtifactFileDetail({
         {!isCodeFile && (
           <iframe
             className="size-full"
-            src={urlOfArtifact({ filepath, threadId })}
+            src={urlOfArtifact({ filepath, threadId, isMock })}
           />
         )}
       </ArtifactContent>
