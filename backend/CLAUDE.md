@@ -241,6 +241,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
+- Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
 
 ### Memory System (`src/agents/memory/`)
 

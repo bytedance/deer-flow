@@ -252,6 +252,10 @@ Key sections:
 - `subagents` - Subagent system (enabled/disabled)
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
 
+Provider note:
+- `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).
+- If a provider module is missing, DeerFlow now returns an actionable error with install guidance (for example `uv add langchain-google-genai`).
+
 ### Extensions Configuration (`extensions_config.json`)
 
 MCP servers and skill states in a single file:
