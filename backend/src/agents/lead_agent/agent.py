@@ -23,7 +23,7 @@ from src.sandbox.middleware import SandboxMiddleware
 logger = logging.getLogger(__name__)
 
 
-def _resolve_model_name(requested_model_name: str | None) -> str:
+def _resolve_model_name(requested_model_name: str | None = None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
     app_config = get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
