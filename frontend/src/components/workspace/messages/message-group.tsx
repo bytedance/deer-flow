@@ -17,7 +17,15 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   ChainOfThought,
@@ -65,7 +73,11 @@ export const MessageGroup = memo(function MessageGroup({
   const [showLastThinking, setShowLastThinking] = useState(
     env.VITE_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const resultCacheRef = useRef(new Map<string, unknown>());
+  const steps = useMemo(
+    () => convertToSteps(messages, resultCacheRef.current),
+    [messages],
+  );
   const lastToolCallStep = useMemo(() => {
     const filteredSteps = steps.filter((step) => step.type === "toolCall");
     return filteredSteps[filteredSteps.length - 1];
@@ -125,7 +137,7 @@ export const MessageGroup = memo(function MessageGroup({
           key="above"
           className="w-full items-start justify-start text-left"
           variant="ghost"
-          onClick={() => setShowAbove(!showAbove)}
+          onClick={() => startTransition(() => setShowAbove(!showAbove))}
         >
           <ChainOfThoughtStep
             className="my-0"
@@ -196,7 +208,7 @@ export const MessageGroup = memo(function MessageGroup({
               if (isThinkingStreaming) {
                 return;
               }
-              setShowLastThinking(!showLastThinking);
+              startTransition(() => setShowLastThinking(!showLastThinking));
             }}
           >
             <div className="flex w-full items-center justify-between">
@@ -480,12 +492,14 @@ const ToolCall = memo(function ToolCall({
         label={description}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
-          setOpen(true);
+          startTransition(() => {
+            select(
+              new URL(
+                `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+              ).toString(),
+            );
+            setOpen(true);
+          });
         }}
       >
         {!hideContent && path && (
@@ -611,8 +625,10 @@ const McpDataToolCall = memo(function McpDataToolCall({
     const url = new URL(
       `mcp-data:${name}?tool_call_id=${id}${messageId ? `&message_id=${messageId}` : ""}`,
     ).toString();
-    select(url);
-    setOpen(true);
+    startTransition(() => {
+      select(url);
+      setOpen(true);
+    });
   }, [id, name, messageId, select, setOpen]);
 
   return (
@@ -712,12 +728,15 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
-  result?: string;
+  result?: string | Record<string, unknown>;
 }
 
 type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
-function convertToSteps(messages: Message[]): CoTStep[] {
+function convertToSteps(
+  messages: Message[],
+  resultCache: Map<string, unknown>,
+): CoTStep[] {
   const steps: CoTStep[] = [];
   for (const message of messages) {
     if (message.type === "ai") {
@@ -744,13 +763,22 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
-            try {
-              const json = JSON.parse(toolCallResult);
-              step.result = json;
-            } catch {
-              step.result = toolCallResult;
+          // Use cached parsed result when available to skip
+          // O(n) findToolCallResult scan + JSON.parse
+          const cached = resultCache.get(toolCallId);
+          if (cached !== undefined) {
+            step.result = cached as string | Record<string, unknown>;
+          } else {
+            const toolCallResult = findToolCallResult(toolCallId, messages);
+            if (toolCallResult) {
+              try {
+                const json = JSON.parse(toolCallResult);
+                step.result = json;
+                resultCache.set(toolCallId, json);
+              } catch {
+                step.result = toolCallResult;
+                resultCache.set(toolCallId, toolCallResult);
+              }
             }
           }
         }
