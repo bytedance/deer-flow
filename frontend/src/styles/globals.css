@@ -498,10 +498,10 @@
 
   /* Dot grid background pattern */
   .bg-dot-grid {
-    background-color: rgb(10, 10, 10);
+    background-color: oklch(0.975 0.003 90);
     background-image: radial-gradient(
       circle at center,
-      rgba(255, 255, 255, 0.12) 1px,
+      rgba(0, 0, 0, 0.14) 1px,
       transparent 1px
     );
     background-size: 24px 24px;
