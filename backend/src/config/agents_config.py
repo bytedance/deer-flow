@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
+from src.agents.lead_agent.agent import _resolve_model_name
 from src.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
@@ -22,10 +23,11 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
+    is_default: bool = False
 
 
-def load_agent_config(name: str) -> AgentConfig:
-    """Load a custom agent's config from its directory.
+def load_agent_config(name: str | None) -> AgentConfig | None:
+    """Load the custom or default agent's config from its directory.
 
     Args:
         name: The agent name.
@@ -37,6 +39,10 @@ def load_agent_config(name: str) -> AgentConfig:
         FileNotFoundError: If the agent directory or config.yaml does not exist.
         ValueError: If config.yaml cannot be parsed.
     """
+
+    if name is None:
+        return None
+
     if not AGENT_NAME_PATTERN.match(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
     agent_dir = get_paths().agent_dir(name)

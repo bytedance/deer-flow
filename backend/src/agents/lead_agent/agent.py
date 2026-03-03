@@ -258,19 +258,26 @@ def make_lead_agent(config: RunnableConfig):
 
     thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
     reasoning_effort = config.get("configurable", {}).get("reasoning_effort", None)
-    requested_model_name = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
-    model_name = _resolve_model_name(requested_model_name)
-    if model_name is None:
-        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+    requested_model_name: str | None = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
     max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
     is_bootstrap = config.get("configurable", {}).get("is_bootstrap", False)
     agent_name = config.get("configurable", {}).get("agent_name")
 
+    agent_config = load_agent_config(agent_name)
+    # Custom agent model or fallback to global/default model resolution
+    agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
+
+    # Final model name resolution with request override, then agent config, then global default
+    model_name = requested_model_name or agent_model_name
+
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
-    if thinking_enabled and model_config is not None and not model_config.supports_thinking:
+
+    if model_config is None:
+        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+    if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
 
@@ -288,6 +295,7 @@ def make_lead_agent(config: RunnableConfig):
     # Inject run metadata for LangSmith trace tagging
     if "metadata" not in config:
         config["metadata"] = {}
+
     config["metadata"].update(
         {
             "agent_name": agent_name or "default",
@@ -311,31 +319,11 @@ def make_lead_agent(config: RunnableConfig):
             state_schema=ThreadState,
         )
 
-    if agent_name:
-        # Custom agent mode: reuse the full lead agent prompt, then inject SOUL.md + USER.md
-        agent = load_agent_config(agent_name)
-
-        # Resolve effective model: configurable > agent config > default
-        effective_model_name = model_name or agent.model
-
-        # Base prompt: standard lead agent (all capabilities intact)
-        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name)
-
-        tool_groups = agent.tool_groups
-
-        return create_agent(
-            model=create_chat_model(name=effective_model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(groups=tool_groups, model_name=effective_model_name, subagent_enabled=subagent_enabled),
-            middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-            system_prompt=system_prompt,
-            state_schema=ThreadState,
-        )
-
     # Default lead agent (unchanged behavior)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
-        tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name),
-        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents),
+        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups, subagent_enabled=subagent_enabled),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
     )
