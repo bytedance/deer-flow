@@ -8,7 +8,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from api_client import WorldBankClient, WorldBankAPIError
+from worldbank_mcp.api_client import WorldBankClient, WorldBankAPIError
 
 mcp = FastMCP("worldbank")
 client = WorldBankClient()
@@ -118,6 +118,7 @@ async def worldbank_get_indicator_data(
         return json.dumps({"error": str(e)})
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the worldbank-mcp CLI."""
     print("World Bank MCP server starting...", file=sys.stderr)
     mcp.run(transport="stdio")
