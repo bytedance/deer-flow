@@ -11,6 +11,7 @@ set -euo pipefail
 #   ./scripts/prod.sh start          Start the full stack
 #   ./scripts/prod.sh stop           Stop all services
 #   ./scripts/prod.sh restart        Rebuild and restart
+#   ./scripts/prod.sh reload         Restart backend services (config reload, no rebuild)
 #   ./scripts/prod.sh status         Show service status
 #   ./scripts/prod.sh logs [service] Tail logs (optionally for a single service)
 #   ./scripts/prod.sh build          Build images without starting
@@ -178,6 +179,13 @@ cmd_restart() {
     cmd_start
 }
 
+cmd_reload() {
+    log_header "Reloading Configuration"
+    log_info "Restarting gateway, langgraph, and worker services (no rebuild)..."
+    compose restart gateway langgraph worker
+    log_ok "Services restarted. Config changes (config.yaml, extensions_config.json, .env) are now active."
+}
+
 cmd_status() {
     log_header "Service Status"
     compose ps
@@ -292,6 +300,7 @@ cmd_help() {
     echo "  start              Build images and start all services"
     echo "  stop               Stop all services (preserves data)"
     echo "  restart            Rebuild and restart all services"
+    echo "  reload             Restart gateway, langgraph, worker (pick up config changes)"
     echo "  status             Show service status"
     echo "  logs [service]     Follow logs (all or specific service)"
     echo "                     Services: nginx, gateway, langgraph, worker, postgres, redis"
@@ -324,6 +333,7 @@ main() {
         start)   cmd_start ;;
         stop)    cmd_stop ;;
         restart) cmd_restart ;;
+        reload)  cmd_reload ;;
         status)  cmd_status ;;
         logs)    shift; cmd_logs "$@" ;;
         build)   shift; cmd_build "$@" ;;
