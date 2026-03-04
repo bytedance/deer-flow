@@ -210,7 +210,7 @@ class DeerFlowClient:
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from backend.src.agents.checkpointer.async_provider import get_checkpointer
+            from src.agents.checkpointer import get_checkpointer
 
             checkpointer = get_checkpointer()
         if checkpointer is not None:

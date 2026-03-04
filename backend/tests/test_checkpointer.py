@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agents.checkpointer.async_provider import get_checkpointer, reset_checkpointer
+from src.agents.checkpointer import get_checkpointer, reset_checkpointer
 from src.config.checkpointer_config import (
     CheckpointerConfig,
     get_checkpointer_config,
@@ -92,11 +92,10 @@ class TestGetCheckpointer:
         cp1 = get_checkpointer()
         reset_checkpointer()
         cp2 = get_checkpointer()
-        # After reset, a new instance is created
         assert cp1 is not cp2
 
     def test_sqlite_raises_when_package_missing(self):
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": ":memory:"})
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
         with patch.dict(sys.modules, {"langgraph.checkpoint.sqlite": None}):
             reset_checkpointer()
             with pytest.raises(ImportError, match="langgraph-checkpoint-sqlite"):
@@ -114,17 +113,23 @@ class TestGetCheckpointer:
         mock_saver = MagicMock()
         mock_module = MagicMock()
         mock_module.PostgresSaver = mock_saver
-        with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_module, "psycopg_pool": MagicMock()}):
+        with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_module}):
             reset_checkpointer()
             with pytest.raises(ValueError, match="connection_string is required"):
                 get_checkpointer()
 
     def test_sqlite_creates_saver(self):
         """SQLite checkpointer is created when package is available."""
-        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": ":memory:"})
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
 
         mock_saver_instance = MagicMock()
-        mock_saver_cls = MagicMock(return_value=mock_saver_instance)
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
         mock_module = MagicMock()
         mock_module.SqliteSaver = mock_saver_cls
 
@@ -133,6 +138,7 @@ class TestGetCheckpointer:
             cp = get_checkpointer()
 
         assert cp is mock_saver_instance
+        mock_saver_cls.from_conn_string.assert_called_once()
         mock_saver_instance.setup.assert_called_once()
 
     def test_postgres_creates_saver(self):
@@ -140,20 +146,22 @@ class TestGetCheckpointer:
         load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
 
         mock_saver_instance = MagicMock()
-        mock_saver_cls = MagicMock(return_value=mock_saver_instance)
+        mock_cm = MagicMock()
+        mock_cm.__enter__ = MagicMock(return_value=mock_saver_instance)
+        mock_cm.__exit__ = MagicMock(return_value=False)
+
+        mock_saver_cls = MagicMock()
+        mock_saver_cls.from_conn_string = MagicMock(return_value=mock_cm)
+
         mock_pg_module = MagicMock()
         mock_pg_module.PostgresSaver = mock_saver_cls
 
-        mock_pool_instance = MagicMock()
-        mock_pool_cls = MagicMock(return_value=mock_pool_instance)
-        mock_pool_module = MagicMock()
-        mock_pool_module.ConnectionPool = mock_pool_cls
-
-        with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_pg_module, "psycopg_pool": mock_pool_module}):
+        with patch.dict(sys.modules, {"langgraph.checkpoint.postgres": mock_pg_module}):
             reset_checkpointer()
             cp = get_checkpointer()
 
         assert cp is mock_saver_instance
+        mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
 
 
@@ -163,18 +171,10 @@ class TestGetCheckpointer:
 
 
 class TestAppConfigLoadsCheckpointer:
-    def test_from_dict_loads_checkpointer_section(self):
-        """AppConfig.from_file loads the checkpointer section."""
-        from src.config.app_config import AppConfig
-        from src.config.checkpointer_config import get_checkpointer_config
-
-        # Reset before testing
+    def test_load_checkpointer_section(self):
+        """load_checkpointer_config_from_dict populates the global config."""
         set_checkpointer_config(None)
-
-        config_data = {
-            "type": "memory",
-        }
-        load_checkpointer_config_from_dict(config_data)
+        load_checkpointer_config_from_dict({"type": "memory"})
         cfg = get_checkpointer_config()
         assert cfg is not None
         assert cfg.type == "memory"
@@ -194,16 +194,17 @@ class TestClientCheckpointerFallback:
 
         load_checkpointer_config_from_dict({"type": "memory"})
 
-        model_mock = MagicMock()
-        config_mock = MagicMock()
-        config_mock.models = [model_mock]
-        config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
-
         captured_kwargs = {}
 
         def fake_create_agent(**kwargs):
             captured_kwargs.update(kwargs)
             return MagicMock()
+
+        model_mock = MagicMock()
+        config_mock = MagicMock()
+        config_mock.models = [model_mock]
+        config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
+        config_mock.checkpointer = None
 
         with (
             patch("src.client.get_app_config", return_value=config_mock),
@@ -237,6 +238,7 @@ class TestClientCheckpointerFallback:
         config_mock = MagicMock()
         config_mock.models = [model_mock]
         config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
+        config_mock.checkpointer = None
 
         with (
             patch("src.client.get_app_config", return_value=config_mock),

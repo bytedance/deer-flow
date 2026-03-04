@@ -63,10 +63,10 @@ def _make_sync_checkpointer(config: CheckpointerConfig) -> Checkpointer:
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = resolve_path(config.connection_string or "store.db")
-        saver = SqliteSaver.from_conn_string(conn_str)
-        saver.setup()
-        logger.info("Checkpointer: using SqliteSaver (%s)", conn_str)
-        return saver
+        with SqliteSaver.from_conn_string(conn_str) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using SqliteSaver (%s)", conn_str)
+            return saver
 
     if config.type == "postgres":
         try:
@@ -77,10 +77,10 @@ def _make_sync_checkpointer(config: CheckpointerConfig) -> Checkpointer:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        saver = PostgresSaver.from_conn_string(config.connection_string)
-        saver.setup()
-        logger.info("Checkpointer: using PostgresSaver")
-        return saver
+        with PostgresSaver.from_conn_string(config.connection_string) as saver:
+            saver.setup()
+            logger.info("Checkpointer: using PostgresSaver")
+            return saver
 
     raise ValueError(f"Unknown checkpointer type: {config.type!r}")
 

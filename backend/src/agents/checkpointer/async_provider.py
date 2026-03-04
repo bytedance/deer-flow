@@ -94,7 +94,6 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer | None]:
 
     config = get_app_config()
 
-    print(f"!!!!Initializing checkpointer with config: {config.checkpointer}")
     if config.checkpointer is None:
         yield None
         return

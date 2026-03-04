@@ -98,7 +98,6 @@ class AppConfig(BaseModel):
         if "checkpointer" in config_data:
             load_checkpointer_config_from_dict(config_data["checkpointer"])
 
-        print(f"!!!{config_data.get('checkpointer')}")
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()
         config_data["extensions"] = extensions_config.model_dump()
