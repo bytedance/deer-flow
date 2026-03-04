@@ -248,6 +248,10 @@ export const enUS: Translations = {
   },
 
   // Subtasks
+  uploads: {
+    uploadingFiles: "Uploading files, please wait...",
+  },
+
   subtasks: {
     subtask: "Subtask",
     executing: (count: number) =>

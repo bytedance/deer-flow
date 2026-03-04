@@ -187,6 +187,11 @@ export interface Translations {
     skillInstallTooltip: string;
   };
 
+  // Uploads
+  uploads: {
+    uploadingFiles: string;
+  };
+
   // Subtasks
   subtasks: {
     subtask: string;

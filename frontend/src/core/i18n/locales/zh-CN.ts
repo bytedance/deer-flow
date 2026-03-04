@@ -238,6 +238,10 @@ export const zhCN: Translations = {
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
   },
 
+  uploads: {
+    uploadingFiles: "文件上传中，请稍候...",
+  },
+
   subtasks: {
     subtask: "子任务",
     executing: (count: number) =>
