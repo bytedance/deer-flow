@@ -1,42 +1,70 @@
-import type { HumanMessage } from "@langchain/core/messages";
 import type { AIMessage } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
-import { useStream, type UseStream } from "@langchain/langgraph-sdk/react";
+import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
 import { uploadFiles } from "../uploads";
 
-import type {
-  AgentThread,
-  AgentThreadContext,
-  AgentThreadState,
-} from "./types";
+import type { AgentThread, AgentThreadState } from "./types";
+
+export type ToolEndEvent = {
+  name: string;
+  data: unknown;
+};
+
+export type ThreadStreamOptions = {
+  threadId?: string | null | undefined;
+  context: LocalSettings["context"];
+  isMock?: boolean;
+  onStart?: (threadId: string) => void;
+  onFinish?: (state: AgentThreadState) => void;
+  onToolEnd?: (event: ToolEndEvent) => void;
+};
 
 export function useThreadStream({
   threadId,
-  isNewThread,
+  context,
+  isMock,
+  onStart,
   onFinish,
-}: {
-  isNewThread: boolean;
-  threadId: string | null | undefined;
-  onFinish?: (state: AgentThreadState) => void;
-}) {
+  onToolEnd,
+}: ThreadStreamOptions) {
+  const [_threadId, setThreadId] = useState<string | null>(threadId ?? null);
+
+  useEffect(() => {
+    if (_threadId && _threadId !== threadId) {
+      setThreadId(threadId ?? null);
+    }
+  }, [threadId, _threadId]);
+
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(),
+    client: getAPIClient(isMock),
     assistantId: "lead_agent",
-    threadId: isNewThread ? undefined : threadId,
+    threadId: _threadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
+    onCreated(meta) {
+      setThreadId(meta.thread_id);
+      onStart?.(meta.thread_id);
+    },
+    onLangChainEvent(event) {
+      if (event.event === "on_tool_end") {
+        onToolEnd?.({
+          name: event.name,
+          data: event.data,
+        });
+      }
+    },
     onCustomEvent(event: unknown) {
-      console.info(event);
       if (
         typeof event === "object" &&
         event !== null &&
@@ -53,48 +81,16 @@ export function useThreadStream({
     },
     onFinish(state) {
       onFinish?.(state.values);
-      // void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title: state.values.title,
-                },
-              };
-            }
-            return t;
-          });
-        },
-      );
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
-  return thread;
-}
 
-export function useSubmitThread({
-  threadId,
-  thread,
-  threadContext,
-  isNewThread,
-  afterSubmit,
-}: {
-  isNewThread: boolean;
-  threadId: string | null | undefined;
-  thread: UseStream<AgentThreadState>;
-  threadContext: Omit<AgentThreadContext, "thread_id">;
-  afterSubmit?: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const callback = useCallback(
-    async (message: PromptInputMessage) => {
+  const sendMessage = useCallback(
+    async (
+      threadId: string,
+      message: PromptInputMessage,
+      extraContext?: Record<string, unknown>,
+    ) => {
       const text = message.text.trim();
 
       // Upload files first if any
@@ -163,10 +159,10 @@ export function useSubmitThread({
                 },
               ],
             },
-          ] as HumanMessage[],
+          ],
         },
         {
-          threadId: isNewThread ? threadId! : undefined,
+          threadId: threadId,
           streamSubgraphs: true,
           streamResumable: true,
           streamMode: ["values", "messages-tuple", "custom"],
@@ -174,17 +170,21 @@ export function useSubmitThread({
             recursion_limit: 1000,
           },
           context: {
-            ...threadContext,
+            ...extraContext,
+            ...context,
+            thinking_enabled: context.mode !== "flash",
+            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
+            subagent_enabled: context.mode === "ultra",
             thread_id: threadId,
           },
         },
       );
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      afterSubmit?.();
+      // afterSubmit?.();
     },
-    [thread, isNewThread, threadId, threadContext, queryClient, afterSubmit],
+    [thread, context, queryClient],
   );
-  return callback;
+  return [thread, sendMessage] as const;
 }
 
 export function useThreads(

@@ -4,6 +4,7 @@
 
 help:
 	@echo "DeerFlow Development Commands:"
+	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
@@ -20,7 +21,11 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@test -f config.yaml || cp config.example.yaml config.yaml
+	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
+		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
+		exit 1; \
+	fi
+	@cp config.example.yaml config.yaml
 	@test -f .env || cp .env.example .env
 	@test -f frontend/.env || cp frontend/.env.example frontend/.env
 
@@ -166,6 +171,7 @@ dev:
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
 	@cleanup() { \
+		trap - INT TERM; \
 		echo ""; \
 		echo "Shutting down services..."; \
 		pkill -f "langgraph dev" 2>/dev/null || true; \

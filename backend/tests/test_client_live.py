@@ -226,13 +226,12 @@ class TestLiveFileUpload:
 # ===========================================================================
 
 class TestLiveConfigQueries:
-    def test_list_models_returns_ark(self, client):
-        """list_models() returns the configured ARK model."""
+    def test_list_models_returns_configured_model(self, client):
+        """list_models() returns at least one configured model with Gateway-aligned fields."""
         result = client.list_models()
         assert "models" in result
         assert len(result["models"]) >= 1
         names = [m["name"] for m in result["models"]]
-        assert "ark-model" in names
         # Verify Gateway-aligned fields
         for m in result["models"]:
             assert "display_name" in m
@@ -240,10 +239,12 @@ class TestLiveConfigQueries:
         print(f"  models: {names}")
 
     def test_get_model_found(self, client):
-        """get_model() returns details for existing model."""
-        model = client.get_model("ark-model")
+        """get_model() returns details for the first configured model."""
+        result = client.list_models()
+        first_model_name = result["models"][0]["name"]
+        model = client.get_model(first_model_name)
         assert model is not None
-        assert model["name"] == "ark-model"
+        assert model["name"] == first_model_name
         assert "display_name" in model
         assert "supports_thinking" in model
         print(f"  model detail: {model}")
