@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.config.app_config import AppConfig
 from src.config.extensions_config import ExtensionsConfig, McpServerConfig
-
+from src.config.provider_model_catalog_config import ProviderModelCatalogConfig
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -29,6 +29,7 @@ def _make_app_config(models: list | None = None) -> AppConfig:
     """Create a minimal AppConfig with mock model list."""
     config = MagicMock(spec=AppConfig)
     config.models = models or [_minimal_model_config()]
+    config.provider_models = ProviderModelCatalogConfig(providers=[])
     config.get_model_config = lambda name: next(
         (m for m in config.models if m.name == name), None
     )
@@ -47,9 +48,10 @@ def app():
     with patch("src.config.app_config.get_app_config", return_value=mock_config):
         with patch("src.gateway.routers.models.get_app_config", return_value=mock_config):
             with patch("src.gateway.routers.agent.get_app_config", return_value=mock_config):
-                # Import here to avoid circular import issues
-                from src.gateway.app import create_app
-                yield create_app()
+                with patch("src.models.provider_catalog.get_app_config", return_value=mock_config):
+                    # Import here to avoid circular import issues
+                    from src.gateway.app import create_app
+                    yield create_app()
 
 
 @pytest.fixture()
@@ -106,6 +108,22 @@ class TestModelsRouter:
         assert "display_name" in model
         assert "description" in model
         assert "supports_thinking" in model
+
+
+# ---------------------------------------------------------------------------
+# Providers Router
+# ---------------------------------------------------------------------------
+class TestProvidersRouter:
+    """Tests for /api/providers endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_get_provider_catalog(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/providers/catalog")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "providers" in data
+        assert isinstance(data["providers"], list)
+        assert any(provider["id"] == "openai" for provider in data["providers"])
 
 
 # ---------------------------------------------------------------------------

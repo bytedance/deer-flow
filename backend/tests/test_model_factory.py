@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -65,8 +64,13 @@ class TestRuntimeTierSettings:
         result = _runtime_tier_settings(spec, thinking_enabled=True)
         assert result["reasoning"]["effort"] == "medium"
 
-    def test_anthropic_thinking_tier_uses_enabled_budget(self) -> None:
+    def test_anthropic_opus_adaptive_thinking_uses_effort(self) -> None:
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-opus-4-6", tier="thinking")
+        result = _runtime_tier_settings(spec, thinking_enabled=True)
+        assert result == {"thinking": {"type": "adaptive", "effort": "medium"}}
+
+    def test_anthropic_thinking_enabled(self) -> None:
+        spec = RuntimeModelSpec(provider="anthropic", model_id="claude-3-5-sonnet", tier="thinking")
         result = _runtime_tier_settings(spec, thinking_enabled=True)
         assert result == {
             "thinking": {
@@ -75,11 +79,6 @@ class TestRuntimeTierSettings:
             }
         }
 
-    def test_anthropic_thinking_enabled(self) -> None:
-        spec = RuntimeModelSpec(provider="anthropic", model_id="claude-3-5-sonnet", tier="thinking")
-        result = _runtime_tier_settings(spec, thinking_enabled=True)
-        assert result == {"thinking": {"type": "enabled", "budget_tokens": 10000}}
-
     def test_deepseek_thinking(self) -> None:
         spec = RuntimeModelSpec(provider="deepseek", model_id="deepseek-v3", tier="thinking")
         result = _runtime_tier_settings(spec, thinking_enabled=True)
@@ -87,10 +86,13 @@ class TestRuntimeTierSettings:
 
     def test_deepseek_reasoner(self) -> None:
         spec = RuntimeModelSpec(provider="deepseek", model_id="deepseek-reasoner", tier=None)
-        # tier is None but model ends with "reasoner"
         result = _runtime_tier_settings(spec, thinking_enabled=True)
-        # No tier, so returns {} (the reasoner check requires thinking but no tier match first)
-        assert result == {}
+        assert result == {"extra_body": {"thinking": {"type": "enabled"}}}
+
+    def test_openai_adaptive_thinking_effort_from_runtime_spec(self) -> None:
+        spec = RuntimeModelSpec(provider="openai", model_id="gpt-5.2", thinking_effort="xhigh")
+        result = _runtime_tier_settings(spec, thinking_enabled=True)
+        assert result == {"reasoning": {"effort": "xhigh", "summary": "auto"}}
 
     def test_kimi_thinking(self) -> None:
         spec = RuntimeModelSpec(provider="kimi", model_id="moonshot-v1", tier="thinking")
@@ -128,7 +130,7 @@ class TestCreateRuntimeModel:
     def test_openai_model(self, mock_cls) -> None:
         mock_cls.return_value = MagicMock()
         spec = RuntimeModelSpec(provider="openai", model_id="gpt-4o", api_key="sk-test")
-        result = _create_runtime_model(spec, thinking_enabled=False)
+        _create_runtime_model(spec, thinking_enabled=False)
         mock_cls.assert_called_once()
         call_kwargs = mock_cls.call_args[1]
         assert call_kwargs["model"] == "gpt-4o"
@@ -139,7 +141,7 @@ class TestCreateRuntimeModel:
     def test_anthropic_model(self, mock_cls) -> None:
         mock_cls.return_value = MagicMock()
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-3-5-sonnet", api_key="sk-ant-test")
-        result = _create_runtime_model(spec, thinking_enabled=False)
+        _create_runtime_model(spec, thinking_enabled=False)
         mock_cls.assert_called_once()
         call_kwargs = mock_cls.call_args[1]
         assert call_kwargs["model"] == "claude-3-5-sonnet"
@@ -148,7 +150,7 @@ class TestCreateRuntimeModel:
     def test_deepseek_model(self, mock_cls) -> None:
         mock_cls.return_value = MagicMock()
         spec = RuntimeModelSpec(provider="deepseek", model_id="deepseek-v3", api_key="sk-ds-test")
-        result = _create_runtime_model(spec, thinking_enabled=False)
+        _create_runtime_model(spec, thinking_enabled=False)
         mock_cls.assert_called_once()
         call_kwargs = mock_cls.call_args[1]
         assert call_kwargs["model"] == "deepseek-v3"
@@ -158,14 +160,14 @@ class TestCreateRuntimeModel:
     def test_epfl_rcp_model(self, mock_cls) -> None:
         mock_cls.return_value = MagicMock()
         spec = RuntimeModelSpec(provider="epfl-rcp", model_id="mixtral", api_key="key")
-        result = _create_runtime_model(spec, thinking_enabled=False)
+        _create_runtime_model(spec, thinking_enabled=False)
         mock_cls.assert_called_once()
 
     @patch("src.models.factory.ChatOpenAI")
     def test_gemini_uses_chatopenai(self, mock_cls) -> None:
         mock_cls.return_value = MagicMock()
         spec = RuntimeModelSpec(provider="gemini", model_id="gemini-pro", api_key="key")
-        result = _create_runtime_model(spec, thinking_enabled=False)
+        _create_runtime_model(spec, thinking_enabled=False)
         mock_cls.assert_called_once()
         assert mock_cls.call_args[1]["base_url"] == PROVIDER_BASE_URLS["gemini"]
 
@@ -198,10 +200,7 @@ class TestCreateRuntimeModel:
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-opus-4-6", api_key="key")
         _create_runtime_model(spec, thinking_enabled=False, thinking={"type": "adaptive", "effort": "medium"})
         call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["thinking"] == {
-            "type": "enabled",
-            "budget_tokens": ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS,
-        }
+        assert call_kwargs["thinking"] == {"type": "adaptive", "effort": "medium"}
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +211,7 @@ class TestCreateChatModel:
 
     def test_runtime_model_dict(self) -> None:
         with patch("src.models.factory.ChatOpenAI", return_value=MagicMock()) as mock_cls:
-            result = create_chat_model(
+            create_chat_model(
                 runtime_model={"provider": "openai", "model_id": "gpt-4o", "api_key": "key"}
             )
             mock_cls.assert_called_once()
@@ -220,7 +219,7 @@ class TestCreateChatModel:
     def test_runtime_model_spec(self) -> None:
         spec = RuntimeModelSpec(provider="openai", model_id="gpt-4o", api_key="key")
         with patch("src.models.factory.ChatOpenAI", return_value=MagicMock()) as mock_cls:
-            result = create_chat_model(runtime_model=spec)
+            create_chat_model(runtime_model=spec)
             mock_cls.assert_called_once()
 
     def test_config_model_not_found_raises(self) -> None:

@@ -41,6 +41,8 @@ def tmp_store_dir(tmp_path: Path) -> Generator[Path, None, None]:
         patch("src.security.api_key_store._STORE_DIR", store_dir),
         patch("src.security.api_key_store._KEY_FILE", store_dir / "api-keys.key"),
         patch("src.security.api_key_store._DATA_FILE", store_dir / "api-keys.json"),
+        patch("src.security.model_preference_store._STORE_DIR", store_dir),
+        patch("src.security.model_preference_store._DATA_FILE", store_dir / "model-preferences.json"),
     ]
 
     for p in patches:
