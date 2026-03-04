@@ -99,6 +99,19 @@ class UserApiKeyModel(Base):
     )
 
 
+class UserModelPreferenceModel(Base):
+    """Per-user persisted model selection preferences."""
+
+    __tablename__ = "user_model_preferences"
+
+    user_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    model_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    thinking_effort: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider_enabled: Mapped[dict] = mapped_column(_JSONType, nullable=False, default=dict)
+    enabled_models: Mapped[dict] = mapped_column(_JSONType, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
 class UploadModel(Base):
     """File upload metadata model."""
 
