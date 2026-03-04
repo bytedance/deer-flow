@@ -10,7 +10,6 @@ Covers:
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
