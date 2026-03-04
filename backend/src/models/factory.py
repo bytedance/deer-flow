@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.config import get_app_config, get_tracing_config, is_tracing_enabled
 from src.models.patched_deepseek import PatchedChatDeepSeek
 from src.models.patched_openai import PatchedChatOpenAI
+from src.models.provider_catalog import get_provider_catalog
 from src.reflection import resolve_class
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ class RuntimeModelSpec(BaseModel):
     api_key: str | None = Field(default=None, description="API key for provider")
     user_id: str | None = Field(default=None, description="User identifier for stored keys")
     tier: str | None = Field(default=None, description="Optional tier identifier")
+    thinking_effort: str | None = Field(default=None, description="Optional adaptive thinking effort")
     base_url: str | None = Field(default=None, description="Optional base URL override")
     supports_vision: bool | None = Field(default=None, description="Whether the model supports vision")
     model_config = ConfigDict(extra="allow")
@@ -35,14 +37,24 @@ PROVIDER_BASE_URLS = {
     "epfl-rcp": "https://inference-rcp.epfl.ch/v1",
 }
 
-ANTHROPIC_ADAPTIVE_THINKING_MODELS = {"claude-opus-4-6"}
 ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS = 16384
 
 
 def _normalize_anthropic_thinking_config(thinking_config: Any) -> Any:
-    """Normalize Anthropic thinking config to a payload shape currently accepted by the API."""
+    """Normalize Anthropic thinking config while preserving adaptive effort payloads."""
     if not isinstance(thinking_config, dict):
         return thinking_config
+
+    effort = thinking_config.get("effort")
+    if thinking_config.get("type") == "adaptive":
+        normalized_effort = effort.strip().lower() if isinstance(effort, str) and effort.strip() else "medium"
+        return {"type": "adaptive", "effort": normalized_effort}
+
+    adaptive = thinking_config.get("adaptive")
+    if isinstance(adaptive, dict) and adaptive.get("effort") is not None:
+        adaptive_effort = adaptive.get("effort")
+        normalized_effort = adaptive_effort.strip().lower() if isinstance(adaptive_effort, str) and adaptive_effort.strip() else "medium"
+        return {"type": "adaptive", "effort": normalized_effort}
 
     budget_tokens = thinking_config.get("budget_tokens")
     normalized_budget = (
@@ -51,39 +63,99 @@ def _normalize_anthropic_thinking_config(thinking_config: Any) -> Any:
         else ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS
     )
 
-    # Anthropic rejects adaptive effort in some deployments/libraries.
-    # Fall back to explicit enabled thinking with a concrete token budget.
-    if thinking_config.get("type") == "adaptive":
-        return {"type": "enabled", "budget_tokens": normalized_budget}
-
-    adaptive = thinking_config.get("adaptive")
-    if isinstance(adaptive, dict) and adaptive.get("effort") is not None:
-        return {"type": "enabled", "budget_tokens": normalized_budget}
-
     if thinking_config.get("type") == "enabled":
         return {"type": "enabled", "budget_tokens": normalized_budget}
 
     return thinking_config
 
 
+def _catalog_adaptive_efforts(spec: RuntimeModelSpec) -> tuple[list[str], str | None]:
+    catalog = get_provider_catalog()
+    provider = spec.provider.lower()
+    for provider_entry in catalog.providers:
+        if provider_entry.id != provider:
+            continue
+        for model in provider_entry.models:
+            if model.model_id == spec.model_id:
+                return model.adaptive_thinking_efforts, model.default_thinking_effort
+    return [], None
+
+
+def _catalog_thinking_enabled(spec: RuntimeModelSpec) -> bool:
+    catalog = get_provider_catalog()
+    provider = spec.provider.lower()
+    for provider_entry in catalog.providers:
+        if provider_entry.id != provider:
+            continue
+        for model in provider_entry.models:
+            if model.model_id == spec.model_id:
+                return model.thinking_enabled
+    return False
+
+
+def _resolve_adaptive_effort(value: str | None, allowed_efforts: list[str], default_effort: str | None) -> str:
+    if not allowed_efforts:
+        return "medium"
+    normalized_allowed = [effort.strip().lower() for effort in allowed_efforts if effort.strip()]
+    if not normalized_allowed:
+        return "medium"
+    default = "medium" if "medium" in normalized_allowed else (default_effort or "").strip().lower()
+    if default not in normalized_allowed:
+        default = normalized_allowed[0]
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in normalized_allowed:
+            return candidate
+    return default
+
+
+def _legacy_reasoning_effort_from_tier(tier: str | None) -> str | None:
+    if not tier or not tier.startswith("reasoning-"):
+        return None
+    legacy = tier.replace("reasoning-", "").strip().lower()
+    if legacy == "extra-high":
+        return "xhigh"
+    return legacy
+
+
 def _runtime_tier_settings(spec: RuntimeModelSpec, thinking_enabled: bool) -> dict[str, Any]:
-    if not thinking_enabled or not spec.tier:
+    if not thinking_enabled:
         return {}
     provider = spec.provider.lower()
-    if provider == "openai" and spec.tier.startswith("reasoning-"):
-        effort = spec.tier.replace("reasoning-", "")
+    adaptive_efforts, default_effort = _catalog_adaptive_efforts(spec)
+    configured_thinking_enabled = _catalog_thinking_enabled(spec)
+    model_thinking_enabled = configured_thinking_enabled or bool(spec.tier)
+
+    if provider == "openai" and adaptive_efforts:
+        effort = _resolve_adaptive_effort(
+            spec.thinking_effort or _legacy_reasoning_effort_from_tier(spec.tier),
+            adaptive_efforts,
+            default_effort,
+        )
         return {"reasoning": {"effort": effort, "summary": "auto"}}
-    if provider == "anthropic" and spec.tier == "thinking":
+
+    if provider == "openai" and spec.tier and spec.tier.startswith("reasoning-"):
+        effort = _legacy_reasoning_effort_from_tier(spec.tier) or "medium"
+        return {"reasoning": {"effort": effort, "summary": "auto"}}
+
+    if provider == "anthropic" and adaptive_efforts:
+        effort = _resolve_adaptive_effort(spec.thinking_effort, adaptive_efforts, default_effort)
+        return {"thinking": {"type": "adaptive", "effort": effort}}
+
+    if provider == "anthropic" and (spec.tier == "thinking" or model_thinking_enabled):
         return {
             "thinking": {
                 "type": "enabled",
                 "budget_tokens": ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS,
             }
         }
-    if provider in {"deepseek", "kimi", "zai"} and spec.tier == "thinking":
+
+    if provider in {"deepseek", "kimi", "zai"} and (spec.tier == "thinking" or model_thinking_enabled):
         return {"extra_body": {"thinking": {"type": "enabled"}}}
+
     if provider == "deepseek" and spec.model_id.endswith("reasoner"):
         return {"extra_body": {"thinking": {"type": "enabled"}}}
+
     return {}
 
 
@@ -116,9 +188,10 @@ def _create_runtime_model(spec: RuntimeModelSpec, thinking_enabled: bool, **kwar
         if thinking_config is not None:
             settings["thinking"] = thinking_config
         if isinstance(thinking_config, dict):
-            budget_tokens = thinking_config.get("budget_tokens")
-            if isinstance(budget_tokens, int) and budget_tokens > settings["max_tokens"]:
-                settings["max_tokens"] = budget_tokens
+            if thinking_config.get("type") == "enabled":
+                budget_tokens = thinking_config.get("budget_tokens")
+                if isinstance(budget_tokens, int) and budget_tokens > settings["max_tokens"]:
+                    settings["max_tokens"] = budget_tokens
         return ChatAnthropic(**settings)
     if provider == "deepseek":
         if spec.base_url or PROVIDER_BASE_URLS.get(provider):
