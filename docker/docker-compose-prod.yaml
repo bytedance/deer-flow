@@ -111,9 +111,11 @@ services:
       context: ../
       dockerfile: backend/Dockerfile.prod
     command: >
-      sh -c "cd backend && uv run langgraph up
+      sh -c "cd backend && uv run langgraph dev
+      --host 0.0.0.0
       --port 2024
-      --postgres-uri postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank"
+      --no-browser
+      --no-reload"
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
