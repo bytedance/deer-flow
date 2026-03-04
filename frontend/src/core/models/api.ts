@@ -48,7 +48,8 @@ export async function setProviderKey(provider: ProviderId, apiKey: string) {
     body: JSON.stringify({ api_key: apiKey }),
   });
   if (!res.ok) {
-    throw new Error(`Failed to store ${provider} API key (${res.status})`);
+    const detail = await res.json().then((b) => b.detail).catch(() => undefined);
+    throw new Error(detail ?? `Failed to store ${provider} API key (${res.status})`);
   }
   return (await res.json()) as { provider: ProviderId; has_key: boolean };
 }

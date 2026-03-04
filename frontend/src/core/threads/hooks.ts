@@ -217,12 +217,14 @@ export function useSubmitThread({
 
       // Claim ownership of newly created threads via the gateway
       if (isNewThread && threadId) {
-        authFetch(`/api/threads/${threadId}/claim`, { method: "POST" }).catch(
-          (err) => console.error("Failed to claim thread:", err),
-        );
+        try {
+          await authFetch(`/api/threads/${threadId}/claim`, { method: "POST" });
+        } catch (err) {
+          console.error("Failed to claim thread:", err);
+        }
       }
 
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      await queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       afterSubmit?.();
     },
     [thread, isNewThread, threadId, threadContext, queryClient, afterSubmit],
