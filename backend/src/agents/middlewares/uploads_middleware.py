@@ -99,7 +99,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
-            if not filename:
+            if not filename or Path(filename).name != filename:
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
@@ -147,9 +147,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir)
-        if not new_files:
-            return None
+        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
 
         # Collect historical files from the uploads directory (all except the new ones)
         new_filenames = {f["filename"] for f in new_files}
@@ -166,6 +164,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                             "extension": file_path.suffix,
                         }
                     )
+
+        if not new_files and not historical_files:
+            return None
 
         logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 

@@ -239,6 +239,7 @@ export const zhCN: Translations = {
   },
 
   uploads: {
+    uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
   },
 

@@ -189,6 +189,7 @@ export interface Translations {
 
   // Uploads
   uploads: {
+    uploading: string;
     uploadingFiles: string;
   };
 

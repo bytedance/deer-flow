@@ -19,9 +19,11 @@ import {
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
@@ -131,9 +133,15 @@ function MessageContent_({
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
-    if (!Array.isArray(files) || files.length === 0) return null;
+    if (!Array.isArray(files) || files.length === 0) {
+      if (rawContent.includes("<uploaded_files>")) {
+        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+        return parseUploadedFiles(rawContent);
+      }
+      return null;
+    }
     return files as FileInMessage[];
-  }, [message.additional_kwargs]);
+  }, [message.additional_kwargs?.files, rawContent]);
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
@@ -298,6 +306,7 @@ function RichFileCard({
   file: FileInMessage;
   threadId: string;
 }) {
+  const { t } = useI18n();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
 
@@ -321,7 +330,7 @@ function RichFileCard({
             {getFileTypeLabel(file.filename)}
           </Badge>
           <span className="text-muted-foreground text-[10px]">
-            Uploading...
+            {t.uploads.uploading}
           </span>
         </div>
       </div>

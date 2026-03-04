@@ -282,3 +282,37 @@ export function stripUploadedFilesTag(content: string): string {
     .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
     .trim();
 }
+
+export function parseUploadedFiles(content: string): FileInMessage[] {
+  // Match <uploaded_files>...</uploaded_files> tag
+  const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
+  // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
+  const match = content.match(uploadedFilesRegex);
+
+  if (!match) {
+    return [];
+  }
+
+  const uploadedFilesContent = match[1];
+
+  // Check if it's "No files have been uploaded yet."
+  if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
+    return [];
+  }
+
+  // Parse file list
+  // Format: - filename (size)\n  Path: /path/to/file
+  const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
+  const files: FileInMessage[] = [];
+  let fileMatch;
+
+  while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
+    files.push({
+      filename: fileMatch[1].trim(),
+      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      path: fileMatch[3].trim(),
+    });
+  }
+
+  return files;
+}
