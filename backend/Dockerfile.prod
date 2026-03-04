@@ -46,9 +46,8 @@ COPY --from=builder /root/.local/bin/uv /usr/local/bin/uv
 # Copy application with installed virtualenv
 COPY --from=builder /app /app
 
-# Copy config files to /app (parent of backend working directory)
-COPY config.yaml /app/config.yaml
-COPY extensions_config.json /app/extensions_config.json
+# Config files (config.yaml, extensions_config.json) are bind-mounted at runtime
+# via docker-compose volumes — not baked into the image.
 
 # Copy CodeArtifact entrypoint script
 COPY docker/codeartifact-entrypoint.sh /usr/local/bin/codeartifact-entrypoint.sh

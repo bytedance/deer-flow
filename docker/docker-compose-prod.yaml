@@ -73,6 +73,9 @@ services:
       sh -c "mkdir -p /tmp/prometheus_multiproc &&
       cd backend && uv run alembic upgrade head &&
       uv run gunicorn src.gateway.app:app -c gunicorn.conf.py"
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - ../extensions_config.json:/app/extensions_config.json:ro
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
@@ -116,6 +119,9 @@ services:
       --port 2024
       --no-browser
       --no-reload"
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - ../extensions_config.json:/app/extensions_config.json:ro
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
@@ -150,6 +156,9 @@ services:
       context: ../
       dockerfile: backend/Dockerfile.prod
     command: sh -c "cd backend && uv run python worker.py"
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - ../extensions_config.json:/app/extensions_config.json:ro
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
