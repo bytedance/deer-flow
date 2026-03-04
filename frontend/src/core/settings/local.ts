@@ -8,6 +8,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
+    thinking_effort: "medium",
     mode: undefined,
   },
   models: {

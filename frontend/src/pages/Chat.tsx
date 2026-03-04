@@ -39,9 +39,15 @@ import { useAuth } from "@/core/auth";
 import { authFetch } from "@/core/auth/fetch";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
-import { getRuntimeModelSpec, useModels } from "@/core/models/hooks";
+import { getUserModelPreferences, setUserModelPreferences } from "@/core/models/api";
+import {
+  getRuntimeModelSpec,
+  resolveThinkingEffortForModel,
+  useModels,
+} from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
+import { getLocalSettings } from "@/core/settings/local";
 import { type AgentThread, type AgentThreadState } from "@/core/threads";
 import {
   type ThreadResubmitOptions,
@@ -107,6 +113,8 @@ function ChatInner() {
   const lastInitialValueRef = useRef<string | undefined>(undefined);
   const setInputRef = useRef(promptInputController.textInput.setInput);
   const resubmitInFlightThreadRef = useRef<string | null>(null);
+  const [modelPrefsHydrated, setModelPrefsHydrated] = useState(false);
+  const lastPersistedModelPrefsRef = useRef<string>("");
   setInputRef.current = promptInputController.textInput.setInput;
 
   useEffect(() => {
@@ -267,10 +275,115 @@ function ChatInner() {
     () => models.find((model) => model.id === contextModelName),
     [models, contextModelName],
   );
-  const runtimeModelSpec = useMemo(
-    () => getRuntimeModelSpec(selectedModel),
+  const selectedThinkingEffort = useMemo(
+    () =>
+      resolveThinkingEffortForModel(
+        selectedModel,
+        settings.context.thinking_effort,
+      ) ?? "medium",
+    [selectedModel, settings.context.thinking_effort],
+  );
+  const modelThinkingEnabled = useMemo(
+    () => selectedModel?.thinking_enabled ?? selectedModel?.supports_thinking ?? false,
     [selectedModel],
   );
+  const runtimeModelSpec = useMemo(
+    () => getRuntimeModelSpec(selectedModel, selectedThinkingEffort),
+    [selectedModel, selectedThinkingEffort],
+  );
+  useEffect(() => {
+    if (!user?.id) {
+      setModelPrefsHydrated(false);
+      lastPersistedModelPrefsRef.current = "";
+      return;
+    }
+    let cancelled = false;
+    setModelPrefsHydrated(false);
+    void getUserModelPreferences()
+      .then((preferences) => {
+        if (cancelled) {
+          return;
+        }
+        const latest = getLocalSettings();
+        const nextContext = {
+          ...latest.context,
+        };
+        let changed = false;
+        if (
+          typeof preferences.model_name === "string" &&
+          preferences.model_name.trim().length > 0 &&
+          preferences.model_name !== latest.context.model_name
+        ) {
+          nextContext.model_name = preferences.model_name;
+          changed = true;
+        }
+        if (
+          typeof preferences.thinking_effort === "string" &&
+          preferences.thinking_effort.trim().length > 0 &&
+          preferences.thinking_effort !== latest.context.thinking_effort
+        ) {
+          nextContext.thinking_effort = preferences.thinking_effort.trim().toLowerCase();
+          changed = true;
+        }
+        if (!nextContext.thinking_effort) {
+          nextContext.thinking_effort = "medium";
+          changed = true;
+        }
+        const remoteSignature = JSON.stringify({
+          model_name: preferences.model_name ?? null,
+          thinking_effort: preferences.thinking_effort ?? null,
+        });
+        lastPersistedModelPrefsRef.current = remoteSignature;
+        if (changed) {
+          setSettings("context", nextContext);
+        }
+      })
+      .catch(() => {
+        // Keep local settings when remote preferences cannot be loaded.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setModelPrefsHydrated(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setSettings, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id || !modelPrefsHydrated) {
+      return;
+    }
+    const payload = {
+      model_name: settings.context.model_name ?? null,
+      thinking_effort: selectedThinkingEffort ?? null,
+    };
+    const signature = JSON.stringify(payload);
+    if (signature === lastPersistedModelPrefsRef.current) {
+      return;
+    }
+    const timeout = setTimeout(() => {
+      void setUserModelPreferences(payload)
+        .then((saved) => {
+          lastPersistedModelPrefsRef.current = JSON.stringify({
+            model_name: saved.model_name ?? null,
+            thinking_effort: saved.thinking_effort ?? null,
+          });
+        })
+        .catch(() => {
+          // Keep local state; retry on next change.
+        });
+    }, 400);
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [
+    modelPrefsHydrated,
+    selectedThinkingEffort,
+    settings.context.model_name,
+    user?.id,
+  ]);
 
   const handleSubmit = useSubmitThread({
     isNewThread,
@@ -279,8 +392,9 @@ function ChatInner() {
     threadContext: {
       ...settings.context,
       model_spec: runtimeModelSpec,
+      thinking_effort: selectedThinkingEffort,
       user_id: user?.id,
-      thinking_enabled: settings.context.mode !== "flash",
+      thinking_enabled: modelThinkingEnabled || settings.context.mode !== "flash",
       is_plan_mode:
         settings.context.mode === "pro" || settings.context.mode === "ultra",
       subagent_enabled: settings.context.mode === "ultra",
@@ -633,6 +747,7 @@ function ChatInner() {
                     <MessageList
                       className={cn("size-full", !showLanding && "pt-10")}
                       threadId={threadId}
+                      isNewThread={isNewThread}
                       thread={thread}
                       paddingBottom={showLanding ? 400 : 160}
                       isRegenerating={isRegenerating}

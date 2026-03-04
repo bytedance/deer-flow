@@ -19,10 +19,11 @@ export interface AgentThreadState extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {}
 
-export interface AgentThreadContext extends Record<string, unknown> {
+export interface AgentThreadContext {
   thread_id: string;
   model_name: string | undefined;
   model_spec?: RuntimeModelSpec;
+  thinking_effort?: string;
   user_id?: string;
   thinking_enabled: boolean;
   is_plan_mode: boolean;

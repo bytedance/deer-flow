@@ -39,6 +39,7 @@ import {
 export function MessageList({
   className,
   threadId,
+  isNewThread = false,
   thread,
   messages: messagesProp,
   messagesOverride,
@@ -50,6 +51,7 @@ export function MessageList({
 }: {
   className?: string;
   threadId: string;
+  isNewThread?: boolean;
   thread: UseStream<AgentThreadState>;
   /** Explicit messages to display (from Chat.tsx filtering logic). */
   messages?: Message[];
@@ -337,7 +339,10 @@ export function MessageList({
         )}
       >
         {messageNodes}
-        {!thread.isLoading && !isTransitioning && messages.length === 0 && (
+        {!thread.isLoading &&
+          !isTransitioning &&
+          messages.length === 0 &&
+          !isNewThread && (
           <ConversationEmptyState />
         )}
         {(thread.isLoading || isTransitioning) && (

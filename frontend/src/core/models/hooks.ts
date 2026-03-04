@@ -1,31 +1,34 @@
-import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef } from "react";
 
 import { useLocalSettings } from "../settings";
 import { getLocalSettings } from "../settings/local";
 
-import { getProviderKeyStatus, loadProviderModels, validateProviderKey } from "./api";
-import type { ProviderId, ProviderModel, RuntimeModelSpec } from "./types";
+import { getProviderKeyStatus, loadProviderCatalog, validateProviderKey } from "./api";
+import type { ProviderCatalog, ProviderId, ProviderModel, RuntimeModelSpec } from "./types";
 
-export function useProviderModels(
-  provider: ProviderId,
-  hasKey: boolean,
-  enabled: boolean,
-) {
-  const queryOptions = {
-    staleTime: Infinity,
-    gcTime: Infinity,
-    retry: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    refetchOnMount: false,
-  } as const;
-  return useQuery({
-    queryKey: ["provider-models", provider],
-    queryFn: () => loadProviderModels(provider),
-    enabled: enabled && hasKey,
-    ...queryOptions,
+const CATALOG_QUERY_OPTIONS = {
+  staleTime: Infinity,
+  gcTime: Infinity,
+  retry: false,
+  refetchOnWindowFocus: false,
+  refetchOnReconnect: false,
+  refetchOnMount: false,
+} as const;
+
+export function useProviderCatalog({ enabled = true }: { enabled?: boolean } = {}) {
+  const query = useQuery({
+    queryKey: ["provider-catalog"],
+    queryFn: loadProviderCatalog,
+    enabled,
+    ...CATALOG_QUERY_OPTIONS,
   });
+  return {
+    providers: query.data?.providers ?? [],
+    isLoading: query.isLoading,
+    error: query.error,
+    refetch: query.refetch,
+  };
 }
 
 export function useValidateProviderKey() {
@@ -42,29 +45,34 @@ export function useValidateProviderKey() {
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   const [settings, setSettings] = useLocalSettings();
-  const syncedRef = useRef(false);
-  const providerEntries = Object.entries(settings.models.providers) as Array<
-    [ProviderId, (typeof settings.models.providers)[ProviderId]]
-  >;
+  const { providers, isLoading, error } = useProviderCatalog({ enabled });
+  const syncedProviderSignatureRef = useRef("");
 
   useEffect(() => {
-    if (syncedRef.current) {
+    if (!enabled || providers.length === 0) {
       return;
     }
-    syncedRef.current = true;
+    const providerSignature = providers
+      .map((provider) => provider.id)
+      .sort()
+      .join(",");
+    if (syncedProviderSignatureRef.current === providerSignature) {
+      return;
+    }
+    syncedProviderSignatureRef.current = providerSignature;
+
     void Promise.all(
-      providerEntries.map(async ([providerId]) => {
+      providers.map(async (provider) => {
         try {
-          const status = await getProviderKeyStatus(providerId);
-          return [providerId, status.has_key] as const;
+          const status = await getProviderKeyStatus(provider.id);
+          return [provider.id, status.has_key] as const;
         } catch {
-          return [providerId, undefined] as const;
+          return [provider.id, undefined] as const;
         }
       }),
     ).then((results) => {
       const latest = getLocalSettings();
-      const updates: Record<ProviderId, Partial<(typeof latest.models.providers)[ProviderId]>> =
-        {} as Record<ProviderId, Partial<(typeof latest.models.providers)[ProviderId]>>;
+      const updates: Partial<typeof latest.models.providers> = {};
       for (const [providerId, hasKey] of results) {
         if (typeof hasKey === "boolean") {
           updates[providerId] = {
@@ -83,51 +91,76 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
         });
       }
     });
-  }, [providerEntries, setSettings, settings.models.providers]);
+  }, [enabled, providers, setSettings]);
 
-  const providerQueries = useQueries({
-    queries: providerEntries.map(([providerId, config]) => ({
-      queryKey: ["provider-models", providerId],
-      queryFn: () => loadProviderModels(providerId),
-      enabled: enabled && config.enabled && config.has_key,
-      staleTime: Infinity,
-      gcTime: Infinity,
-      retry: false,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-    })),
-  });
-
-  const { models, isLoading, error } = useMemo(() => {
+  const models = useMemo(() => {
     const enabledMap = settings.models.enabled_models ?? {};
-    const combined = providerQueries.flatMap((query) => query.data?.models ?? []);
-    const filtered = combined
+    return providers
+      .flatMap((provider) => provider.models)
       .filter((model) => {
-      const providerEnabled = settings.models.providers[model.provider]?.enabled;
-      return providerEnabled && enabledMap[model.id] !== false;
+        const providerEnabled = settings.models.providers[model.provider]?.enabled;
+        return providerEnabled && enabledMap[model.id] !== false;
       })
       .sort((a, b) => a.display_name.localeCompare(b.display_name));
-    return {
-      models: filtered,
-      isLoading: providerQueries.some((query) => query.isLoading),
-      error: providerQueries.find((query) => query.error)?.error,
-    };
-  }, [providerQueries, settings.models.enabled_models, settings.models.providers]);
+  }, [providers, settings.models.enabled_models, settings.models.providers]);
 
-  return { models, isLoading, error };
+  return { models, providers, isLoading, error };
+}
+
+export function resolveThinkingEffortForModel(
+  model: ProviderModel | undefined,
+  preferredEffort: string | null | undefined,
+): string | undefined {
+  if (!model?.supports_adaptive_thinking) {
+    return undefined;
+  }
+  const allowedEfforts = (model.adaptive_thinking_efforts ?? [])
+    .map((effort) => effort.trim().toLowerCase())
+    .filter((effort) => effort.length > 0);
+  const safeDefault =
+    allowedEfforts.find((effort) => effort === "medium") ??
+    allowedEfforts.find(
+      (effort) =>
+        effort === (model.default_thinking_effort ?? "").trim().toLowerCase(),
+    ) ??
+    allowedEfforts[0] ??
+    "medium";
+  if (typeof preferredEffort !== "string") {
+    return safeDefault;
+  }
+  const normalized = preferredEffort.trim().toLowerCase();
+  if (!normalized) {
+    return safeDefault;
+  }
+  return allowedEfforts.includes(normalized) ? normalized : safeDefault;
 }
 
 export function getRuntimeModelSpec(
   model: ProviderModel | undefined,
+  thinkingEffort?: string,
 ): RuntimeModelSpec | undefined {
   if (!model) {
     return undefined;
   }
+  const resolvedThinkingEffort = resolveThinkingEffortForModel(model, thinkingEffort);
   return {
     provider: model.provider,
     model_id: model.model_id,
     tier: model.tier ?? undefined,
+    thinking_effort: resolvedThinkingEffort,
     supports_vision: model.supports_vision,
   };
 }
+
+export function providerCatalogById(
+  providers: ProviderCatalog[],
+): Record<ProviderId, ProviderCatalog | undefined> {
+  return providers.reduce(
+    (acc, provider) => {
+      acc[provider.id] = provider;
+      return acc;
+    },
+    {} as Record<ProviderId, ProviderCatalog | undefined>,
+  );
+}
+

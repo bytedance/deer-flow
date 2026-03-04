@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 
+import { reloadLocalSettingsSnapshot } from "@/core/settings";
 import { env } from "@/env";
 
 import {
@@ -36,6 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const init = async () => {
       const token = getAccessToken();
       if (!token) {
+        reloadLocalSettingsSnapshot();
         setIsLoading(false);
         return;
       }
@@ -45,6 +47,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const newToken = await refreshToken();
         if (!newToken) {
           clearAccessToken();
+          reloadLocalSettingsSnapshot();
           setIsLoading(false);
           return;
         }
@@ -57,6 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } else {
         clearAccessToken();
       }
+      reloadLocalSettingsSnapshot();
       setIsLoading(false);
     };
 
@@ -66,12 +70,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const response = await loginUser(email, password);
     setUser(response.user);
+    reloadLocalSettingsSnapshot();
   }, []);
 
   const register = useCallback(
     async (email: string, password: string, displayName?: string) => {
       const response = await registerUser(email, password, displayName);
       setUser(response.user);
+      reloadLocalSettingsSnapshot();
     },
     [],
   );
@@ -79,6 +85,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     await logoutUser();
     setUser(null);
+    reloadLocalSettingsSnapshot();
   }, []);
 
   const value = useMemo<AuthState>(

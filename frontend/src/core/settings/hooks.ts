@@ -29,6 +29,13 @@ function updateSnapshot(newSettings: LocalSettings) {
   }
 }
 
+export function reloadLocalSettingsSnapshot() {
+  snapshot = getLocalSettings();
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
 export function useLocalSettings(): [
   LocalSettings,
   (
