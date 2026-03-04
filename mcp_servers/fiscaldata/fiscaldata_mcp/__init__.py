@@ -8,7 +8,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from api_client import FiscalDataAPIError, FiscalDataClient
+from fiscaldata_mcp.api_client import FiscalDataAPIError, FiscalDataClient
 
 mcp = FastMCP("fiscaldata")
 client = FiscalDataClient()
@@ -232,6 +232,7 @@ async def fiscaldata_query_dataset(
         return json.dumps({"error": str(e)})
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the fiscaldata-mcp CLI."""
     print("Fiscal Data MCP server starting...", file=sys.stderr)
     mcp.run(transport="stdio")
