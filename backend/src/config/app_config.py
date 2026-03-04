@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.config.extensions_config import ExtensionsConfig
 from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
+from src.config.provider_model_catalog_config import ProviderModelCatalogConfig
 from src.config.sandbox_config import SandboxConfig
 from src.config.skills_config import SkillsConfig
 from src.config.summarization_config import load_summarization_config_from_dict
@@ -31,6 +32,10 @@ class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
+    provider_models: ProviderModelCatalogConfig = Field(
+        default_factory=ProviderModelCatalogConfig,
+        description="Allowed providers and models for runtime model selection",
+    )
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")

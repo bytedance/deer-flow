@@ -25,6 +25,50 @@ from src.sandbox.middleware import SandboxMiddleware
 logger = logging.getLogger(__name__)
 
 
+RUNTIME_MODEL_PROVIDERS = {
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "kimi",
+    "zai",
+    "minimax",
+    "epfl-rcp",
+}
+
+
+def _runtime_model_spec_from_model_name(model_name: str | None) -> dict[str, str] | None:
+    """Build a runtime model spec from provider-style model IDs.
+
+    Supports IDs like:
+    - provider:model_id
+    - provider:model_id:tier
+    - provider:model_id:tier:thinking_effort
+    """
+    if not isinstance(model_name, str):
+        return None
+    parts = [part.strip() for part in model_name.split(":", 3)]
+    if len(parts) < 2:
+        return None
+    provider = parts[0].lower()
+    model_id = parts[1]
+    tier = parts[2] if len(parts) >= 3 else ""
+    thinking_effort = parts[3] if len(parts) >= 4 else ""
+
+    if provider not in RUNTIME_MODEL_PROVIDERS or not model_id:
+        return None
+
+    runtime_model: dict[str, str] = {
+        "provider": provider,
+        "model_id": model_id,
+    }
+    if tier and tier.lower() != "standard":
+        runtime_model["tier"] = tier
+    if thinking_effort:
+        runtime_model["thinking_effort"] = thinking_effort
+    return runtime_model
+
+
 def _create_summarization_middleware() -> SummarizationMiddleware | None:
     """Create and configure the summarization middleware from config."""
     config = get_summarization_config()
@@ -265,11 +309,19 @@ def make_lead_agent(config: RunnableConfig):
     thinking_enabled = configurable.get("thinking_enabled", True)
     model_name = configurable.get("model_name") or configurable.get("model")
     runtime_model = configurable.get("model_spec")
+    if runtime_model is None:
+        runtime_model = _runtime_model_spec_from_model_name(model_name)
     # Inject user_id into runtime model spec so the factory can look up stored API keys
     if isinstance(runtime_model, dict) and "user_id" not in runtime_model:
         user_id = configurable.get("user_id")
         if user_id:
             runtime_model = {**runtime_model, "user_id": user_id}
+    if isinstance(runtime_model, dict) and "thinking_effort" not in runtime_model:
+        thinking_effort = configurable.get("thinking_effort")
+        if isinstance(thinking_effort, str) and thinking_effort.strip():
+            runtime_model = {**runtime_model, "thinking_effort": thinking_effort.strip().lower()}
+    if isinstance(configurable, dict) and isinstance(runtime_model, dict):
+        configurable["model_spec"] = runtime_model
     is_plan_mode = configurable.get("is_plan_mode", False)
     subagent_enabled = configurable.get("subagent_enabled", False)
     max_concurrent_subagents = configurable.get("max_concurrent_subagents", 3)
