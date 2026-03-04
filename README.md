@@ -21,7 +21,7 @@ Learn more and see **real demos** on our official website.
 ## Table of Contents
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
-  - [Offiical Website](#offiical-website)
+  - [Official Website](#official-website)
   - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
