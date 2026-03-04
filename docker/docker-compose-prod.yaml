@@ -83,6 +83,8 @@ services:
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
@@ -120,6 +122,8 @@ services:
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-thinktank-ai}
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
@@ -149,6 +153,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
