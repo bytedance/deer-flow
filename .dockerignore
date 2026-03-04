@@ -62,6 +62,7 @@ docker/
 # Allow nginx config and Dockerfile for the nginx+frontend production build
 !docker/nginx/
 !docker/Dockerfile.nginx
+!docker/codeartifact-entrypoint.sh
 skills/
 frontend/.next
 frontend/node_modules
