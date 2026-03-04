@@ -256,14 +256,16 @@ def make_lead_agent(config: RunnableConfig):
     from src.tools import get_available_tools
     from src.tools.builtins import setup_agent
 
-    thinking_enabled = config.get("configurable", {}).get("thinking_enabled", True)
-    reasoning_effort = config.get("configurable", {}).get("reasoning_effort", None)
-    requested_model_name: str | None = config.get("configurable", {}).get("model_name") or config.get("configurable", {}).get("model")
-    is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)
-    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
-    max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
-    is_bootstrap = config.get("configurable", {}).get("is_bootstrap", False)
-    agent_name = config.get("configurable", {}).get("agent_name")
+    cfg = config.get("configurable", {})
+
+    thinking_enabled = cfg.get("thinking_enabled", True)
+    reasoning_effort = cfg.get("reasoning_effort", None)
+    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
+    is_plan_mode = cfg.get("is_plan_mode", False)
+    subagent_enabled = cfg.get("subagent_enabled", False)
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    is_bootstrap = cfg.get("is_bootstrap", False)
+    agent_name = cfg.get("agent_name")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
