@@ -55,7 +55,8 @@ COPY docker/codeartifact-entrypoint.sh /usr/local/bin/codeartifact-entrypoint.sh
 
 # Create non-root user and transfer ownership
 RUN useradd -m -r -s /bin/false appuser && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app && \
+    chmod +x /usr/local/bin/codeartifact-entrypoint.sh
 
 WORKDIR /app
 

@@ -36,7 +36,7 @@ COMPOSE_FILE="$DOCKER_DIR/docker-compose-prod.yaml"
 
 # Defaults (override via environment or .env)
 export DB_PASSWORD="${DB_PASSWORD:-Qwen3.5-397B-A17B}"
-export NGINX_PORT="${NGINX_PORT:-80}"
+export NGINX_HTTP_PORT="${NGINX_HTTP_PORT:-80}"
 export GATEWAY_REPLICAS="${GATEWAY_REPLICAS:-1}"
 export LANGGRAPH_REPLICAS="${LANGGRAPH_REPLICAS:-1}"
 export WORKER_REPLICAS="${WORKER_REPLICAS:-1}"
@@ -108,12 +108,12 @@ cmd_build() {
 cmd_start() {
     log_header "Starting Thinktank.ai Production Stack"
 
-    if [[ "$DB_PASSWORD" == "changeme" ]]; then
+    if [[ "$DB_PASSWORD" == "Qwen3.5-397B-A17B" ]]; then
         log_warn "Using default DB_PASSWORD. Set DB_PASSWORD env var for real deployments."
     fi
 
     log_info "Configuration:"
-    echo "       NGINX_PORT         = $NGINX_PORT"
+    echo "       NGINX_HTTP_PORT         = $NGINX_HTTP_PORT"
     echo "       GATEWAY_REPLICAS   = $GATEWAY_REPLICAS"
     echo "       LANGGRAPH_REPLICAS = $LANGGRAPH_REPLICAS"
     echo "       WORKER_REPLICAS    = $WORKER_REPLICAS"
@@ -143,7 +143,7 @@ cmd_start() {
 
     # Wait for gateway to respond
     log_info "Waiting for Gateway API to start (running migrations)..."
-    if wait_for_url "http://localhost:${NGINX_PORT}/health" 90; then
+    if wait_for_url "http://localhost:${NGINX_HTTP_PORT}/health" 90; then
         log_ok "Gateway API is healthy"
     else
         log_warn "Gateway health check did not pass within 90s"
@@ -152,11 +152,11 @@ cmd_start() {
 
     # Print summary
     log_header "Thinktank.ai is running!"
-    echo "  Application:  http://localhost:${NGINX_PORT}"
-    echo "  API Gateway:  http://localhost:${NGINX_PORT}/api/*"
-    echo "  LangGraph:    http://localhost:${NGINX_PORT}/api/langgraph/*"
-    echo "  Health:       http://localhost:${NGINX_PORT}/health"
-    echo "  API Docs:     http://localhost:${NGINX_PORT}/docs"
+    echo "  Application:  http://localhost:${NGINX_HTTP_PORT}"
+    echo "  API Gateway:  http://localhost:${NGINX_HTTP_PORT}/api/*"
+    echo "  LangGraph:    http://localhost:${NGINX_HTTP_PORT}/api/langgraph/*"
+    echo "  Health:       http://localhost:${NGINX_HTTP_PORT}/health"
+    echo "  API Docs:     http://localhost:${NGINX_HTTP_PORT}/docs"
     echo ""
     echo "  Commands:"
     echo "    $0 status    Show service status"
@@ -209,7 +209,7 @@ cmd_clean() {
 cmd_health() {
     log_header "Health Check"
 
-    local port="$NGINX_PORT"
+    local port="$NGINX_HTTP_PORT"
     local base="http://localhost:${port}"
 
     # Nginx / Frontend
@@ -268,7 +268,7 @@ cmd_health() {
 cmd_test() {
     log_header "Running Playwright E2E Tests"
 
-    local port="$NGINX_PORT"
+    local port="$NGINX_HTTP_PORT"
 
     log_info "Testing against http://localhost:${port}"
 
@@ -303,15 +303,15 @@ cmd_help() {
     echo ""
     echo "Environment variables (set in shell or .env):"
     echo "  DB_PASSWORD          PostgreSQL password        (default: Qwen3.5-397B-A17B)"
-    echo "  NGINX_PORT           Port for nginx             (default: 80)"
+    echo "  NGINX_HTTP_PORT           Port for nginx             (default: 80)"
     echo "  GATEWAY_REPLICAS     Number of gateway replicas (default: 1)"
     echo "  LANGGRAPH_REPLICAS   Number of langgraph replicas (default: 1)"
     echo "  WORKER_REPLICAS      Number of worker replicas  (default: 1)"
     echo ""
     echo "Examples:"
     echo "  $0 start                               # Start with defaults on port 80"
-    echo "  NGINX_PORT=8080 $0 start               # Start on port 8080"
-    echo "  DB_PASSWORD=Qwen3.5-397B-A17B NGINX_PORT=8080 $0 start"
+    echo "  NGINX_HTTP_PORT=8080 $0 start               # Start on port 8080"
+    echo "  DB_PASSWORD=Qwen3.5-397B-A17B NGINX_HTTP_PORT=8080 $0 start"
     echo "  $0 logs gateway                        # Follow gateway logs only"
     echo "  $0 test                                # Run E2E tests"
     echo ""
