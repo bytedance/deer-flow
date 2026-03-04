@@ -6,5 +6,8 @@
   "env": ".env",
   "graphs": {
     "lead_agent": "src.agents:make_lead_agent"
+  },
+  "checkpointer": {
+    "path": "./src/agents/checkpointer/async_provider.py:make_checkpointer"
   }
 }

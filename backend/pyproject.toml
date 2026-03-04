@@ -32,6 +32,7 @@ dependencies = [
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
     "langchain-google-genai>=4.2.1",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [dependency-groups]

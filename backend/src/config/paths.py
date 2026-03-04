@@ -176,3 +176,11 @@ def get_paths() -> Paths:
     if _paths is None:
         _paths = Paths()
     return _paths
+
+
+def resolve_path(path: str) -> Path:
+    """Resolve a absolute path, or relative to the base dir if it starts with './'."""
+    p = Path(path)
+    if not p.is_absolute():
+        p = get_paths().base_dir / path
+    return p.resolve()
