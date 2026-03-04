@@ -25,12 +25,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy backend source (only this layer rebuilds on code-only changes)
 COPY backend ./backend
 
+
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
-# Install minimal runtime dependencies
+# Install minimal runtime dependencies + AWS CLI (for CodeArtifact auth)
 RUN apt-get update && apt-get install -y \
     curl \
+    unzip \
+    && curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip \
+    && apt-get purge -y unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy uv from builder
@@ -38,6 +45,13 @@ COPY --from=builder /root/.local/bin/uv /usr/local/bin/uv
 
 # Copy application with installed virtualenv
 COPY --from=builder /app /app
+
+# Copy config files to /app (parent of backend working directory)
+COPY config.yaml /app/config.yaml
+COPY extensions_config.json /app/extensions_config.json
+
+# Copy CodeArtifact entrypoint script
+COPY docker/codeartifact-entrypoint.sh /usr/local/bin/codeartifact-entrypoint.sh
 
 # Create non-root user and transfer ownership
 RUN useradd -m -r -s /bin/false appuser && \
@@ -48,6 +62,7 @@ WORKDIR /app
 # Prevent uv from re-syncing at runtime (deps are pre-installed in builder)
 ENV UV_NO_SYNC=1
 
+
 # Switch to non-root user
 USER appuser
 
@@ -57,6 +72,9 @@ EXPOSE 8001 2024
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
+
+# Entrypoint: fetch CodeArtifact token (no-op if CODEARTIFACT_DOMAIN is unset)
+ENTRYPOINT ["codeartifact-entrypoint.sh"]
 
 # Default: run Gateway with Gunicorn (override in docker-compose for other services)
 CMD ["sh", "-c", "cd backend && uv run gunicorn src.gateway.app:app -c gunicorn.conf.py"]

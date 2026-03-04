@@ -24,6 +24,8 @@
 #   CORS_ALLOWED_ORIGIN: Allowed CORS origin (default: *)
 #   TLS_CERTS_DIR: Path to TLS certificates directory (default: ./certs)
 #   REQUIRE_ENV_SECRETS: Set to 'true' to require JWT_SECRET_KEY and ENCRYPTION_KEY env vars
+#   CODEARTIFACT_DOMAIN: CodeArtifact domain name for private MCP servers (e.g., "thinktank")
+#   AWS_ACCOUNT_ID: AWS account ID for CodeArtifact auth
 
 services:
   # ── Database ────────────────────────────────────────────────────────
@@ -81,6 +83,9 @@ services:
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
+      AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     env_file:
       - ../.env
     depends_on:
@@ -115,6 +120,9 @@ services:
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-thinktank-ai}
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
+      AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     env_file:
       - ../.env
     depends_on:
@@ -141,6 +149,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_FORMAT: json
       LOG_LEVEL: INFO
+      CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
+      AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     env_file:
       - ../.env
     depends_on:

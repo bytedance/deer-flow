@@ -1,0 +1,141 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Thinktank.ai — Publish MCP Servers to AWS CodeArtifact
+# ─────────────────────────────────────────────────────────────────────────────
+# Builds and publishes private MCP server packages to CodeArtifact.
+#
+# Trigger:
+#   - Push a tag like `worldbank-mcp/v0.2.0` or `fiscaldata-mcp/v0.3.1`
+#   - Manual dispatch to publish a specific server
+#
+# Prerequisites (one-time AWS setup):
+#   1. Create a CodeArtifact domain:
+#        aws codeartifact create-domain --domain thinktank
+#
+#   2. Create a CodeArtifact repository:
+#        aws codeartifact create-repository \
+#          --domain thinktank \
+#          --repository mcp-servers \
+#          --description "Private MCP server packages"
+#
+#   3. Connect an upstream PyPI repo (so uvx can resolve public deps too):
+#        aws codeartifact create-repository \
+#          --domain thinktank \
+#          --repository pypi-store \
+#          --description "PyPI upstream cache"
+#        aws codeartifact associate-external-connection \
+#          --domain thinktank \
+#          --repository pypi-store \
+#          --external-connection public:pypi
+#        aws codeartifact update-repository \
+#          --domain thinktank \
+#          --repository mcp-servers \
+#          --upstreams repositoryName=pypi-store
+#
+#   4. Add GitHub Actions secrets:
+#        AWS_ACCOUNT_ID          (your 12-digit AWS account ID)
+#        AWS_REGION              (e.g., us-east-1)
+#        AWS_ROLE_ARN            (IAM role ARN for GitHub OIDC)
+#
+#   5. Create an IAM role for GitHub Actions OIDC:
+#        - Trust policy: allow GitHub OIDC provider
+#        - Permissions: codeartifact:GetAuthorizationToken,
+#          codeartifact:GetRepositoryEndpoint, codeartifact:PublishPackageVersion,
+#          sts:GetServiceBearerToken
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Publish MCP Servers
+
+on:
+  push:
+    tags:
+      - "worldbank-mcp/v*"
+      - "fiscaldata-mcp/v*"
+
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "MCP server to publish"
+        required: true
+        type: choice
+        options:
+          - worldbank-mcp
+          - fiscaldata-mcp
+
+jobs:
+  determine-package:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.resolve.outputs.package }}
+      package_dir: ${{ steps.resolve.outputs.package_dir }}
+    steps:
+      - name: Resolve package from tag or input
+        id: resolve
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            PACKAGE="${{ github.event.inputs.package }}"
+          else
+            # Extract package name from tag (e.g., "worldbank-mcp/v0.2.0" → "worldbank-mcp")
+            TAG="${{ github.ref_name }}"
+            PACKAGE="${TAG%%/v*}"
+          fi
+
+          # Map package name to directory
+          case "$PACKAGE" in
+            worldbank-mcp)  DIR="mcp_servers/worldbank" ;;
+            fiscaldata-mcp) DIR="mcp_servers/fiscaldata" ;;
+            *) echo "::error::Unknown package: $PACKAGE"; exit 1 ;;
+          esac
+
+          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "package_dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Publishing **$PACKAGE** from \`$DIR\`"
+
+  build-and-publish:
+    needs: determine-package
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for AWS OIDC
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        working-directory: ${{ needs.determine-package.outputs.package_dir }}
+        run: uv build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get CodeArtifact auth token
+        id: codeartifact
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain thinktank \
+            --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+          REPO_URL=$(aws codeartifact get-repository-endpoint \
+            --domain thinktank \
+            --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} \
+            --repository mcp-servers \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to CodeArtifact
+        working-directory: ${{ needs.determine-package.outputs.package_dir }}
+        run: |
+          uv publish dist/* \
+            --publish-url "${{ steps.codeartifact.outputs.repo_url }}" \
+            --token "aws:${{ steps.codeartifact.outputs.token }}"
