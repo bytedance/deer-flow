@@ -1,5 +1,6 @@
 """Prompt templates for memory update and injection."""
 
+import re
 from typing import Any
 
 try:
@@ -242,8 +243,6 @@ def format_conversation_for_update(messages: list[Any]) -> str:
     Returns:
         Formatted conversation string.
     """
-    import re
-
     lines = []
     for msg in messages:
         role = getattr(msg, "type", "unknown")
@@ -255,9 +254,14 @@ def format_conversation_for_update(messages: list[Any]) -> str:
             content = " ".join(text_parts) if text_parts else str(content)
 
         # Strip uploaded_files tags from human messages to avoid persisting
-        # ephemeral file path info into long-term memory
+        # ephemeral file path info into long-term memory.  Skip the turn entirely
+        # when nothing remains after stripping (upload-only message).
         if role == "human":
-            content = re.sub(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)).strip()
+            content = re.sub(
+                r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)
+            ).strip()
+            if not content:
+                continue
 
         # Truncate very long messages
         if len(str(content)) > 1000:

@@ -136,27 +136,44 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
         return _create_empty_memory()
 
 
+# Matches sentences that describe a file-upload *event* rather than general
+# file-related work.  Deliberately narrow to avoid removing legitimate facts
+# such as "User works with CSV files" or "prefers PDF export".
 _UPLOAD_SENTENCE_RE = re.compile(
-    r"[^.!?]*\b(?:upload(?:ed|ing)?|\.txt\b|\.pdf\b|\.csv\b|\.docx?\b)"
-    r"[^.!?]*[.!?]?\s*",
+    r"[^.!?]*\b(?:"
+    r"upload(?:ed|ing)?\s+(?:file|files?|document|documents?|attachment|attachments?)"
+    r"|file\s+upload"
+    r"|/mnt/user-data/uploads/"
+    r"|<uploaded_files>"
+    r")[^.!?]*[.!?]?\s*",
     re.IGNORECASE,
 )
 
 
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries.
+    """Remove sentences about file uploads from all memory summaries and facts.
 
     Uploaded files are session-scoped; persisting upload events in long-term
     memory causes the agent to search for non-existent files in future sessions.
     """
+    # Scrub summaries in user/history sections
     for section in ("user", "history"):
         section_data = memory_data.get(section, {})
         for _key, val in section_data.items():
             if isinstance(val, dict) and "summary" in val:
                 cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
-                # Collapse multiple spaces left by removal
                 cleaned = re.sub(r"  +", " ", cleaned)
                 val["summary"] = cleaned
+
+    # Also remove any facts that describe upload events
+    facts = memory_data.get("facts", [])
+    if facts:
+        memory_data["facts"] = [
+            f
+            for f in facts
+            if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))
+        ]
+
     return memory_data
 
 
