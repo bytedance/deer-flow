@@ -50,7 +50,7 @@ class TestResolveConfigPath:
         config_file.write_text("models: []")
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEER_FLOW_CONFIG_PATH", None)
-            with patch("os.getcwd", return_value=str(tmp_path)):
+            with patch("src.config.app_config._MODULE_CWD", Path(tmp_path)):
                 result = AppConfig.resolve_config_path()
                 assert result == config_file
 
@@ -61,14 +61,14 @@ class TestResolveConfigPath:
         config_file.write_text("models: []")
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEER_FLOW_CONFIG_PATH", None)
-            with patch("os.getcwd", return_value=str(child)):
+            with patch("src.config.app_config._MODULE_CWD", Path(child)):
                 result = AppConfig.resolve_config_path()
                 assert result == config_file
 
     def test_not_found_anywhere(self, tmp_path: Path) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEER_FLOW_CONFIG_PATH", None)
-            with patch("os.getcwd", return_value=str(tmp_path)):
+            with patch("src.config.app_config._MODULE_CWD", Path(tmp_path)):
                 with pytest.raises(FileNotFoundError, match="config.yaml"):
                     AppConfig.resolve_config_path()
 

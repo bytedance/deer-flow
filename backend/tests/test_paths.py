@@ -27,12 +27,12 @@ class TestPathsBaseDir:
             assert p.base_dir == custom.resolve()
 
     def test_backend_cwd_fallback(self, tmp_path):
-        """When cwd is a backend dir, base_dir is cwd/.think-tank."""
+        """When backend dir has pyproject.toml, base_dir is backend/.think-tank."""
         (tmp_path / "pyproject.toml").touch()
         p = Paths()
         with (
             patch.dict(os.environ, {}, clear=False),
-            patch("src.config.paths.Path.cwd", return_value=tmp_path),
+            patch("src.config.paths._BACKEND_DIR", tmp_path),
         ):
             os.environ.pop("DEER_FLOW_HOME", None)
             assert p.base_dir == tmp_path / ".think-tank"
@@ -45,7 +45,7 @@ class TestPathsBaseDir:
         p = Paths()
         with (
             patch.dict(os.environ, {}, clear=False),
-            patch("src.config.paths.Path.cwd", return_value=other),
+            patch("src.config.paths._BACKEND_DIR", other),
             patch("src.config.paths.Path.home", return_value=tmp_path),
         ):
             os.environ.pop("DEER_FLOW_HOME", None)

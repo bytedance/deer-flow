@@ -26,6 +26,8 @@ def tmp_store_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
     # Save and remove DATABASE_URL so is_db_enabled() returns False
     saved_db_url = os.environ.pop("DATABASE_URL", None)
+    # Save and remove ENCRYPTION_KEY so tests use file-based key generation
+    saved_enc_key = os.environ.pop("ENCRYPTION_KEY", None)
 
     patches = [
         # Force file-based mode regardless of environment
@@ -52,6 +54,9 @@ def tmp_store_dir(tmp_path: Path) -> Generator[Path, None, None]:
     # Restore DATABASE_URL if it was previously set
     if saved_db_url is not None:
         os.environ["DATABASE_URL"] = saved_db_url
+    # Restore ENCRYPTION_KEY if it was previously set
+    if saved_enc_key is not None:
+        os.environ["ENCRYPTION_KEY"] = saved_enc_key
 
 
 @pytest.fixture()
