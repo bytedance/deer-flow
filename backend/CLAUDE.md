@@ -152,28 +152,30 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 `.env` is loaded via dotenv using a cwd-based search (parents included). Model creation fails fast when an `api_key` is still an unresolved `$ENV_VAR` or empty, to avoid opaque provider auth errors.
 
-Note: OpenAI models enable thinking via the Responses API. Use `when_thinking_enabled.reasoning` (for example `effort: high`) to switch to the Responses API and control reasoning effort; do not send a `thinking` payload to Chat Completions.
+Note: OpenAI reasoning models use the Responses API payload (`reasoning.effort`). Adaptive effort options are configured per model in `config.yaml` under `provider_models`.
 
-When using Anthropic extended thinking, ensure `max_tokens` is at least `thinking.budget_tokens` to avoid request errors.
+For Anthropic 4.6 models (`claude-opus-4-6`, `claude-sonnet-4-6`), use adaptive thinking payloads (`thinking: { type: "adaptive", effort }`). `budget_tokens` on those models is deprecated and should not be used.
 
 **Runtime Model Selection (per-user):**
 
 - The frontend can pass a `model_spec` object in `config.configurable` to bypass `config.yaml` and create a model dynamically.
-- `model_spec` includes `{ provider, model_id, tier, api_key, supports_vision }`.
-- API keys are sent per request and are not persisted server-side.
-- Provider model discovery and validation are exposed via:
+- `model_spec` includes `{ provider, model_id, tier, thinking_effort, api_key, supports_vision }`.
+- If `model_spec` is missing but `model_name` uses provider format (`provider:model_id[:tier][:thinking_effort]`), the lead agent derives a runtime spec from `model_name` and injects `user_id` for stored API key lookup.
+- Provider/model options are sourced from `config.yaml` (`provider_models.providers`) and exposed via:
+  - `GET /api/providers/catalog`
   - `POST /api/providers/{provider}/models`
+- API key validation is exposed via:
   - `POST /api/providers/{provider}/validate`
-- Provider API keys can be stored per-device in the gateway and referenced via:
+- Provider API keys are stored per-user in the gateway and referenced via:
   - `PUT /api/providers/{provider}/key`
   - `GET /api/providers/{provider}/key`
   - `DELETE /api/providers/{provider}/key`
-- These endpoints expect the `x-device-id` header to identify the device.
-- OpenAI model discovery only includes GPT-5.2 (excluding codex).
-- Anthropic model discovery only includes models containing 4.6.
+- User model preferences are persisted account-wide via:
+  - `GET /api/user/preferences/models`
+  - `PUT /api/user/preferences/models`
 - EPFL RCP AIaaS is available as provider `epfl-rcp` with a static model list and OpenAI-compatible endpoint `https://inference-rcp.epfl.ch/v1`.
 - EPFL RCP responses may include `reasoning_content`; the backend preserves this in streaming chunks and stored timelines.
-- EPFL RCP models are flagged as thinking-capable, so reasoning modes are enabled by default in the UI.
+- In the Chat UI, models with adaptive thinking show an effort selector; default effort is `medium`.
 
 **Extensions Configuration** (`extensions_config.json`):
 
@@ -194,7 +196,8 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **Providers** (`/api/providers`) | `POST /{provider}/models` - list provider models; `POST /{provider}/validate` - validate API key |
+| **Providers** (`/api/providers`) | `GET /catalog` - list allowed providers/models from config; `POST /{provider}/models` - list configured models for provider; `POST /{provider}/validate` - validate API key |
+| **Preferences** (`/api/user/preferences`) | `GET /models` - get persisted model preference; `PUT /models` - update persisted model preference |
 | **Agent** (`/api/agent`) | `GET /context` - resolved tools and enabled skills |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive |
@@ -279,6 +282,9 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
+- Runtime `model_spec` supports `thinking_effort` and applies provider-specific adaptive payloads
+  - OpenAI GPT-5.2: `reasoning.effort` (`low|medium|high|xhigh`)
+  - Anthropic Opus/Sonnet 4.6: `thinking.type=adaptive` with effort (`low|medium|high|max`)
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 
@@ -318,6 +324,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 **`config.yaml`** key sections:
 - `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
+- `provider_models.providers[]` - Allowed runtime providers/models shown in UI (`thinking_enabled`, adaptive efforts, default effort)
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path

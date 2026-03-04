@@ -45,21 +45,25 @@ Thinktank.ai is an open-source **super agent harness** that orchestrates **sub-a
    - `config.yaml`: backend defaults (system prompts, tools, sandbox, and fallback models).
    - `.env`: backend service keys (optional if you only use per-user keys via Settings).
 - **Model setup (recommended)**
-   - Open **Settings → Models** in the UI to enable providers, paste API keys (stored in localStorage), validate them, and select which models appear in the model picker.
+   - Define the allowed runtime providers/models in `config.yaml` under `provider_models.providers`.
+   - Open **Settings → Models** in the UI to enable only those configured providers, validate API keys, and choose which configured models appear in the chat model picker.
    - EPFL RCP AIaaS is available as provider `epfl-rcp` and uses the OpenAI-compatible endpoint `https://inference-rcp.epfl.ch/v1`.
    - EPFL RCP models expose `reasoning_content` when available; the backend now preserves it for streaming and timeline logs.
-   - EPFL RCP models are marked as thinking-capable so the UI defaults to reasoning modes for them.
-   - On app start, Thinktank.ai fetches the latest available models from each enabled provider.
+   - Adaptive-thinking models show a **Thinking effort** selector in Chat UI (default: `medium`).
+   - For models marked `thinking_enabled: true` in `config.yaml`, thinking is always enabled and Flash mode is hidden.
 - **Optional**
    - `frontend/.env`: configure backend API URLs.
    - `extensions_config.json`: configure desired MCP servers and skills.
    - `THINKTANK_TIMELINE_FILE_MODE=1`: force agent timeline logs to `.think-tank/threads/{thread_id}/user-data/outputs/agent_timeline.json` (useful for local development).
 
-   For OpenAI reasoning-capable models, enable thinking via `when_thinking_enabled.reasoning` (this switches to the Responses API and lets you set `effort`). When thinking is enabled, Thinktank.ai surfaces a short reasoning summary in the chat UI.
+   Runtime model + thinking-effort preferences are persisted account-wide server-side and cached locally for fast restore. Refreshing and re-login keep the same model and thinking effort until the user changes them.
 
-   Note: `.env` is loaded from the current working directory or its parents. If a model `api_key` resolves to an unset `$ENV_VAR`, Thinktank.ai fails fast with a message pointing at the missing variable. When using Settings-based keys, the backend does not persist secrets.
+   For Anthropic 4.6 models (`claude-opus-4-6`, `claude-sonnet-4-6`), Thinktank.ai now uses adaptive thinking payloads (`thinking.type: adaptive` + `effort`) instead of deprecated `budget_tokens`.
 
-   Model selection persists per device; regenerate/edit actions reuse the current model unless you change it via the selector.
+   Note: `.env` is loaded from the current working directory or its parents. If a model `api_key` resolves to an unset `$ENV_VAR`, Thinktank.ai fails fast with a message pointing at the missing variable. Settings-based provider keys are persisted per user in the gateway with encryption-at-rest.
+
+   Model selection and adaptive effort persist across sessions. Regenerate/edit actions reuse the current model and effort unless you change them via the selector.
+   The backend accepts provider-style model IDs (`provider:model_id[:tier][:thinking_effort]`) and auto-resolves them to runtime model specs, which helps recover from stale persisted selections.
 
    Thinking blocks auto-expand while tokens are streaming, so users can observe the reasoning as it is generated, auto-scroll to new tokens, and scroll within a capped height.
 

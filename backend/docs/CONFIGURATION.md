@@ -68,6 +68,47 @@ models:
           type: enabled
 ```
 
+### Provider Model Catalog (Chat UI)
+
+Runtime model selection in the frontend is driven by `provider_models` in `config.yaml`.
+Only providers/models defined here appear in **Settings → Models** and the Chat model picker.
+
+```yaml
+provider_models:
+  providers:
+    - id: openai
+      display_name: OpenAI
+      description: OpenAI API models
+      enabled_by_default: false
+      requires_api_key: true
+      models:
+        - model_id: gpt-5.2
+          display_name: GPT-5.2
+          thinking_enabled: true
+          adaptive_thinking:
+            efforts: [low, medium, high, xhigh]
+            default_effort: medium
+
+    - id: anthropic
+      display_name: Anthropic
+      description: Claude models
+      enabled_by_default: false
+      requires_api_key: true
+      models:
+        - model_id: claude-opus-4-6
+          display_name: Claude Opus 4.6
+          supports_vision: true
+          thinking_enabled: true
+          adaptive_thinking:
+            efforts: [low, medium, high, max]
+            default_effort: medium
+```
+
+Notes:
+- `thinking_enabled: true` means thinking is always enabled for that model.
+- Adaptive-thinking models show a Thinking Effort selector in Chat UI (default `medium`).
+- For Anthropic 4.6 models (`claude-opus-4-6`, `claude-sonnet-4-6`), use adaptive payloads (`thinking.type=adaptive` + `effort`) rather than deprecated `budget_tokens`.
+
 ### Tool Groups
 
 Organize tools into logical groups:
