@@ -10,7 +10,7 @@ export const ArtifactTrigger = () => {
   const { t } = useI18n();
   const { artifacts, setOpen: setArtifactsOpen } = useArtifacts();
 
-  if (artifacts?.length === 0) {
+  if (!artifacts || artifacts.length === 0) {
     return null;
   }
   return (

@@ -1,8 +1,8 @@
 import type { AIMessage } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
-import { useStream, type UseStream } from "@langchain/langgraph-sdk/react";
+import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -37,6 +37,13 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const [_threadId, setThreadId] = useState<string | null>(threadId ?? null);
+
+  useEffect(() => {
+    if (_threadId && _threadId !== threadId) {
+      setThreadId(threadId ?? null);
+    }
+  }, [threadId, _threadId]);
+
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
@@ -74,27 +81,7 @@ export function useThreadStream({
     },
     onFinish(state) {
       onFinish?.(state.values);
-      // void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title: state.values.title,
-                },
-              };
-            }
-            return t;
-          });
-        },
-      );
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
 

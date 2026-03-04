@@ -1,10 +1,11 @@
 "use client";
 
-import { BotIcon } from "lucide-react";
-import { useParams } from "next/navigation";
+import { BotIcon, PlusSquare } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
@@ -13,6 +14,7 @@ import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
+import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
@@ -25,10 +27,10 @@ import { cn } from "@/lib/utils";
 export default function AgentChatPage() {
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
+  const router = useRouter();
 
-  const { agent_name, thread_id: threadIdFromPath } = useParams<{
+  const { agent_name } = useParams<{
     agent_name: string;
-    thread_id: string;
   }>();
 
   const { agent } = useAgent(agent_name);
@@ -37,7 +39,7 @@ export default function AgentChatPage() {
 
   const { showNotification } = useNotification();
   const [thread, sendMessage] = useThreadStream({
-    threadId: threadIdFromPath !== "new" ? threadIdFromPath : undefined,
+    threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
     onStart: () => {
       setIsNewThread(false);
@@ -99,7 +101,18 @@ export default function AgentChatPage() {
             <div className="flex w-full items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div>
+            <div className="mr-4 flex items-center">
+              <Tooltip content={t.agents.newChat}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    router.push(`/workspace/agents/${agent_name}/chats/new`);
+                  }}
+                >
+                  <PlusSquare /> {t.agents.newChat}
+                </Button>
+              </Tooltip>
               <ArtifactTrigger />
             </div>
           </header>

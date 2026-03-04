@@ -265,7 +265,7 @@ def make_lead_agent(config: RunnableConfig):
     is_bootstrap = config.get("configurable", {}).get("is_bootstrap", False)
     agent_name = config.get("configurable", {}).get("agent_name")
 
-    agent_config = load_agent_config(agent_name)
+    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
     agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
 
