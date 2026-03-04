@@ -46,6 +46,7 @@ export function useThreadStream({
   useEffect(() => {
     if (_threadId && _threadId !== threadId) {
       setThreadId(threadId ?? null);
+      startedRef.current = false; // Reset for new thread
     }
   }, [threadId, _threadId]);
 

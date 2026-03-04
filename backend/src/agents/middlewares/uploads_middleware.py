@@ -75,7 +75,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
-    def _files_from_kwargs(self, message: HumanMessage) -> list[dict] | None:
+    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
@@ -84,9 +84,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         Args:
             message: The human message to inspect.
+            uploads_dir: Physical uploads directory used to verify file existence.
+                         When provided, entries whose files no longer exist are skipped.
 
         Returns:
-            List of file dicts, or None if the field is absent or empty.
+            List of file dicts with virtual paths, or None if the field is absent or empty.
         """
         kwargs_files = (message.additional_kwargs or {}).get("files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
@@ -97,14 +99,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
-            path = f.get("path") or ""
-            if not filename or not path:
+            if not filename:
+                continue
+            if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
             files.append(
                 {
                     "filename": filename,
                     "size": int(f.get("size") or 0),
-                    "path": path,
+                    "path": f"/mnt/user-data/uploads/{filename}",
                     "extension": Path(filename).suffix,
                 }
             )
@@ -139,29 +142,30 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
+        # Resolve uploads directory for existence checks
+        thread_id = runtime.context.get("thread_id")
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+
         # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message)
+        new_files = self._files_from_kwargs(last_message, uploads_dir)
         if not new_files:
             return None
 
         # Collect historical files from the uploads directory (all except the new ones)
-        thread_id = runtime.context.get("thread_id")
         new_filenames = {f["filename"] for f in new_files}
         historical_files: list[dict] = []
-        if thread_id:
-            uploads_dir = self._paths.sandbox_uploads_dir(thread_id)
-            if uploads_dir.exists():
-                for file_path in sorted(uploads_dir.iterdir()):
-                    if file_path.is_file() and file_path.name not in new_filenames:
-                        stat = file_path.stat()
-                        historical_files.append(
-                            {
-                                "filename": file_path.name,
-                                "size": stat.st_size,
-                                "path": f"/mnt/user-data/uploads/{file_path.name}",
-                                "extension": file_path.suffix,
-                            }
-                        )
+        if uploads_dir and uploads_dir.exists():
+            for file_path in sorted(uploads_dir.iterdir()):
+                if file_path.is_file() and file_path.name not in new_filenames:
+                    stat = file_path.stat()
+                    historical_files.append(
+                        {
+                            "filename": file_path.name,
+                            "size": stat.st_size,
+                            "path": f"/mnt/user-data/uploads/{file_path.name}",
+                            "extension": file_path.suffix,
+                        }
+                    )
 
         logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 
