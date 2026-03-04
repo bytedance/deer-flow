@@ -66,3 +66,8 @@ Return the following to the user:
 
 ## Reference Material
 Detailed specifications for each chart type are located in the `references/` directory. Consult these files to ensure the `args` passed to the script match the expected schema.
+
+## License
+
+This `SKILL.md` is provided by [antvis/chart-visualization-skills](https://github.com/antvis/chart-visualization-skills).
+Licensed under the [MIT License](https://github.com/antvis/chart-visualization-skills/blob/master/LICENSE).

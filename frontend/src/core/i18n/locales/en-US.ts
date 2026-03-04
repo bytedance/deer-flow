@@ -151,6 +151,41 @@ export const enUS: Translations = {
     chats: "Chats",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
+    agents: "Agents",
+  },
+
+  // Agents
+  agents: {
+    title: "Agents",
+    description:
+      "Create and manage custom agents with specialized prompts and capabilities.",
+    newAgent: "New Agent",
+    emptyTitle: "No custom agents yet",
+    emptyDescription:
+      "Create your first custom agent with a specialized system prompt.",
+    chat: "Chat",
+    delete: "Delete",
+    deleteConfirm:
+      "Are you sure you want to delete this agent? This action cannot be undone.",
+    deleteSuccess: "Agent deleted",
+    newChat: "New chat",
+    createPageTitle: "Design your Agent",
+    createPageSubtitle:
+      "Describe the agent you want — I'll help you create it through conversation.",
+    nameStepTitle: "Name your new Agent",
+    nameStepHint:
+      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
+    nameStepPlaceholder: "e.g. code-reviewer",
+    nameStepContinue: "Continue",
+    nameStepInvalidError:
+      "Invalid name — use only letters, digits, and hyphens",
+    nameStepAlreadyExistsError: "An agent with this name already exists",
+    nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepBootstrapMessage:
+      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+    agentCreated: "Agent created!",
+    startChatting: "Start chatting",
+    backToGallery: "Back to Gallery",
   },
 
   // Breadcrumb
