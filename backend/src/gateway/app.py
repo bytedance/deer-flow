@@ -8,7 +8,19 @@ from fastapi import FastAPI
 from src.config.app_config import get_app_config
 from src.gateway.auth.routes import router as auth_router
 from src.gateway.config import get_gateway_config
-from src.gateway.routers import agent, artifacts, keys, mcp, memory, models, providers, skills, threads, uploads
+from src.gateway.routers import (
+    agent,
+    artifacts,
+    keys,
+    mcp,
+    memory,
+    models,
+    providers,
+    skills,
+    threads,
+    uploads,
+    user_preferences,
+)
 from src.logging_config import configure_logging
 
 # Configure logging
@@ -127,6 +139,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Thread CRUD: list, delete, rename, claim, and message truncation",
             },
             {
+                "name": "preferences",
+                "description": "Per-user persisted UI preferences (model and thinking effort)",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -167,6 +183,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Threads API: collection-level at /api/threads, item-level at /api/threads/{thread_id}
     app.include_router(threads.router_list)
     app.include_router(threads.router)
+
+    # User preferences API
+    app.include_router(user_preferences.router)
 
     # ── Prometheus metrics instrumentation ──────────────────────────────────
     from src.gateway.metrics import setup_metrics

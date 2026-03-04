@@ -4,7 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from src.gateway.auth.middleware import get_optional_user
-from src.models.provider_catalog import ProviderCatalogError, ProviderModelInfo, list_provider_models, validate_provider_key
+from src.models.provider_catalog import (
+    ProviderCatalogError,
+    ProviderCatalogResponse,
+    ProviderModelInfo,
+    get_provider_catalog,
+    list_provider_models,
+    validate_provider_key,
+)
 from src.security.api_key_store import get_api_key
 
 router = APIRouter(prefix="/api", tags=["providers"])
@@ -48,6 +55,19 @@ async def get_provider_models(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list models for {provider}: {exc}") from exc
+
+
+@router.get(
+    "/providers/catalog",
+    response_model=ProviderCatalogResponse,
+    summary="List Configured Provider Catalog",
+    description="Return allowed providers and models configured in config.yaml.",
+)
+async def list_configured_provider_catalog() -> ProviderCatalogResponse:
+    try:
+        return get_provider_catalog()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load provider catalog: {exc}") from exc
 
 
 @router.post(
