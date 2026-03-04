@@ -163,7 +163,18 @@ class ExtensionsConfig(BaseModel):
             elif isinstance(value, dict):
                 config[key] = cls.resolve_env_variables(value)
             elif isinstance(value, list):
-                config[key] = [cls.resolve_env_variables(item) if isinstance(item, dict) else item for item in value]
+                resolved = []
+                for item in value:
+                    if isinstance(item, dict):
+                        resolved.append(cls.resolve_env_variables(item))
+                    elif isinstance(item, str) and item.startswith("$"):
+                        env_value = os.getenv(item[1:])
+                        if env_value is None:
+                            raise ValueError(f"Environment variable {item[1:]} not found for config value {item}")
+                        resolved.append(env_value)
+                    else:
+                        resolved.append(item)
+                config[key] = resolved
         return config
 
     def get_enabled_mcp_servers(self) -> dict[str, McpServerConfig]:
