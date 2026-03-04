@@ -114,9 +114,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
         """Inject uploaded files information before agent execution.
 
-        Reads file metadata from the current message's additional_kwargs.files.
-        Also collects files from previous human messages to inform the model
-        about historically uploaded files.
+        New files come from the current message's additional_kwargs.files.
+        Historical files are scanned from the thread's uploads directory,
+        excluding the new ones.
 
         Prepends <uploaded_files> context to the last human message content.
         The original additional_kwargs (including files metadata) is preserved
@@ -144,19 +144,26 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not new_files:
             return None
 
-        # Collect historical files from previous human messages
-        seen_paths = {f["path"] for f in new_files if f.get("path")}
+        # Collect historical files from the uploads directory (all except the new ones)
+        thread_id = runtime.context.get("thread_id")
+        new_filenames = {f["filename"] for f in new_files}
         historical_files: list[dict] = []
-        for msg in messages[:-1]:
-            if isinstance(msg, HumanMessage):
-                prev_files = self._files_from_kwargs(msg)
-                if prev_files:
-                    for f in prev_files:
-                        if f.get("path") and f["path"] not in seen_paths:
-                            historical_files.append(f)
-                            seen_paths.add(f["path"])
+        if thread_id:
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id)
+            if uploads_dir.exists():
+                for file_path in sorted(uploads_dir.iterdir()):
+                    if file_path.is_file() and file_path.name not in new_filenames:
+                        stat = file_path.stat()
+                        historical_files.append(
+                            {
+                                "filename": file_path.name,
+                                "size": stat.st_size,
+                                "path": f"/mnt/user-data/uploads/{file_path.name}",
+                                "extension": file_path.suffix,
+                            }
+                        )
 
-        logger.info(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
+        logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 
         # Create files message and prepend to the last human message content
         files_message = self._create_files_message(new_files, historical_files)
