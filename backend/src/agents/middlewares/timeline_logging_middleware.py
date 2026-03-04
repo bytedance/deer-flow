@@ -9,6 +9,7 @@ Supports two storage backends:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -283,15 +284,15 @@ class TimelineLoggingMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        self._record_messages(state, runtime, "before_model")
+        await asyncio.to_thread(self._record_messages, state, runtime, "before_model")
         return None
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        self._record_messages(state, runtime, "after_model")
+        await asyncio.to_thread(self._record_messages, state, runtime, "after_model")
         return None
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
-        self._record_messages(state, runtime, "after_agent")
+        await asyncio.to_thread(self._record_messages, state, runtime, "after_agent")
         return None
