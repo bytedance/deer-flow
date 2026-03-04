@@ -139,7 +139,9 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
 
         # If no config file exists, create one in the parent directory (project root)
         if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
+            # Resolve to project root (backend/..) instead of using Path.cwd()
+            # which is blocked inside the async event loop by blockbuster.
+            config_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
         # Load current config to preserve skills configuration

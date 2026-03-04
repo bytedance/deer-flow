@@ -27,7 +27,9 @@ class SkillsConfig(BaseModel):
             path = Path(self.path)
             if not path.is_absolute():
                 # If relative, resolve from current working directory
-                path = Path.cwd() / path
+                # Resolve relative to backend/ dir instead of cwd to avoid
+                # blocking Path.cwd() inside the async event loop.
+                path = Path(__file__).resolve().parent.parent.parent / path
             return path.resolve()
         else:
             # Default: ../skills relative to backend directory

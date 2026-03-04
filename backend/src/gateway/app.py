@@ -185,8 +185,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 response = await client.get(f"{url}/ok")
                 if response.status_code == 200:
                     return "healthy"
+                logger.warning("LangGraph health check returned status %s", response.status_code)
                 return f"unhealthy: status {response.status_code}"
         except Exception as e:
+            logger.error("LangGraph health check failed: %s", e)
             return f"unhealthy: {e}"
 
     @app.get("/health", tags=["health"])
@@ -214,6 +216,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
         all_healthy = all(v == "healthy" for v in checks.values())
         status = "healthy" if all_healthy else "degraded"
+
+        if not all_healthy:
+            unhealthy = {k: v for k, v in checks.items() if v != "healthy"}
+            logger.warning("Health check degraded: %s", unhealthy)
 
         return {"status": status, "service": "deer-flow-gateway", "checks": checks}
 

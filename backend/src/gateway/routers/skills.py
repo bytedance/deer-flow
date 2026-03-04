@@ -285,7 +285,9 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             # Create new config file in parent directory (project root)
-            config_path = Path.cwd().parent / "extensions_config.json"
+            # Resolve to project root (backend/..) instead of using Path.cwd()
+            # which is blocked inside the async event loop by blockbuster.
+            config_path = Path(__file__).resolve().parent.parent.parent.parent.parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
         # Load current configuration

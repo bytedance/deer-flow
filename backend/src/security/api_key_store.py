@@ -19,7 +19,10 @@ from cryptography.fernet import Fernet, InvalidToken
 # File-based storage (local / Electron dev)
 # ---------------------------------------------------------------------------
 _LOCK = threading.Lock()
-_STORE_DIR = Path(os.getcwd()) / ".think-tank"
+# Derive backend/ dir from this file's location (backend/src/security/api_key_store.py)
+# instead of os.getcwd() which is blocked inside the async event loop by blockbuster.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+_STORE_DIR = _BACKEND_DIR / ".think-tank"
 _KEY_FILE = _STORE_DIR / "api-keys.key"
 _DATA_FILE = _STORE_DIR / "api-keys.json"
 
@@ -55,7 +58,16 @@ def _get_or_create_master_key() -> bytes:
     # 1. Environment variable (preferred, required in production)
     env_key = os.environ.get("ENCRYPTION_KEY")
     if env_key:
-        return env_key.encode("utf-8")
+        # Validate early: Fernet keys must be 32 url-safe base64-encoded bytes
+        key_bytes = env_key.encode("utf-8")
+        try:
+            Fernet(key_bytes)
+        except (ValueError, Exception) as exc:
+            raise RuntimeError(
+                f"ENCRYPTION_KEY is not a valid Fernet key: {exc}. "
+                "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+            ) from exc
+        return key_bytes
 
     # 2. Production mode requires env var
     if os.environ.get("REQUIRE_ENV_SECRETS"):

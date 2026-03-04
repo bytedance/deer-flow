@@ -9,7 +9,10 @@ from pathlib import Path
 
 import jwt
 
-_STORE_DIR = Path(os.getcwd()) / ".think-tank"
+# Derive backend/ dir from this file's location (backend/src/gateway/auth/jwt.py)
+# instead of os.getcwd() which is blocked inside the async event loop by blockbuster.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent
+_STORE_DIR = _BACKEND_DIR / ".think-tank"
 _SECRET_FILE = _STORE_DIR / "jwt-secret.key"
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 15

@@ -7,6 +7,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Cache CWD at import time to avoid blocking os.getcwd() calls in async context.
+_MODULE_CWD = Path(os.getcwd())
+
 
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
@@ -95,21 +98,21 @@ class ExtensionsConfig(BaseModel):
             return path
         else:
             # Check if the extensions_config.json is in the current directory
-            path = Path(os.getcwd()) / "extensions_config.json"
+            path = _MODULE_CWD / "extensions_config.json"
             if path.exists():
                 return path
 
             # Check if the extensions_config.json is in the parent directory of CWD
-            path = Path(os.getcwd()).parent / "extensions_config.json"
+            path = _MODULE_CWD.parent / "extensions_config.json"
             if path.exists():
                 return path
 
             # Backward compatibility: check for mcp_config.json
-            path = Path(os.getcwd()) / "mcp_config.json"
+            path = _MODULE_CWD / "mcp_config.json"
             if path.exists():
                 return path
 
-            path = Path(os.getcwd()).parent / "mcp_config.json"
+            path = _MODULE_CWD.parent / "mcp_config.json"
             if path.exists():
                 return path
 

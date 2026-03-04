@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +7,8 @@ from pydantic import BaseModel, Field
 from src.gateway.auth.middleware import get_current_user
 from src.models.provider_catalog import SUPPORTED_PROVIDERS
 from src.security.api_key_store import delete_api_key, has_api_key, set_api_key
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["providers"])
 
@@ -42,7 +45,14 @@ async def store_provider_key(
     try:
         set_api_key(user_id, normalized, request.api_key)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        msg = str(exc)
+        if "Fernet" in msg or "key must be" in msg:
+            logger.error("Server encryption key misconfigured: %s", msg)
+            raise HTTPException(status_code=500, detail="Server encryption configuration error") from exc
+        raise HTTPException(status_code=400, detail=msg) from exc
+    except Exception as exc:
+        logger.error("Failed to store API key for provider %s: %s", normalized, exc)
+        raise HTTPException(status_code=500, detail="Internal error storing API key") from exc
     return ProviderKeyStatusResponse(provider=normalized, has_key=True)
 
 

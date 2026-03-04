@@ -7,6 +7,9 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
+# Derive backend/ dir at import time to avoid blocking Path.cwd() inside the event loop.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+
 
 class Paths:
     """
@@ -41,9 +44,8 @@ class Paths:
         if env_home := os.getenv("DEER_FLOW_HOME"):
             return Path(env_home).resolve()
 
-        cwd = Path.cwd()
-        if cwd.name == "backend" or (cwd / "pyproject.toml").exists():
-            return cwd / ".think-tank"
+        if _BACKEND_DIR.name == "backend" or (_BACKEND_DIR / "pyproject.toml").exists():
+            return _BACKEND_DIR / ".think-tank"
 
         return Path.home() / ".think-tank"
 

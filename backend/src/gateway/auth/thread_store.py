@@ -19,7 +19,10 @@ from typing import Any
 # File-based storage (local / Electron dev)
 # ---------------------------------------------------------------------------
 _LOCK = threading.Lock()
-_STORE_DIR = Path(os.getcwd()) / ".think-tank"
+# Derive backend/ dir from this file's location (backend/src/gateway/auth/thread_store.py)
+# instead of os.getcwd() which is blocked inside the async event loop by blockbuster.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent
+_STORE_DIR = _BACKEND_DIR / ".think-tank"
 _DATA_FILE = _STORE_DIR / "thread-ownership.json"
 
 

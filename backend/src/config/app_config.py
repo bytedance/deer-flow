@@ -21,6 +21,11 @@ if dotenv_path:
 else:
     load_dotenv()
 
+# Cache CWD at import time to avoid blocking os.getcwd() calls in async context.
+# LangGraph's blockbuster library flags os.getcwd() as a blocking call when
+# invoked inside the event loop.
+_MODULE_CWD = Path(os.getcwd())
+
 
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
@@ -54,10 +59,10 @@ class AppConfig(BaseModel):
             return path
         else:
             # Check if the config.yaml is in the current directory
-            path = Path(os.getcwd()) / "config.yaml"
+            path = _MODULE_CWD / "config.yaml"
             if not path.exists():
                 # Check if the config.yaml is in the parent directory of CWD
-                path = Path(os.getcwd()).parent / "config.yaml"
+                path = _MODULE_CWD.parent / "config.yaml"
                 if not path.exists():
                     raise FileNotFoundError("`config.yaml` file not found at the current directory nor its parent directory")
             return path
