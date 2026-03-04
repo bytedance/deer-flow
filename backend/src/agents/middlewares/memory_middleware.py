@@ -22,9 +22,12 @@ def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
     This filters out:
     - Tool messages (intermediate tool call results)
     - AI messages with tool_calls (intermediate steps, not final responses)
+    - Human messages that contain <uploaded_files> (file upload interactions are
+      session-scoped; persisting them causes the agent to search for non-existent
+      files in future sessions)
 
     Only keeps:
-    - Human messages (user input)
+    - Human messages without file uploads
     - AI messages without tool_calls (final assistant responses)
 
     Args:
@@ -34,16 +37,28 @@ def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
         Filtered list containing only user inputs and final assistant responses.
     """
     filtered = []
+    skip_next_ai = False
     for msg in messages:
         msg_type = getattr(msg, "type", None)
 
         if msg_type == "human":
-            # Always keep user messages
+            content = getattr(msg, "content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content if isinstance(p, dict)
+                )
+            if "<uploaded_files>" in str(content):
+                # Skip this human message and the paired AI response
+                skip_next_ai = True
+                continue
             filtered.append(msg)
+            skip_next_ai = False
         elif msg_type == "ai":
-            # Only keep AI messages that are final responses (no tool_calls)
             tool_calls = getattr(msg, "tool_calls", None)
             if not tool_calls:
+                if skip_next_ai:
+                    skip_next_ai = False
+                    continue
                 filtered.append(msg)
         # Skip tool messages and AI messages with tool_calls
 

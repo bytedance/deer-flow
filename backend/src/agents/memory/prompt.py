@@ -108,6 +108,9 @@ Important Rules:
 - For history sections, integrate new information chronologically into appropriate time period
 - Preserve technical accuracy - keep exact names of technologies, companies, projects
 - Focus on information useful for future interactions and personalization
+- IMPORTANT: Do NOT record file upload events in memory. Uploaded files are
+  session-specific and ephemeral — they will not be accessible in future sessions.
+  Recording upload events causes confusion in subsequent conversations.
 
 Return ONLY valid JSON, no explanation or markdown."""
 
@@ -239,6 +242,8 @@ def format_conversation_for_update(messages: list[Any]) -> str:
     Returns:
         Formatted conversation string.
     """
+    import re
+
     lines = []
     for msg in messages:
         role = getattr(msg, "type", "unknown")
@@ -248,6 +253,11 @@ def format_conversation_for_update(messages: list[Any]) -> str:
         if isinstance(content, list):
             text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
             content = " ".join(text_parts) if text_parts else str(content)
+
+        # Strip uploaded_files tags from human messages to avoid persisting
+        # ephemeral file path info into long-term memory
+        if role == "human":
+            content = re.sub(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)).strip()
 
         # Truncate very long messages
         if len(str(content)) > 1000:
