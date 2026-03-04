@@ -208,7 +208,7 @@ export function useThreadStream({
                 (info) => ({
                   filename: info.filename,
                   size: info.size,
-                  path: info.path,
+                  path: info.virtual_path,
                   status: "uploaded" as const,
                 }),
               );
