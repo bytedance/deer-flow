@@ -43,7 +43,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     setArtifacts(thread.values.artifacts);
     if (
       thread.values.artifacts?.length === 0 ||
-      (selectedArtifact && !artifacts.includes(selectedArtifact))
+      (selectedArtifact && !thread.values.artifacts?.includes(selectedArtifact))
     ) {
       deselect();
     }
