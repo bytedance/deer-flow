@@ -1,67 +1,37 @@
 /**
- * About Thinktank.ai markdown content. Inlined to avoid raw-loader dependency
+ * About brand markdown content. Inlined to avoid raw-loader dependency
  * (Turbopack cannot resolve raw-loader for .md imports).
  */
-export const aboutMarkdown = `# [About Thinktank.ai](https://github.com/thinktank-ai/thinktank-ai)
+export const aboutMarkdown = `# [About {{brandName}}]({{githubUrl}})
 
-> **From Open Source, Back to Open Source**
+> **Sovereign, Adaptive, and Secure**
 
-Thinktank.ai is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
+{{brandName}} is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
 
 ---
 
 ## 🚀 Core Features
 
-* **Skills & Tools**: With built-in and extensible skills and tools, Thinktank.ai can do almost anything.
-* **Sub-Agents**: Sub-Agents help the main agent to do the tasks that are too complex to be done by the main agent.
+* **Skills & Tools**: With built-in and extensible skills and tools, {{brandName}} can do almost anything.
+* **Agent Sawrms**: Agent Sawrms help the main agent to do the tasks that are too complex to be done by the main agent.
 * **Sandbox & File System**: Safely execute code and manipulate files in the sandbox.
 * **Context Engineering**: Isolated sub-agent context, summarization to keep the context window sharp.
 * **Long-Term Memory**: Keep recording the user's profile, top of mind, and conversation history.
 
 ---
 
-## 🌟 GitHub Repository
-
-![Star History Chart](https://api.star-history.com/svg?repos=thinktank-ai/thinktank-ai&type=Date)
-
-Explore Thinktank.ai on GitHub: [github.com/thinktank-ai/thinktank-ai](https://github.com/thinktank-ai/thinktank-ai)
-
 ## 🌐 Official Website
 
-Visit the official website of Thinktank.ai: [thinktank.ai](https://thinktank.ai/)
+Visit the official website of {{brandName}}: [{{websiteUrl}}]({{websiteUrl}})
 
 ## 📧 Support
 
-If you have any questions or need help, please contact us at [support@thinktank.ai](mailto:support@thinktank.ai).
-
----
-
-## 📜 License
-
-Thinktank.ai is proudly open source and distributed under the **MIT License**.
+If you have any questions or need help, please contact us at [{{supportEmail}}](mailto:{{supportEmail}}).
 
 ---
 
 ## 🙌 Acknowledgments
 
-We extend our heartfelt gratitude to the open source projects and contributors who have made Thinktank.ai a reality. We truly stand on the shoulders of giants.
+We extend our heartfelt gratitude to all the future investors and clients who have made {{brandName}} a reality. We truly stand on the shoulders of giants.
 
-### Core Frameworks
-- **[LangChain](https://github.com/langchain-ai/langchain)**: A phenomenal framework that powers our LLM interactions and chains.
-- **[LangGraph](https://github.com/langchain-ai/langgraph)**: Enabling sophisticated multi-agent orchestration.
-- **[Next.js](https://nextjs.org/)**: A cutting-edge framework for building web applications.
-
-### UI Libraries
-- **[Shadcn](https://ui.shadcn.com/)**: Minimalistic components that power our UI.
-- **[SToneX](https://github.com/stonexer)**: For his invaluable contribution to token-by-token visual effects.
-
-These outstanding projects form the backbone of Thinktank.ai and exemplify the transformative power of open source collaboration.
-
-### Special Thanks
-Finally, we want to express our heartfelt gratitude to the core authors of Thinktank.ai 1.0 and 2.0:
-
-- **[Daniel Walnut](https://github.com/hetaoBackend/)**
-- **[Henry Li](https://github.com/magiccube/)**
-
-Without their vision, passion and dedication, \`Thinktank.ai\` would not be what it is today.
 `;
