@@ -29,10 +29,12 @@ COPY backend ./backend
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
-# Install minimal runtime dependencies + AWS CLI (for CodeArtifact auth)
+# Install minimal runtime dependencies + Node.js (for npx MCP servers) + AWS CLI (for CodeArtifact auth)
 RUN apt-get update && apt-get install -y \
     curl \
     unzip \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
@@ -40,8 +42,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get purge -y unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy uv from builder
+# Copy uv and uvx from builder (uvx is needed for MCP servers like worldbank, fiscaldata)
 COPY --from=builder /root/.local/bin/uv /usr/local/bin/uv
+COPY --from=builder /root/.local/bin/uvx /usr/local/bin/uvx
 
 # Copy application with installed virtualenv
 COPY --from=builder /app /app

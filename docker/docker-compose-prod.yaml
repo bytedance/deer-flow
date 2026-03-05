@@ -24,14 +24,19 @@
 #   CORS_ALLOWED_ORIGIN: Allowed CORS origin (default: *)
 #   TLS_CERTS_DIR: Path to TLS certificates directory (default: ./certs)
 #   REQUIRE_ENV_SECRETS: Set to 'true' to require JWT_SECRET_KEY and ENCRYPTION_KEY env vars
+#   LANGGRAPH_CLOUD_LICENSE_KEY: LangGraph Platform license key (optional, for licensed features)
 #   CODEARTIFACT_DOMAIN: CodeArtifact domain name for private MCP servers (e.g., "thinktank")
 #   AWS_ACCOUNT_ID: AWS account ID for CodeArtifact auth
 
 services:
   # ── Database ────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: thinktank-postgres
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=vector
     volumes:
       - pgdata:/var/lib/postgresql/data
     environment:
@@ -76,17 +81,19 @@ services:
     volumes:
       - ../config.yaml:/app/config.yaml:ro
       - ../extensions_config.json:/app/extensions_config.json:ro
+      - ../mcp_servers:/app/mcp_servers:ro
+      - threaddata:/data/thinktank
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
+      DEER_FLOW_HOME: /data/thinktank
       REQUIRE_ENV_SECRETS: ${REQUIRE_ENV_SECRETS:-true}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY required}
-      LANGGRAPH_URL: http://langgraph:2024
+      LANGGRAPH_URL: http://langgraph:8000
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
       LOG_FORMAT: json
       LOG_LEVEL: INFO
-      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
       ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
@@ -109,28 +116,31 @@ services:
       - thinktank
 
   # ── LangGraph Server (scalable with sticky sessions) ────────────────
+  # Uses the langchain/langgraph-api base image with Postgres persistence
+  # for checkpoints, threads, runs, and Store. Redis for pub-sub streaming.
   langgraph:
     build:
       context: ../
-      dockerfile: backend/Dockerfile.prod
-    command: >
-      sh -c "cd backend && uv run langgraph dev
-      --host 0.0.0.0
-      --port 2024
-      --no-browser
-      --no-reload"
+      dockerfile: backend/Dockerfile.langgraph
     volumes:
-      - ../config.yaml:/app/config.yaml:ro
-      - ../extensions_config.json:/app/extensions_config.json:ro
+      - ../config.yaml:/deps/backend/config.yaml:ro
+      - ../extensions_config.json:/deps/backend/extensions_config.json:ro
+      - ../mcp_servers:/deps/backend/mcp_servers:ro
+      - threaddata:/data/thinktank
     environment:
+      DEER_FLOW_HOME: /data/thinktank
+      # Postgres for checkpoints, threads, runs (used by LangGraph API server)
+      POSTGRES_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank?sslmode=disable
+      # Also set DATABASE_URL for LangGraph Store and our app code
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
-      REDIS_URL: redis://redis:6379/0
+      # Redis for pub-sub (streaming background runs)
+      REDIS_URI: redis://redis:6379
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-thinktank-ai}
+      LANGGRAPH_CLOUD_LICENSE_KEY: ${LANGGRAPH_CLOUD_LICENSE_KEY:-}
       LOG_FORMAT: json
       LOG_LEVEL: INFO
-      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
       ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
@@ -139,6 +149,8 @@ services:
       - ../.env
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     deploy:
       replicas: ${LANGGRAPH_REPLICAS:-2}
@@ -159,12 +171,14 @@ services:
     volumes:
       - ../config.yaml:/app/config.yaml:ro
       - ../extensions_config.json:/app/extensions_config.json:ro
+      - ../mcp_servers:/app/mcp_servers:ro
+      - threaddata:/data/thinktank
     environment:
       DATABASE_URL: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/thinktank
       REDIS_URL: redis://redis:6379/0
+      DEER_FLOW_HOME: /data/thinktank
       LOG_FORMAT: json
       LOG_LEVEL: INFO
-      DATABASE_URI: postgresql://thinktank:${DB_PASSWORD}@postgres:5432/erp_sample
       ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
@@ -256,6 +270,7 @@ volumes:
   pgdata:
   redisdata:
   backupdata:
+  threaddata:
 
 networks:
   thinktank:

@@ -1,0 +1,56 @@
+# Production Dockerfile for LangGraph Server
+# Based on langchain/langgraph-api which includes:
+#   - Postgres persistence (checkpoints, threads, runs, store)
+#   - Redis pub-sub for streaming background runs
+#   - pgvector-backed semantic memory (LangGraph Store)
+#
+# This image is used ONLY for the langgraph service in docker-compose-prod.yaml.
+# Gateway and worker services continue using Dockerfile.prod.
+
+FROM langchain/langgraph-api:3.12
+
+# Install Node.js (for npx MCP servers) and AWS CLI (for CodeArtifact auth)
+USER root
+RUN apt-get update && apt-get install -y \
+    curl \
+    unzip \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip \
+    && apt-get purge -y unzip && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install backend package as a local dependency
+ADD backend /deps/backend
+RUN PYTHONDONTWRITEBYTECODE=1 pip install --no-cache-dir -e /deps/backend
+
+# Set LangGraph configuration via environment variables
+ENV LANGSERVE_GRAPHS='{"lead_agent": "src.agents:make_lead_agent"}'
+ENV LANGGRAPH_STORE='{"type": "postgres", "uri": "$DATABASE_URL"}'
+
+# Ensure user deps didn't overwrite langgraph-api internals
+RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license \
+    && touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
+RUN PYTHONDONTWRITEBYTECODE=1 pip install --no-cache-dir --no-deps -e /api
+
+WORKDIR /deps/backend
+
+# Wrapper entrypoint: run CodeArtifact setup, then delegate to LangGraph's entrypoint
+RUN printf '#!/bin/sh\nset -e\n\n# CodeArtifact token fetch (no-op if CODEARTIFACT_DOMAIN is unset)\n\
+if [ -n "$CODEARTIFACT_DOMAIN" ]; then\n\
+  REPO="${CODEARTIFACT_REPOSITORY:-mcp-servers}"\n\
+  TOKEN=$(aws codeartifact get-authorization-token \\\n\
+    --domain "$CODEARTIFACT_DOMAIN" --domain-owner "$AWS_ACCOUNT_ID" \\\n\
+    --region "$AWS_DEFAULT_REGION" --query authorizationToken --output text)\n\
+  REPO_URL=$(aws codeartifact get-repository-endpoint \\\n\
+    --domain "$CODEARTIFACT_DOMAIN" --domain-owner "$AWS_ACCOUNT_ID" \\\n\
+    --repository "$REPO" --region "$AWS_DEFAULT_REGION" \\\n\
+    --format pypi --query repositoryEndpoint --output text)\n\
+  export UV_EXTRA_INDEX_URL="$(echo "$REPO_URL" | sed "s|https://|https://aws:${TOKEN}@|")simple/"\n\
+fi\n\nexec /storage/entrypoint.sh "$@"\n' > /usr/local/bin/entrypoint-wrapper.sh \
+    && chmod +x /usr/local/bin/entrypoint-wrapper.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-wrapper.sh"]
