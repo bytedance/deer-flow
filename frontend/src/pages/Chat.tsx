@@ -24,7 +24,7 @@ import {
   ArtifactFileList,
   useArtifacts,
 } from "@/components/workspace/artifacts";
-import { ContextPanel } from "@/components/workspace/context-panel";
+// import { ContextPanel } from "@/components/workspace/context-panel";
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
@@ -828,10 +828,10 @@ function ChatInner() {
                       collapsed={todoListCollapsed}
                       onToggle={() => setTodoListCollapsed(!todoListCollapsed)}
                     />
-                    <ContextPanel
+                    {/* <ContextPanel
                       modelName={contextModelName}
                       subagentEnabled={settings.context.mode === "ultra"}
-                    />
+                    /> */}
                   </div>
                 </aside>
               )}
