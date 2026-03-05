@@ -1,8 +1,15 @@
-"""Cache for MCP tools to avoid repeated loading."""
+"""Cache for MCP tools to avoid repeated loading.
+
+Uses a stale-while-revalidate strategy: when the config file changes,
+the cached tools are returned immediately while a background task
+refreshes the cache. This avoids blocking the caller during MCP
+server reconnection.
+"""
 
 import asyncio
 import logging
 import os
+import threading
 
 from langchain_core.tools import BaseTool
 
@@ -12,6 +19,7 @@ _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
+_background_refresh_in_progress = False  # Prevents duplicate background refreshes
 
 
 def _get_config_mtime() -> float | None:
@@ -34,8 +42,6 @@ def _is_cache_stale() -> bool:
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
-    global _config_mtime
-
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
 
@@ -79,26 +85,52 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         return _mcp_tools_cache
 
 
+def _background_refresh() -> None:
+    """Refresh MCP tools in a background thread without blocking callers."""
+    global _mcp_tools_cache, _config_mtime, _background_refresh_in_progress
+
+    async def _do_refresh():
+        global _mcp_tools_cache, _config_mtime, _background_refresh_in_progress
+        try:
+            from src.mcp.tools import get_mcp_tools
+
+            logger.info("Background refresh: reloading MCP tools...")
+            new_tools = await get_mcp_tools()
+            _mcp_tools_cache = new_tools
+            _config_mtime = _get_config_mtime()
+            logger.info(f"Background refresh complete: {len(new_tools)} tool(s) loaded (config mtime: {_config_mtime})")
+        except Exception as e:
+            logger.error(f"Background refresh failed: {e}")
+        finally:
+            _background_refresh_in_progress = False
+
+    try:
+        asyncio.run(_do_refresh())
+    except Exception as e:
+        logger.error(f"Background refresh thread error: {e}")
+        _background_refresh_in_progress = False
+
+
 def get_cached_mcp_tools() -> list[BaseTool]:
     """Get cached MCP tools with lazy initialization.
 
-    If tools are not initialized, automatically initializes them.
-    This ensures MCP tools work in both FastAPI and LangGraph Studio contexts.
-
-    Also checks if the config file has been modified since last initialization,
-    and re-initializes if needed. This ensures that changes made through the
-    Gateway API (which runs in a separate process) are reflected in the
-    LangGraph Server.
+    If tools are not initialized, automatically initializes them (blocking).
+    If tools are cached but stale, returns the stale cache immediately
+    and triggers a background refresh (stale-while-revalidate).
 
     Returns:
         List of cached MCP tools.
     """
-    global _cache_initialized
+    global _background_refresh_in_progress
 
-    # Check if cache is stale due to config file changes
-    if _is_cache_stale():
-        logger.info("MCP cache is stale, resetting for re-initialization...")
-        reset_mcp_tools_cache()
+    # Stale-while-revalidate: serve stale cache, refresh in background
+    if _is_cache_stale() and _cache_initialized and _mcp_tools_cache is not None:
+        if not _background_refresh_in_progress:
+            _background_refresh_in_progress = True
+            logger.info("MCP cache is stale, serving cached tools while refreshing in background...")
+            thread = threading.Thread(target=_background_refresh, daemon=True)
+            thread.start()
+        return _mcp_tools_cache
 
     if not _cache_initialized:
         logger.info("MCP tools not initialized, performing lazy initialization...")
@@ -131,8 +163,9 @@ def reset_mcp_tools_cache() -> None:
 
     This is useful for testing or when you want to reload MCP tools.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _background_refresh_in_progress
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+    _background_refresh_in_progress = False
     logger.info("MCP tools cache reset")

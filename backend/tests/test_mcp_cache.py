@@ -197,23 +197,24 @@ class TestGetCachedMcpTools:
         assert result == []
 
     @patch("src.mcp.cache._is_cache_stale", return_value=True)
-    @patch("src.mcp.cache.reset_mcp_tools_cache")
-    @patch("src.mcp.cache.initialize_mcp_tools", new_callable=AsyncMock)
-    def test_resets_on_stale_cache(self, mock_init, mock_reset, mock_stale) -> None:
-        """When cache is stale, it should reset and re-initialize."""
+    @patch("src.mcp.cache._background_refresh")
+    def test_serves_stale_and_triggers_background_refresh(self, mock_refresh, mock_stale) -> None:
+        """When cache is stale, returns cached tools and triggers background refresh."""
         import src.mcp.cache as cache_mod
 
-        # After reset, _cache_initialized will be False triggering lazy init
-        # The lazy init will try to create an event loop; mock it out
-        mock_init.return_value = []
-
-        # We need to simulate: stale -> reset -> not initialized -> lazy init
-        # Since reset is mocked, _cache_initialized stays True from our setup
+        fake_tools = [MagicMock(name="stale_tool")]
         cache_mod._cache_initialized = True
-        cache_mod._mcp_tools_cache = [MagicMock()]
+        cache_mod._mcp_tools_cache = fake_tools
 
-        get_cached_mcp_tools()
-        mock_reset.assert_called_once()
+        # Patch threading.Thread to avoid actually spawning a thread
+        with patch("src.mcp.cache.threading") as mock_threading:
+            result = get_cached_mcp_tools()
+
+        # Should return stale cache immediately
+        assert result is fake_tools
+        # Should have started a background thread
+        mock_threading.Thread.assert_called_once()
+        mock_threading.Thread.return_value.start.assert_called_once()
 
     @patch("src.mcp.cache.initialize_mcp_tools", new_callable=AsyncMock)
     def test_returns_empty_on_init_failure(self, mock_init) -> None:

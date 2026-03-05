@@ -1,5 +1,6 @@
 """Load MCP tools using langchain-mcp-adapters."""
 
+import asyncio
 import logging
 
 from langchain_core.tools import BaseTool
@@ -11,17 +12,35 @@ from src.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_header
 logger = logging.getLogger(__name__)
 
 
+async def _load_server_tools(
+    server_name: str,
+    server_params: dict,
+    tool_interceptors: list,
+) -> list[BaseTool]:
+    """Load tools from a single MCP server."""
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    try:
+        client = MultiServerMCPClient({server_name: server_params}, tool_interceptors=tool_interceptors)
+        tools = await client.get_tools()
+        logger.info(f"Loaded {len(tools)} tool(s) from MCP server '{server_name}'")
+        return tools
+    except Exception as e:
+        logger.error(f"Failed to load tools from MCP server '{server_name}': {e}")
+        return []
+
+
 async def get_mcp_tools() -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
-    Loads tools from each server independently so that one failing server
-    does not prevent tools from other servers from being loaded.
+    Loads tools from each server independently and in parallel so that one
+    failing server does not prevent tools from other servers from being loaded.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
     try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.client import MultiServerMCPClient  # noqa: F401
     except ImportError:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
@@ -54,15 +73,17 @@ async def get_mcp_tools() -> list[BaseTool]:
     if oauth_interceptor is not None:
         tool_interceptors.append(oauth_interceptor)
 
+    # Load all servers in parallel for faster initialization
+    results = await asyncio.gather(
+        *[
+            _load_server_tools(server_name, server_params, tool_interceptors)
+            for server_name, server_params in servers_config.items()
+        ]
+    )
+
     all_tools: list[BaseTool] = []
-    for server_name, server_params in servers_config.items():
-        try:
-            client = MultiServerMCPClient({server_name: server_params}, tool_interceptors=tool_interceptors)
-            tools = await client.get_tools()
-            all_tools.extend(tools)
-            logger.info(f"Loaded {len(tools)} tool(s) from MCP server '{server_name}'")
-        except Exception as e:
-            logger.error(f"Failed to load tools from MCP server '{server_name}': {e}")
+    for tools in results:
+        all_tools.extend(tools)
 
     logger.info(f"Successfully loaded {len(all_tools)} tool(s) from MCP servers")
     return all_tools

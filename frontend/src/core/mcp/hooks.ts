@@ -6,6 +6,7 @@ export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["mcpConfig"],
     queryFn: () => loadMCPConfig(),
+    staleTime: 5 * 60 * 1000, // 5 minutes — avoid refetching on every mount/focus
   });
   return { config: data, isLoading, error };
 }
