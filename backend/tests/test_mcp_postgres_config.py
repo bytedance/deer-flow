@@ -46,6 +46,30 @@ class TestBuildServerParams:
         assert "env" in params
         assert params["env"]["DATABASE_URI"] == "postgresql://admin:secret@db-host:5433/erp"
 
+    def test_postgres_mcp_strips_wrapping_quotes(self):
+        """Quoted URI values should be normalized before being passed to subprocess env."""
+        config = _make_postgres_config(db_uri='"postgresql://user:pass@localhost:5432/testdb"')
+        params = build_server_params("postgres", config)
+
+        assert params["env"]["DATABASE_URI"] == "postgresql://user:pass@localhost:5432/testdb"
+
+    def test_postgres_mcp_falls_back_to_database_url_when_database_uri_invalid(self):
+        """Invalid DATABASE_URI (e.g., ':memory:') should fallback to DATABASE_URL when valid."""
+        config = _make_postgres_config(db_uri=":memory:")
+        fallback_url = "postgresql://fallback:pass@localhost:5432/fallback_db"
+
+        with patch.dict(os.environ, {"DATABASE_URL": fallback_url}, clear=True):
+            params = build_server_params("postgres", config)
+
+        assert params["env"]["DATABASE_URI"] == fallback_url
+
+    def test_postgres_mcp_invalid_uri_without_fallback_raises(self):
+        """Invalid PostgreSQL conninfo without fallback should raise ValueError."""
+        config = _make_postgres_config(db_uri=":memory:")
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError, match="requires a valid PostgreSQL connection string"):
+                build_server_params("postgres", config)
+
     def test_missing_command_raises_error(self):
         """stdio transport without command should raise ValueError."""
         config = McpServerConfig(
