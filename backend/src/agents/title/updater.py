@@ -40,9 +40,38 @@ class TitleGenerationUpdater:
         self._client_factory = client_factory
 
     def process(self, task: TitleGenerationTask) -> None:
+        # Avoid unnecessary title generation if the thread already has a non-default/manual title.
+        if self._has_non_default_title(task.thread_id):
+            return
+
         title = self.generate_title(task.messages)
         self._update_thread_title_if_needed(task.thread_id, title)
 
+    def _has_non_default_title(self, thread_id: str) -> bool:
+        """
+        Returns True if the thread already has a non-empty title, indicating that
+        a manual or non-default title has been set and we should skip generation.
+        """
+        # If no client is available, we cannot check the existing title; fall back to generation.
+        if self._client_factory is None and _get_sync_client is None:
+            return False
+
+        try:
+            if self._client_factory is not None:
+                client = self._client_factory(self._langgraph_url)
+            else:
+                client = _get_sync_client(self._langgraph_url)  # type: ignore[misc]
+
+            thread = client.threads.get(thread_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch thread %s while checking existing title: %s", thread_id, exc)
+            return False
+
+        existing_title = getattr(thread, "title", None)
+        if not isinstance(existing_title, str):
+            return False
+
+        return existing_title.strip() != ""
     def generate_title(self, messages: list[Any]) -> str:
         config = get_title_config()
         user_msg, assistant_msg = self._extract_messages(messages)

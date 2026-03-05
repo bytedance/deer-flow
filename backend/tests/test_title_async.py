@@ -42,14 +42,16 @@ def test_updater_falls_back_after_timeout(monkeypatch):
             return SimpleNamespace(content="ignored")
 
     original = get_title_config()
-    set_title_config(TitleConfig(timeout_seconds=0.01, max_retries=0, max_chars=20))
-    monkeypatch.setattr("src.agents.title.updater.create_chat_model", lambda **kwargs: SlowModel())
+    try:
+        set_title_config(TitleConfig(timeout_seconds=0.01, max_retries=0, max_chars=20))
+        monkeypatch.setattr("src.agents.title.updater.create_chat_model", lambda **kwargs: SlowModel())
 
-    updater = TitleGenerationUpdater(client_factory=lambda url: None)
-    title = updater.generate_title([_message("human", "A long first message for fallback title")])
+        updater = TitleGenerationUpdater(client_factory=lambda url: None)
+        title = updater.generate_title([_message("human", "A long first message for fallback title")])
 
-    set_title_config(original)
-    assert title.startswith("A long first message")
+        assert title.startswith("A long first message")
+    finally:
+        set_title_config(original)
 
 
 def test_updater_does_not_override_manual_title(monkeypatch):
