@@ -67,7 +67,7 @@ class TestRuntimeTierSettings:
     def test_anthropic_opus_adaptive_thinking_uses_effort(self) -> None:
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-opus-4-6", tier="thinking")
         result = _runtime_tier_settings(spec, thinking_enabled=True)
-        assert result == {"thinking": {"type": "adaptive", "effort": "medium"}}
+        assert result == {"thinking": {"type": "adaptive"}, "effort": "medium"}
 
     def test_anthropic_thinking_enabled(self) -> None:
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-3-5-sonnet", tier="thinking")
@@ -200,7 +200,8 @@ class TestCreateRuntimeModel:
         spec = RuntimeModelSpec(provider="anthropic", model_id="claude-opus-4-6", api_key="key")
         _create_runtime_model(spec, thinking_enabled=False, thinking={"type": "adaptive", "effort": "medium"})
         call_kwargs = mock_cls.call_args[1]
-        assert call_kwargs["thinking"] == {"type": "adaptive", "effort": "medium"}
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["effort"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -311,3 +312,33 @@ class TestCreateChatModel:
             with patch("src.models.factory.resolve_class", return_value=MagicMock()):
                 with pytest.raises(ValueError, match="empty api_key"):
                     create_chat_model(name="test-model")
+
+    @patch("src.models.factory.ChatAnthropic")
+    def test_config_anthropic_adaptive_thinking_is_normalized(self, mock_cls) -> None:
+        mock_model = MagicMock()
+        mock_model.name = "claude-opus-4-6"
+        mock_model.use = "langchain_anthropic:ChatAnthropic"
+        mock_model.supports_thinking = True
+        mock_model.when_thinking_enabled = {
+            "thinking": {
+                "type": "adaptive",
+                "effort": "high",
+            }
+        }
+        mock_model.model_dump.return_value = {
+            "model": "claude-opus-4-6",
+            "api_key": "resolved-key",
+        }
+
+        mock_config = MagicMock()
+        mock_config.models = [mock_model]
+        mock_config.get_model_config.return_value = mock_model
+
+        with patch("src.models.factory.get_app_config", return_value=mock_config):
+            with patch("src.models.factory.resolve_class", return_value=mock_cls):
+                with patch("src.models.factory.is_tracing_enabled", return_value=False):
+                    create_chat_model(name="claude-opus-4-6", thinking_enabled=True)
+
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["effort"] == "high"
