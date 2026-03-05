@@ -9,6 +9,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import { useAppConfig } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -34,6 +35,7 @@ export function WorkspaceHeader({
   ...props
 }: React.ComponentProps<"header">) {
   const { t } = useI18n();
+  const { brand } = useAppConfig();
   const location = useLocation();
   const segments = useMemo(() => {
     const parts = location.pathname?.split("/") || [];
@@ -101,7 +103,7 @@ export function WorkspaceHeader({
       >
         <Tooltip content={t.workspace.githubTooltip}>
           <a
-            href="https://github.com/thinktank-ai/thinktank-ai"
+            href={brand.github_url ?? "https://github.com/thinktank-ai/thinktank-ai"}
             target="_blank"
             rel="noopener noreferrer"
             className="opacity-75 transition hover:opacity-100"

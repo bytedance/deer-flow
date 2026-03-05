@@ -3,11 +3,13 @@ import { useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { useAppConfig } from "@/core/config";
 import { env } from "@/env";
 
 import { useRightPanel } from "./right-panel-context";
 
 export function WorkspaceTitleBar() {
+  const { brand } = useAppConfig();
   const { open: rightPanelOpen, setOpen: setRightPanelOpen } = useRightPanel();
   const location = useLocation();
   const isOnChatPage = location.pathname.startsWith("/workspace/chats/");
@@ -23,7 +25,7 @@ export function WorkspaceTitleBar() {
       {/* Space for macOS traffic lights */}
       <div className="w-20 shrink-0" />
       {/* Brand */}
-      <span className="text-primary mr-1 font-serif text-sm">Thinktank.ai</span>
+      <span className="text-primary mr-1 font-serif text-sm">{brand.name}</span>
       {/* Left panel (sidebar) trigger */}
       <div
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

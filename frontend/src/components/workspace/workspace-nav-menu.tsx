@@ -100,7 +100,7 @@ export function WorkspaceNavMenu() {
                   <DropdownMenuSeparator />
                   {/* Temporarily hidden entries in "Settings and more".
                   <a
-                    href="https://thinktank.ai/"
+                    href={brand.website_url ?? "https://thinktank.ai"}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -110,7 +110,7 @@ export function WorkspaceNavMenu() {
                     </DropdownMenuItem>
                   </a>
                   <a
-                    href="https://github.com/thinktank-ai/thinktank-ai"
+                    href={brand.github_url ?? "https://github.com/thinktank-ai/thinktank-ai"}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -121,7 +121,7 @@ export function WorkspaceNavMenu() {
                   </a>
                   <DropdownMenuSeparator />
                   <a
-                    href="https://github.com/thinktank-ai/thinktank-ai/issues"
+                    href={`${brand.github_url ?? "https://github.com/thinktank-ai/thinktank-ai"}/issues`}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -130,7 +130,7 @@ export function WorkspaceNavMenu() {
                       {t.workspace.reportIssue}
                     </DropdownMenuItem>
                   </a>
-                  <a href="mailto:support@thinktank.ai">
+                  <a href={`mailto:${brand.support_email ?? "support@thinktank.ai"}`}>
                     <DropdownMenuItem>
                       <MailIcon />
                       {t.workspace.contactUs}

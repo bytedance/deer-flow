@@ -8,12 +8,14 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAppConfig } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
+  const { brand } = useAppConfig();
   const { state } = useSidebar();
   const location = useLocation();
   return (
@@ -39,11 +41,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             <div className="flex items-center">
               {env.VITE_STATIC_WEBSITE_ONLY === "true" ? (
                 <Link to="/" className="gradient-text ml-2 font-serif">
-                  Thinktank.ai
+                  {brand.name}
                 </Link>
               ) : (
                 <div className="gradient-text ml-2 cursor-default font-serif">
-                  Thinktank.ai
+                  {brand.name}
                 </div>
               )}
               <div className="flex-1" />
