@@ -20,18 +20,18 @@ interface QuickAction {
 const defaultActions: QuickAction[] = [
   {
     icon: CalendarIcon,
-    label: "Optimize my week",
-    prompt: "Help me plan and optimize my schedule for this week",
+    label: "Research Green Bonds for Coastal Resilience",
+    prompt: "Which US municipalities have successfully issued green bonds to fund climate resilience infrastructure? Compare their project outcomes, repayment structures, and lessons learned — particularly for coastal cities under 500,000 population.",
   },
   {
     icon: FolderIcon,
-    label: "Organize my screenshots",
-    prompt: "Help me organize and categorize my screenshots",
+    label: "Analyze Brazil, India, and South Africa Trends",
+    prompt: "What are the GDP per capita and life expectancy trends for Brazil, India, and South Africa over the last 20 years? Which country has improved the most?",
   },
   {
     icon: TableIcon,
-    label: "Find insights in files",
-    prompt: "Help me find insights and patterns in my files",
+    label: "Retrieve AAPL Stock Data",
+    prompt: "Use AlphaVantage to retrieve the as-traded daily open/high/low/close/volume values of today for AAPL.",
   },
 ];
 
@@ -100,13 +100,16 @@ export function QuickActions({ className, actions = defaultActions }: QuickActio
           <ShuffleIcon className="size-4" />
           <span>Pick a task, any task</span>
         </div>
-        <button
-          type="button"
-          className="flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <PlusIcon className="size-3.5" />
-          Customize with plugins
-        </button>
+        {/* Temporarily hidden for demo */}
+        {false && (
+          <button
+            type="button"
+            className="flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <PlusIcon className="size-3.5" />
+            Customize with plugins
+          </button>
+        )}
       </div>
 
       {/* Task cards - 3 in a row */}
