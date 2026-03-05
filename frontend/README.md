@@ -73,6 +73,12 @@ NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2024"
 ```
 
+### Brand Name
+
+- The frontend reads brand metadata from backend `GET /api/config`, sourced from top-level `brand` in `config.yaml`.
+- If the backend is unreachable, UI falls back to default brand values (`Thinktank.ai`, website, GitHub, support email).
+- Desktop package naming is still controlled by `frontend/electron-builder.json` (`productName`). For a full rebrand, update both `config.yaml` and `electron-builder.json`.
+
 ## Project Structure
 
 ```
