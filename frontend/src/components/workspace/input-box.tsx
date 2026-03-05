@@ -3,7 +3,6 @@ import {
   ArrowUpIcon,
   CheckIcon,
   ChevronDownIcon,
-  FolderIcon,
   GraduationCapIcon,
   LightbulbIcon,
   PaperclipIcon,
@@ -34,9 +33,13 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { ConfettiButton } from "@/components/ui/confetti-button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
 import { resolveThinkingEffortForModel, useModels } from "@/core/models/hooks";
@@ -54,15 +57,48 @@ import {
   ModelSelectorTrigger,
 } from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
 
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { Tooltip } from "./tooltip";
+
+type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+function normalizeModeForModel(
+  mode: InputMode | undefined,
+  modelSupportsThinking: boolean,
+): InputMode {
+  if (!mode) {
+    return modelSupportsThinking ? "thinking" : "flash";
+  }
+  if (modelSupportsThinking && mode === "flash") {
+    return "thinking";
+  }
+  if (!modelSupportsThinking && mode === "thinking") {
+    return "flash";
+  }
+  return mode;
+}
+
+function preferredThinkingEffortForMode(mode: InputMode): string {
+  return mode === "pro" || mode === "ultra" ? "high" : "medium";
+}
+
+function resolveThinkingEffortForMode(
+  model: ReturnType<typeof useModels>["models"][number] | undefined,
+  mode: InputMode,
+  currentEffort: string | undefined,
+): string | undefined {
+  const supportsThinking = model?.thinking_enabled ?? model?.supports_thinking ?? false;
+  if (!supportsThinking) {
+    return currentEffort;
+  }
+  return (
+    resolveThinkingEffortForModel(
+      model,
+      preferredThinkingEffortForMode(mode),
+    ) ?? currentEffort
+  );
+}
 
 export function InputBox({
   className,
@@ -85,7 +121,7 @@ export function InputBox({
     AgentThreadContext,
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
   > & {
-    mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    mode: InputMode | undefined;
   };
   extraHeader?: React.ReactNode;
   isNewThread?: boolean;
@@ -95,7 +131,7 @@ export function InputBox({
       AgentThreadContext,
       "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
     > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+      mode: InputMode | undefined;
     },
   ) => void;
   onSubmit?: (message: PromptInputMessage) => void;
@@ -105,21 +141,23 @@ export function InputBox({
   const [settings] = useLocalSettings();
   const [searchParams] = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  const [thinkingEffortMenuOpen, setThinkingEffortMenuOpen] = useState(false);
   const { models } = useModels();
   const selectedModel = useMemo(() => {
     if (!context.model_name && models.length > 0) {
       const model = models[0]!;
       const alwaysThinking =
         model.thinking_enabled ?? model.supports_thinking ?? false;
-      const defaultEffort =
-        resolveThinkingEffortForModel(model, context.thinking_effort) ??
-        "medium";
+      const defaultMode = normalizeModeForModel(undefined, alwaysThinking);
+      const defaultEffort = resolveThinkingEffortForMode(
+        model,
+        defaultMode,
+        context.thinking_effort,
+      );
       setTimeout(() => {
         onContextChange?.({
           ...context,
           model_name: model.id,
-          mode: alwaysThinking ? "pro" : "flash",
+          mode: defaultMode,
           thinking_effort: defaultEffort,
         });
       }, 0);
@@ -131,24 +169,20 @@ export function InputBox({
     () => selectedModel?.thinking_enabled ?? selectedModel?.supports_thinking ?? false,
     [selectedModel],
   );
-  const supportThinking = useMemo(() => modelThinkingEnabled, [modelThinkingEnabled]);
-  const supportsAdaptiveThinking = useMemo(
-    () => selectedModel?.supports_adaptive_thinking ?? false,
-    [selectedModel],
-  );
-  const selectedThinkingEffort = useMemo(
-    () => resolveThinkingEffortForModel(selectedModel, context.thinking_effort),
-    [context.thinking_effort, selectedModel],
+  const activeMode = useMemo(
+    () => normalizeModeForModel(context.mode, modelThinkingEnabled),
+    [context.mode, modelThinkingEnabled],
   );
   useEffect(() => {
     if (!selectedModel) {
       return;
     }
-    const nextMode =
-      modelThinkingEnabled && context.mode === "flash" ? "pro" : context.mode;
-    const nextThinkingEffort =
-      resolveThinkingEffortForModel(selectedModel, context.thinking_effort) ??
-      "medium";
+    const nextMode = normalizeModeForModel(context.mode, modelThinkingEnabled);
+    const nextThinkingEffort = resolveThinkingEffortForMode(
+      selectedModel,
+      nextMode,
+      context.thinking_effort,
+    );
     if (
       nextMode !== context.mode ||
       nextThinkingEffort !== context.thinking_effort
@@ -183,13 +217,16 @@ export function InputBox({
     (model_id: string) => {
       const model = models.find((item) => item.id === model_id);
       const alwaysThinking = model?.thinking_enabled ?? model?.supports_thinking ?? false;
-      const normalizedThinkingEffort =
-        resolveThinkingEffortForModel(model, context.thinking_effort) ??
-        "medium";
+      const normalizedMode = normalizeModeForModel(context.mode, alwaysThinking);
+      const normalizedThinkingEffort = resolveThinkingEffortForMode(
+        model,
+        normalizedMode,
+        context.thinking_effort,
+      );
       onContextChange?.({
         ...context,
         model_name: model_id,
-        mode: alwaysThinking && context.mode === "flash" ? "pro" : context.mode,
+        mode: normalizedMode,
         thinking_effort: normalizedThinkingEffort,
       });
       setModelDialogOpen(false);
@@ -197,36 +234,23 @@ export function InputBox({
     [context, models, onContextChange],
   );
   const handleModeSelect = useCallback(
-    (mode: "flash" | "thinking" | "pro" | "ultra") => {
-      if (mode === "flash" && modelThinkingEnabled) {
+    (mode: InputMode) => {
+      if ((mode === "flash" && modelThinkingEnabled) || (mode === "thinking" && !modelThinkingEnabled)) {
         return;
       }
+      const nextMode = normalizeModeForModel(mode, modelThinkingEnabled);
+      const nextThinkingEffort = resolveThinkingEffortForMode(
+        selectedModel,
+        nextMode,
+        context.thinking_effort,
+      );
       onContextChange?.({
         ...context,
-        mode,
+        mode: nextMode,
+        thinking_effort: nextThinkingEffort,
       });
     },
-    [context, modelThinkingEnabled, onContextChange],
-  );
-  const handleThinkingEffortSelect = useCallback(
-    (effort: string) => {
-      onContextChange?.({
-        ...context,
-        thinking_effort: effort,
-      });
-    },
-    [context, onContextChange],
-  );
-  const thinkingEffortLabel = useMemo(() => {
-    const effort = selectedThinkingEffort ?? "medium";
-    if (effort === "xhigh") {
-      return "XHigh";
-    }
-    return effort.charAt(0).toUpperCase() + effort.slice(1);
-  }, [selectedThinkingEffort]);
-  const adaptiveThinkingEfforts = useMemo(
-    () => selectedModel?.adaptive_thinking_efforts ?? [],
-    [selectedModel],
+    [context, modelThinkingEnabled, onContextChange, selectedModel],
   );
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -245,11 +269,11 @@ export function InputBox({
     [isMissingProviderKey, onSubmit, onStop, status],
   );
   const modeLabel =
-    context.mode === "flash"
+    activeMode === "flash"
       ? t.inputBox.flashMode
-      : context.mode === "thinking"
+      : activeMode === "thinking"
         ? t.inputBox.reasoningMode
-        : context.mode === "pro"
+        : activeMode === "pro"
           ? t.inputBox.proMode
           : t.inputBox.ultraMode;
   const submitDisabled = disabled ? true : isMissingProviderKey;
@@ -298,31 +322,26 @@ export function InputBox({
           <PromptInputActionMenu>
             <ModeHoverGuide
               mode={
-                context.mode === "flash" ||
-                context.mode === "thinking" ||
-                context.mode === "pro" ||
-                context.mode === "ultra"
-                  ? context.mode
-                  : "flash"
+                activeMode
               }
             >
               <PromptInputActionMenuTrigger className="gap-1.5! px-2! text-foreground/70 hover:text-foreground">
                 <div>
-                  {context.mode === "flash" && <ZapIcon className="size-4" />}
-                  {context.mode === "thinking" && (
+                  {activeMode === "flash" && <ZapIcon className="size-4" />}
+                  {activeMode === "thinking" && (
                     <LightbulbIcon className="size-4" />
                   )}
-                  {context.mode === "pro" && (
+                  {activeMode === "pro" && (
                     <GraduationCapIcon className="size-4" />
                   )}
-                  {context.mode === "ultra" && (
+                  {activeMode === "ultra" && (
                     <RocketIcon className="size-4 text-[#dabb5e]" />
                   )}
                 </div>
                 <div
                   className={cn(
                     "text-sm font-medium",
-                    context.mode === "ultra" ? "golden-text" : "",
+                    activeMode === "ultra" ? "golden-text" : "",
                   )}
                 >
                   {modeLabel}
@@ -338,7 +357,7 @@ export function InputBox({
                   {!modelThinkingEnabled && (
                     <PromptInputActionMenuItem
                       className={cn(
-                        context.mode === "flash"
+                        activeMode === "flash"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
                       )}
@@ -349,7 +368,7 @@ export function InputBox({
                           <ZapIcon
                             className={cn(
                               "mr-2 size-4",
-                              context.mode === "flash" &&
+                              activeMode === "flash" &&
                                 "text-accent-foreground",
                             )}
                           />
@@ -359,17 +378,17 @@ export function InputBox({
                           {t.inputBox.flashModeDescription}
                         </div>
                       </div>
-                      {context.mode === "flash" ? (
+                      {activeMode === "flash" ? (
                         <CheckIcon className="ml-auto size-4" />
                       ) : (
                         <div className="ml-auto size-4" />
                       )}
                     </PromptInputActionMenuItem>
                   )}
-                  {supportThinking && (
+                  {modelThinkingEnabled && (
                     <PromptInputActionMenuItem
                       className={cn(
-                        context.mode === "thinking"
+                        activeMode === "thinking"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
                       )}
@@ -380,7 +399,7 @@ export function InputBox({
                           <LightbulbIcon
                             className={cn(
                               "mr-2 size-4",
-                              context.mode === "thinking" &&
+                              activeMode === "thinking" &&
                                 "text-accent-foreground",
                             )}
                           />
@@ -390,7 +409,7 @@ export function InputBox({
                           {t.inputBox.reasoningModeDescription}
                         </div>
                       </div>
-                      {context.mode === "thinking" ? (
+                      {activeMode === "thinking" ? (
                         <CheckIcon className="ml-auto size-4" />
                       ) : (
                         <div className="ml-auto size-4" />
@@ -399,7 +418,7 @@ export function InputBox({
                   )}
                   <PromptInputActionMenuItem
                     className={cn(
-                      context.mode === "pro"
+                      activeMode === "pro"
                         ? "text-accent-foreground"
                         : "text-muted-foreground/65",
                     )}
@@ -410,7 +429,7 @@ export function InputBox({
                         <GraduationCapIcon
                           className={cn(
                             "mr-2 size-4",
-                            context.mode === "pro" && "text-accent-foreground",
+                            activeMode === "pro" && "text-accent-foreground",
                           )}
                         />
                         {t.inputBox.proMode}
@@ -419,7 +438,7 @@ export function InputBox({
                         {t.inputBox.proModeDescription}
                       </div>
                     </div>
-                    {context.mode === "pro" ? (
+                    {activeMode === "pro" ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (
                       <div className="ml-auto size-4" />
@@ -427,7 +446,7 @@ export function InputBox({
                   </PromptInputActionMenuItem>
                   <PromptInputActionMenuItem
                     className={cn(
-                      context.mode === "ultra"
+                      activeMode === "ultra"
                         ? "text-accent-foreground"
                         : "text-muted-foreground/65",
                     )}
@@ -438,12 +457,12 @@ export function InputBox({
                         <RocketIcon
                           className={cn(
                             "mr-2 size-4",
-                            context.mode === "ultra" && "text-[#dabb5e]",
+                            activeMode === "ultra" && "text-[#dabb5e]",
                           )}
                         />
                         <div
                           className={cn(
-                            context.mode === "ultra" && "golden-text",
+                            activeMode === "ultra" && "golden-text",
                           )}
                         >
                           {t.inputBox.ultraMode}
@@ -453,7 +472,7 @@ export function InputBox({
                         {t.inputBox.ultraModeDescription}
                       </div>
                     </div>
-                    {context.mode === "ultra" ? (
+                    {activeMode === "ultra" ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (
                       <div className="ml-auto size-4" />
@@ -463,51 +482,6 @@ export function InputBox({
               </DropdownMenuGroup>
             </PromptInputActionMenuContent>
           </PromptInputActionMenu>
-          {supportsAdaptiveThinking && (
-            <DropdownMenu
-              open={thinkingEffortMenuOpen}
-              onOpenChange={setThinkingEffortMenuOpen}
-            >
-              <DropdownMenuTrigger asChild>
-                <PromptInputButton
-                  aria-label={`Thinking effort: ${thinkingEffortLabel}`}
-                  className="px-2! text-foreground/70 hover:text-foreground"
-                  onPointerDown={(event) => {
-                    if (!thinkingEffortMenuOpen) {
-                      return;
-                    }
-                    // Ensure re-clicking trigger closes the open menu.
-                    event.preventDefault();
-                    setThinkingEffortMenuOpen(false);
-                  }}
-                >
-                  <LightbulbIcon className="size-4" />
-                </PromptInputButton>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent className="w-52">
-                {adaptiveThinkingEfforts.map((effort) => {
-                  const normalized = effort.trim().toLowerCase();
-                  const label = normalized === "xhigh"
-                    ? "XHigh"
-                    : normalized.charAt(0).toUpperCase() + normalized.slice(1);
-                  const selected = normalized === selectedThinkingEffort;
-                  return (
-                    <DropdownMenuItem
-                      key={effort}
-                      onSelect={() => handleThinkingEffortSelect(normalized)}
-                    >
-                      <span>{label}</span>
-                      {selected ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
         </PromptInputTools>
         <PromptInputTools className="gap-2">
           <div className="flex flex-col gap-1">
@@ -531,26 +505,33 @@ export function InputBox({
                   </div>
                 )}
                 <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.id}
-                      value={m.id}
-                      onSelect={() => handleModelSelect(m.id)}
-                      className="flex-col items-start gap-1 py-3"
-                    >
-                      <div className="flex w-full items-center justify-between">
-                        <ModelSelectorName className="text-base font-medium">{m.display_name}</ModelSelectorName>
-                        {m.id === context.model_name && (
-                          <CheckIcon className="size-4 text-primary" />
-                        )}
-                      </div>
-                      <span className="text-sm text-muted-foreground">
-                        {m.thinking_enabled ?? m.supports_thinking
-                          ? "Best for everyday tasks"
-                          : "Fastest for quick answers"}
-                      </span>
-                    </ModelSelectorItem>
-                  ))}
+                  {models.map((m) => {
+                    const modelDescription = m.description?.trim();
+                    const fallbackDescription =
+                      (m.thinking_enabled ?? m.supports_thinking)
+                        ? "Best for everyday tasks"
+                        : "Fastest for quick answers";
+                    return (
+                      <ModelSelectorItem
+                        key={m.id}
+                        value={m.id}
+                        onSelect={() => handleModelSelect(m.id)}
+                        className="flex-col items-start gap-1 py-3"
+                      >
+                        <div className="flex w-full items-center justify-between">
+                          <ModelSelectorName className="text-base font-medium">{m.display_name}</ModelSelectorName>
+                          {m.id === context.model_name && (
+                            <CheckIcon className="size-4 text-primary" />
+                          )}
+                        </div>
+                        <span className="text-sm text-muted-foreground">
+                          {modelDescription && modelDescription.length > 0
+                            ? modelDescription
+                            : fallbackDescription}
+                        </span>
+                      </ModelSelectorItem>
+                    );
+                  })}
                 </ModelSelectorList>
               </ModelSelectorContent>
             </ModelSelector>
