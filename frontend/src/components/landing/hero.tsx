@@ -56,7 +56,7 @@ export function Hero({ className }: { className?: string }) {
           An Intelligent SuperAgent harness that researches, analyzes, and creates insights.
           With
           <br />
-          the help of sandboxes, memories, tools, skills and agent sawrms, it
+          the help of sandboxes, memories, tools, skills and agent swarms, it
           handles
           <br />
           different levels of tasks that could take minutes to hours.
