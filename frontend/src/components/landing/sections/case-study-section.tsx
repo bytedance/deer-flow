@@ -1,12 +1,14 @@
 import { Link } from "react-router";
 
 import { Card } from "@/components/ui/card";
+import { useAppConfig } from "@/core/config";
 import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
 
 export function CaseStudySection({ className }: { className?: string }) {
+  const { brand } = useAppConfig();
   const caseStudies = [
     {
       threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
@@ -49,7 +51,7 @@ export function CaseStudySection({ className }: { className?: string }) {
     <Section
       className={className}
       title="Case Studies"
-      subtitle="See how Thinktank.ai is used in the wild"
+      subtitle={`See how ${brand.name} is used in the wild`}
     >
       <div className="container-md mt-8 grid grid-cols-1 gap-4 px-20 md:grid-cols-2 lg:grid-cols-3">
         {caseStudies.map((caseStudy) => (
