@@ -300,6 +300,11 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
     return [];
   }
 
+  // Check if the backend reported no new files were uploaded in this message
+  if (uploadedFilesContent?.includes("(empty)")) {
+    return [];
+  }
+
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
   const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;

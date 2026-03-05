@@ -188,6 +188,13 @@ class TestCreateFilesMessage:
         msg = mw._create_files_message([self._new_file()], [])
         assert "read_file" in msg
 
+    def test_empty_new_files_produces_empty_marker(self, tmp_path):
+        mw = _middleware(tmp_path)
+        msg = mw._create_files_message([], [])
+        assert "(empty)" in msg
+        assert "<uploaded_files>" in msg
+        assert "</uploaded_files>" in msg
+
 
 # ---------------------------------------------------------------------------
 # before_agent
