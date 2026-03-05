@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Index,
     Integer,
@@ -68,8 +70,15 @@ class ThreadModel(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    s3_sync_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="none")
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    local_evicted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
 
-    __table_args__ = (Index("idx_threads_user_id", "user_id"),)
+    __table_args__ = (
+        Index("idx_threads_user_id", "user_id"),
+        Index("idx_threads_s3_sync_status", "s3_sync_status"),
+        Index("idx_threads_last_accessed_at", "last_accessed_at"),
+    )
 
 
 class UserMemoryModel(Base):

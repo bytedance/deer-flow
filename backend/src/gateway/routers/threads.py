@@ -6,6 +6,9 @@ and enforce per-user ownership via the thread store.
 """
 
 import logging
+import os
+import shutil
+import stat
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +16,7 @@ from langchain_core.messages import RemoveMessage
 from langgraph_sdk import get_client
 from pydantic import BaseModel
 
+from src.config.paths import get_paths
 from src.gateway.auth.middleware import get_current_user
 from src.gateway.auth.ownership import verify_thread_ownership
 from src.gateway.auth.thread_store import (
@@ -181,6 +185,46 @@ async def delete_thread(
         delete_thread_ownership(thread_id)
     except Exception as e:
         logger.warning(f"Failed to remove ownership record for {thread_id}: {e}")
+
+    # Delete local thread directory (best-effort)
+    # Files may be owned by root (created inside Docker containers), so fix
+    # permissions on the fly before retrying the removal.
+    def _rmtree_onerror(_func, path, _exc_info):
+        try:
+            os.chmod(path, stat.S_IRWXU)
+            parent = os.path.dirname(path)
+            os.chmod(parent, stat.S_IRWXU)
+            _func(path)
+        except Exception:
+            pass
+
+    try:
+        thread_dir = get_paths().thread_dir(thread_id)
+        if thread_dir.exists():
+            shutil.rmtree(thread_dir, onerror=_rmtree_onerror)
+    except Exception as e:
+        logger.warning(f"Failed to delete local thread directory for {thread_id}: {e}")
+
+    # Enqueue S3 deletion if S3 is configured (best-effort)
+    try:
+        from src.storage.s3_artifact_store import is_s3_enabled
+
+        if is_s3_enabled():
+            from src.queue.redis_connection import get_redis_client, is_redis_available
+
+            if is_redis_available():
+                from rq import Queue as RQQueue
+
+                redis = get_redis_client()
+                queue = RQQueue("artifact_sync", connection=redis)
+                queue.enqueue(
+                    "src.queue.artifact_tasks.delete_thread_from_s3",
+                    user_id=current_user["id"],
+                    thread_id=thread_id,
+                    job_timeout=120,
+                )
+    except Exception as e:
+        logger.warning(f"Failed to enqueue S3 deletion for {thread_id}: {e}")
 
     logger.info(f"Deleted thread {thread_id} for user {current_user['id']}")
     return {"success": True}

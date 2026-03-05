@@ -44,6 +44,7 @@ dependencies = [
     "python-json-logger>=2.0.0",
     "prometheus-client>=0.20.0",
     "prometheus-fastapi-instrumentator>=7.0.0",
+    "boto3>=1.35.0",
 ]
 
 [dependency-groups]
