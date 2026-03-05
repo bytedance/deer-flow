@@ -40,21 +40,41 @@ PROVIDER_BASE_URLS = {
 ANTHROPIC_DEFAULT_THINKING_BUDGET_TOKENS = 16384
 
 
-def _normalize_anthropic_thinking_config(thinking_config: Any) -> Any:
-    """Normalize Anthropic thinking config while preserving adaptive effort payloads."""
+def _normalize_effort_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized:
+            return normalized
+    return None
+
+
+def _normalize_anthropic_thinking_config(thinking_config: Any) -> tuple[Any, str | None]:
+    """Normalize Anthropic thinking config and extract adaptive effort.
+
+    Anthropic adaptive reasoning now uses:
+      - thinking: {"type": "adaptive"}
+      - effort: "low|medium|high|max"
+
+    This helper keeps backward compatibility with legacy payloads like:
+      - {"type": "adaptive", "effort": "medium"}
+      - {"adaptive": {"effort": "medium"}}
+    """
     if not isinstance(thinking_config, dict):
-        return thinking_config
+        return thinking_config, None
 
     effort = thinking_config.get("effort")
     if thinking_config.get("type") == "adaptive":
-        normalized_effort = effort.strip().lower() if isinstance(effort, str) and effort.strip() else "medium"
-        return {"type": "adaptive", "effort": normalized_effort}
+        normalized_effort = _normalize_effort_value(effort)
+        adaptive = thinking_config.get("adaptive")
+        if normalized_effort is None and isinstance(adaptive, dict):
+            normalized_effort = _normalize_effort_value(adaptive.get("effort"))
+        return {"type": "adaptive"}, (normalized_effort or "medium")
 
     adaptive = thinking_config.get("adaptive")
     if isinstance(adaptive, dict) and adaptive.get("effort") is not None:
         adaptive_effort = adaptive.get("effort")
-        normalized_effort = adaptive_effort.strip().lower() if isinstance(adaptive_effort, str) and adaptive_effort.strip() else "medium"
-        return {"type": "adaptive", "effort": normalized_effort}
+        normalized_effort = _normalize_effort_value(adaptive_effort)
+        return {"type": "adaptive"}, (normalized_effort or "medium")
 
     budget_tokens = thinking_config.get("budget_tokens")
     normalized_budget = (
@@ -64,9 +84,9 @@ def _normalize_anthropic_thinking_config(thinking_config: Any) -> Any:
     )
 
     if thinking_config.get("type") == "enabled":
-        return {"type": "enabled", "budget_tokens": normalized_budget}
+        return {"type": "enabled", "budget_tokens": normalized_budget}, None
 
-    return thinking_config
+    return thinking_config, None
 
 
 def _catalog_adaptive_efforts(spec: RuntimeModelSpec) -> tuple[list[str], str | None]:
@@ -140,7 +160,7 @@ def _runtime_tier_settings(spec: RuntimeModelSpec, thinking_enabled: bool) -> di
 
     if provider == "anthropic" and adaptive_efforts:
         effort = _resolve_adaptive_effort(spec.thinking_effort, adaptive_efforts, default_effort)
-        return {"thinking": {"type": "adaptive", "effort": effort}}
+        return {"thinking": {"type": "adaptive"}, "effort": effort}
 
     if provider == "anthropic" and (spec.tier == "thinking" or model_thinking_enabled):
         return {
@@ -184,9 +204,11 @@ def _create_runtime_model(spec: RuntimeModelSpec, thinking_enabled: bool, **kwar
 
     settings.setdefault("max_tokens", 128000)
     if provider == "anthropic":
-        thinking_config = _normalize_anthropic_thinking_config(settings.get("thinking"))
+        thinking_config, effort_from_thinking = _normalize_anthropic_thinking_config(settings.get("thinking"))
         if thinking_config is not None:
             settings["thinking"] = thinking_config
+        if effort_from_thinking is not None and settings.get("effort") is None:
+            settings["effort"] = effort_from_thinking
         if isinstance(thinking_config, dict):
             if thinking_config.get("type") == "enabled":
                 budget_tokens = thinking_config.get("budget_tokens")
@@ -258,6 +280,17 @@ def create_chat_model(
         if not model_config.supports_thinking:
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
         model_settings_from_config.update(model_config.when_thinking_enabled)
+    try:
+        is_anthropic_model = issubclass(model_class, ChatAnthropic)
+    except TypeError:
+        model_class_path = model_config.use.strip().lower()
+        is_anthropic_model = model_class_path.startswith("langchain_anthropic:chatanthropic")
+    if is_anthropic_model:
+        thinking_config, effort_from_thinking = _normalize_anthropic_thinking_config(model_settings_from_config.get("thinking"))
+        if thinking_config is not None:
+            model_settings_from_config["thinking"] = thinking_config
+        if effort_from_thinking is not None and model_settings_from_config.get("effort") is None:
+            model_settings_from_config["effort"] = effort_from_thinking
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
     # Attach LangSmith tracing if enabled

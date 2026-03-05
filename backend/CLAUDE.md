@@ -154,7 +154,7 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 Note: OpenAI reasoning models use the Responses API payload (`reasoning.effort`). Adaptive effort options are configured per model in `config.yaml` under `provider_models`.
 
-For Anthropic 4.6 models (`claude-opus-4-6`, `claude-sonnet-4-6`), use adaptive thinking payloads (`thinking: { type: "adaptive", effort }`). `budget_tokens` on those models is deprecated and should not be used.
+For Anthropic 4.6 models (`claude-opus-4-6`, `claude-sonnet-4-6`), use adaptive thinking payloads (`thinking: { type: "adaptive" }` + `effort`). `budget_tokens` on those models is deprecated and should not be used.
 
 **Runtime Model Selection (per-user):**
 
@@ -284,7 +284,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Runtime `model_spec` supports `thinking_effort` and applies provider-specific adaptive payloads
   - OpenAI GPT-5.2: `reasoning.effort` (`low|medium|high|xhigh`)
-  - Anthropic Opus/Sonnet 4.6: `thinking.type=adaptive` with effort (`low|medium|high|max`)
+  - Anthropic Opus/Sonnet 4.6: `thinking.type=adaptive` plus `effort` (`low|medium|high|max`)
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 

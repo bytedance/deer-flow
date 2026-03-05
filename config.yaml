@@ -38,10 +38,9 @@ models:
     supports_vision: true
     supports_thinking: true  # Enable extended thinking capability
     when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-          budget_tokens: 16384
+      thinking:
+        type: adaptive
+      effort: medium
 
   # Example: DeepSeek model (with thinking support)
   - name: deepseek-reasoner
