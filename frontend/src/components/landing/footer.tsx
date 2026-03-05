@@ -1,7 +1,10 @@
 import { useMemo } from "react";
 
+import { useAppConfig } from "@/core/config";
+
 export function Footer() {
   const year = useMemo(() => new Date().getFullYear(), []);
+  const { brand } = useAppConfig();
   return (
     <footer className="container-md mx-auto mt-32 flex flex-col items-center justify-center">
       <hr className="from-border/0 to-border/0 m-0 h-px w-full border-none bg-linear-to-r via-white/20" />
@@ -12,7 +15,7 @@ export function Footer() {
       </div>
       <div className="text-muted-foreground container mb-8 flex flex-col items-center justify-center text-xs">
         <p>Licensed under MIT License</p>
-        <p>&copy; {year} Thinktank.ai</p>
+        <p>&copy; {year} {brand.name}</p>
       </div>
     </footer>
   );

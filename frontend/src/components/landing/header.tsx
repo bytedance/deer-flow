@@ -2,10 +2,14 @@ import { StarFilledIcon, GitHubLogoIcon } from "@radix-ui/react-icons";
 
 import { Button } from "@/components/ui/button";
 import { NumberTicker } from "@/components/ui/number-ticker";
+import { useAppConfig } from "@/core/config";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export function Header() {
+  const { brand } = useAppConfig();
+  const githubUrl = brand.github_url ?? "https://github.com/thinktank-ai/thinktank-ai";
+
   return (
     <header
       className="container-md fixed top-0 right-0 left-0 z-20 mx-auto flex h-16 items-center justify-between backdrop-blur-xs"
@@ -17,8 +21,8 @@ export function Header() {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         style={env.IS_ELECTRON ? ({ WebkitAppRegion: "no-drag" } as any) : undefined}
       >
-        <a href="https://github.com/thinktank-ai/thinktank-ai" target="_blank" rel="noreferrer">
-          <h1 className="font-serif text-xl">Thinktank.ai</h1>
+        <a href={githubUrl} target="_blank" rel="noreferrer">
+          <h1 className="font-serif text-xl">{brand.name}</h1>
         </a>
       </div>
       <div
@@ -39,10 +43,12 @@ export function Header() {
           asChild
           className="group relative z-10"
         >
-          <a href="https://github.com/thinktank-ai/thinktank-ai" target="_blank" rel="noreferrer">
+          <a href={githubUrl} target="_blank" rel="noreferrer">
             <GitHubLogoIcon className="size-4" />
             Star on GitHub
-            {env.VITE_STATIC_WEBSITE_ONLY === "true" && <StarCounter />}
+            {env.VITE_STATIC_WEBSITE_ONLY === "true" && (
+              <StarCounter githubUrl={githubUrl} />
+            )}
           </a>
         </Button>
       </div>
@@ -51,18 +57,15 @@ export function Header() {
   );
 }
 
-async function StarCounter() {
+async function StarCounter({ githubUrl }: { githubUrl: string }) {
   let stars = 10000; // Default value
 
   try {
-    const response = await fetch(
-      "https://api.github.com/repos/thinktank-ai/thinktank-ai",
-      {
-        headers: {
-          "Content-Type": "application/json",
-        },
+    const response = await fetch(getGitHubRepoApiUrl(githubUrl), {
+      headers: {
+        "Content-Type": "application/json",
       },
-    );
+    });
 
     if (response.ok) {
       const data = await response.json();
@@ -79,4 +82,17 @@ async function StarCounter() {
       )}
     </>
   );
+}
+
+function getGitHubRepoApiUrl(githubUrl: string): string {
+  try {
+    const parsed = new URL(githubUrl);
+    const [owner, repo] = parsed.pathname.split("/").filter(Boolean);
+    if (owner && repo) {
+      return `https://api.github.com/repos/${owner}/${repo}`;
+    }
+  } catch {
+    // Fall through to default if URL parsing fails.
+  }
+  return "https://api.github.com/repos/thinktank-ai/thinktank-ai";
 }

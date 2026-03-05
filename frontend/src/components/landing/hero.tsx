@@ -3,8 +3,11 @@ import { Link } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { WordRotate } from "@/components/ui/word-rotate";
+import { useAppConfig } from "@/core/config";
 import { cn } from "@/lib/utils";
 export function Hero({ className }: { className?: string }) {
+  const { brand } = useAppConfig();
+
   return (
     <div
       className={cn(
@@ -32,35 +35,35 @@ export function Hero({ className }: { className?: string }) {
               "Deep Research",
               "Collect Data",
               "Analyze Data",
-              "Generate Webpages",
-              "Vibe Coding",
-              "Generate Slides",
-              "Generate Images",
-              "Generate Podcasts",
-              "Generate Videos",
-              "Generate Songs",
-              "Organize Emails",
-              "Do Anything",
+              // "Generate Webpages",
+              // "Vibe Coding",
+              // "Generate Slides",
+              // "Generate Images",
+              // "Generate Podcasts",
+              // "Generate Videos",
+              // "Generate Songs",
+              "Organize Workflows",
+              // "Do Anything",
               "Learn Anything",
             ]}
           />{" "}
-          <div>with Thinktank.ai</div>
+          <div>with {brand.name}</div>
         </h1>
         <p
           className="mt-8 scale-105 text-center text-2xl text-shadow-sm"
           style={{ color: "rgb(184,184,192)" }}
         >
-          An open-source SuperAgent harness that researches, codes, and creates.
+          An Intelligent SuperAgent harness that researches, analyzes, and creates insights.
           With
           <br />
-          the help of sandboxes, memories, tools, skills and subagents, it
+          the help of sandboxes, memories, tools, skills and agent sawrms, it
           handles
           <br />
           different levels of tasks that could take minutes to hours.
         </p>
         <Link to="/workspace">
           <Button className="size-lg mt-8 scale-108" size="lg">
-            <span className="text-md">Get Started with 2.0</span>
+            <span className="text-md">Get Started</span>
             <ChevronRightIcon className="size-4" />
           </Button>
         </Link>
