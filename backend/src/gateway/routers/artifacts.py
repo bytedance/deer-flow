@@ -1,5 +1,6 @@
 import logging
 import mimetypes
+import time
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -7,12 +8,63 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from src.gateway.auth.middleware import get_current_user
 from src.gateway.auth.ownership import verify_thread_ownership
 from src.gateway.path_utils import resolve_thread_virtual_path
 
 logger = logging.getLogger(__name__)
+
+# In-memory debounce cache for last_accessed_at updates (thread_id -> timestamp)
+_access_time_cache: dict[str, float] = {}
+_ACCESS_TIME_DEBOUNCE_SECS = 3600  # Only write to DB if >1h stale
+
+
+def _update_last_accessed(thread_id: str) -> None:
+    """Update last_accessed_at in the DB, debounced to avoid write storms."""
+    now = time.time()
+    last = _access_time_cache.get(thread_id, 0)
+    if now - last < _ACCESS_TIME_DEBOUNCE_SECS:
+        return
+    _access_time_cache[thread_id] = now
+
+    try:
+        from datetime import UTC, datetime
+
+        from src.db.engine import get_db_session, is_db_enabled
+        from src.db.models import ThreadModel
+
+        if not is_db_enabled():
+            return
+        with get_db_session() as session:
+            thread = session.get(ThreadModel, thread_id)
+            if thread:
+                thread.last_accessed_at = datetime.now(UTC)
+    except Exception:
+        logger.debug(f"Failed to update last_accessed_at for {thread_id}", exc_info=True)
+
+
+async def _try_s3_download(thread_id: str, user_id: str, virtual_path: str, local_path: Path) -> bool:
+    """Try to download a file from S3 if S3 is configured. Returns True on success."""
+    from src.storage.s3_artifact_store import get_s3_artifact_store, is_s3_enabled
+
+    if not is_s3_enabled():
+        return False
+
+    store = get_s3_artifact_store()
+    if store is None:
+        return False
+
+    # Derive relative_path from the virtual path (strip the "mnt/user-data/" prefix)
+    stripped = virtual_path.lstrip("/")
+    prefix = "mnt/user-data/"
+    if stripped.startswith(prefix):
+        relative_path = stripped[len(prefix):]
+    else:
+        relative_path = stripped
+
+    return await run_in_threadpool(store.download_file, user_id, thread_id, relative_path, local_path)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 
@@ -103,6 +155,9 @@ async def get_artifact(
     """
     verify_thread_ownership(thread_id, current_user["id"])
 
+    # Debounced last-accessed timestamp update
+    _update_last_accessed(thread_id)
+
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
@@ -114,7 +169,11 @@ async def get_artifact(
         actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
 
         if not actual_skill_path.exists():
-            raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
+            # S3 fallback for .skill archive
+            if await _try_s3_download(thread_id, current_user["id"], skill_file_path, actual_skill_path):
+                pass  # downloaded successfully, continue
+            else:
+                raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
 
         if not actual_skill_path.is_file():
             raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
@@ -142,7 +201,9 @@ async def get_artifact(
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
     if not actual_path.exists():
-        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
+        # S3 fallback: try downloading the file from S3 if configured
+        if not await _try_s3_download(thread_id, current_user["id"], path, actual_path):
+            raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
 
     if not actual_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")

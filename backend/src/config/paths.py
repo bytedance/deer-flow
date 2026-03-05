@@ -132,7 +132,16 @@ class Paths:
         # Require an exact segment-boundary match to avoid prefix confusion
         # (e.g. reject paths like "mnt/user-dataX/...").
         if stripped != prefix and not stripped.startswith(prefix + "/"):
-            raise ValueError(f"Path must start with /{prefix}")
+            # Handle physical paths that contain the thread's user-data directory
+            # (e.g. "/data/thinktank/threads/{id}/user-data/outputs/file.png").
+            # Normalise by extracting everything after "user-data/" and re-prefixing.
+            ud_marker = "user-data/"
+            idx = stripped.find(ud_marker)
+            if idx >= 0:
+                tail = stripped[idx + len(ud_marker):]
+                stripped = prefix + "/" + tail if tail else prefix
+            else:
+                raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
         base = self.sandbox_user_data_dir(thread_id).resolve()
