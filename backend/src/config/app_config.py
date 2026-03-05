@@ -6,6 +6,7 @@ import yaml
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.config.brand_config import BrandConfig, get_brand_config, load_brand_config_from_dict
 from src.config.extensions_config import ExtensionsConfig
 from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
@@ -40,6 +41,7 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
+    brand: BrandConfig = Field(default_factory=BrandConfig, description="Brand configuration for frontend UI")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     model_config = ConfigDict(extra="allow", frozen=False)
 
@@ -100,6 +102,11 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Load brand config if present
+        if "brand" in config_data:
+            load_brand_config_from_dict(config_data["brand"])
+            config_data["brand"] = get_brand_config().model_dump()
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()

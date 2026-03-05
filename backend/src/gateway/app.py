@@ -11,6 +11,7 @@ from src.gateway.config import get_gateway_config
 from src.gateway.routers import (
     agent,
     artifacts,
+    config,
     keys,
     mcp,
     memory,
@@ -115,6 +116,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Inspect the resolved agent context (tools and skills)",
             },
             {
+                "name": "config",
+                "description": "Read frontend-safe runtime application configuration",
+            },
+            {
                 "name": "mcp",
                 "description": "Manage Model Context Protocol (MCP) server configurations",
             },
@@ -164,6 +169,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Agent context API is mounted at /api/agent
     app.include_router(agent.router)
+
+    # Public application config API mounted at /api/config
+    app.include_router(config.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
