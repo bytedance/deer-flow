@@ -7,6 +7,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   context: {
     model_name: undefined,
     mode: undefined,
+    reasoning_effort: undefined,
   },
   layout: {
     sidebar_collapsed: false,
@@ -24,6 +25,7 @@ export interface LocalSettings {
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
   layout: {
     sidebar_collapsed: boolean;

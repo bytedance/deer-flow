@@ -1,6 +1,7 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,19 @@ from src.config.paths import get_paths
 from src.models import create_chat_model
 
 
-def _get_memory_file_path() -> Path:
-    """Get the path to the memory file."""
+def _get_memory_file_path(agent_name: str | None = None) -> Path:
+    """Get the path to the memory file.
+
+    Args:
+        agent_name: If provided, returns the per-agent memory file path.
+                    If None, returns the global memory file path.
+
+    Returns:
+        Path to the memory file.
+    """
+    if agent_name is not None:
+        return get_paths().agent_memory_file(agent_name)
+
     config = get_memory_config()
     if config.storage_path:
         p = Path(config.storage_path)
@@ -44,24 +56,24 @@ def _create_empty_memory() -> dict[str, Any]:
     }
 
 
-# Global memory data cache
-_memory_data: dict[str, Any] | None = None
-# Track file modification time for cache invalidation
-_memory_file_mtime: float | None = None
+# Per-agent memory cache: keyed by agent_name (None = global)
+# Value: (memory_data, file_mtime)
+_memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
 
 
-def get_memory_data() -> dict[str, Any]:
+def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data (cached with file modification time check).
 
     The cache is automatically invalidated if the memory file has been modified
     since the last load, ensuring fresh data is always returned.
 
+    Args:
+        agent_name: If provided, loads per-agent memory. If None, loads global memory.
+
     Returns:
         The memory data dictionary.
     """
-    global _memory_data, _memory_file_mtime
-
-    file_path = _get_memory_file_path()
+    file_path = _get_memory_file_path(agent_name)
 
     # Get current file modification time
     try:
@@ -69,41 +81,48 @@ def get_memory_data() -> dict[str, Any]:
     except OSError:
         current_mtime = None
 
+    cached = _memory_cache.get(agent_name)
+
     # Invalidate cache if file has been modified or doesn't exist
-    if _memory_data is None or _memory_file_mtime != current_mtime:
-        _memory_data = _load_memory_from_file()
-        _memory_file_mtime = current_mtime
+    if cached is None or cached[1] != current_mtime:
+        memory_data = _load_memory_from_file(agent_name)
+        _memory_cache[agent_name] = (memory_data, current_mtime)
+        return memory_data
 
-    return _memory_data
+    return cached[0]
 
 
-def reload_memory_data() -> dict[str, Any]:
+def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Reload memory data from file, forcing cache invalidation.
+
+    Args:
+        agent_name: If provided, reloads per-agent memory. If None, reloads global memory.
 
     Returns:
         The reloaded memory data dictionary.
     """
-    global _memory_data, _memory_file_mtime
+    file_path = _get_memory_file_path(agent_name)
+    memory_data = _load_memory_from_file(agent_name)
 
-    file_path = _get_memory_file_path()
-    _memory_data = _load_memory_from_file()
-
-    # Update file modification time after reload
     try:
-        _memory_file_mtime = file_path.stat().st_mtime if file_path.exists() else None
+        mtime = file_path.stat().st_mtime if file_path.exists() else None
     except OSError:
-        _memory_file_mtime = None
+        mtime = None
 
-    return _memory_data
+    _memory_cache[agent_name] = (memory_data, mtime)
+    return memory_data
 
 
-def _load_memory_from_file() -> dict[str, Any]:
+def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
     """Load memory data from file.
+
+    Args:
+        agent_name: If provided, loads per-agent memory file. If None, loads global.
 
     Returns:
         The memory data dictionary.
     """
-    file_path = _get_memory_file_path()
+    file_path = _get_memory_file_path(agent_name)
 
     if not file_path.exists():
         return _create_empty_memory()
@@ -117,17 +136,58 @@ def _load_memory_from_file() -> dict[str, Any]:
         return _create_empty_memory()
 
 
-def _save_memory_to_file(memory_data: dict[str, Any]) -> bool:
+# Matches sentences that describe a file-upload *event* rather than general
+# file-related work.  Deliberately narrow to avoid removing legitimate facts
+# such as "User works with CSV files" or "prefers PDF export".
+_UPLOAD_SENTENCE_RE = re.compile(
+    r"[^.!?]*\b(?:"
+    r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
+    r"|file\s+upload"
+    r"|/mnt/user-data/uploads/"
+    r"|<uploaded_files>"
+    r")[^.!?]*[.!?]?\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
+    """Remove sentences about file uploads from all memory summaries and facts.
+
+    Uploaded files are session-scoped; persisting upload events in long-term
+    memory causes the agent to search for non-existent files in future sessions.
+    """
+    # Scrub summaries in user/history sections
+    for section in ("user", "history"):
+        section_data = memory_data.get(section, {})
+        for _key, val in section_data.items():
+            if isinstance(val, dict) and "summary" in val:
+                cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
+                cleaned = re.sub(r"  +", " ", cleaned)
+                val["summary"] = cleaned
+
+    # Also remove any facts that describe upload events
+    facts = memory_data.get("facts", [])
+    if facts:
+        memory_data["facts"] = [
+            f
+            for f in facts
+            if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))
+        ]
+
+    return memory_data
+
+
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
     """Save memory data to file and update cache.
 
     Args:
         memory_data: The memory data to save.
+        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
 
     Returns:
         True if successful, False otherwise.
     """
-    global _memory_data, _memory_file_mtime
-    file_path = _get_memory_file_path()
+    file_path = _get_memory_file_path(agent_name)
 
     try:
         # Ensure directory exists
@@ -145,11 +205,12 @@ def _save_memory_to_file(memory_data: dict[str, Any]) -> bool:
         temp_path.replace(file_path)
 
         # Update cache and file modification time
-        _memory_data = memory_data
         try:
-            _memory_file_mtime = file_path.stat().st_mtime
+            mtime = file_path.stat().st_mtime
         except OSError:
-            _memory_file_mtime = None
+            mtime = None
+
+        _memory_cache[agent_name] = (memory_data, mtime)
 
         print(f"Memory saved to {file_path}")
         return True
@@ -175,12 +236,13 @@ class MemoryUpdater:
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
-    def update_memory(self, messages: list[Any], thread_id: str | None = None) -> bool:
+    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
         """Update memory based on conversation messages.
 
         Args:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
+            agent_name: If provided, updates per-agent memory. If None, updates global memory.
 
         Returns:
             True if update was successful, False otherwise.
@@ -194,7 +256,7 @@ class MemoryUpdater:
 
         try:
             # Get current memory
-            current_memory = get_memory_data()
+            current_memory = get_memory_data(agent_name)
 
             # Format conversation for prompt
             conversation_text = format_conversation_for_update(messages)
@@ -224,8 +286,14 @@ class MemoryUpdater:
             # Apply updates
             updated_memory = self._apply_updates(current_memory, update_data, thread_id)
 
+            # Strip file-upload mentions from all summaries before saving.
+            # Uploaded files are session-scoped and won't exist in future sessions,
+            # so recording upload events in long-term memory causes the agent to
+            # try (and fail) to locate those files in subsequent conversations.
+            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+
             # Save
-            return _save_memory_to_file(updated_memory)
+            return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
             print(f"Failed to parse LLM response for memory update: {e}")
@@ -305,15 +373,16 @@ class MemoryUpdater:
         return current_memory
 
 
-def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None) -> bool:
+def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
     """Convenience function to update memory from a conversation.
 
     Args:
         messages: List of conversation messages.
         thread_id: Optional thread ID.
+        agent_name: If provided, updates per-agent memory. If None, updates global memory.
 
     Returns:
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id)
+    return updater.update_memory(messages, thread_id, agent_name)

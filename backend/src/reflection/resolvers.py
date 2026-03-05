@@ -1,7 +1,28 @@
 from importlib import import_module
-from typing import TypeVar
 
-T = TypeVar("T")
+MODULE_TO_PACKAGE_HINTS = {
+    "langchain_google_genai": "langchain-google-genai",
+    "langchain_anthropic": "langchain-anthropic",
+    "langchain_openai": "langchain-openai",
+    "langchain_deepseek": "langchain-deepseek",
+}
+
+
+def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
+    """Build an actionable hint when module import fails."""
+    module_root = module_path.split(".", 1)[0]
+    missing_module = getattr(err, "name", None) or module_root
+
+    # Prefer provider package hints for known integrations, even when the import
+    # error is triggered by a transitive dependency (e.g. `google`).
+    package_name = MODULE_TO_PACKAGE_HINTS.get(module_root)
+    if package_name is None:
+        package_name = MODULE_TO_PACKAGE_HINTS.get(missing_module, missing_module.replace("_", "-"))
+
+    return (
+        f"Missing dependency '{missing_module}'. "
+        f"Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
+    )
 
 
 def resolve_variable[T](
@@ -30,7 +51,13 @@ def resolve_variable[T](
     try:
         module = import_module(module_path)
     except ImportError as err:
-        raise ImportError(f"Could not import module {module_path}") from err
+        module_root = module_path.split(".", 1)[0]
+        err_name = getattr(err, "name", None)
+        if isinstance(err, ModuleNotFoundError) or err_name == module_root:
+            hint = _build_missing_dependency_hint(module_path, err)
+            raise ImportError(f"Could not import module {module_path}. {hint}") from err
+        # Preserve the original ImportError message for non-missing-module failures.
+        raise ImportError(f"Error importing module {module_path}: {err}") from err
 
     try:
         variable = getattr(module, variable_name)

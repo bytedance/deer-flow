@@ -20,21 +20,31 @@ Learn more and see **real demos** on our official website.
 
 ## Table of Contents
 
-- [Quick Start](#quick-start)
-- [Sandbox Mode](#sandbox-mode)
-- [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
-- [Core Features](#core-features)
-  - [Skills & Tools](#skills--tools)
-  - [Sub-Agents](#sub-agents)
-  - [Sandbox & File System](#sandbox--file-system)
-  - [Context Engineering](#context-engineering)
-  - [Long-Term Memory](#long-term-memory)
-- [Recommended Models](#recommended-models)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
-- [Star History](#star-history)
+- [🦌 DeerFlow - 2.0](#-deerflow---20)
+  - [Official Website](#official-website)
+  - [Table of Contents](#table-of-contents)
+  - [Quick Start](#quick-start)
+    - [Configuration](#configuration)
+    - [Running the Application](#running-the-application)
+      - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
+      - [Option 2: Local Development](#option-2-local-development)
+    - [Advanced](#advanced)
+      - [Sandbox Mode](#sandbox-mode)
+      - [MCP Server](#mcp-server)
+  - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
+  - [Core Features](#core-features)
+    - [Skills \& Tools](#skills--tools)
+    - [Sub-Agents](#sub-agents)
+    - [Sandbox \& File System](#sandbox--file-system)
+    - [Context Engineering](#context-engineering)
+    - [Long-Term Memory](#long-term-memory)
+  - [Recommended Models](#recommended-models)
+  - [Documentation](#documentation)
+  - [Contributing](#contributing)
+  - [License](#license)
+  - [Acknowledgments](#acknowledgments)
+    - [Key Contributors](#key-contributors)
+  - [Star History](#star-history)
 
 ## Quick Start
 
@@ -127,18 +137,23 @@ If you prefer running services locally:
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
 
-2. **(Optional) Pre-pull sandbox image**:
+2. **Install dependencies**:
+   ```bash
+   make install  # Install backend + frontend dependencies
+   ```
+
+3. **(Optional) Pre-pull sandbox image**:
    ```bash
    # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
 
-3. **Start services**:
+4. **Start services**:
    ```bash
    make dev
    ```
 
-4. **Access**: http://localhost:2026
+5. **Access**: http://localhost:2026
 
 ### Advanced
 #### Sandbox Mode
@@ -155,6 +170,7 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 #### MCP Server
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
+For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 ## From Deep Research to Super Agent Harness

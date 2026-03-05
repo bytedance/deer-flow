@@ -29,6 +29,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
+    "langchain-google-genai>=4.2.1",
 ]
 
 [dependency-groups]
