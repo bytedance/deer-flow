@@ -284,10 +284,6 @@ export function stripUploadedFilesTag(content: string): string {
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  if (content.includes("(empty)")) {
-    return []; // No files uploaded in current message, return empty array
-  }
-
   // Match <uploaded_files>...</uploaded_files> tag
   const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
@@ -301,6 +297,11 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
+    return [];
+  }
+
+  // Check if the backend reported no new files were uploaded in this message
+  if (uploadedFilesContent?.includes("(empty)")) {
     return [];
   }
 

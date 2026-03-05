@@ -57,7 +57,6 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       }
     }
   }, [
-    artifacts,
     autoSelectFirstArtifact,
     deselect,
     selectArtifact,
