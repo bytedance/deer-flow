@@ -151,6 +151,14 @@ export function getFileExtension(filepath: string) {
   return filepath.split(".").pop()!.toLocaleLowerCase();
 }
 
+const imageExtensions = new Set([
+  "jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "webp", "svg", "heic",
+]);
+
+export function isImageFile(filepath: string) {
+  return imageExtensions.has(getFileExtension(filepath));
+}
+
 export function checkCodeFile(
   filepath: string,
 ):

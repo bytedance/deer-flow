@@ -29,12 +29,13 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
+import { authFetch } from "@/core/auth/fetch";
 import { useArtifactContent, useMcpDataContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
-import { checkCodeFile, getFileName } from "@/core/utils/files";
+import { checkCodeFile, getFileName, isImageFile } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -295,7 +296,14 @@ function FileArtifactDetail({
             readonly
           />
         )}
-        {!isCodeFile && (
+        {!isCodeFile && isImageFile(filepath) && (
+          <AuthImage
+            src={urlOfArtifact({ filepath, threadId })}
+            alt={getFileName(filepath)}
+            className="max-h-full max-w-full object-contain m-auto"
+          />
+        )}
+        {!isCodeFile && !isImageFile(filepath) && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId })}
@@ -341,3 +349,34 @@ export function ArtifactFilePreview({
   return null;
 }
 
+function AuthImage({
+  src,
+  alt,
+  className,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoked = false;
+    authFetch(src)
+      .then((res) => res.blob())
+      .then((blob) => {
+        if (!revoked) {
+          setObjectUrl(URL.createObjectURL(blob));
+        }
+      })
+      .catch(console.error);
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
+
+  if (!objectUrl) return null;
+  return <img src={objectUrl} alt={alt} className={className} />;
+}
