@@ -269,6 +269,11 @@ def _build_middlewares(config: RunnableConfig):
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware())
 
+    # Add ArtifactSyncMiddleware (enqueues S3 upload after agent execution)
+    from src.agents.middlewares.artifact_sync_middleware import ArtifactSyncMiddleware
+
+    middlewares.append(ArtifactSyncMiddleware())
+
     # Add ViewImageMiddleware only if the current model supports vision
     configurable = config.get("configurable", {})
     model_name = configurable.get("model_name") or configurable.get("model")

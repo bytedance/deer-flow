@@ -32,7 +32,10 @@ if __name__ == "__main__":
     logger.info(f"Starting memory update worker, connecting to {redis_url}")
 
     redis_conn = Redis.from_url(redis_url)
-    queues = [Queue("memory_updates", connection=redis_conn)]
+    queues = [
+        Queue("memory_updates", connection=redis_conn),
+        Queue("artifact_sync", connection=redis_conn),
+    ]
 
     worker = Worker(
         queues,
