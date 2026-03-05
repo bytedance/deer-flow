@@ -18,6 +18,7 @@
       },
       "description": "GitHub MCP server for repository operations"
     },
+
     "postgres": {
       "enabled": false,
       "type": "stdio",
