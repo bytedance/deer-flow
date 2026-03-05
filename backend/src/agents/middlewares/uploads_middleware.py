@@ -53,12 +53,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         lines.append("The following files were uploaded in this message:")
         lines.append("")
-        for file in new_files:
-            size_kb = file["size"] / 1024
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-            lines.append(f"- {file['filename']} ({size_str})")
-            lines.append(f"  Path: {file['path']}")
-            lines.append("")
+        if new_files:
+            for file in new_files:
+                size_kb = file["size"] / 1024
+                size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+                lines.append(f"- {file['filename']} ({size_str})")
+                lines.append(f"  Path: {file['path']}")
+                lines.append("")
+        else:
+            lines.append("(empty)")
 
         if historical_files:
             lines.append("The following files were uploaded in previous messages and are still available:")

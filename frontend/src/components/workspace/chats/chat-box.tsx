@@ -34,12 +34,19 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     setOpen: setArtifactsOpen,
     setArtifacts,
     select: selectArtifact,
+    deselect,
     selectedArtifact,
   } = useArtifacts();
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
     setArtifacts(thread.values.artifacts);
+    if (
+      thread.values.artifacts?.length === 0 ||
+      (selectedArtifact && !artifacts.includes(selectedArtifact))
+    ) {
+      deselect();
+    }
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
       autoSelectFirstArtifact
@@ -50,8 +57,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       }
     }
   }, [
+    artifacts,
     autoSelectFirstArtifact,
+    deselect,
     selectArtifact,
+    selectedArtifact,
     setArtifacts,
     thread.values.artifacts,
   ]);
