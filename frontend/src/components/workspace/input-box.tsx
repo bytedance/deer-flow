@@ -765,6 +765,7 @@ export function InputBox({
                     />
                   ))}
                   <Button
+                    aria-label={t.common.close}
                     className="text-muted-foreground cursor-pointer rounded-full px-3 text-xs font-normal"
                     variant="outline"
                     size="sm"
