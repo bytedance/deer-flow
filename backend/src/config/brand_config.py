@@ -26,7 +26,7 @@ def _derive_repo_slug(domain: str) -> str:
 class BrandConfig(BaseModel):
     """Configuration for brand display and links in the frontend."""
 
-    name: str = Field(default="Thinktank.ai", min_length=1, description="Display brand name")
+    name: str = Field(default="Dominium AI", min_length=1, description="Display brand name")
     website_url: str | None = Field(default=None, description="Official website URL")
     github_url: str | None = Field(default=None, description="GitHub repository URL")
     support_email: str | None = Field(default=None, description="Support contact email")
