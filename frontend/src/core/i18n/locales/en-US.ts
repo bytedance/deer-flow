@@ -73,17 +73,17 @@ export const enUS: Translations = {
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
     mode: "Mode",
-    flashMode: "Flash",
-    flashModeDescription: "Fast and efficient, but may not be accurate",
-    reasoningMode: "Reasoning",
+    flashMode: "Chat",
+    flashModeDescription: "Fast and efficient responses for everyday tasks",
+    reasoningMode: "Chat",
     reasoningModeDescription:
-      "Reasoning before action, balance between time and accuracy",
-    proMode: "Pro",
+      "Balanced chat with extra reasoning for better accuracy",
+    proMode: "Research",
     proModeDescription:
-      "Reasoning, planning and executing, get more accurate results, may take more time",
-    ultraMode: "Ultra",
+      "Plans and executes research tasks for stronger depth and accuracy",
+    ultraMode: "Deep Research",
     ultraModeDescription:
-      "Pro mode with subagents to divide work; best for complex multi-step tasks",
+      "Research mode with subagents to divide work; best for complex multi-step tasks",
     searchModels: "Search models...",
     missingApiKey:
       "Add an API key for this provider in Settings → Models to send messages.",
