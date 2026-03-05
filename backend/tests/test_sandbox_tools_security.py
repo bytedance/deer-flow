@@ -7,6 +7,7 @@ from src.sandbox.tools import (
     mask_local_paths_in_output,
     replace_virtual_path,
     resolve_local_tool_path,
+    validate_local_bash_command_paths,
 )
 
 
@@ -56,3 +57,27 @@ def test_resolve_local_tool_path_rejects_path_traversal() -> None:
 
     with pytest.raises(PermissionError, match="path traversal"):
         resolve_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../../../etc/passwd", thread_data)
+
+
+def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
+        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
+        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
+    }
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths("cat /etc/passwd", thread_data)
+
+
+def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> None:
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
+        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
+        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
+    }
+
+    validate_local_bash_command_paths(
+        "/bin/echo ok > /mnt/user-data/workspace/out.txt && cat /dev/null",
+        thread_data,
+    )

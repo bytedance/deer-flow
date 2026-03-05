@@ -14,6 +14,16 @@ from src.sandbox.exceptions import (
 from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import get_sandbox_provider
 
+_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
+_LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
+    "/bin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/sbin/",
+    "/opt/homebrew/bin/",
+    "/dev/",
+)
+
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
     """Replace virtual /mnt/user-data paths with actual thread data paths.
@@ -142,6 +152,35 @@ def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> s
             continue
 
     raise PermissionError("Access denied: path traversal detected")
+
+
+def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
+    """Validate absolute paths in local-sandbox bash commands.
+
+    In local mode, commands must use virtual paths under /mnt/user-data for
+    user data access. A small allowlist of common system path prefixes is kept
+    for executable and device references (e.g. /bin/sh, /dev/null).
+    """
+    if thread_data is None:
+        raise SandboxRuntimeError("Thread data not available for local sandbox")
+
+    unsafe_paths: list[str] = []
+
+    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+        if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+            continue
+
+        if any(
+            absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix)
+            for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES
+        ):
+            continue
+
+        unsafe_paths.append(absolute_path)
+
+    if unsafe_paths:
+        unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
+        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -330,11 +369,14 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         ensure_thread_directories_exist(runtime)
         thread_data = get_thread_data(runtime)
         if is_local_sandbox(runtime):
+            validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             output = sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
         return sandbox.execute_command(command)
     except SandboxError as e:
+        return f"Error: {e}"
+    except PermissionError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error executing command: {type(e).__name__}: {e}"
