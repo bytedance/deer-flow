@@ -355,13 +355,17 @@ async def truncate_messages(
         if not remove_message_updates:
             raise HTTPException(status_code=400, detail="No valid messages found to remove")
 
+        # Pin the update to the exact checkpoint we read so we don't try to
+        # remove IDs that don't exist at a different checkpoint.
+        fetched_checkpoint = state.get("checkpoint", {}) if isinstance(state, dict) else {}
+        checkpoint_id = fetched_checkpoint.get("checkpoint_id") if isinstance(fetched_checkpoint, dict) else None
+
         # Use RemoveMessage updates so LangGraph's add_messages reducer actually
         # deletes messages instead of merging/appending.
         update_result = await client.threads.update_state(
             thread_id,
-            {
-                "messages": remove_message_updates,
-            },
+            {"messages": remove_message_updates},
+            checkpoint_id=checkpoint_id,
         )
 
         checkpoint = update_result.get("checkpoint", {}) if isinstance(update_result, dict) else {}
