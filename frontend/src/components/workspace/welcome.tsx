@@ -1,4 +1,3 @@
-import { TriangleAlertIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useSearchParams } from "react-router";
 
@@ -56,7 +55,7 @@ export function Welcome({
       </h1>
 
       {/* Notice banner - dark card style */}
-      <div className="flex w-full items-start gap-3 rounded-xl border border-border bg-card/80 px-5 py-4 text-left text-sm text-muted-foreground">
+      {/* <div className="flex w-full items-start gap-3 rounded-xl border border-border bg-card/80 px-5 py-4 text-left text-sm text-muted-foreground">
         <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
         <p className="leading-relaxed">
           {searchParams.get("mode") === "skill" ? (
@@ -82,7 +81,7 @@ export function Welcome({
             </>
           )}
         </p>
-      </div>
+      </div> */}
     </div>
   );
 }
