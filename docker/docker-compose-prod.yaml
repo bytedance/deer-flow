@@ -98,6 +98,11 @@ services:
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_ARTIFACTS_BUCKET: ${S3_ARTIFACTS_BUCKET:-}
+      S3_ARTIFACTS_PREFIX: ${S3_ARTIFACTS_PREFIX:-}
+      S3_ARTIFACTS_REGION: ${S3_ARTIFACTS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}
     env_file:
       - ../.env
     depends_on:
@@ -125,7 +130,7 @@ services:
     volumes:
       - ../config.yaml:/deps/backend/config.yaml:ro
       - ../extensions_config.json:/deps/backend/extensions_config.json:ro
-      - ../mcp_servers:/deps/backend/mcp_servers:ro
+      - ../mcp_servers:/app/mcp_servers:ro
       - threaddata:/data/thinktank
     environment:
       DEER_FLOW_HOME: /data/thinktank
@@ -145,6 +150,11 @@ services:
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_ARTIFACTS_BUCKET: ${S3_ARTIFACTS_BUCKET:-}
+      S3_ARTIFACTS_PREFIX: ${S3_ARTIFACTS_PREFIX:-}
+      S3_ARTIFACTS_REGION: ${S3_ARTIFACTS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}
     env_file:
       - ../.env
     depends_on:
@@ -183,6 +193,12 @@ services:
       CODEARTIFACT_DOMAIN: ${CODEARTIFACT_DOMAIN:-}
       AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_ARTIFACTS_BUCKET: ${S3_ARTIFACTS_BUCKET:-}
+      S3_ARTIFACTS_PREFIX: ${S3_ARTIFACTS_PREFIX:-}
+      S3_ARTIFACTS_REGION: ${S3_ARTIFACTS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}
+      ARTIFACT_CACHE_RETENTION_DAYS: ${ARTIFACT_CACHE_RETENTION_DAYS:-7}
     env_file:
       - ../.env
     depends_on:
