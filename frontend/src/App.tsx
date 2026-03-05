@@ -19,7 +19,12 @@ export function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="dark"
+        enableSystem
+        disableTransitionOnChange
+      >
         <I18nProvider initialLocale={locale}>
           <AuthProvider>
             <UpdateBanner />

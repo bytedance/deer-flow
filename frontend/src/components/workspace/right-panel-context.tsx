@@ -12,7 +12,7 @@ export function RightPanelProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   return (
     <RightPanelContext.Provider value={{ open, setOpen }}>
       {children}
@@ -24,6 +24,6 @@ export function useRightPanel(): RightPanelContextType {
   const ctx = useContext(RightPanelContext);
   // Fallback for use outside provider
   // eslint-disable-next-line @typescript-eslint/no-empty-function
-  if (!ctx) return { open: true, setOpen: () => {} };
+  if (!ctx) return { open: false, setOpen: () => {} };
   return ctx;
 }
