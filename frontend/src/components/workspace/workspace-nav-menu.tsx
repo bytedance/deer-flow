@@ -97,7 +97,6 @@ export function WorkspaceNavMenu() {
                     <Settings2Icon />
                     {t.common.settings}
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
                   {/* Temporarily hidden entries in "Settings and more".
                   <a
                     href={brand.website_url ?? "https://thinktank.ai"}
