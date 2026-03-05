@@ -28,6 +28,7 @@ extensions_config.json
 
 # IDE
 .idea/
+.vscode/
 
 # Coverage report
 coverage.xml
@@ -36,6 +37,7 @@ coverage/
 .claude/
 skills/custom/*
 logs/
+log/
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/

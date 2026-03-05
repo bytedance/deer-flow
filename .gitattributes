@@ -1,0 +1,43 @@
+# Normalize line endings to LF for all text files
+* text=auto eol=lf
+
+# Shell scripts and makefiles must always use LF
+*.sh text eol=lf
+Makefile text eol=lf
+**/Makefile text eol=lf
+
+# Common config/source files
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.html text eol=lf
+*.env text eol=lf
+
+# Windows scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.mp4 binary
+*.mov binary
+*.woff binary
+*.woff2 binary

@@ -77,6 +77,7 @@ Per-thread isolated execution with virtual path translation:
 - **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
+- **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
 - **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace`
 
 ### Subagent System
@@ -251,6 +252,10 @@ Key sections:
 - `subagents` - Subagent system (enabled/disabled)
 - `memory` - Memory system settings (enabled, storage, debounce, facts limits)
 
+Provider note:
+- `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).
+- If a provider module is missing, DeerFlow now returns an actionable error with install guidance (for example `uv add langchain-google-genai`).
+
 ### Extensions Configuration (`extensions_config.json`)
 
 MCP servers and skill states in a single file:
@@ -264,6 +269,18 @@ MCP servers and skill states in a single file:
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"}
+    },
+    "secure-http": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "oauth": {
+        "enabled": true,
+        "token_url": "https://auth.example.com/oauth/token",
+        "grant_type": "client_credentials",
+        "client_id": "$MCP_OAUTH_CLIENT_ID",
+        "client_secret": "$MCP_OAUTH_CLIENT_SECRET"
+      }
     }
   },
   "skills": {

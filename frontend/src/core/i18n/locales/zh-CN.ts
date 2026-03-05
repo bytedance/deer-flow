@@ -80,6 +80,15 @@ export const zhCN: Translations = {
     ultraMode: "Ultra",
     ultraModeDescription:
       "继承自 Pro 模式，可调用子代理分工协作，适合复杂多步骤任务，能力最强",
+    reasoningEffort: "推理深度",
+    reasoningEffortMinimal: "最低",
+    reasoningEffortMinimalDescription: "检索 + 直接输出",
+    reasoningEffortLow: "低",
+    reasoningEffortLowDescription: "简单逻辑校验 + 浅层推演",
+    reasoningEffortMedium: "中",
+    reasoningEffortMediumDescription: "多层逻辑分析 + 基础验证",
+    reasoningEffortHigh: "高",
+    reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
     searchModels: "搜索模型...",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
@@ -139,6 +148,36 @@ export const zhCN: Translations = {
     chats: "对话",
     recentChats: "最近的对话",
     demoChats: "演示对话",
+    agents: "智能体",
+  },
+
+  // Agents
+  agents: {
+    title: "智能体",
+    description: "创建和管理具有专属 Prompt 与能力的自定义智能体。",
+    newAgent: "新建智能体",
+    emptyTitle: "还没有自定义智能体",
+    emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
+    chat: "对话",
+    delete: "删除",
+    deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
+    deleteSuccess: "智能体已删除",
+    newChat: "新对话",
+    createPageTitle: "设计你的智能体",
+    createPageSubtitle: "描述你想要的智能体，我来帮你通过对话创建。",
+    nameStepTitle: "给新智能体起个名字",
+    nameStepHint:
+      "只允许字母、数字和连字符，存储时自动转为小写（例如 code-reviewer）",
+    nameStepPlaceholder: "例如 code-reviewer",
+    nameStepContinue: "继续",
+    nameStepInvalidError: "名称无效，只允许字母、数字和连字符",
+    nameStepAlreadyExistsError: "已存在同名智能体",
+    nameStepCheckError: "无法验证名称可用性，请稍后重试",
+    nameStepBootstrapMessage:
+      "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
+    agentCreated: "智能体已创建！",
+    startChatting: "开始对话",
+    backToGallery: "返回 Gallery",
   },
 
   // Breadcrumb
@@ -197,6 +236,11 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+  },
+
+  uploads: {
+    uploading: "上传中...",
+    uploadingFiles: "文件上传中，请稍候...",
   },
 
   subtasks: {

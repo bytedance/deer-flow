@@ -14,6 +14,37 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## OAuth Support (HTTP/SSE MCP Servers)
+
+For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.
+
+- Supported grants: `client_credentials`, `refresh_token`
+- Configure per-server `oauth` block in `extensions_config.json`
+- Secrets should be provided via environment variables (for example: `$MCP_OAUTH_CLIENT_SECRET`)
+
+Example:
+
+```json
+{
+   "mcpServers": {
+      "secure-http-server": {
+         "enabled": true,
+         "type": "http",
+         "url": "https://api.example.com/mcp",
+         "oauth": {
+            "enabled": true,
+            "token_url": "https://auth.example.com/oauth/token",
+            "grant_type": "client_credentials",
+            "client_id": "$MCP_OAUTH_CLIENT_ID",
+            "client_secret": "$MCP_OAUTH_CLIENT_SECRET",
+            "scope": "mcp.read",
+            "refresh_skew_seconds": 60
+         }
+      }
+   }
+}
+```
+
 ## How It Works
 
 MCP servers expose tools that are automatically discovered and integrated into DeerFlow’s agent system at runtime. Once enabled, these tools become available to agents without additional code changes.

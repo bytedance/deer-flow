@@ -47,7 +47,8 @@ deer-flow/
 │   │   ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
 │   │   ├── community/         # Community tools (tavily, jina_ai, firecrawl, image_search, aio_sandbox)
 │   │   ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │   └── utils/             # Utilities (network, readability)
+│   │   ├── utils/             # Utilities (network, readability)
+│   │   └── client.py          # Embedded Python client (DeerFlowClient)
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
 ├── frontend/                   # Next.js frontend application
@@ -223,13 +224,14 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - **Lazy initialization**: Tools loaded on first use via `get_cached_mcp_tools()`
 - **Cache invalidation**: Detects config file changes via mtime comparison
 - **Transports**: stdio (command-based), SSE, HTTP
+- **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
 - **Runtime updates**: Gateway API saves to extensions_config.json; LangGraph detects via mtime
 
 ### Skills System (`src/skills/`)
 
 - **Location**: `deer-flow/skills/{public,custom}/`
 - **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools)
-- **Loading**: `load_skills()` scans directories, parses SKILL.md, reads enabled state from extensions_config.json
+- **Loading**: `load_skills()` recursively scans `skills/{public,custom}` for `SKILL.md`, parses metadata, and reads enabled state from extensions_config.json
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
 
@@ -239,6 +241,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
+- Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
 
 ### Memory System (`src/agents/memory/`)
 
@@ -286,10 +289,43 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
 
 **`extensions_config.json`**:
-- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, description)
+- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
 - `skills` - Map of skill name → state (enabled)
 
-Both can be modified at runtime via Gateway API endpoints.
+Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` methods.
+
+### Embedded Client (`src/client.py`)
+
+`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
+
+**Architecture**: Imports the same `src/` modules that LangGraph Server and Gateway API use. Shares the same config files and data directories. No FastAPI dependency.
+
+**Agent Conversation** (replaces LangGraph Server):
+- `chat(message, thread_id)` — synchronous, returns final text
+- `stream(message, thread_id)` — yields `StreamEvent` aligned with LangGraph SSE protocol:
+  - `"values"` — full state snapshot (title, messages, artifacts)
+  - `"messages-tuple"` — per-message update (AI text, tool calls, tool results)
+  - `"end"` — stream finished
+- Agent created lazily via `create_agent()` + `_build_middlewares()`, same as `make_lead_agent`
+- Supports `checkpointer` parameter for state persistence across turns
+- `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
+
+**Gateway Equivalent Methods** (replaces Gateway API):
+
+| Category | Methods | Return format |
+|----------|---------|---------------|
+| Models | `list_models()`, `get_model(name)` | `{"models": [...]}`, `{name, display_name, ...}` |
+| MCP | `get_mcp_config()`, `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
+| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` | `{"skills": [...]}` |
+| Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
+| Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
+| Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
+
+**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`. Artifact returns `(bytes, mime_type)` instead of HTTP Response. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
+
+**Tests**: `tests/test_client.py` (77 unit tests including `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests, requires config.yaml)
+
+**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
 ## Development Workflow
 
