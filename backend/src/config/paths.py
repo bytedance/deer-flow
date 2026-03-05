@@ -123,6 +123,15 @@ class Paths:
         """
         return self.thread_dir(thread_id) / "user-data"
 
+    def messages_file(self, thread_id: str) -> Path:
+        """
+        Path to the persisted thread messages file.
+        Host: `{base_dir}/threads/{thread_id}/messages.json`
+
+        This file stores the conversation history for persistence across restarts.
+        """
+        return self.thread_dir(thread_id) / "messages.json"
+
     def ensure_thread_dirs(self, thread_id: str) -> None:
         """Create all standard sandbox directories for a thread."""
         self.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)

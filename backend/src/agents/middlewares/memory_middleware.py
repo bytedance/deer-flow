@@ -8,6 +8,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from src.agents.memory.queue import get_memory_queue
+from src.agents.messages import save_messages
 from src.config.memory_config import get_memory_config
 
 
@@ -149,5 +150,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # Queue the filtered conversation for memory update
         queue = get_memory_queue()
         queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+
+        # Also save messages to disk for persistence across restarts
+        save_messages(thread_id, filtered_messages)
 
         return None
