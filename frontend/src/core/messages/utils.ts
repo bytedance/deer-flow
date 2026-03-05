@@ -263,57 +263,56 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 /**
- * Represents an uploaded file parsed from the <uploaded_files> tag
+ * Represents a file stored in message additional_kwargs.files.
+ * Used for optimistic UI (uploading state) and structured file metadata.
  */
-export interface UploadedFile {
+export interface FileInMessage {
   filename: string;
-  size: string;
-  path: string;
+  size: number; // bytes
+  path?: string; // virtual path, may not be set during upload
+  status?: "uploading" | "uploaded";
 }
 
 /**
- * Result of parsing uploaded files from message content
+ * Strip <uploaded_files> tag from message content.
+ * Returns the content with the tag removed.
  */
-export interface ParsedUploadedFiles {
-  files: UploadedFile[];
-  cleanContent: string;
+export function stripUploadedFilesTag(content: string): string {
+  return content
+    .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
+    .trim();
 }
 
-/**
- * Parse <uploaded_files> tag from message content and extract file information.
- * Returns the list of uploaded files and the content with the tag removed.
- */
-export function parseUploadedFiles(content: string): ParsedUploadedFiles {
+export function parseUploadedFiles(content: string): FileInMessage[] {
   // Match <uploaded_files>...</uploaded_files> tag
   const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
   if (!match) {
-    return { files: [], cleanContent: content };
+    return [];
   }
 
   const uploadedFilesContent = match[1];
-  const cleanContent = content.replace(uploadedFilesRegex, "").trim();
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
-    return { files: [], cleanContent };
+    return [];
   }
 
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
   const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
-  const files: UploadedFile[] = [];
+  const files: FileInMessage[] = [];
   let fileMatch;
 
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: fileMatch[2].trim(),
+      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
       path: fileMatch[3].trim(),
     });
   }
 
-  return { files, cleanContent };
+  return files;
 }
