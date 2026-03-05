@@ -1,22 +1,31 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon } from "lucide-react";
+import { FileIcon, Loader2Icon } from "lucide-react";
 import { useParams } from "next/navigation";
 import { memo, useMemo, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
 
+import { Loader } from "@/components/ai-elements/loader";
 import {
   Message as AIElementMessage,
   MessageContent as AIElementMessageContent,
   MessageResponse as AIElementMessageResponse,
   MessageToolbar,
 } from "@/components/ai-elements/message";
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from "@/components/ai-elements/reasoning";
+import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   parseUploadedFiles,
-  type UploadedFile,
+  stripUploadedFilesTag,
+  type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
@@ -121,37 +130,67 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
-  const { contentToParse, uploadedFiles } = useMemo(() => {
-    if (!isLoading && reasoningContent && !rawContent) {
-      return {
-        contentToParse: reasoningContent,
-        uploadedFiles: [] as UploadedFile[],
-      };
+
+  const files = useMemo(() => {
+    const files = message.additional_kwargs?.files;
+    if (!Array.isArray(files) || files.length === 0) {
+      if (rawContent.includes("<uploaded_files>")) {
+        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+        return parseUploadedFiles(rawContent);
+      }
+      return null;
     }
-    if (isHuman && rawContent) {
-      const { files, cleanContent: contentWithoutFiles } =
-        parseUploadedFiles(rawContent);
-      return { contentToParse: contentWithoutFiles, uploadedFiles: files };
+    return files as FileInMessage[];
+  }, [message.additional_kwargs?.files, rawContent]);
+
+  const contentToDisplay = useMemo(() => {
+    if (isHuman) {
+      return rawContent ? stripUploadedFilesTag(rawContent) : "";
     }
-    return {
-      contentToParse: rawContent ?? "",
-      uploadedFiles: [] as UploadedFile[],
-    };
-  }, [isLoading, rawContent, reasoningContent, isHuman]);
+    return rawContent ?? "";
+  }, [rawContent, isHuman]);
 
   const filesList =
-    uploadedFiles.length > 0 && thread_id ? (
-      <UploadedFilesList files={uploadedFiles} threadId={thread_id} />
+    files && files.length > 0 && thread_id ? (
+      <RichFilesList files={files} threadId={thread_id} />
     ) : null;
 
+  // Uploading state: mock AI message shown while files upload
+  if (message.additional_kwargs?.element === "task") {
+    return (
+      <AIElementMessageContent className={className}>
+        <Task defaultOpen={false}>
+          <TaskTrigger title="">
+            <div className="text-muted-foreground flex w-full cursor-default items-center gap-2 text-sm select-none">
+              <Loader className="size-4" />
+              <span>{contentToDisplay}</span>
+            </div>
+          </TaskTrigger>
+        </Task>
+      </AIElementMessageContent>
+    );
+  }
+
+  // Reasoning-only AI message (no main response content yet)
+  if (!isHuman && reasoningContent && !rawContent) {
+    return (
+      <AIElementMessageContent className={className}>
+        <Reasoning isStreaming={isLoading}>
+          <ReasoningTrigger />
+          <ReasoningContent>{reasoningContent}</ReasoningContent>
+        </Reasoning>
+      </AIElementMessageContent>
+    );
+  }
+
   if (isHuman) {
-    const messageResponse = contentToParse ? (
+    const messageResponse = contentToDisplay ? (
       <AIElementMessageResponse
         remarkPlugins={humanMessagePlugins.remarkPlugins}
         rehypePlugins={humanMessagePlugins.rehypePlugins}
         components={components}
       >
-        {contentToParse}
+        {contentToDisplay}
       </AIElementMessageResponse>
     ) : null;
     return (
@@ -170,7 +209,7 @@ function MessageContent_({
     <AIElementMessageContent className={className}>
       {filesList}
       <MarkdownContent
-        content={contentToParse}
+        content={contentToDisplay}
         isLoading={isLoading}
         rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"
@@ -224,22 +263,31 @@ function isImageFile(filename: string): boolean {
 }
 
 /**
- * Uploaded files list component
+ * Format bytes to human-readable size string
  */
-function UploadedFilesList({
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "—";
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * List of files from additional_kwargs.files (with optional upload status)
+ */
+function RichFilesList({
   files,
   threadId,
 }: {
-  files: UploadedFile[];
+  files: FileInMessage[];
   threadId: string;
 }) {
   if (files.length === 0) return null;
-
   return (
     <div className="mb-2 flex flex-wrap justify-end gap-2">
       {files.map((file, index) => (
-        <UploadedFileCard
-          key={`${file.path}-${index}`}
+        <RichFileCard
+          key={`${file.filename}-${index}`}
           file={file}
           threadId={threadId}
         />
@@ -249,18 +297,48 @@ function UploadedFilesList({
 }
 
 /**
- * Single uploaded file card component
+ * Single file card that handles FileInMessage (supports uploading state)
  */
-function UploadedFileCard({
+function RichFileCard({
   file,
   threadId,
 }: {
-  file: UploadedFile;
+  file: FileInMessage;
   threadId: string;
 }) {
-  if (!threadId) return null;
-
+  const { t } = useI18n();
+  const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
+
+  if (isUploading) {
+    return (
+      <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 opacity-60 shadow-sm">
+        <div className="flex items-start gap-2">
+          <Loader2Icon className="text-muted-foreground mt-0.5 size-4 shrink-0 animate-spin" />
+          <span
+            className="text-foreground truncate text-sm font-medium"
+            title={file.filename}
+          >
+            {file.filename}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <Badge
+            variant="secondary"
+            className="rounded px-1.5 py-0.5 text-[10px] font-normal"
+          >
+            {getFileTypeLabel(file.filename)}
+          </Badge>
+          <span className="text-muted-foreground text-[10px]">
+            {t.uploads.uploading}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!file.path) return null;
+
   const fileUrl = resolveArtifactURL(file.path, threadId);
 
   if (isImage) {
@@ -274,14 +352,14 @@ function UploadedFileCard({
         <img
           src={fileUrl}
           alt={file.filename}
-          className="h-32 w-auto max-w-[240px] object-cover transition-transform group-hover:scale-105"
+          className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
         />
       </a>
     );
   }
 
   return (
-    <div className="bg-background border-border/40 flex max-w-[200px] min-w-[120px] flex-col gap-1 rounded-lg border p-3 shadow-sm">
+    <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 shadow-sm">
       <div className="flex items-start gap-2">
         <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
         <span
@@ -298,7 +376,9 @@ function UploadedFileCard({
         >
           {getFileTypeLabel(file.filename)}
         </Badge>
-        <span className="text-muted-foreground text-[10px]">{file.size}</span>
+        <span className="text-muted-foreground text-[10px]">
+          {formatBytes(file.size)}
+        </span>
       </div>
     </div>
   );
