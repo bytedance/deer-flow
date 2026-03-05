@@ -6,7 +6,8 @@ import os
 import threading
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.config.title_config import TitleConfig, get_title_config
 from src.models import create_chat_model
