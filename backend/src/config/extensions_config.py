@@ -139,6 +139,13 @@ class ExtensionsConfig(BaseModel):
         with open(resolved_path) as f:
             config_data = json.load(f)
 
+        # Strip disabled MCP servers before resolving env vars so that
+        # missing env vars for disabled servers don't cause startup failures.
+        mcp_servers = config_data.get("mcpServers", {})
+        for name, server in list(mcp_servers.items()):
+            if isinstance(server, dict) and not server.get("enabled", True):
+                mcp_servers.pop(name)
+
         cls.resolve_env_variables(config_data)
         return cls.model_validate(config_data)
 

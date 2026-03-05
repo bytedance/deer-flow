@@ -82,6 +82,7 @@ async def list_threads(
 
     Returns thread objects with metadata (title, timestamps, etc.)
     fetched from LangGraph, filtered to only those owned by the user.
+    Falls back to ownership store data if LangGraph is unavailable.
 
     Args:
         current_user: The authenticated user (injected by dependency).
@@ -99,20 +100,42 @@ async def list_threads(
         if not owned_thread_ids:
             return []
 
-        # Fetch thread details from LangGraph
-        client = get_client(url=_langgraph_url())
-
-        # LangGraph threads.search() returns all threads; we filter by owned IDs.
-        # Fetch in batches if needed, but typically manageable.
-        all_threads = await client.threads.search(
-            limit=100,
-            sort_by="updated_at",
-            sort_order="desc",
-        )
-
-        # Filter to only threads owned by this user
         owned_set = set(owned_thread_ids)
-        user_threads = [t for t in all_threads if t["thread_id"] in owned_set]
+
+        # Fetch thread details from LangGraph
+        langgraph_threads: dict[str, dict[str, Any]] = {}
+        try:
+            client = get_client(url=_langgraph_url())
+            all_threads = await client.threads.search(
+                limit=100,
+                sort_by="updated_at",
+                sort_order="desc",
+            )
+            langgraph_threads = {
+                t["thread_id"]: t for t in all_threads if t["thread_id"] in owned_set
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch threads from LangGraph for user {user_id}: {e}")
+
+        # Build result: use LangGraph data where available, fall back to stubs
+        user_threads: list[dict[str, Any]] = []
+        for tid in owned_thread_ids:
+            if tid in langgraph_threads:
+                user_threads.append(langgraph_threads[tid])
+            else:
+                # Thread exists in ownership store but not in LangGraph.
+                # Return a stub so the UI can still display it.
+                user_threads.append({
+                    "thread_id": tid,
+                    "values": {},
+                    "metadata": {},
+                    "status": "idle",
+                    "created_at": "",
+                    "updated_at": "",
+                })
+
+        # Sort by updated_at desc (LangGraph threads have timestamps, stubs sort last)
+        user_threads.sort(key=lambda t: t.get("updated_at", ""), reverse=True)
 
         return user_threads
 
