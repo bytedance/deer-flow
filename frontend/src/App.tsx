@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet } from "react-router";
 
 import { ThemeProvider } from "@/components/theme-provider";
@@ -11,18 +12,22 @@ import { detectLocaleClient } from "@/core/i18n/detect";
  * Root application component
  * Provides theme, i18n, and auth context to all routes
  */
+const queryClient = new QueryClient();
+
 export function App() {
   const locale = detectLocaleClient();
 
   return (
-    <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
-      <I18nProvider initialLocale={locale}>
-        <AuthProvider>
-          <UpdateBanner />
-          <Outlet />
-          <OfflineIndicator />
-        </AuthProvider>
-      </I18nProvider>
-    </ThemeProvider>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
+        <I18nProvider initialLocale={locale}>
+          <AuthProvider>
+            <UpdateBanner />
+            <Outlet />
+            <OfflineIndicator />
+          </AuthProvider>
+        </I18nProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }
