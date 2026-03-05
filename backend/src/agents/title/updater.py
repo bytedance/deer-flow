@@ -4,9 +4,9 @@ import importlib
 import logging
 import os
 import threading
+from collections.abc import Callable
 from concurrent.futures import TimeoutError
 from dataclasses import dataclass
-from collections.abc import Callable
 from typing import Any
 
 from src.config.title_config import TitleConfig, get_title_config
