@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.agents.messages import get_messages_export, save_messages
+from src.agents.messages import get_messages_export
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
