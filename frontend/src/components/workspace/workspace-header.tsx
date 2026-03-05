@@ -29,10 +29,10 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           )}
         >
           {state === "collapsed" ? (
-            // Non-Electron collapsed: TT logo + hover-to-reveal trigger
+            // Non-Electron collapsed: DM logo + hover-to-reveal trigger
             <div className="group-has-data-[collapsible=icon]/sidebar-wrapper:-translate-y flex w-full cursor-pointer items-center justify-center">
               <div className="gradient-text block pt-1 font-serif group-hover/workspace-header:hidden">
-                TT
+                DM
               </div>
               <SidebarTrigger className="hidden pl-2 group-hover/workspace-header:block" />
             </div>

@@ -1,4 +1,4 @@
-import { AsteriskIcon, TriangleAlertIcon } from "lucide-react";
+import { TriangleAlertIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useSearchParams } from "react-router";
 
@@ -33,11 +33,15 @@ export function Welcome({
     >
       {/* Logo */}
       <div className="mb-1">
-        <AsteriskIcon className="size-8 text-primary" strokeWidth={2.5} />
+        <img
+          src="/images/gov.png"
+          alt="Government building logo"
+          className="size-8 object-contain"
+        />
       </div>
 
       {/* Main headline - italic serif style, left-aligned */}
-      <h1 className="font-serif text-2xl italic tracking-tight text-foreground/90 md:text-3xl">
+      <h1 className="max-w-[28ch] font-serif text-xl italic leading-tight tracking-tight text-foreground/90 sm:text-2xl 2xl:text-3xl">
         {searchParams.get("mode") === "skill" ? (
           t.welcome.createYourOwnSkill
         ) : (
