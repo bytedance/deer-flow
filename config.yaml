@@ -99,8 +99,15 @@ provider_models:
       enabled_by_default: false
       requires_api_key: true
       models:
+        - model_id: gpt-5.4
+          display_name: GPT-5.4
+          description: OpenAI's most capable model for professional work
+          thinking_enabled: true
+          adaptive_thinking:
+            efforts: [low, medium, high, xhigh]
         - model_id: gpt-5.2
           display_name: GPT-5.2
+          description: OpenAI's previous frontier model for professional work
           thinking_enabled: true
           adaptive_thinking:
             efforts: [low, medium, high, xhigh]
@@ -112,11 +119,13 @@ provider_models:
       models:
         - model_id: claude-sonnet-4-6
           display_name: Claude Sonnet 4.6
+          description: Anthropic's best combination of speed and intelligence
           thinking_enabled: true
           adaptive_thinking:
             efforts: [low, medium, high, max]
         - model_id: claude-opus-4-6
           display_name: Claude Opus 4.6
+          description: Anthropic's most intelligent model
           thinking_enabled: true
           adaptive_thinking:
             efforts: [low, medium, high, max]
@@ -128,6 +137,7 @@ provider_models:
       models:
         - model_id: kimi-k2.5
           display_name: Kimi K2.5
+          description: Kimi's most intelligent open-source SOTA model for building agents
           thinking_enabled: true
     - id: zai
       display_name: Z.ai
@@ -137,6 +147,7 @@ provider_models:
       models:
         - model_id: zai-glm-5
           display_name: Z.ai GLM 5
+          description: The latest open-source SOTA model from Z.ai for advanced reasoning
           thinking_enabled: true
         - model_id: zai-glm-4-7
           display_name: Z.ai GLM 4.7
