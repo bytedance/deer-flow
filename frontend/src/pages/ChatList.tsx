@@ -8,6 +8,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useAppConfig } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreads } from "@/core/threads/hooks";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
@@ -15,12 +16,13 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 export function ChatList() {
   const { t } = useI18n();
+  const { brand } = useAppConfig();
   const { data: threads } = useThreads();
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    document.title = `${t.pages.chats} - ${t.pages.appName}`;
-  }, [t.pages.chats, t.pages.appName]);
+    document.title = `${t.pages.chats} - ${brand.name}`;
+  }, [brand.name, t.pages.chats]);
 
   const filteredThreads = useMemo(() => {
     return threads?.filter((thread) => {

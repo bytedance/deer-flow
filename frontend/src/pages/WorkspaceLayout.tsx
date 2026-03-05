@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { Outlet } from "react-router";
 import { Toaster } from "sonner";
@@ -12,8 +11,6 @@ import { WorkspaceTitleBar } from "@/components/workspace/workspace-title-bar";
 import { useLocalSettings } from "@/core/settings";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
-
-const queryClient = new QueryClient();
 
 export function WorkspaceLayout() {
   const [settings, setSettings] = useLocalSettings();
@@ -32,25 +29,23 @@ export function WorkspaceLayout() {
   );
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <RightPanelProvider>
-        <SidebarProvider
-          className={cn("h-screen", env.IS_ELECTRON && "pt-10")}
-          open={open}
-          onOpenChange={handleOpenChange}
-        >
-          <ArtifactsProvider>
-            {env.IS_ELECTRON && <WorkspaceTitleBar />}
-            <WorkspaceSidebar />
-            <SidebarInset className="min-w-0">
-              <PromptInputProvider>
-                <Outlet />
-              </PromptInputProvider>
-            </SidebarInset>
-          </ArtifactsProvider>
-        </SidebarProvider>
-      </RightPanelProvider>
+    <RightPanelProvider>
+      <SidebarProvider
+        className={cn("h-screen", env.IS_ELECTRON && "pt-10")}
+        open={open}
+        onOpenChange={handleOpenChange}
+      >
+        <ArtifactsProvider>
+          {env.IS_ELECTRON && <WorkspaceTitleBar />}
+          <WorkspaceSidebar />
+          <SidebarInset className="min-w-0">
+            <PromptInputProvider>
+              <Outlet />
+            </PromptInputProvider>
+          </SidebarInset>
+        </ArtifactsProvider>
+      </SidebarProvider>
       <Toaster position="top-center" />
-    </QueryClientProvider>
+    </RightPanelProvider>
   );
 }

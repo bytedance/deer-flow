@@ -37,7 +37,7 @@ import { Tooltip } from "@/components/workspace/tooltip";
 import { Welcome } from "@/components/workspace/welcome";
 import { useAuth } from "@/core/auth";
 import { authFetch } from "@/core/auth/fetch";
-import { getBackendBaseURL } from "@/core/config";
+import { getBackendBaseURL, useAppConfig } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { getUserModelPreferences, setUserModelPreferences } from "@/core/models/api";
 import {
@@ -88,6 +88,7 @@ interface PendingResubmitData {
 
 function ChatInner() {
   const { t } = useI18n();
+  const { brand } = useAppConfig();
   const navigate = useNavigate();
   const [settings, setSettings] = useLocalSettings();
   const { setOpen: setSidebarOpen } = useSidebar();
@@ -207,15 +208,15 @@ function ChatInner() {
         ? thread.values.title
         : t.pages.untitled;
     if (thread.isThreadLoading) {
-      document.title = `Loading... - ${t.pages.appName}`;
+      document.title = `Loading... - ${brand.name}`;
     } else {
-      document.title = `${pageTitle} - ${t.pages.appName}`;
+      document.title = `${pageTitle} - ${brand.name}`;
     }
   }, [
+    brand.name,
     isNewThread,
     t.pages.newChat,
     t.pages.untitled,
-    t.pages.appName,
     thread.values.title,
     thread.isThreadLoading,
   ]);

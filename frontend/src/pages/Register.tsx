@@ -4,9 +4,11 @@ import { Link, Navigate, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth";
+import { useAppConfig } from "@/core/config";
 
 export function Register() {
   const { register, isAuthenticated, isLoading } = useAuth();
+  const { brand } = useAppConfig();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -63,7 +65,7 @@ export function Register() {
             Create your account
           </h1>
           <p className="text-muted-foreground mt-2 text-sm">
-            Get started with Thinktank AI
+            Get started with {brand.name}
           </p>
         </div>
 

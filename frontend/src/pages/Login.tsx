@@ -4,9 +4,11 @@ import { Link, Navigate, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth";
+import { useAppConfig } from "@/core/config";
 
 export function Login() {
   const { login, isAuthenticated, isLoading } = useAuth();
+  const { brand } = useAppConfig();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -45,7 +47,7 @@ export function Login() {
       <div className="w-full max-w-sm space-y-8">
         <div className="text-center">
           <h1 className="text-2xl font-semibold tracking-tight text-white">
-            Sign in to Thinktank
+            Sign in to {brand.name}
           </h1>
           <p className="text-muted-foreground mt-2 text-sm">
             Enter your credentials to access your workspace
