@@ -5,19 +5,22 @@ import {
   Terminal,
   TypingAnimation,
 } from "@/components/ui/terminal";
+import { useAppConfig } from "@/core/config";
 
 import { Section } from "../section";
 
 export function SandboxSection({ className }: { className?: string }) {
+  const { brand } = useAppConfig();
+
   return (
     <Section
       className={className}
       title="Agent Runtime Environment"
       subtitle={
         <p>
-          We give Thinktank.ai a &quot;computer&quot;, which can execute commands,
-          manage files, and run long tasks — all in a secure Docker-based
-          sandbox
+          We give {brand.name} a &quot;computer&quot;, which can execute
+          commands, manage files, and run long tasks — all in a secure
+          Docker-based sandbox
         </p>
       }
     >

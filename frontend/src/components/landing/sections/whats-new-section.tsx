@@ -1,6 +1,7 @@
 "use client";
 
 import MagicBento, { type BentoCardProps } from "@/components/ui/magic-bento";
+import { useAppConfig } from "@/core/config";
 import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
@@ -38,22 +39,24 @@ const features: BentoCardProps[] = [
     color: COLOR,
     label: "Flexible",
     title: "Multi-Model Support",
-    description: "Doubao, DeepSeek, OpenAI, Gemini, etc.",
+    description: "OpenAI, Anthropic, Gemini, Kimi, Z.ai, etc.",
   },
   {
     color: COLOR,
-    label: "Free",
-    title: "Open Source",
-    description: "MIT License, self-hosted, full control",
+    label: "Sovereign",
+    title: "Secure and Private",
+    description: "Securely hosted, fully private, fully controlled, fully auditable",
   },
 ];
 
 export function WhatsNewSection({ className }: { className?: string }) {
+  const { brand } = useAppConfig();
+
   return (
     <Section
       className={cn("", className)}
-      title="Whats New in Thinktank.ai 2.0"
-      subtitle="Thinktank.ai is now evolving from a Deep Research agent into a full-stack Super Agent"
+      title={`Whats New in ${brand.name} 2.0`}
+      subtitle={`${brand.name} is now evolving from a Deep Research agent into a full-stack Super Agent`}
     >
       <div className="flex w-full items-center justify-center">
         <MagicBento data={features} />
