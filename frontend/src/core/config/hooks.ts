@@ -4,7 +4,7 @@ import { loadAppConfig, type AppConfigResponse } from "./api";
 
 export const DEFAULT_APP_CONFIG: AppConfigResponse = {
   brand: {
-    name: "Thinktank.ai",
+    name: "Dominium AI",
     website_url: "https://think-tank-ai.com",
     github_url: "https://github.com/thinktank-ai/thinktank-ai",
     support_email: "support@thinktank.ai",
