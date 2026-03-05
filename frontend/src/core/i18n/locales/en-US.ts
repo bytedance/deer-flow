@@ -55,7 +55,7 @@ export const enUS: Translations = {
 
     createYourOwnSkill: "Create Your Own Skill",
     createYourOwnSkillDescription:
-      "Create your own skill to release the power of Thinktank.ai. With customized skills,\nThinktank.ai can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
+      "Create your own skill to release the power of {{brandName}}. With customized skills,\n{{brandName}} can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
   },
 
   // Clipboard
@@ -157,13 +157,13 @@ export const enUS: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "Thinktank.ai's official website",
-    githubTooltip: "Thinktank.ai on Github",
+    officialWebsite: "{{brandName}}'s official website",
+    githubTooltip: "{{brandName}} on Github",
     settingsAndMore: "Settings and more",
-    visitGithub: "Thinktank.ai on GitHub",
+    visitGithub: "{{brandName}} on GitHub",
     reportIssue: "Report a issue",
     contactUs: "Contact us",
-    about: "About Thinktank.ai",
+    about: "About {{brandName}}",
     signOut: "Sign out",
   },
 
@@ -180,7 +180,6 @@ export const enUS: Translations = {
 
   // Page titles (document title)
   pages: {
-    appName: "Thinktank.ai",
     chats: "Chats",
     newChat: "New chat",
     untitled: "Untitled",
@@ -207,7 +206,7 @@ export const enUS: Translations = {
     done: "Done",
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
-    skillInstallTooltip: "Install skill and make it available to Thinktank.ai",
+    skillInstallTooltip: "Install skill and make it available to {{brandName}}",
     mcpDataResults: (count: number, total?: number) =>
       total && total > count
         ? `${count} of ${total} records`
@@ -230,7 +229,7 @@ export const enUS: Translations = {
   // Settings
   settings: {
     title: "Settings",
-    description: "Adjust how Thinktank.ai looks and behaves for you.",
+    description: "Adjust how {{brandName}} looks and behaves for you.",
     sections: {
       appearance: "Appearance",
       models: "Models",
@@ -243,7 +242,7 @@ export const enUS: Translations = {
     memory: {
       title: "Memory",
       description:
-        "Thinktank.ai automatically learns from your conversations in the background. These memories help Thinktank.ai understand you better and deliver a more personalized experience.",
+        "{{brandName}} automatically learns from your conversations in the background. These memories help {{brandName}} understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
       markdown: {
@@ -311,18 +310,18 @@ export const enUS: Translations = {
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
-        "Put your agent skill folders under the `/skills/custom` folder under the root folder of Thinktank.ai.",
+        "Put your agent skill folders under the `/skills/custom` folder under the root folder of {{brandName}}.",
       emptyButton: "Create Your First Skill",
     },
     notification: {
       title: "Notification",
       description:
-        "Thinktank.ai only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
+        "{{brandName}} only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
       requestPermission: "Request notification permission",
       deniedHint:
         "Notification permission was denied. You can enable it in your browser's site settings to receive completion alerts.",
       testButton: "Send test notification",
-      testTitle: "Thinktank.ai",
+      testTitle: "{{brandName}}",
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
