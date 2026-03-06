@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
 import tempfile
@@ -152,7 +153,10 @@ class DeerFlowClient:
     def _atomic_write_json(path: Path, data: dict) -> None:
         """Write JSON to *path* atomically (temp file + replace)."""
         fd = tempfile.NamedTemporaryFile(
-            mode="w", dir=path.parent, suffix=".tmp", delete=False,
+            mode="w",
+            dir=path.parent,
+            suffix=".tmp",
+            delete=False,
         )
         try:
             json.dump(data, fd, indent=2)
@@ -320,10 +324,7 @@ class DeerFlowClient:
                                 "type": "ai",
                                 "content": "",
                                 "id": msg_id,
-                                "tool_calls": [
-                                    {"name": tc["name"], "args": tc["args"], "id": tc.get("id")}
-                                    for tc in msg.tool_calls
-                                ],
+                                "tool_calls": [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls],
                             },
                         )
 
@@ -494,10 +495,7 @@ class DeerFlowClient:
         """
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError(
-                "Cannot locate extensions_config.json. "
-                "Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root."
-            )
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         current_config = get_extensions_config()
 
@@ -561,10 +559,7 @@ class DeerFlowClient:
 
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError(
-                "Cannot locate extensions_config.json. "
-                "Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root."
-            )
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         extensions_config = get_extensions_config()
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
@@ -729,47 +724,73 @@ class DeerFlowClient:
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
+        convertible_extensions = {ext.lower() for ext in CONVERTIBLE_EXTENSIONS}
+        has_convertible_file = False
         for f in files:
             p = Path(f)
             if not p.exists():
                 raise FileNotFoundError(f"File not found: {f}")
+            if not p.is_file():
+                raise ValueError(f"Path is not a file: {f}")
             resolved_files.append(p)
+            if not has_convertible_file and p.suffix.lower() in convertible_extensions:
+                has_convertible_file = True
 
         uploads_dir = self._get_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
 
-        for src_path in resolved_files:
+        conversion_pool = None
+        if has_convertible_file:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                conversion_pool = None
+            else:
+                import concurrent.futures
 
-            dest = uploads_dir / src_path.name
-            shutil.copy2(src_path, dest)
+                # Reuse one worker when already inside an event loop to avoid
+                # creating a new ThreadPoolExecutor per converted file.
+                conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-            info: dict[str, Any] = {
-                "filename": src_path.name,
-                "size": str(dest.stat().st_size),
-                "path": str(dest),
-                "virtual_path": f"/mnt/user-data/uploads/{src_path.name}",
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
-            }
+        def _convert_in_thread(path: Path):
+            return asyncio.run(convert_file_to_markdown(path))
 
-            if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                try:
+        try:
+            for src_path in resolved_files:
+                dest = uploads_dir / src_path.name
+                shutil.copy2(src_path, dest)
+
+                info: dict[str, Any] = {
+                    "filename": src_path.name,
+                    "size": str(dest.stat().st_size),
+                    "path": str(dest),
+                    "virtual_path": f"/mnt/user-data/uploads/{src_path.name}",
+                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
+                }
+
+                if src_path.suffix.lower() in convertible_extensions:
                     try:
-                        asyncio.get_running_loop()
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as pool:
-                            md_path = pool.submit(lambda: asyncio.run(convert_file_to_markdown(dest))).result()
-                    except RuntimeError:
-                        md_path = asyncio.run(convert_file_to_markdown(dest))
-                except Exception:
-                    logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
-                    md_path = None
+                        if conversion_pool is not None:
+                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
+                        else:
+                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                    except Exception:
+                        logger.warning(
+                            "Failed to convert %s to markdown",
+                            src_path.name,
+                            exc_info=True,
+                        )
+                        md_path = None
 
-                if md_path is not None:
-                    info["markdown_file"] = md_path.name
-                    info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
-                    info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
+                    if md_path is not None:
+                        info["markdown_file"] = md_path.name
+                        info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
+                        info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
-            uploaded_files.append(info)
+                uploaded_files.append(info)
+        finally:
+            if conversion_pool is not None:
+                conversion_pool.shutdown(wait=True)
 
         return {
             "success": True,
@@ -792,18 +813,23 @@ class DeerFlowClient:
             return {"files": [], "count": 0}
 
         files = []
-        for fp in sorted(uploads_dir.iterdir()):
-            if fp.is_file():
-                stat = fp.stat()
-                files.append({
-                    "filename": fp.name,
+        with os.scandir(uploads_dir) as entries:
+            file_entries = [entry for entry in entries if entry.is_file()]
+
+        for entry in sorted(file_entries, key=lambda item: item.name):
+            stat = entry.stat()
+            filename = entry.name
+            files.append(
+                {
+                    "filename": filename,
                     "size": str(stat.st_size),
-                    "path": str(fp),
-                    "virtual_path": f"/mnt/user-data/uploads/{fp.name}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{fp.name}",
-                    "extension": fp.suffix,
+                    "path": str(Path(entry.path)),
+                    "virtual_path": f"/mnt/user-data/uploads/{filename}",
+                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}",
+                    "extension": Path(filename).suffix,
                     "modified": stat.st_mtime,
-                })
+                }
+            )
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
@@ -858,7 +884,7 @@ class DeerFlowClient:
         if not clean_path.startswith(virtual_prefix):
             raise ValueError(f"Path must start with /{virtual_prefix}")
 
-        relative = clean_path[len(virtual_prefix):].lstrip("/")
+        relative = clean_path[len(virtual_prefix) :].lstrip("/")
         base_dir = get_paths().sandbox_user_data_dir(thread_id)
         actual = (base_dir / relative).resolve()
 
