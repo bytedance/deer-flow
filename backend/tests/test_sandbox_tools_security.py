@@ -47,6 +47,20 @@ def test_resolve_local_tool_path_rejects_non_virtual_path() -> None:
         resolve_local_tool_path("/Users/someone/config.yaml", thread_data)
 
 
+def test_resolve_local_tool_path_rejects_virtual_root_with_clear_message() -> None:
+    """Passing the bare virtual root /mnt/user-data should be rejected early with a
+    clear 'Only paths under' message, not the misleading 'path traversal detected'
+    error that would result from the root mapping to a common parent directory."""
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
+        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
+        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
+    }
+
+    with pytest.raises(PermissionError, match="Only paths under"):
+        resolve_local_tool_path(VIRTUAL_PATH_PREFIX, thread_data)
+
+
 def test_resolve_local_tool_path_rejects_path_traversal() -> None:
     base = Path("/tmp/deer-flow/threads/t1/user-data")
     thread_data = {
