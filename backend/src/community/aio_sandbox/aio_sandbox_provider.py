@@ -20,6 +20,7 @@ import signal
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from src.config import get_app_config
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
@@ -219,6 +220,18 @@ class AioSandboxProvider(SandboxProvider):
         try:
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
+
+            # In Dockerized backend environments, config.skills.get_skills_path()
+            # often resolves to an in-container path (e.g. /app/skills). For
+            # nested local container launches, the runtime needs the host path.
+            host_skills_path = os.getenv("DEER_FLOW_SKILLS_HOST_PATH")
+            if host_skills_path:
+                resolved_host_path = Path(host_skills_path).expanduser().resolve()
+                if resolved_host_path.exists():
+                    skills_path = resolved_host_path
+                else:
+                    logger.warning(f"DEER_FLOW_SKILLS_HOST_PATH does not exist: {resolved_host_path}. Falling back to configured skills path.")
+
             container_path = config.skills.container_path
 
             if skills_path.exists():

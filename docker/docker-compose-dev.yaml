@@ -122,6 +122,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
     env_file:
       - ../.env
     extra_hosts:
@@ -151,6 +152,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
     env_file:
       - ../.env
     networks:

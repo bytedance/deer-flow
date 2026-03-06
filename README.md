@@ -139,6 +139,8 @@ The fastest way to get started with a consistent environment:
 
    `make docker-start` now starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
+   For Dockerized backend services that launch local AIO sandbox containers, `docker-compose-dev.yaml` sets `DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills` so nested sandbox mounts use the host skills path instead of an in-container path.
+
 2. **Access**: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
