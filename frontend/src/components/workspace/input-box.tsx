@@ -52,6 +52,8 @@ import { cn } from "@/lib/utils";
 import {
   ModelSelector,
   ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
   ModelSelectorInput,
   ModelSelectorItem,
   ModelSelectorList,
@@ -75,12 +77,15 @@ function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
 ): InputMode {
-  if (!supportsThinking && mode !== "flash") {
+  // Only gate the dedicated "thinking" mode by model capability.
+  // Pro/Ultra should remain selectable because they also control planning/subagents.
+  if (!supportsThinking && mode === "thinking") {
     return "flash";
   }
   if (mode) {
     return mode;
   }
+  // For first load without user selection, choose a sensible default mode.
   return supportsThinking ? "pro" : "flash";
 }
 
@@ -126,7 +131,13 @@ export function InputBox({
   const { t } = useI18n();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  const { models } = useModels();
+  const [modelSearch, setModelSearch] = useState("");
+  const {
+    models,
+    isLoading: isModelsLoading,
+    error: modelsError,
+    refetch: refetchModels,
+  } = useModels();
 
   useEffect(() => {
     if (models.length === 0) {
@@ -155,6 +166,33 @@ export function InputBox({
     }
     return models.find((m) => m.name === context.model_name) ?? models[0];
   }, [context.model_name, models]);
+
+  const filteredModels = useMemo(() => {
+    const keyword = modelSearch.trim().toLowerCase();
+    if (!keyword) {
+      return models;
+    }
+    return models.filter((model) => {
+      const displayName = (model.display_name ?? "").toLowerCase();
+      const name = model.name.toLowerCase();
+      const description = (model.description ?? "").toLowerCase();
+      return (
+        displayName.includes(keyword) ||
+        name.includes(keyword) ||
+        description.includes(keyword)
+      );
+    });
+  }, [modelSearch, models]);
+
+  const modelEmptyText = useMemo(() => {
+    if (isModelsLoading) {
+      return "Loading models...";
+    }
+    if (modelsError) {
+      return "Failed to load models. Please check backend connection.";
+    }
+    return "No models found.";
+  }, [isModelsLoading, modelsError]);
 
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
@@ -203,6 +241,18 @@ export function InputBox({
     },
     [onContextChange, context],
   );
+
+  useEffect(() => {
+    if (!modelDialogOpen && modelSearch !== "") {
+      setModelSearch("");
+    }
+  }, [modelDialogOpen, modelSearch]);
+
+  useEffect(() => {
+    if (modelDialogOpen) {
+      void refetchModels();
+    }
+  }, [modelDialogOpen, refetchModels]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -553,22 +603,30 @@ export function InputBox({
               </PromptInputButton>
             </ModelSelectorTrigger>
             <ModelSelectorContent>
-              <ModelSelectorInput placeholder={t.inputBox.searchModels} />
+              <ModelSelectorInput
+                placeholder={t.inputBox.searchModels}
+                value={modelSearch}
+                onValueChange={setModelSearch}
+              />
               <ModelSelectorList>
-                {models.map((m) => (
-                  <ModelSelectorItem
-                    key={m.name}
-                    value={m.name}
-                    onSelect={() => handleModelSelect(m.name)}
-                  >
-                    <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                    {m.name === context.model_name ? (
-                      <CheckIcon className="ml-auto size-4" />
-                    ) : (
-                      <div className="ml-auto size-4" />
-                    )}
-                  </ModelSelectorItem>
-                ))}
+                <ModelSelectorEmpty>{modelEmptyText}</ModelSelectorEmpty>
+                <ModelSelectorGroup>
+                  {filteredModels.map((m) => (
+                    <ModelSelectorItem
+                      key={m.name}
+                      forceMount
+                      value={m.name}
+                      onSelect={() => handleModelSelect(m.name)}
+                    >
+                      <ModelSelectorName>{m.display_name}</ModelSelectorName>
+                      {m.name === context.model_name ? (
+                        <CheckIcon className="ml-auto size-4" />
+                      ) : (
+                        <div className="ml-auto size-4" />
+                      )}
+                    </ModelSelectorItem>
+                  ))}
+                </ModelSelectorGroup>
               </ModelSelectorList>
             </ModelSelectorContent>
           </ModelSelector>
