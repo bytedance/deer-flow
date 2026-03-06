@@ -47,6 +47,20 @@ def test_resolve_local_tool_path_rejects_non_virtual_path() -> None:
         resolve_local_tool_path("/Users/someone/config.yaml", thread_data)
 
 
+def test_resolve_local_tool_path_returns_host_path_for_valid_virtual_path() -> None:
+    base = Path("/tmp/deer-flow/threads/t1/user-data")
+    thread_data = {
+        "workspace_path": str(base / "workspace"),
+        "uploads_path": str(base / "uploads"),
+        "outputs_path": str(base / "outputs"),
+    }
+
+    result = resolve_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", thread_data)
+
+    expected = str((base / "workspace" / "file.txt").resolve())
+    assert result == expected
+
+
 def test_resolve_local_tool_path_rejects_path_traversal() -> None:
     base = Path("/tmp/deer-flow/threads/t1/user-data")
     thread_data = {
