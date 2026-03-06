@@ -31,7 +31,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 ## Table of Contents
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
-  - [Offiical Website](#offiical-website)
+  - [Official Website](#official-website)
   - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
@@ -148,18 +148,23 @@ If you prefer running services locally:
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
 
-2. **(Optional) Pre-pull sandbox image**:
+2. **Install dependencies**:
+   ```bash
+   make install  # Install backend + frontend dependencies
+   ```
+
+3. **(Optional) Pre-pull sandbox image**:
    ```bash
    # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
 
-3. **Start services**:
+4. **Start services**:
    ```bash
    make dev
    ```
 
-4. **Access**: http://localhost:2026
+5. **Access**: http://localhost:2026
 
 ### Advanced
 #### Sandbox Mode
