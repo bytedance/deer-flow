@@ -13,33 +13,30 @@
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: Volcengine (Doubao) model
+  # - name: doubao-seed-1.8
+  #   display_name: Doubao-Seed-1.8
+  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: doubao-seed-1-8-251228
+  #   api_base: https://ark.cn-beijing.volces.com/api/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  
   # Example: OpenAI model
-  - name: gpt-4
-    display_name: GPT-4
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4
-    api_key: $OPENAI_API_KEY # Use environment variable
-    max_tokens: 4096
-    temperature: 0.7
-    supports_vision: true # Enable vision support for view_image tool
-
-  # Example: Novita AI (OpenAI-compatible)
-  # Novita provides an OpenAI-compatible API with competitive pricing
-  # See: https://novita.ai
-  - name: novita-deepseek-v3.2
-    display_name: Novita DeepSeek V3.2
-    use: langchain_openai:ChatOpenAI
-    model: deepseek/deepseek-v3.2
-    api_key: $NOVITA_API_KEY
-    base_url: https://api.novita.ai/openai
-    max_tokens: 4096
-    temperature: 0.7
-    supports_thinking: true
-    supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
+  # - name: gpt-4
+  #   display_name: GPT-4
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4
+  #   api_key: $OPENAI_API_KEY # Use environment variable
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_vision: true # Enable vision support for view_image tool
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
@@ -73,21 +70,6 @@ models:
   #       thinking:
   #         type: enabled
 
-  # Example: Volcengine (Doubao) model
-  - name: doubao-seed-1.8
-    display_name: Doubao-Seed-1.8
-    use: src.models.patched_deepseek:PatchedChatDeepSeek
-    model: doubao-seed-1-8-251228
-    api_base: https://ark.cn-beijing.volces.com/api/v3
-    api_key: $VOLCENGINE_API_KEY
-    supports_thinking: true
-    supports_vision: true
-    supports_reasoning_effort: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
@@ -98,6 +80,24 @@ models:
   #   max_tokens: 32768
   #   supports_thinking: true
   #   supports_vision: true  # Check your specific model's capabilities
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+  # Example: Novita AI (OpenAI-compatible)
+  # Novita provides an OpenAI-compatible API with competitive pricing
+  # See: https://novita.ai
+  # - name: novita-deepseek-v3.2
+  #   display_name: Novita DeepSeek V3.2
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek/deepseek-v3.2
+  #   api_key: $NOVITA_API_KEY
+  #   base_url: https://api.novita.ai/openai
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: true
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -127,11 +127,29 @@ tools:
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Set if needed
 
+  # Web search tool (requires InfoQuest API key)
+  # - name: web_search
+  #   group: web
+  #   use: src.community.infoquest.tools:web_search_tool
+  #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
+  #   search_time_range: 10
+
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
     use: src.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+
+  # Web fetch tool (uses InfoQuest AI reader)
+  # - name: web_fetch
+  #   group: web
+  #   use: src.community.infoquest.tools:web_fetch_tool
+  #   # Overall timeout for the entire crawling process (in seconds). Set to positive value to enable, -1 to disable
+  #   timeout: 10
+  #   # Waiting time after page loading (in seconds). Set to positive value to enable, -1 to disable
+  #   fetch_time: 10
+  #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
+  #   navigation_timeout: 30
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
