@@ -144,6 +144,11 @@ def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> s
     if not allowed_roots:
         raise SandboxRuntimeError("No allowed local sandbox directories configured")
 
+    # Also allow the virtual root itself (/mnt/user-data) to map to the common parent dir.
+    common_parent = _thread_virtual_to_actual_mappings(thread_data).get(VIRTUAL_PATH_PREFIX)
+    if common_parent is not None:
+        allowed_roots.append(Path(common_parent).resolve())
+
     for root in allowed_roots:
         try:
             resolved.relative_to(root)
@@ -405,8 +410,8 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied: {requested_path}"
+    except PermissionError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
 
@@ -444,8 +449,8 @@ def read_file_tool(
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: File not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied reading file: {requested_path}"
+    except PermissionError as e:
+        return f"Error: {e}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except Exception as e:
@@ -478,8 +483,8 @@ def write_file_tool(
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
-    except PermissionError:
-        return f"Error: Permission denied writing to file: {requested_path}"
+    except PermissionError as e:
+        return f"Error: {e}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except OSError as e:
@@ -529,7 +534,7 @@ def str_replace_tool(
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: File not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied accessing file: {requested_path}"
+    except PermissionError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error replacing string: {type(e).__name__}: {e}"

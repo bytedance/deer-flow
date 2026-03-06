@@ -36,6 +36,28 @@ def test_mask_local_paths_in_output_hides_host_paths() -> None:
     assert "/mnt/user-data/workspace/result.txt" in masked
 
 
+def test_resolve_local_tool_path_resolves_valid_virtual_path() -> None:
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
+        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
+        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
+    }
+
+    result = resolve_local_tool_path("/mnt/user-data/workspace/report.txt", thread_data)
+    assert result == "/tmp/deer-flow/threads/t1/user-data/workspace/report.txt"
+
+
+def test_resolve_local_tool_path_allows_virtual_root() -> None:
+    thread_data = {
+        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
+        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
+        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
+    }
+
+    result = resolve_local_tool_path("/mnt/user-data", thread_data)
+    assert result == "/tmp/deer-flow/threads/t1/user-data"
+
+
 def test_resolve_local_tool_path_rejects_non_virtual_path() -> None:
     thread_data = {
         "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
