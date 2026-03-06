@@ -125,8 +125,8 @@ def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> s
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
-    if path != VIRTUAL_PATH_PREFIX and not path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX} are allowed")
+    if not path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ are allowed")
 
     resolved_path = replace_virtual_path(path, thread_data)
     resolved = Path(resolved_path).resolve()
