@@ -305,23 +305,35 @@ class TestMemoryFilePath:
     def test_global_memory_path(self, tmp_path):
         """None agent_name should return global memory file."""
         import src.agents.memory.updater as updater_mod
+        from src.config.memory_config import MemoryConfig
 
-        with patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)):
+        with (
+            patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
+            patch("src.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+        ):
             path = updater_mod._get_memory_file_path(None)
         assert path == tmp_path / "memory.json"
 
     def test_agent_memory_path(self, tmp_path):
         """Providing agent_name should return per-agent memory file."""
         import src.agents.memory.updater as updater_mod
+        from src.config.memory_config import MemoryConfig
 
-        with patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)):
+        with (
+            patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
+            patch("src.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+        ):
             path = updater_mod._get_memory_file_path("code-reviewer")
         assert path == tmp_path / "agents" / "code-reviewer" / "memory.json"
 
     def test_different_paths_for_different_agents(self, tmp_path):
         import src.agents.memory.updater as updater_mod
+        from src.config.memory_config import MemoryConfig
 
-        with patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)):
+        with (
+            patch("src.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
+            patch("src.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+        ):
             path_global = updater_mod._get_memory_file_path(None)
             path_a = updater_mod._get_memory_file_path("agent-a")
             path_b = updater_mod._get_memory_file_path("agent-b")
