@@ -90,7 +90,7 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
 
     prompt = (
         "You are generating follow-up questions to help the user continue the conversation.\n"
-        "Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
+        f"Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
         "Requirements:\n"
         "- Questions must be relevant to the conversation.\n"
         "- Questions must be written in the same language as the user.\n"
@@ -98,7 +98,7 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
         "- Do NOT include numbering, markdown, or any extra text.\n"
         "- Output MUST be a JSON array of strings only.\n\n"
         "Conversation:\n"
-        "{conversation}\n"
+        f"{conversation}\n"
     ).format(n=n, conversation=conversation)
 
     try:
