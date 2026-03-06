@@ -35,6 +35,8 @@ from langchain_core.runnables import RunnableConfig
 
 from src.agents.lead_agent.agent import _build_middlewares
 from src.agents.lead_agent.prompt import apply_prompt_template
+from src.agents.memory.updater import create_chat_model
+from src.agents.messages import load_messages
 from src.agents.thread_state import ThreadState
 from src.config.app_config import get_app_config, reload_app_config
 from src.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
@@ -297,7 +299,15 @@ class DeerFlowClient:
         config = self._get_runnable_config(thread_id, **kwargs)
         self._ensure_agent(config)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
+        # Load existing messages from disk for persistence across restarts
+        existing_messages = load_messages(thread_id)
+        
+        # Start with existing messages (if any) plus the new user message
+        if existing_messages:
+            state = {"messages": existing_messages + [HumanMessage(content=message)]}
+        else:
+            state = {"messages": [HumanMessage(content=message)]}
+        
         context = {"thread_id": thread_id}
 
         seen_ids: set[str] = set()

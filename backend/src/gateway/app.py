@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from src.config.app_config import get_app_config
 from src.gateway.config import get_gateway_config
-from src.gateway.routers import agents, artifacts, mcp, memory, models, skills, uploads
+from src.gateway.routers import agents, artifacts, mcp, memory, models, skills, threads, uploads
 
 # Configure logging
 logging.basicConfig(
@@ -134,6 +134,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Threads API is mounted at /api/threads
+    app.include_router(threads.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
