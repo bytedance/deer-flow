@@ -719,6 +719,7 @@ class DeerFlowClient:
 
         Raises:
             FileNotFoundError: If any file does not exist.
+            ValueError: If any supplied path exists but is not a regular file.
         """
         from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 

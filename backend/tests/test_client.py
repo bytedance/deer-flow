@@ -1,9 +1,12 @@
 """Tests for DeerFlowClient."""
 
+import asyncio
+import concurrent.futures
 import json
 import tempfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -646,6 +649,58 @@ class TestUploads:
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ValueError, match="Path is not a file"):
                 client.upload_files("thread-1", [tmp])
+
+    def test_upload_files_reuses_single_executor_inside_event_loop(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            first = tmp_path / "first.pdf"
+            second = tmp_path / "second.pdf"
+            first.write_bytes(b"%PDF-1.4 first")
+            second.write_bytes(b"%PDF-1.4 second")
+
+            created_executors = []
+            real_executor_cls = concurrent.futures.ThreadPoolExecutor
+
+            async def fake_convert(path: Path) -> Path:
+                md_path = path.with_suffix(".md")
+                md_path.write_text(f"converted {path.name}")
+                return md_path
+
+            class FakeExecutor:
+                def __init__(self, max_workers: int):
+                    self.max_workers = max_workers
+                    self.shutdown_calls = []
+                    self._executor = real_executor_cls(max_workers=max_workers)
+                    created_executors.append(self)
+
+                def submit(self, fn, *args, **kwargs):
+                    return self._executor.submit(fn, *args, **kwargs)
+
+                def shutdown(self, wait: bool = True):
+                    self.shutdown_calls.append(wait)
+                    self._executor.shutdown(wait=wait)
+
+            async def call_upload() -> dict:
+                return client.upload_files("thread-async", [first, second])
+
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("src.gateway.routers.uploads.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("src.gateway.routers.uploads.convert_file_to_markdown", side_effect=fake_convert),
+                patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor),
+            ):
+                result = asyncio.run(call_upload())
+
+            assert result["success"] is True
+            assert len(result["files"]) == 2
+            assert len(created_executors) == 1
+            assert created_executors[0].max_workers == 1
+            assert created_executors[0].shutdown_calls == [True]
+            assert result["files"][0]["markdown_file"] == "first.md"
+            assert result["files"][1]["markdown_file"] == "second.md"
 
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
