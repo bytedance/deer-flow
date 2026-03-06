@@ -13,33 +13,30 @@
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: Volcengine (Doubao) model
+  # - name: doubao-seed-1.8
+  #   display_name: Doubao-Seed-1.8
+  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: doubao-seed-1-8-251228
+  #   api_base: https://ark.cn-beijing.volces.com/api/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  
   # Example: OpenAI model
-  - name: gpt-4
-    display_name: GPT-4
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4
-    api_key: $OPENAI_API_KEY # Use environment variable
-    max_tokens: 4096
-    temperature: 0.7
-    supports_vision: true # Enable vision support for view_image tool
-
-  # Example: Novita AI (OpenAI-compatible)
-  # Novita provides an OpenAI-compatible API with competitive pricing
-  # See: https://novita.ai
-  - name: novita-deepseek-v3.2
-    display_name: Novita DeepSeek V3.2
-    use: langchain_openai:ChatOpenAI
-    model: deepseek/deepseek-v3.2
-    api_key: $NOVITA_API_KEY
-    base_url: https://api.novita.ai/openai
-    max_tokens: 4096
-    temperature: 0.7
-    supports_thinking: true
-    supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
+  # - name: gpt-4
+  #   display_name: GPT-4
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4
+  #   api_key: $OPENAI_API_KEY # Use environment variable
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_vision: true # Enable vision support for view_image tool
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
@@ -73,21 +70,6 @@ models:
   #       thinking:
   #         type: enabled
 
-  # Example: Volcengine (Doubao) model
-  - name: doubao-seed-1.8
-    display_name: Doubao-Seed-1.8
-    use: src.models.patched_deepseek:PatchedChatDeepSeek
-    model: doubao-seed-1-8-251228
-    api_base: https://ark.cn-beijing.volces.com/api/v3
-    api_key: $VOLCENGINE_API_KEY
-    supports_thinking: true
-    supports_vision: true
-    supports_reasoning_effort: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
@@ -98,6 +80,24 @@ models:
   #   max_tokens: 32768
   #   supports_thinking: true
   #   supports_vision: true  # Check your specific model's capabilities
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+  # Example: Novita AI (OpenAI-compatible)
+  # Novita provides an OpenAI-compatible API with competitive pricing
+  # See: https://novita.ai
+  # - name: novita-deepseek-v3.2
+  #   display_name: Novita DeepSeek V3.2
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek/deepseek-v3.2
+  #   api_key: $NOVITA_API_KEY
+  #   base_url: https://api.novita.ai/openai
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: true
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
