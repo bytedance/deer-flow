@@ -127,11 +127,29 @@ tools:
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Set if needed
 
+  # Web search tool (requires InfoQuest API key)
+  # - name: web_search
+  #   group: web
+  #   use: src.community.infoquest.tools:web_search_tool
+  #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
+  #   search_time_range: 10
+
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
     use: src.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+
+  # Web fetch tool (uses InfoQuest AI reader)
+  # - name: web_fetch
+  #   group: web
+  #   use: src.community.infoquest.tools:web_fetch_tool
+  #   # Overall timeout for the entire crawling process (in seconds). Set to positive value to enable, -1 to disable
+  #   timeout: 10
+  #   # Waiting time after page loading (in seconds). Set to positive value to enable, -1 to disable
+  #   fetch_time: 10
+  #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
+  #   navigation_timeout: 30
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation

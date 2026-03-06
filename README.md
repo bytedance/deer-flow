@@ -16,6 +16,16 @@ Learn more and see **real demos** on our official website.
 
 **[deerflow.tech](https://deerflow.tech/)**
 
+## InfoQuest
+
+DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img 
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="InfoQuest_banner" 
+  />
+</a>
+
 ---
 
 ## Table of Contents
@@ -94,6 +104,7 @@ Learn more and see **real demos** on our official website.
    TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
    # Add other provider keys as needed
+   INFOQUEST_API_KEY=your-infoquest-api-key
    ```
 
 - Option B: Export environment variables in your shell
