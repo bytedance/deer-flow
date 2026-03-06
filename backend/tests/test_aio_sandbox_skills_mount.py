@@ -1,10 +1,11 @@
-"""Tests for AIO sandbox skills mount resolution."""
+"""Tests for AIO sandbox skills and extensions mount resolution."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from src.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+from src.community.aio_sandbox.aio_sandbox_provider import DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH, AioSandboxProvider
+from src.config.sandbox_config import VolumeMountConfig
 
 
 class _SkillsConfig:
@@ -84,3 +85,46 @@ def test_get_skills_mount_auto_resolves_bind_source_without_env(monkeypatch, tmp
     )
 
     assert AioSandboxProvider._get_skills_mount() == (str(host_skills_path.resolve()), "/mnt/skills", True)
+
+
+def test_resolve_config_mounts_resolves_host_paths(monkeypatch, tmp_path: Path):
+    configured_mount = VolumeMountConfig(host_path=str(tmp_path / "container-mount"), container_path="/mnt/shared", read_only=False)
+    host_mount_path = tmp_path / "host-mount"
+    host_mount_path.mkdir()
+
+    monkeypatch.setattr(
+        AioSandboxProvider,
+        "_resolve_mount_source_path",
+        classmethod(lambda cls, path: host_mount_path),
+    )
+
+    resolved_mounts = AioSandboxProvider._resolve_config_mounts([configured_mount])
+
+    assert resolved_mounts[0].host_path == str(host_mount_path)
+    assert resolved_mounts[0].container_path == "/mnt/shared"
+    assert resolved_mounts[0].read_only is False
+
+
+def test_get_extensions_config_mount_uses_bind_source(monkeypatch, tmp_path: Path):
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text('{"mcpServers": {}}', encoding="utf-8")
+
+    host_extensions_path = tmp_path / "host" / "extensions_config.json"
+    host_extensions_path.parent.mkdir(parents=True)
+    host_extensions_path.write_text('{"mcpServers": {}}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.community.aio_sandbox.aio_sandbox_provider.ExtensionsConfig.resolve_config_path",
+        classmethod(lambda cls, config_path=None: extensions_path),
+    )
+    monkeypatch.setattr(
+        AioSandboxProvider,
+        "_resolve_mount_source_path",
+        classmethod(lambda cls, path: host_extensions_path),
+    )
+
+    assert AioSandboxProvider._get_extensions_config_mount() == (
+        str(host_extensions_path),
+        DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH,
+        True,
+    )

@@ -20,9 +20,11 @@ import signal
 import threading
 import time
 import uuid
+from copy import deepcopy
 from pathlib import Path
 
 from src.config import get_app_config
+from src.config.extensions_config import ExtensionsConfig
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import SandboxProvider
@@ -43,6 +45,7 @@ DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
+DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH = "/tmp/deer-flow/extensions_config.json"
 
 
 class AioSandboxProvider(SandboxProvider):
@@ -143,6 +146,10 @@ class AioSandboxProvider(SandboxProvider):
         """Load sandbox configuration from app config."""
         config = get_app_config()
         sandbox_config = config.sandbox
+        resolved_environment = self._resolve_env_vars(sandbox_config.environment or {})
+        extensions_mount = self._get_extensions_config_mount()
+        if extensions_mount and not resolved_environment.get("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+            resolved_environment["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = extensions_mount[1]
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
@@ -151,8 +158,9 @@ class AioSandboxProvider(SandboxProvider):
             "auto_start": sandbox_config.auto_start if sandbox_config.auto_start is not None else True,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": getattr(sandbox_config, "idle_timeout", None) or DEFAULT_IDLE_TIMEOUT,
-            "mounts": sandbox_config.mounts or [],
-            "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "mounts": self._resolve_config_mounts(sandbox_config.mounts or []),
+            "environment": resolved_environment,
+            "extensions_mount": extensions_mount,
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
         }
@@ -195,7 +203,36 @@ class AioSandboxProvider(SandboxProvider):
             mounts.append(skills_mount)
             logger.info(f"Adding skills mount: {skills_mount}")
 
+        extensions_mount = self._config.get("extensions_mount")
+        if extensions_mount:
+            mounts.append(extensions_mount)
+            logger.info(f"Adding extensions config mount: {extensions_mount}")
+
         return mounts
+
+    @classmethod
+    def _resolve_mount_source_path(cls, mount_source: Path) -> Path:
+        """Resolve the host path for a mount source.
+
+        In Docker-in-Docker scenarios, a mount source may exist only inside the
+        backend container (e.g. ``/app/skills``) while nested runtime mounts need
+        the host bind source. In those cases we detect the bind source from
+        ``/proc/self/mountinfo``.
+        """
+        resolved_bind_source = cls._resolve_host_bind_path(mount_source)
+        if resolved_bind_source:
+            return resolved_bind_source
+        return mount_source
+
+    @classmethod
+    def _resolve_config_mounts(cls, config_mounts: list) -> list:
+        """Resolve host mount paths for config-defined mounts."""
+        resolved_mounts = []
+        for mount in config_mounts:
+            resolved_mount = deepcopy(mount)
+            resolved_mount.host_path = str(cls._resolve_mount_source_path(Path(mount.host_path).expanduser().resolve()))
+            resolved_mounts.append(resolved_mount)
+        return resolved_mounts
 
     @staticmethod
     def _get_thread_mounts(thread_id: str) -> list[tuple[str, str, bool]]:
@@ -269,7 +306,7 @@ class AioSandboxProvider(SandboxProvider):
         """
         try:
             config = get_app_config()
-            skills_path = config.skills.get_skills_path()
+            skills_path = cls._resolve_mount_source_path(config.skills.get_skills_path())
 
             host_skills_path = os.getenv("DEER_FLOW_SKILLS_HOST_PATH")
             if host_skills_path:
@@ -279,9 +316,7 @@ class AioSandboxProvider(SandboxProvider):
                 else:
                     logger.warning(f"DEER_FLOW_SKILLS_HOST_PATH does not exist: {resolved_host_path}. Falling back to auto detection.")
             else:
-                resolved_bind_source = cls._resolve_host_bind_path(skills_path)
-                if resolved_bind_source:
-                    skills_path = resolved_bind_source
+                skills_path = cls._resolve_mount_source_path(skills_path)
 
             container_path = config.skills.container_path
 
@@ -289,6 +324,21 @@ class AioSandboxProvider(SandboxProvider):
                 return (str(skills_path), container_path, True)  # Read-only for security
         except Exception as e:
             logger.warning(f"Could not setup skills mount: {e}")
+        return None
+
+    @classmethod
+    def _get_extensions_config_mount(cls) -> tuple[str, str, bool] | None:
+        """Get mount tuple for extensions_config.json when present."""
+        try:
+            resolved_config_path = ExtensionsConfig.resolve_config_path()
+            if resolved_config_path is None:
+                return None
+
+            host_extensions_path = cls._resolve_mount_source_path(resolved_config_path.expanduser().resolve())
+            if host_extensions_path.exists():
+                return (str(host_extensions_path), DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH, True)
+        except Exception as exc:
+            logger.warning(f"Could not setup extensions config mount: {exc}")
         return None
 
     # ── Idle timeout management ──────────────────────────────────────────
