@@ -215,22 +215,73 @@ class AioSandboxProvider(SandboxProvider):
         return mounts
 
     @staticmethod
-    def _get_skills_mount() -> tuple[str, str, bool] | None:
-        """Get the skills directory mount configuration."""
+    def _unescape_mountinfo_field(value: str) -> str:
+        """Decode escaped mountinfo fields (e.g. ``\040`` for spaces)."""
+        return value.replace("\040", " ").replace("\011", "\t").replace("\012", "\n").replace("\134", "\\")
+
+    @classmethod
+    def _resolve_host_bind_path(cls, container_path: Path) -> Path | None:
+        """Resolve host bind source for a mounted container path via /proc/self/mountinfo.
+
+        Returns None when mount metadata is unavailable or no bind source can be
+        determined.
+        """
+        mountinfo = Path("/proc/self/mountinfo")
+        if not mountinfo.exists():
+            return None
+
+        try:
+            target_path = container_path.resolve().as_posix()
+        except FileNotFoundError:
+            target_path = container_path.as_posix()
+
+        try:
+            for line in mountinfo.read_text().splitlines():
+                if " - " not in line:
+                    continue
+                left, right = line.split(" - ", 1)
+                left_parts = left.split()
+                right_parts = right.split()
+                if len(left_parts) < 5 or len(right_parts) < 2:
+                    continue
+
+                mount_point = cls._unescape_mountinfo_field(left_parts[4])
+                if mount_point != target_path:
+                    continue
+
+                source = cls._unescape_mountinfo_field(right_parts[1])
+                source_path = Path(source).expanduser()
+                if source_path.exists():
+                    return source_path.resolve()
+        except Exception as exc:
+            logger.debug(f"Failed to parse /proc/self/mountinfo for {container_path}: {exc}")
+
+        return None
+
+    @classmethod
+    def _get_skills_mount(cls) -> tuple[str, str, bool] | None:
+        """Get the skills directory mount configuration.
+
+        Resolution priority for mount source path:
+        1. ``DEER_FLOW_SKILLS_HOST_PATH`` override (if set and exists)
+        2. Host bind source discovered from ``/proc/self/mountinfo``
+        3. Configured ``skills.path`` / default skills path
+        """
         try:
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
 
-            # In Dockerized backend environments, config.skills.get_skills_path()
-            # often resolves to an in-container path (e.g. /app/skills). For
-            # nested local container launches, the runtime needs the host path.
             host_skills_path = os.getenv("DEER_FLOW_SKILLS_HOST_PATH")
             if host_skills_path:
                 resolved_host_path = Path(host_skills_path).expanduser().resolve()
                 if resolved_host_path.exists():
                     skills_path = resolved_host_path
                 else:
-                    logger.warning(f"DEER_FLOW_SKILLS_HOST_PATH does not exist: {resolved_host_path}. Falling back to configured skills path.")
+                    logger.warning(f"DEER_FLOW_SKILLS_HOST_PATH does not exist: {resolved_host_path}. Falling back to auto detection.")
+            else:
+                resolved_bind_source = cls._resolve_host_bind_path(skills_path)
+                if resolved_bind_source:
+                    skills_path = resolved_bind_source
 
             container_path = config.skills.container_path
 

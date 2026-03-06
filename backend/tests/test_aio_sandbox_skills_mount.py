@@ -63,3 +63,24 @@ def test_get_skills_mount_falls_back_when_host_override_missing(monkeypatch, tmp
     monkeypatch.setenv("DEER_FLOW_SKILLS_HOST_PATH", str(missing_host_path))
 
     assert AioSandboxProvider._get_skills_mount() == (str(skills_path), "/mnt/skills", True)
+
+
+def test_get_skills_mount_auto_resolves_bind_source_without_env(monkeypatch, tmp_path: Path):
+    container_visible_skills_path = tmp_path / "container" / "skills"
+    container_visible_skills_path.mkdir(parents=True)
+
+    host_skills_path = tmp_path / "host" / "skills"
+    host_skills_path.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "src.community.aio_sandbox.aio_sandbox_provider.get_app_config",
+        lambda: _AppConfig(skills_path=container_visible_skills_path),
+    )
+    monkeypatch.delenv("DEER_FLOW_SKILLS_HOST_PATH", raising=False)
+    monkeypatch.setattr(
+        AioSandboxProvider,
+        "_resolve_host_bind_path",
+        classmethod(lambda cls, path: host_skills_path if path == container_visible_skills_path else None),
+    )
+
+    assert AioSandboxProvider._get_skills_mount() == (str(host_skills_path.resolve()), "/mnt/skills", True)
