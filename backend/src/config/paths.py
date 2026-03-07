@@ -179,7 +179,11 @@ def get_paths() -> Paths:
 
 
 def resolve_path(path: str) -> Path:
-    """Resolve a absolute path, or relative to the base dir if it starts with './'."""
+    """Resolve *path* to an absolute ``Path``.
+
+    Relative paths are resolved relative to the application base directory.
+    Absolute paths are returned as-is (after normalisation).
+    """
     p = Path(path)
     if not p.is_absolute():
         p = get_paths().base_dir / path

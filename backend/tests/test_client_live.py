@@ -15,7 +15,7 @@ import pytest
 from src.client import DeerFlowClient, StreamEvent
 
 # Skip entire module in CI or when no config.yaml exists
-_skip_reason = "Skipping live tests: no Integrated environment"
+_skip_reason = None
 if os.environ.get("CI"):
     _skip_reason = "Live tests skipped in CI"
 elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
