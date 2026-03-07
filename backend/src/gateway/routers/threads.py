@@ -14,6 +14,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import RemoveMessage
 from langgraph_sdk import get_client
+from langgraph_sdk.errors import NotFoundError as LangGraphNotFoundError
 from pydantic import BaseModel
 
 from src.config.paths import get_paths
@@ -104,20 +105,17 @@ async def list_threads(
         if not owned_thread_ids:
             return []
 
-        owned_set = set(owned_thread_ids)
-
-        # Fetch thread details from LangGraph
+        # Fetch thread details from LangGraph by individual ID so we never
+        # leak or miss threads due to an unfiltered global search.
         langgraph_threads: dict[str, dict[str, Any]] = {}
         try:
             client = get_client(url=_langgraph_url())
-            all_threads = await client.threads.search(
-                limit=100,
-                sort_by="updated_at",
-                sort_order="desc",
-            )
-            langgraph_threads = {
-                t["thread_id"]: t for t in all_threads if t["thread_id"] in owned_set
-            }
+            for tid in owned_thread_ids:
+                try:
+                    t = await client.threads.get(tid)
+                    langgraph_threads[t["thread_id"]] = t
+                except LangGraphNotFoundError:
+                    pass
         except Exception as e:
             logger.warning(f"Failed to fetch threads from LangGraph for user {user_id}: {e}")
 
@@ -176,6 +174,11 @@ async def delete_thread(
     try:
         client = get_client(url=_langgraph_url())
         await client.threads.delete(thread_id)
+    except LangGraphNotFoundError:
+        # Thread doesn't exist in LangGraph (e.g. it was never fully created
+        # due to an error). Treat as already deleted and continue with
+        # ownership/local cleanup so the UI entry can be removed.
+        logger.info(f"Thread {thread_id} not found in LangGraph, proceeding with cleanup")
     except Exception as e:
         logger.error(f"Error deleting thread {thread_id} from LangGraph: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete thread: {str(e)}")
