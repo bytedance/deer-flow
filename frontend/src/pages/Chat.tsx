@@ -153,6 +153,7 @@ function ChatInner() {
     isNewThread,
     threadId,
     onFinish: (state) => {
+      setPendingFileNames([]);
       if (isNewThread && threadIdFromPath === "new" && threadId) {
         void navigate(pathOfThread(threadId), { replace: true });
       }
@@ -177,6 +178,8 @@ function ChatInner() {
   }) as unknown as UseStream<AgentThreadState>;
 
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [pendingFileNames, setPendingFileNames] = useState<string[]>([]);
   const [isTransitioningConversation, setIsTransitioningConversation] =
     useState(false);
   const [hasPendingSubmit, setHasPendingSubmit] = useState(false);
@@ -405,12 +408,23 @@ function ChatInner() {
         void navigate(pathOfThread(threadId!));
       }
     },
+    onUploadStart: useCallback(() => setIsUploadingFiles(true), []),
+    onUploadEnd: useCallback(() => setIsUploadingFiles(false), []),
   });
 
   const handleSubmitWithLanding = useCallback(
     (message: Parameters<typeof handleSubmit>[0]) => {
       if (isNewThread && !hasConversation) {
         setHasPendingSubmit(true);
+      }
+      if (message.files && message.files.length > 0) {
+        setPendingFileNames(
+          message.files
+            .map((f) => f.filename)
+            .filter((n): n is string => !!n),
+        );
+      } else {
+        setPendingFileNames([]);
       }
       return handleSubmit(message);
     },
@@ -752,6 +766,8 @@ function ChatInner() {
                       thread={thread}
                       paddingBottom={showLanding ? 400 : 160}
                       isRegenerating={isRegenerating}
+                      isUploadingFiles={isUploadingFiles}
+                      pendingFileNames={pendingFileNames}
                       isTransitioning={isTransitioningConversation}
                       onEditMessage={handleEditMessage}
                       onRegenerateMessage={handleRegenerateMessage}
@@ -788,11 +804,13 @@ function ChatInner() {
                       status={
                         isRegenerating || thread.isLoading
                           ? "streaming"
-                          : "ready"
+                          : isUploadingFiles
+                            ? "submitted"
+                            : "ready"
                       }
                       context={settings.context}
                       disabled={
-                        env.VITE_STATIC_WEBSITE_ONLY === "true" || isRegenerating
+                        env.VITE_STATIC_WEBSITE_ONLY === "true" || isRegenerating || isUploadingFiles
                       }
                       onContextChange={(context) =>
                         setSettings("context", context)

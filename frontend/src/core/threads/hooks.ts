@@ -117,12 +117,16 @@ export function useSubmitThread({
   threadContext,
   isNewThread,
   afterSubmit,
+  onUploadStart,
+  onUploadEnd,
 }: {
   isNewThread: boolean;
   threadId: string | null | undefined;
   thread: UseStream<AgentThreadState>;
   threadContext: Omit<AgentThreadContext, "thread_id">;
   afterSubmit?: () => void;
+  onUploadStart?: () => void;
+  onUploadEnd?: () => void;
 }) {
   const queryClient = useQueryClient();
   const callback = useCallback(
@@ -132,7 +136,9 @@ export function useSubmitThread({
       const text = message.text.trim();
 
       // Upload files first if any
-      if (message.files && message.files.length > 0) {
+      const hasFiles = message.files && message.files.length > 0;
+      if (hasFiles) {
+        onUploadStart?.();
         try {
           // Convert FileUIPart to File objects by fetching blob URLs
           const filePromises = message.files.map(async (fileUIPart) => {
@@ -177,12 +183,14 @@ export function useSubmitThread({
             await uploadFiles(threadId, files);
           }
         } catch (error) {
+          onUploadEnd?.();
           console.error("Failed to upload files:", error);
           const errorMessage =
             error instanceof Error ? error.message : "Failed to upload files.";
           toast.error(errorMessage);
           throw error;
         }
+        onUploadEnd?.();
       }
 
       await thread.submit(
@@ -227,7 +235,7 @@ export function useSubmitThread({
       await queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       afterSubmit?.();
     },
-    [thread, isNewThread, threadId, threadContext, queryClient, afterSubmit],
+    [thread, isNewThread, threadId, threadContext, queryClient, afterSubmit, onUploadStart, onUploadEnd],
   );
   return callback;
 }
@@ -255,6 +263,19 @@ export function useThreads() {
  */
 export function useDeleteThread() {
   const queryClient = useQueryClient();
+
+  const removeFromCache = (threadId: string) => {
+    queryClient.setQueriesData(
+      {
+        queryKey: ["threads", "search"],
+        exact: false,
+      },
+      (oldData: Array<AgentThread>) => {
+        return oldData.filter((t) => t.thread_id !== threadId);
+      },
+    );
+  };
+
   return useMutation({
     mutationFn: async ({ threadId }: { threadId: string }) => {
       const response = await authFetch(`/api/threads/${threadId}`, {
@@ -265,15 +286,14 @@ export function useDeleteThread() {
       }
     },
     onSuccess(_, { threadId }) {
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.filter((t) => t.thread_id !== threadId);
-        },
-      );
+      removeFromCache(threadId);
+    },
+    onError(error, { threadId }) {
+      console.error("Failed to delete thread:", error);
+      // Remove from local cache anyway so the user can clear stuck entries
+      // (e.g. threads that were never fully created in the backend).
+      removeFromCache(threadId);
+      toast.error("Thread deleted locally. It may not have existed on the server.");
     },
   });
 }

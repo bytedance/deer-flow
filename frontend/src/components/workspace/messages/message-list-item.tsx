@@ -12,6 +12,7 @@ import {
 } from "@/components/ai-elements/message";
 import { Badge } from "@/components/ui/badge";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useArtifacts } from "@/components/workspace/artifacts";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
@@ -31,6 +32,7 @@ export const MessageListItem = memo(function MessageListItem({
   message,
   isLoading = false,
   isRegenerating = false,
+  pendingFileNames,
   onEdit,
   onRegenerate,
 }: {
@@ -38,6 +40,7 @@ export const MessageListItem = memo(function MessageListItem({
   message: Message;
   isLoading?: boolean;
   isRegenerating?: boolean;
+  pendingFileNames?: string[];
   onEdit?: (messageId: string, newContent: string) => void;
   onRegenerate?: (messageId: string, content: string) => void;
 }) {
@@ -115,6 +118,7 @@ export const MessageListItem = memo(function MessageListItem({
         className={isHuman ? "w-fit" : "w-full"}
         message={message}
         isLoading={isLoading}
+        pendingFileNames={isHuman ? pendingFileNames : undefined}
       />
       <MessageToolbar
         className={cn(
@@ -198,14 +202,16 @@ function MessageContent_({
   className,
   message,
   isLoading = false,
+  pendingFileNames,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  pendingFileNames?: string[];
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const { thread_id } = useParams<{ thread_id: string }>();
+  const { threadId: thread_id } = useParams<{ threadId: string }>();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -235,9 +241,13 @@ function MessageContent_({
     };
   }, [isLoading, rawContent, reasoningContent, isHuman]);
 
+  // Show backend-parsed files if available, otherwise show pending file names
+  const hasParsedFiles = uploadedFiles.length > 0;
   const filesList =
-    uploadedFiles.length > 0 && thread_id ? (
+    hasParsedFiles && thread_id ? (
       <UploadedFilesList files={uploadedFiles} threadId={thread_id} />
+    ) : pendingFileNames && pendingFileNames.length > 0 && thread_id ? (
+      <PendingFilesList fileNames={pendingFileNames} threadId={thread_id} />
     ) : null;
 
   if (isHuman) {
@@ -345,7 +355,7 @@ function UploadedFilesList({
 }
 
 /**
- * Single uploaded file card component
+ * Single uploaded file card component — clickable to open in artifact panel
  */
 function UploadedFileCard({
   file,
@@ -354,30 +364,41 @@ function UploadedFileCard({
   file: UploadedFile;
   threadId: string;
 }) {
-  if (!threadId) return null;
+  const { select: selectArtifact, setOpen } = useArtifacts();
 
   const isImage = isImageFile(file.filename);
   const fileUrl = resolveArtifactURL(file.path, threadId);
 
+  const handleClick = () => {
+    selectArtifact(file.path);
+    setOpen(true);
+  };
+
   if (isImage) {
     return (
-      <a
-        href={fileUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="group border-border/40 relative block overflow-hidden rounded-lg border"
+      <button
+        type="button"
+        onClick={handleClick}
+        className="group border-border/40 relative block cursor-pointer overflow-hidden rounded-lg border transition-shadow hover:shadow-md hover:ring-2 hover:ring-primary/30"
       >
         <img
           src={fileUrl}
           alt={file.filename}
           className="h-32 w-auto max-w-[240px] object-cover transition-transform group-hover:scale-105"
         />
-      </a>
+        <div className="bg-black/60 absolute inset-x-0 bottom-0 px-2 py-1 text-left opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="truncate text-[11px] font-medium text-white">{file.filename}</span>
+        </div>
+      </button>
     );
   }
 
   return (
-    <div className="bg-background border-border/40 flex max-w-[200px] min-w-[120px] flex-col gap-1 rounded-lg border p-3 shadow-sm">
+    <button
+      type="button"
+      onClick={handleClick}
+      className="bg-background border-border/40 flex max-w-[200px] min-w-[120px] cursor-pointer flex-col gap-1 rounded-lg border p-3 text-left shadow-sm transition-all hover:shadow-md hover:ring-2 hover:ring-primary/30"
+    >
       <div className="flex items-start gap-2">
         <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
         <span
@@ -396,7 +417,92 @@ function UploadedFileCard({
         </Badge>
         <span className="text-muted-foreground text-[10px]">{file.size}</span>
       </div>
+    </button>
+  );
+}
+
+/**
+ * Pending files list — shown before backend returns <uploaded_files> tag
+ */
+function PendingFilesList({
+  fileNames,
+  threadId,
+}: {
+  fileNames: string[];
+  threadId: string;
+}) {
+  if (fileNames.length === 0) return null;
+
+  return (
+    <div className="mb-2 flex flex-wrap justify-end gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      {fileNames.map((name) => (
+        <PendingFileCard key={name} filename={name} threadId={threadId} />
+      ))}
     </div>
+  );
+}
+
+/**
+ * Single pending file card — clickable to open in artifact panel
+ */
+function PendingFileCard({
+  filename,
+  threadId,
+}: {
+  filename: string;
+  threadId: string;
+}) {
+  const { select: selectArtifact, setOpen } = useArtifacts();
+  const filePath = `/mnt/user-data/uploads/${filename}`;
+  const isImage = isImageFile(filename);
+
+  const handleClick = () => {
+    selectArtifact(filePath);
+    setOpen(true);
+  };
+
+  if (isImage) {
+    const fileUrl = resolveArtifactURL(filePath, threadId);
+    return (
+      <button
+        type="button"
+        onClick={handleClick}
+        className="group border-border/40 relative block cursor-pointer overflow-hidden rounded-lg border transition-shadow hover:shadow-md hover:ring-2 hover:ring-primary/30"
+      >
+        <img
+          src={fileUrl}
+          alt={filename}
+          className="h-32 w-auto max-w-[240px] object-cover transition-transform group-hover:scale-105"
+        />
+        <div className="bg-black/60 absolute inset-x-0 bottom-0 px-2 py-1 text-left opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="truncate text-[11px] font-medium text-white">{filename}</span>
+        </div>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      className="bg-background border-border/40 flex max-w-[200px] min-w-[120px] cursor-pointer flex-col gap-1 rounded-lg border p-3 text-left shadow-sm transition-all hover:shadow-md hover:ring-2 hover:ring-primary/30"
+    >
+      <div className="flex items-start gap-2">
+        <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
+        <span
+          className="text-foreground truncate text-sm font-medium"
+          title={filename}
+        >
+          {filename}
+        </span>
+      </div>
+      <Badge
+        variant="secondary"
+        className="rounded px-1.5 py-0.5 text-[10px] font-normal"
+      >
+        {getFileTypeLabel(filename)}
+      </Badge>
+    </button>
   );
 }
 

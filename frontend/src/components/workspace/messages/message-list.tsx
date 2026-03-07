@@ -45,6 +45,8 @@ export function MessageList({
   messagesOverride,
   paddingBottom = 160,
   isRegenerating,
+  isUploadingFiles,
+  pendingFileNames,
   isTransitioning,
   onEditMessage,
   onRegenerateMessage,
@@ -59,6 +61,8 @@ export function MessageList({
   messagesOverride?: Message[];
   paddingBottom?: number;
   isRegenerating?: boolean;
+  isUploadingFiles?: boolean;
+  pendingFileNames?: string[];
   isTransitioning?: boolean;
   onEditMessage?: (messageId: string, newContent: string) => void;
   onRegenerateMessage?: (messageId: string, content: string) => void;
@@ -145,6 +149,18 @@ export function MessageList({
     lastVisibleMessagesRef.current = [];
   }, [threadId]);
 
+  // Find the last human message ID for attaching pending file badges
+  // Must be before early return to satisfy rules of hooks
+  const lastHumanMessageId = useMemo(() => {
+    if (!pendingFileNames || pendingFileNames.length === 0) return null;
+    for (let i = stableMessages.length - 1; i >= 0; i--) {
+      if (stableMessages[i]?.type === "human") {
+        return stableMessages[i]?.id ?? null;
+      }
+    }
+    return null;
+  }, [stableMessages, pendingFileNames]);
+
   if (thread.isThreadLoading) {
     return <MessageListSkeleton />;
   }
@@ -163,12 +179,14 @@ export function MessageList({
 
   const mapGroupToNode = (group: GroupLike) => {
     if (group.type === "human" || group.type === "assistant") {
+      const isLastHuman = group.type === "human" && group.messages[0]?.id === lastHumanMessageId;
       return (
         <MessageListItem
           key={group.id}
           message={group.messages[0]!}
           isLoading={thread.isLoading}
           isRegenerating={isRegenerating}
+          pendingFileNames={isLastHuman ? pendingFileNames : undefined}
           onEdit={onEditMessage}
           onRegenerate={onRegenerateMessage}
         />
@@ -322,6 +340,7 @@ export function MessageList({
           message={message}
           isLoading={thread.isLoading}
           isRegenerating={isRegenerating}
+          pendingFileNames={message.id === lastHumanMessageId ? pendingFileNames : undefined}
           onEdit={onEditMessage}
           onRegenerate={onRegenerateMessage}
         />
@@ -345,12 +364,13 @@ export function MessageList({
           !isNewThread && (
           <ConversationEmptyState />
         )}
-        {(thread.isLoading || isTransitioning) && (
+        {(thread.isLoading || isTransitioning || isUploadingFiles) && (
           <div className="my-4 flex items-center gap-3 transition-opacity duration-200">
             <StreamingIndicator
-              showUsage
+              showUsage={!isUploadingFiles}
               isLoading={thread.isLoading}
               usageEstimate={streamingUsageEstimate}
+              statusOverride={isUploadingFiles ? "Processing files..." : undefined}
             />
           </div>
         )}

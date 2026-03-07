@@ -65,12 +65,14 @@ export function StreamingIndicator({
   showUsage = false,
   isLoading = false,
   usageEstimate,
+  statusOverride,
 }: {
   className?: string;
   size?: "normal" | "sm";
   showUsage?: boolean;
   isLoading?: boolean;
   usageEstimate?: TurnUsageEstimate;
+  statusOverride?: string;
 }) {
   const dotSize = size === "sm" ? "w-1.5 h-1.5 mx-0.5" : "w-2 h-2 mx-1";
   const pickRandomVerb = () =>
@@ -108,7 +110,7 @@ export function StreamingIndicator({
     <div className={cn("flex flex-wrap items-center gap-3", className)}>
       <div className="flex items-center gap-2">
         <span className="text-[#f0a46b]">*</span>
-        <span className="text-[#f0a46b]">{verb}</span>
+        <span className="text-[#f0a46b]">{statusOverride ?? verb}</span>
         <div className="flex">
           <div
             className={cn(

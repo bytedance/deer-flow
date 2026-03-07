@@ -669,7 +669,7 @@ function SubmitButton({
       {isStreaming ? (
         <>Stop</>
       ) : isSubmitted ? (
-        <>Sending...</>
+        <>Uploading...</>
       ) : (
         <ArrowUpIcon className="size-4" />
       )}
