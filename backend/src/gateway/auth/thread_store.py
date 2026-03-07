@@ -95,22 +95,37 @@ def _file_delete_thread(thread_id: str) -> None:
 # Database-backed implementations
 # ---------------------------------------------------------------------------
 def _db_claim_thread(thread_id: str, user_id: str) -> bool:
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.exc import IntegrityError
+
     from src.db.engine import get_db_session
     from src.db.models import ThreadModel
 
     now = datetime.now(UTC)
     with get_db_session() as session:
-        existing = session.query(ThreadModel).filter(ThreadModel.thread_id == thread_id).first()
-        if existing is None:
-            thread = ThreadModel(
-                thread_id=thread_id,
-                user_id=user_id,
-                created_at=now,
-                updated_at=now,
+        # Use INSERT ... ON CONFLICT to atomically claim the thread,
+        # avoiding TOCTOU races between concurrent requests.
+        try:
+            stmt = (
+                pg_insert(ThreadModel)
+                .values(
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=["thread_id"])
             )
-            session.add(thread)
-            return True
-        return existing.user_id == user_id
+            result = session.execute(stmt)
+            if result.rowcount > 0:
+                # Newly inserted — this user now owns the thread.
+                return True
+        except IntegrityError:
+            session.rollback()
+
+        # Row already existed (or conflict) — check the actual owner.
+        existing = session.query(ThreadModel).filter(ThreadModel.thread_id == thread_id).first()
+        return existing is not None and existing.user_id == user_id
 
 
 def _db_get_thread_owner(thread_id: str) -> str | None:
