@@ -19,6 +19,17 @@
 
 set -e
 
+# ── Fix volume permissions ──────────────────────────────────────────────────
+# Docker volumes are created as root. Ensure DEER_FLOW_HOME is writable by
+# appuser so the gateway can create thread directories for uploads etc.
+if [ -n "$DEER_FLOW_HOME" ] && [ "$(id -u)" = "0" ]; then
+  chown appuser:appuser "$DEER_FLOW_HOME"
+  # Also fix threads/ if it already exists (may have been created by another container)
+  if [ -d "$DEER_FLOW_HOME/threads" ]; then
+    chown -R appuser:appuser "$DEER_FLOW_HOME/threads"
+  fi
+fi
+
 if [ -n "$CODEARTIFACT_DOMAIN" ]; then
   REPO="${CODEARTIFACT_REPOSITORY:-mcp-servers}"
 
@@ -48,5 +59,9 @@ if [ -n "$CODEARTIFACT_DOMAIN" ]; then
   echo "CodeArtifact index configured." >&2
 fi
 
-# Execute the original command
-exec "$@"
+# Drop to non-root user and execute the original command
+if [ "$(id -u)" = "0" ]; then
+  exec gosu appuser "$@"
+else
+  exec "$@"
+fi

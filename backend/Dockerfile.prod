@@ -55,6 +55,10 @@ COPY --from=builder /app /app
 # Copy CodeArtifact entrypoint script
 COPY docker/codeartifact-entrypoint.sh /usr/local/bin/codeartifact-entrypoint.sh
 
+# Install gosu for dropping privileges in entrypoint
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user and transfer ownership
 RUN useradd -m -r -s /bin/false appuser && \
     chown -R appuser:appuser /app && \
@@ -66,8 +70,8 @@ WORKDIR /app
 ENV UV_NO_SYNC=1
 
 
-# Switch to non-root user
-USER appuser
+# Note: We do NOT switch to appuser here. The entrypoint runs as root
+# to fix volume permissions, then drops to appuser via gosu.
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024
