@@ -64,9 +64,23 @@ export interface Translations {
     proModeDescription: string;
     ultraMode: string;
     ultraModeDescription: string;
+    reasoningEffort: string;
+    reasoningEffortMinimal: string;
+    reasoningEffortMinimalDescription: string;
+    reasoningEffortLow: string;
+    reasoningEffortLowDescription: string;
+    reasoningEffortMedium: string;
+    reasoningEffortMediumDescription: string;
+    reasoningEffortHigh: string;
+    reasoningEffortHighDescription: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
+    followupLoading: string;
+    followupConfirmTitle: string;
+    followupConfirmDescription: string;
+    followupConfirmAppend: string;
+    followupConfirmReplace: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -90,6 +104,34 @@ export interface Translations {
     newChat: string;
     chats: string;
     demoChats: string;
+    agents: string;
+  };
+
+  // Agents
+  agents: {
+    title: string;
+    description: string;
+    newAgent: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    chat: string;
+    delete: string;
+    deleteConfirm: string;
+    deleteSuccess: string;
+    newChat: string;
+    createPageTitle: string;
+    createPageSubtitle: string;
+    nameStepTitle: string;
+    nameStepHint: string;
+    nameStepPlaceholder: string;
+    nameStepContinue: string;
+    nameStepInvalidError: string;
+    nameStepAlreadyExistsError: string;
+    nameStepCheckError: string;
+    nameStepBootstrapMessage: string;
+    agentCreated: string;
+    startChatting: string;
+    backToGallery: string;
   };
 
   // Breadcrumb
@@ -148,6 +190,12 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
+  };
+
+  // Uploads
+  uploads: {
+    uploading: string;
+    uploadingFiles: string;
   };
 
   // Subtasks

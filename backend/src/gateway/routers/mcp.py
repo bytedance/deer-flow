@@ -1,6 +1,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -9,6 +10,25 @@ from src.config.extensions_config import ExtensionsConfig, get_extensions_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
+
+
+class McpOAuthConfigResponse(BaseModel):
+    """OAuth configuration for an MCP server."""
+
+    enabled: bool = Field(default=True, description="Whether OAuth token injection is enabled")
+    token_url: str = Field(default="", description="OAuth token endpoint URL")
+    grant_type: Literal["client_credentials", "refresh_token"] = Field(default="client_credentials", description="OAuth grant type")
+    client_id: str | None = Field(default=None, description="OAuth client ID")
+    client_secret: str | None = Field(default=None, description="OAuth client secret")
+    refresh_token: str | None = Field(default=None, description="OAuth refresh token")
+    scope: str | None = Field(default=None, description="OAuth scope")
+    audience: str | None = Field(default=None, description="OAuth audience")
+    token_field: str = Field(default="access_token", description="Token response field containing access token")
+    token_type_field: str = Field(default="token_type", description="Token response field containing token type")
+    expires_in_field: str = Field(default="expires_in", description="Token response field containing expires-in seconds")
+    default_token_type: str = Field(default="Bearer", description="Default token type when response omits token_type")
+    refresh_skew_seconds: int = Field(default=60, description="Refresh this many seconds before expiry")
+    extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
 
 
 class McpServerConfigResponse(BaseModel):
@@ -21,6 +41,7 @@ class McpServerConfigResponse(BaseModel):
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
+    oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
 
 

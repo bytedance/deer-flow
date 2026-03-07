@@ -28,6 +28,7 @@ if _skip_reason:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def client():
     """Create a real DeerFlowClient (no mocks)."""
@@ -38,6 +39,7 @@ def client():
 def thread_tmp(tmp_path):
     """Provide a unique thread_id + tmp directory for file operations."""
     import uuid
+
     tid = f"live-test-{uuid.uuid4().hex[:8]}"
     return tid, tmp_path
 
@@ -45,6 +47,7 @@ def thread_tmp(tmp_path):
 # ===========================================================================
 # Scenario 1: Basic chat — model responds coherently
 # ===========================================================================
+
 
 class TestLiveBasicChat:
     def test_chat_returns_nonempty_string(self, client):
@@ -65,6 +68,7 @@ class TestLiveBasicChat:
 # Scenario 2: Streaming — events arrive in correct order
 # ===========================================================================
 
+
 class TestLiveStreaming:
     def test_stream_yields_messages_tuple_and_end(self, client):
         """stream() produces at least one messages-tuple event and ends with end."""
@@ -81,10 +85,7 @@ class TestLiveStreaming:
 
     def test_stream_ai_content_nonempty(self, client):
         """Streamed messages-tuple AI events contain non-empty content."""
-        ai_messages = [
-            e for e in client.stream("What color is the sky? One word.")
-            if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")
-        ]
+        ai_messages = [e for e in client.stream("What color is the sky? One word.") if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
         assert len(ai_messages) >= 1
         for m in ai_messages:
             assert len(m.data.get("content", "")) > 0
@@ -94,13 +95,11 @@ class TestLiveStreaming:
 # Scenario 3: Tool use — agent calls a tool and returns result
 # ===========================================================================
 
+
 class TestLiveToolUse:
     def test_agent_uses_bash_tool(self, client):
         """Agent uses bash tool when asked to run a command."""
-        events = list(client.stream(
-            "Use the bash tool to run: echo 'LIVE_TEST_OK'. "
-            "Then tell me the output."
-        ))
+        events = list(client.stream("Use the bash tool to run: echo 'LIVE_TEST_OK'. Then tell me the output."))
 
         types = [e.type for e in events]
         print(f"  event types: {types}")
@@ -122,10 +121,7 @@ class TestLiveToolUse:
 
     def test_agent_uses_ls_tool(self, client):
         """Agent uses ls tool to list a directory."""
-        events = list(client.stream(
-            "Use the ls tool to list the contents of /mnt/user-data/workspace. "
-            "Just report what you see."
-        ))
+        events = list(client.stream("Use the ls tool to list the contents of /mnt/user-data/workspace. Just report what you see."))
 
         types = [e.type for e in events]
         print(f"  event types: {types}")
@@ -139,15 +135,11 @@ class TestLiveToolUse:
 # Scenario 4: Multi-tool chain — agent chains tools in sequence
 # ===========================================================================
 
+
 class TestLiveMultiToolChain:
     def test_write_then_read(self, client):
         """Agent writes a file, then reads it back."""
-        events = list(client.stream(
-            "Step 1: Use write_file to write 'integration_test_content' to "
-            "/mnt/user-data/outputs/live_test.txt. "
-            "Step 2: Use read_file to read that file back. "
-            "Step 3: Tell me the content you read."
-        ))
+        events = list(client.stream("Step 1: Use write_file to write 'integration_test_content' to /mnt/user-data/outputs/live_test.txt. Step 2: Use read_file to read that file back. Step 3: Tell me the content you read."))
 
         types = [e.type for e in events]
         print(f"  event types: {types}")
@@ -164,15 +156,13 @@ class TestLiveMultiToolChain:
         ai_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
         tr_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
         final_text = ai_events[-1].data["content"] if ai_events else ""
-        assert "integration_test_content" in final_text.lower() or any(
-            "integration_test_content" in e.data.get("content", "")
-            for e in tr_events
-        )
+        assert "integration_test_content" in final_text.lower() or any("integration_test_content" in e.data.get("content", "") for e in tr_events)
 
 
 # ===========================================================================
 # Scenario 5: File upload lifecycle with real filesystem
 # ===========================================================================
+
 
 class TestLiveFileUpload:
     def test_upload_list_delete(self, client, thread_tmp):
@@ -225,14 +215,14 @@ class TestLiveFileUpload:
 # Scenario 6: Configuration query — real config loading
 # ===========================================================================
 
+
 class TestLiveConfigQueries:
-    def test_list_models_returns_ark(self, client):
-        """list_models() returns the configured ARK model."""
+    def test_list_models_returns_configured_model(self, client):
+        """list_models() returns at least one configured model with Gateway-aligned fields."""
         result = client.list_models()
         assert "models" in result
         assert len(result["models"]) >= 1
         names = [m["name"] for m in result["models"]]
-        assert "ark-model" in names
         # Verify Gateway-aligned fields
         for m in result["models"]:
             assert "display_name" in m
@@ -240,10 +230,12 @@ class TestLiveConfigQueries:
         print(f"  models: {names}")
 
     def test_get_model_found(self, client):
-        """get_model() returns details for existing model."""
-        model = client.get_model("ark-model")
+        """get_model() returns details for the first configured model."""
+        result = client.list_models()
+        first_model_name = result["models"][0]["name"]
+        model = client.get_model(first_model_name)
         assert model is not None
-        assert model["name"] == "ark-model"
+        assert model["name"] == first_model_name
         assert "display_name" in model
         assert "supports_thinking" in model
         print(f"  model detail: {model}")
@@ -265,25 +257,25 @@ class TestLiveConfigQueries:
 # Scenario 7: Artifact read after agent writes
 # ===========================================================================
 
+
 class TestLiveArtifact:
     def test_get_artifact_after_write(self, client):
         """Agent writes a file → client reads it back via get_artifact()."""
         import uuid
+
         thread_id = f"live-artifact-{uuid.uuid4().hex[:8]}"
 
         # Ask agent to write a file
-        events = list(client.stream(
-            "Use write_file to create /mnt/user-data/outputs/artifact_test.json "
-            "with content: {\"status\": \"ok\", \"source\": \"live_test\"}",
-            thread_id=thread_id,
-        ))
+        events = list(
+            client.stream(
+                'Use write_file to create /mnt/user-data/outputs/artifact_test.json with content: {"status": "ok", "source": "live_test"}',
+                thread_id=thread_id,
+            )
+        )
 
         # Verify write happened
         tc_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
-        assert any(
-            any(tc["name"] == "write_file" for tc in e.data["tool_calls"])
-            for e in tc_events
-        )
+        assert any(any(tc["name"] == "write_file" for tc in e.data["tool_calls"]) for e in tc_events)
 
         # Read artifact
         content, mime = client.get_artifact(thread_id, "mnt/user-data/outputs/artifact_test.json")
@@ -302,11 +294,13 @@ class TestLiveArtifact:
 # Scenario 8: Per-call overrides
 # ===========================================================================
 
+
 class TestLiveOverrides:
     def test_thinking_disabled_still_works(self, client):
         """Explicit thinking_enabled=False override produces a response."""
         response = client.chat(
-            "Say OK.", thinking_enabled=False,
+            "Say OK.",
+            thinking_enabled=False,
         )
         assert len(response) > 0
         print(f"  response: {response}")
@@ -315,6 +309,7 @@ class TestLiveOverrides:
 # ===========================================================================
 # Scenario 9: Error resilience
 # ===========================================================================
+
 
 class TestLiveErrorResilience:
     def test_delete_nonexistent_upload(self, client):
