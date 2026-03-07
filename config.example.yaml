@@ -344,3 +344,37 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+
+# ============================================================================
+# Checkpointer Configuration
+# ============================================================================
+# Configure state persistence for the embedded DeerFlowClient.
+# The LangGraph Server manages its own state persistence separately
+# via the server infrastructure (this setting does not affect it).
+#
+# When configured, DeerFlowClient will automatically use this checkpointer,
+# enabling multi-turn conversations to persist across process restarts.
+#
+# Supported types:
+#   memory   - In-process only. State is lost when the process exits. (default)
+#   sqlite   - File-based SQLite persistence. Survives restarts.
+#              Requires: uv add langgraph-checkpoint-sqlite
+#   postgres - PostgreSQL persistence. Suitable for multi-process deployments.
+#              Requires: uv add langgraph-checkpoint-postgres psycopg[binary] psycopg-pool
+#
+# Examples:
+#
+# In-memory (default when omitted — no persistence):
+# checkpointer:
+#   type: memory
+#
+# SQLite (file-based, single-process):
+# checkpointer:
+#   type: sqlite
+#   connection_string: checkpoints.db
+#
+# PostgreSQL (multi-process, production):
+# checkpointer:
+#   type: postgres
+#   connection_string: postgresql://user:password@localhost:5432/deerflow
