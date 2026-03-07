@@ -202,7 +202,7 @@ services:
       PGUSER: thinktank
       PGPASSWORD: ${DB_PASSWORD:-staging-password}
       PGDATABASE: thinktank
-      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 */6 * * *}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}
       BACKUP_DIR: /backups
       S3_BUCKET: ${S3_BACKUP_BUCKET:-thinktank-staging-backups}
       S3_PREFIX: ${S3_BACKUP_PREFIX:-backups/}

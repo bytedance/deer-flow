@@ -30,10 +30,6 @@ case "${1:-cron}" in
             log "S3 upload disabled (S3_BUCKET not set)"
         fi
 
-        # Run initial backup on startup
-        log "Running initial backup..."
-        /usr/local/bin/backup.sh || log "Initial backup failed (will retry on schedule)"
-
         # Set up cron job by writing a crontab entry
         # Export all environment variables for the cron job
         env | grep -E '^(PG|BACKUP_|S3_|RETENTION_|AWS_)' > /tmp/backup_env 2>/dev/null || true
