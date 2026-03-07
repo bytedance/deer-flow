@@ -26,6 +26,18 @@ class TitleConfig(BaseModel):
         default=None,
         description="Model name to use for title generation (None = use default model)",
     )
+    timeout_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=30,
+        description="Per-attempt timeout for title generation in seconds",
+    )
+    max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description="Number of retries for failed or timed-out title generation attempts",
+    )
     prompt_template: str = Field(
         default=("Generate a concise title (max {max_words} words) for this conversation.\nUser: {user_msg}\nAssistant: {assistant_msg}\n\nReturn ONLY the title, no quotes, no explanation."),
         description="Prompt template for title generation",

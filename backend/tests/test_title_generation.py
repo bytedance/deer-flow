@@ -16,6 +16,8 @@ class TestTitleConfig:
         assert config.max_words == 6
         assert config.max_chars == 60
         assert config.model_name is None
+        assert config.timeout_seconds == 3.0
+        assert config.max_retries == 1
 
     def test_custom_config(self):
         """Test custom configuration."""
@@ -24,11 +26,15 @@ class TestTitleConfig:
             max_words=10,
             max_chars=100,
             model_name="gpt-4",
+            timeout_seconds=5.0,
+            max_retries=2,
         )
         assert config.enabled is False
         assert config.max_words == 10
         assert config.max_chars == 100
         assert config.model_name == "gpt-4"
+        assert config.timeout_seconds == 5.0
+        assert config.max_retries == 2
 
     def test_config_validation(self):
         """Test configuration validation."""
@@ -43,6 +49,11 @@ class TestTitleConfig:
             TitleConfig(max_chars=5)
         with pytest.raises(ValueError):
             TitleConfig(max_chars=201)
+
+        with pytest.raises(ValueError):
+            TitleConfig(timeout_seconds=0)
+        with pytest.raises(ValueError):
+            TitleConfig(max_retries=-1)
 
     def test_get_set_config(self):
         """Test global config getter and setter."""
