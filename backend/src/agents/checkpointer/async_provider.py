@@ -53,7 +53,10 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         except ImportError as exc:
             raise ImportError(SQLITE_INSTALL) from exc
 
+        import pathlib
+
         conn_str = resolve_path(config.connection_string or "store.db")
+        pathlib.Path(conn_str).parent.mkdir(parents=True, exist_ok=True)
         async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
             await saver.setup()
             yield saver
