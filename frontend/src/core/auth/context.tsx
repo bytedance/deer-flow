@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -7,6 +8,7 @@ import {
   useState,
 } from "react";
 
+import { resetAPIClient } from "@/core/api";
 import { reloadLocalSettingsSnapshot } from "@/core/settings";
 import { env } from "@/env";
 
@@ -22,7 +24,8 @@ import type { AuthState, UserResponse } from "./types";
 
 const AuthContext = createContext<AuthState | null>(null);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
+export function AuthProvider({ children }: React.PropsWithChildren) {
+  const queryClient = useQueryClient();
   const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -85,8 +88,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     await logoutUser();
     setUser(null);
+    queryClient.clear();
+    resetAPIClient();
     reloadLocalSettingsSnapshot();
-  }, []);
+  }, [queryClient]);
 
   const value = useMemo<AuthState>(
     () => ({
