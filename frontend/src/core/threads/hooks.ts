@@ -98,21 +98,14 @@ export function useThreadStream({
       const updates: Array<Partial<AgentThreadState> | null> = Object.values(
         data || {},
       );
-      console.log("Thread update event received:", updates);
       for (const update of updates) {
         if (update && "title" in update && update.title) {
-          console.log("Thread title updated:", update.title);
           void queryClient.setQueriesData(
             {
               queryKey: ["threads", "search"],
               exact: false,
             },
             (oldData: Array<AgentThread> | undefined) => {
-              console.log("Updating thread list with new title:", {
-                oldData,
-                threadId: threadIdRef.current,
-                title: update.title,
-              });
               return oldData?.map((t) => {
                 if (t.thread_id === threadIdRef.current) {
                   return {
