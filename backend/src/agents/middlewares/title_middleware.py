@@ -81,7 +81,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return user_msg if user_msg else "New Conversation"
 
     @override
-    def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+    async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Generate and set thread title after the first agent response."""
         if self._should_generate_title(state):
             title = self._generate_title(state)
