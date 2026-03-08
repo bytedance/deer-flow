@@ -43,7 +43,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         # Generate title after first complete exchange
         return len(user_messages) == 1 and len(assistant_messages) >= 1
 
-    def _generate_title(self, state: TitleMiddlewareState) -> str:
+    async def _generate_title(self, state: TitleMiddlewareState) -> str:
         """Generate a concise title based on the conversation."""
         config = get_title_config()
         messages = state.get("messages", [])
@@ -66,7 +66,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         )
 
         try:
-            response = model.invoke(prompt)
+            response = await model.ainvoke(prompt)
             # Ensure response content is string
             title_content = str(response.content) if response.content else ""
             title = title_content.strip().strip('"').strip("'")
@@ -81,10 +81,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return user_msg if user_msg else "New Conversation"
 
     @override
-    def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+    async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
         """Generate and set thread title after the first agent response."""
         if self._should_generate_title(state):
-            title = self._generate_title(state)
+            title = await self._generate_title(state)
             print(f"Generated thread title: {title}")
 
             # Store title in state (will be persisted by checkpointer if configured)

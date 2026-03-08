@@ -57,6 +57,7 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const deselect = useCallback(() => {
     setSelectedArtifact(null);
     setAutoSelect(true);
+    setOpen(false);
   }, []);
 
   const value: ArtifactsContextType = {

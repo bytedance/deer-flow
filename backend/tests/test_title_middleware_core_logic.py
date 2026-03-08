@@ -1,6 +1,7 @@
 """Core behavior tests for TitleMiddleware."""
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -76,7 +77,7 @@ class TestTitleMiddlewareCoreLogic:
         _set_test_title_config(max_chars=12)
         middleware = TitleMiddleware()
         fake_model = MagicMock()
-        fake_model.invoke.return_value = MagicMock(content='"A very long generated title"')
+        fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='"A very long generated title"'))
         monkeypatch.setattr("src.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
 
         state = {
@@ -85,7 +86,7 @@ class TestTitleMiddlewareCoreLogic:
                 AIMessage(content="好的，先确认需求"),
             ]
         }
-        title = middleware._generate_title(state)
+        title = asyncio.run(middleware._generate_title(state))
 
         assert '"' not in title
         assert "'" not in title
@@ -95,7 +96,7 @@ class TestTitleMiddlewareCoreLogic:
         _set_test_title_config(max_chars=20)
         middleware = TitleMiddleware()
         fake_model = MagicMock()
-        fake_model.invoke.side_effect = RuntimeError("LLM unavailable")
+        fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
         monkeypatch.setattr("src.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
 
         state = {
@@ -104,7 +105,7 @@ class TestTitleMiddlewareCoreLogic:
                 AIMessage(content="收到"),
             ]
         }
-        title = middleware._generate_title(state)
+        title = asyncio.run(middleware._generate_title(state))
 
         # Assert behavior (truncated fallback + ellipsis) without overfitting exact text.
         assert title.endswith("...")
@@ -113,11 +114,11 @@ class TestTitleMiddlewareCoreLogic:
     def test_after_agent_returns_title_only_when_needed(self, monkeypatch):
         middleware = TitleMiddleware()
         monkeypatch.setattr(middleware, "_should_generate_title", lambda state: True)
-        monkeypatch.setattr(middleware, "_generate_title", lambda state: "核心逻辑回归")
+        monkeypatch.setattr(middleware, "_generate_title", AsyncMock(return_value="核心逻辑回归"))
 
-        result = middleware.after_agent({"messages": []}, runtime=MagicMock())
+        result = asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock()))
 
         assert result == {"title": "核心逻辑回归"}
 
         monkeypatch.setattr(middleware, "_should_generate_title", lambda state: False)
-        assert middleware.after_agent({"messages": []}, runtime=MagicMock()) is None
+        assert asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock())) is None
