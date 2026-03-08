@@ -1,6 +1,6 @@
 # MCP (Model Context Protocol) Configuration
 
-DeerFlow supports configurable MCP servers and skills to extend its capabilities, which are loaded from a dedicated `extensions_config.json` file in the project root directory.
+edu-flow supports configurable MCP servers and skills to extend its capabilities, which are loaded from a dedicated `extensions_config.json` file in the project root directory.
 
 ## Setup
 
@@ -16,7 +16,7 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 
 ## OAuth Support (HTTP/SSE MCP Servers)
 
-For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.
+For `http` and `sse` MCP servers, edu-flow supports OAuth token acquisition and automatic token refresh.
 
 - Supported grants: `client_credentials`, `refresh_token`
 - Configure per-server `oauth` block in `extensions_config.json`
@@ -47,7 +47,7 @@ Example:
 
 ## How It Works
 
-MCP servers expose tools that are automatically discovered and integrated into DeerFlow’s agent system at runtime. Once enabled, these tools become available to agents without additional code changes.
+MCP servers expose tools that are automatically discovered and integrated into edu-flow’s agent system at runtime. Once enabled, these tools become available to agents without additional code changes.
 
 ## Example Capabilities
 

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document provides a comprehensive overview of the DeerFlow backend architecture.
+This document provides a comprehensive overview of the edu-flow backend architecture.
 
 ## System Architecture
 
@@ -130,7 +130,7 @@ class ThreadState(AgentState):
     # Core state from AgentState
     messages: list[BaseMessage]
 
-    # DeerFlow extensions
+    # edu-flow extensions
     sandbox: dict             # Sandbox environment info
     artifacts: list[str]      # Generated file paths
     thread_data: dict         # {workspace, uploads, outputs} paths
@@ -178,10 +178,10 @@ class ThreadState(AgentState):
 
 | Virtual Path | Physical Path |
 |-------------|---------------|
-| `/mnt/user-data/workspace` | `backend/.deer-flow/threads/{thread_id}/user-data/workspace` |
-| `/mnt/user-data/uploads` | `backend/.deer-flow/threads/{thread_id}/user-data/uploads` |
-| `/mnt/user-data/outputs` | `backend/.deer-flow/threads/{thread_id}/user-data/outputs` |
-| `/mnt/skills` | `deer-flow/skills/` |
+| `/mnt/user-data/workspace` | `backend/.edu-flow/threads/{thread_id}/user-data/workspace` |
+| `/mnt/user-data/uploads` | `backend/.edu-flow/threads/{thread_id}/user-data/uploads` |
+| `/mnt/user-data/outputs` | `backend/.edu-flow/threads/{thread_id}/user-data/outputs` |
+| `/mnt/skills` | `edu-flow/skills/` |
 
 ### Tool System
 
@@ -385,14 +385,14 @@ SKILL.md Format:
 
 2. Gateway receives file
    - Validates file
-   - Stores in .deer-flow/threads/{thread_id}/user-data/uploads/
+   - Stores in .edu-flow/threads/{thread_id}/user-data/uploads/
    - If document: converts to Markdown via markitdown
 
 3. Returns response
    {
      "files": [{
        "filename": "doc.pdf",
-       "path": ".deer-flow/.../uploads/doc.pdf",
+       "path": ".edu-flow/.../uploads/doc.pdf",
        "virtual_path": "/mnt/user-data/uploads/doc.pdf",
        "artifact_url": "/api/threads/.../artifacts/mnt/.../doc.pdf"
      }]

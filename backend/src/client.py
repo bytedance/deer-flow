@@ -1,12 +1,12 @@
-"""DeerFlowClient — Embedded Python client for DeerFlow agent system.
+"""EduFlowClient — Embedded Python client for edu-flow agent system.
 
-Provides direct programmatic access to DeerFlow's agent capabilities
+Provides direct programmatic access to edu-flow's agent capabilities
 without requiring LangGraph Server or Gateway API processes.
 
 Usage:
-    from src.client import DeerFlowClient
+    from src.client import EduFlowClient
 
-    client = DeerFlowClient()
+    client = EduFlowClient()
     response = client.chat("Analyze this paper for me", thread_id="my-thread")
     print(response)
 
@@ -62,10 +62,10 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
-class DeerFlowClient:
-    """Embedded Python client for DeerFlow agent system.
+class EduFlowClient:
+    """Embedded Python client for edu-flow agent system.
 
-    Provides direct programmatic access to DeerFlow's agent capabilities
+    Provides direct programmatic access to edu-flow's agent capabilities
     without requiring LangGraph Server or Gateway API processes.
 
     Note:
@@ -80,9 +80,9 @@ class DeerFlowClient:
 
     Example::
 
-        from src.client import DeerFlowClient
+        from src.client import EduFlowClient
 
-        client = DeerFlowClient()
+        client = EduFlowClient()
 
         # Simple one-shot
         print(client.chat("hello"))
@@ -499,7 +499,7 @@ class DeerFlowClient:
         """
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set EDU_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         current_config = get_extensions_config()
 
@@ -563,7 +563,7 @@ class DeerFlowClient:
 
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set EDU_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         extensions_config = get_extensions_config()
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)

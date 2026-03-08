@@ -1,16 +1,16 @@
 # Setup Guide
 
-Quick setup instructions for DeerFlow.
+Quick setup instructions for edu-flow.
 
 ## Configuration Setup
 
-DeerFlow uses a YAML configuration file that should be placed in the **project root directory**.
+edu-flow uses a YAML configuration file that should be placed in the **project root directory**.
 
 ### Steps
 
 1. **Navigate to project root**:
    ```bash
-   cd /path/to/deer-flow
+   cd /path/to/edu-flow
    ```
 
 2. **Copy example configuration**:
@@ -35,7 +35,7 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
 
 ## Important Notes
 
-- **Location**: `config.yaml` should be in `deer-flow/` (project root), not `deer-flow/backend/`
+- **Location**: `config.yaml` should be in `edu-flow/` (project root), not `edu-flow/backend/`
 - **Git**: `config.yaml` is automatically ignored by git (contains secrets)
 - **Priority**: If both `backend/config.yaml` and `../config.yaml` exist, backend version takes precedence
 
@@ -43,11 +43,11 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
 
 The backend searches for `config.yaml` in this order:
 
-1. `DEER_FLOW_CONFIG_PATH` environment variable (if set)
+1. `EDU_FLOW_CONFIG_PATH` environment variable (if set)
 2. `backend/config.yaml` (current directory when running from backend/)
-3. `deer-flow/config.yaml` (parent directory - **recommended location**)
+3. `edu-flow/config.yaml` (parent directory - **recommended location**)
 
-**Recommended**: Place `config.yaml` in project root (`deer-flow/config.yaml`).
+**Recommended**: Place `config.yaml` in project root (`edu-flow/config.yaml`).
 
 ## Sandbox Setup (Optional but Recommended)
 
@@ -71,7 +71,7 @@ If you skip this step, the image will be automatically pulled on first agent exe
 
 ```bash
 # Check where the backend is looking
-cd deer-flow/backend
+cd edu-flow/backend
 python -c "from src.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
 ```
 

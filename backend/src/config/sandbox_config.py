@@ -20,7 +20,7 @@ class SandboxConfig(BaseModel):
         port: Base port for sandbox containers (default: 8080)
         base_url: If set, uses existing sandbox instead of starting new container
         auto_start: Whether to automatically start Docker container (default: true)
-        container_prefix: Prefix for container names (default: deer-flow-sandbox)
+        container_prefix: Prefix for container names (default: edu-flow-sandbox)
         idle_timeout: Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.
         mounts: List of volume mounts to share directories with the container
         environment: Environment variables to inject into the container (values starting with $ are resolved from host env)

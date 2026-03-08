@@ -903,16 +903,16 @@ a:hover {
   margin: 0;
 }
 
-.deerflow-branding {
+.edu-flow-branding {
   opacity: 0.7;
   transition: opacity var(--transition-fast);
 }
 
-.deerflow-branding:hover {
+.edu-flow-branding:hover {
   opacity: 1;
 }
 
-.deerflow-link {
+.edu-flow-link {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -920,11 +920,11 @@ a:hover {
   font-size: 0.875rem;
 }
 
-.deerflow-icon {
+.edu-flow-icon {
   font-size: 0.875rem;
 }
 
-.deerflow-text {
+.edu-flow-text {
   font-family: var(--font-sans);
 }
 

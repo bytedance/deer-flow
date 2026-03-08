@@ -1,6 +1,6 @@
-# Contributing to DeerFlow Backend
+# Contributing to edu-flow Backend
 
-Thank you for your interest in contributing to DeerFlow! This document provides guidelines and instructions for contributing to the backend codebase.
+Thank you for your interest in contributing to edu-flow! This document provides guidelines and instructions for contributing to the backend codebase.
 
 ## Table of Contents
 
@@ -27,8 +27,8 @@ Thank you for your interest in contributing to DeerFlow! This document provides 
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/deer-flow.git
-   cd deer-flow
+   git clone https://github.com/YOUR_USERNAME/edu-flow.git
+   cd edu-flow
    ```
 
 ## Development Setup
@@ -423,4 +423,4 @@ If you have questions about contributing:
 2. Look for similar issues or PRs on GitHub
 3. Open a discussion or issue on GitHub
 
-Thank you for contributing to DeerFlow!
+Thank you for contributing to edu-flow!

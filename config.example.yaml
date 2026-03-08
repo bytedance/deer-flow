@@ -1,9 +1,9 @@
-# Configuration for the DeerFlow application
+# Configuration for the edu-flow application
 #
 # Guidelines:
 # - Copy this file to `config.yaml` and customize it for your environment
 # - The default path of this configuration file is `config.yaml` in the current working directory.
-#   However you can change it using the `DEER_FLOW_CONFIG_PATH` environment variable.
+#   However you can change it using the `EDU_FLOW_CONFIG_PATH` environment variable.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
@@ -212,8 +212,8 @@ sandbox:
 #   # Optional: Whether to automatically start Docker container (default: true)
 #   # auto_start: true
 #
-#   # Optional: Prefix for container names (default: deer-flow-sandbox)
-#   # container_prefix: deer-flow-sandbox
+#   # Optional: Prefix for container names (default: edu-flow-sandbox)
+#   # container_prefix: edu-flow-sandbox
 #
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
@@ -349,11 +349,11 @@ memory:
 # ============================================================================
 # Checkpointer Configuration
 # ============================================================================
-# Configure state persistence for the embedded DeerFlowClient.
+# Configure state persistence for the embedded edu-flowClient.
 # The LangGraph Server manages its own state persistence separately
 # via the server infrastructure (this setting does not affect it).
 #
-# When configured, DeerFlowClient will automatically use this checkpointer,
+# When configured, edu-flowClient will automatically use this checkpointer,
 # enabling multi-turn conversations to persist across process restarts.
 #
 # Supported types:
@@ -377,4 +377,4 @@ memory:
 # PostgreSQL (multi-process, production):
 # checkpointer:
 #   type: postgres
-#   connection_string: postgresql://user:password@localhost:5432/deerflow
+#   connection_string: postgresql://user:password@localhost:5432/edu-flow

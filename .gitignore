@@ -1,4 +1,4 @@
-# DeerFlow docker image cache
+# edu-flow docker image cache
 docker/.cache/
 # OS generated files
 .DS_Store
@@ -33,7 +33,7 @@ extensions_config.json
 # Coverage report
 coverage.xml
 coverage/
-.deer-flow/
+.edu-flow/
 .claude/
 skills/custom/*
 logs/

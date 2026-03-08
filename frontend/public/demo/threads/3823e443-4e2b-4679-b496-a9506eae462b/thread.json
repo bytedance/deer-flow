@@ -1020,9 +1020,9 @@
     ],
     "title": "Dr. Fei-Fei Li Podcast Highlights Timeline",
     "thread_data": {
-      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/workspace",
-      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/uploads",
-      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/outputs"
+      "workspace_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/3823e443-4e2b-4679-b496-a9506eae462b/user-data/outputs"
     },
     "uploaded_files": [],
     "artifacts": ["/mnt/user-data/outputs/fei-fei-li-podcast-timeline.md"],

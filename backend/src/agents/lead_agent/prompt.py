@@ -397,7 +397,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
 
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        agent_name=agent_name or "DeerFlow 2.0",
+        agent_name=agent_name or "edu-flow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
         memory_context=memory_context,

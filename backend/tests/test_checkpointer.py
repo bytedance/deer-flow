@@ -181,16 +181,16 @@ class TestAppConfigLoadsCheckpointer:
 
 
 # ---------------------------------------------------------------------------
-# DeerFlowClient falls back to config checkpointer
+# EduFlowClient falls back to config checkpointer
 # ---------------------------------------------------------------------------
 
 
 class TestClientCheckpointerFallback:
     def test_client_uses_config_checkpointer_when_none_provided(self):
-        """DeerFlowClient._ensure_agent falls back to get_checkpointer() when checkpointer=None."""
+        """EduFlowClient._ensure_agent falls back to get_checkpointer() when checkpointer=None."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        from src.client import DeerFlowClient
+        from src.client import EduFlowClient
 
         load_checkpointer_config_from_dict({"type": "memory"})
 
@@ -212,9 +212,9 @@ class TestClientCheckpointerFallback:
             patch("src.client.create_chat_model", return_value=MagicMock()),
             patch("src.client._build_middlewares", return_value=[]),
             patch("src.client.apply_prompt_template", return_value=""),
-            patch("src.client.DeerFlowClient._get_tools", return_value=[]),
+            patch("src.client.EduFlowClient._get_tools", return_value=[]),
         ):
-            client = DeerFlowClient(checkpointer=None)
+            client = EduFlowClient(checkpointer=None)
             config = client._get_runnable_config("test-thread")
             client._ensure_agent(config)
 
@@ -223,7 +223,7 @@ class TestClientCheckpointerFallback:
 
     def test_client_explicit_checkpointer_takes_precedence(self):
         """An explicitly provided checkpointer is used even when config checkpointer is set."""
-        from src.client import DeerFlowClient
+        from src.client import EduFlowClient
 
         load_checkpointer_config_from_dict({"type": "memory"})
 
@@ -246,9 +246,9 @@ class TestClientCheckpointerFallback:
             patch("src.client.create_chat_model", return_value=MagicMock()),
             patch("src.client._build_middlewares", return_value=[]),
             patch("src.client.apply_prompt_template", return_value=""),
-            patch("src.client.DeerFlowClient._get_tools", return_value=[]),
+            patch("src.client.EduFlowClient._get_tools", return_value=[]),
         ):
-            client = DeerFlowClient(checkpointer=explicit_cp)
+            client = EduFlowClient(checkpointer=explicit_cp)
             config = client._get_runnable_config("test-thread")
             client._ensure_agent(config)
 

@@ -445,9 +445,9 @@
     ],
     "title": "Explaining MOE to a Kid",
     "thread_data": {
-      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/workspace",
-      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/uploads",
-      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/outputs"
+      "workspace_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/user-data/outputs"
     },
     "uploaded_files": [],
     "artifacts": ["/mnt/user-data/outputs/doraemon-moe-comic.jpg"]

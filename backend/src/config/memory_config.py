@@ -18,8 +18,8 @@ class MemoryConfig(BaseModel):
             "Absolute paths are used as-is. "
             "Relative paths are resolved against `Paths.base_dir` "
             "(not the backend working directory). "
-            "Note: if you previously set this to `.deer-flow/memory.json`, "
-            "the file will now be resolved as `{base_dir}/.deer-flow/memory.json`; "
+            "Note: if you previously set this to `.edu-flow/memory.json`, "
+            "the file will now be resolved as `{base_dir}/.edu-flow/memory.json`; "
             "migrate existing data or use an absolute path to preserve the old location."
         ),
     )

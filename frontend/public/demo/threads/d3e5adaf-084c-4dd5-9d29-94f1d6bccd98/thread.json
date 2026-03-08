@@ -1229,9 +1229,9 @@
       }
     ],
     "thread_data": {
-      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/workspace",
-      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/uploads",
-      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/outputs"
+      "workspace_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/d3e5adaf-084c-4dd5-9d29-94f1d6bccd98/user-data/outputs"
     },
     "uploaded_files": [],
     "title": "Startup Tech Lead's Video Analysis Request",

@@ -823,9 +823,9 @@
       }
     ],
     "thread_data": {
-      "workspace_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/workspace",
-      "uploads_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/uploads",
-      "outputs_path": "/Users/henry/Desktop/deer-flow/backend/.deer-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/outputs"
+      "workspace_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/workspace",
+      "uploads_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/uploads",
+      "outputs_path": "/Users/henry/Desktop/edu-flow/backend/.edu-flow/threads/4f3e55ee-f853-43db-bfb3-7d1a411f03cb/user-data/outputs"
     },
     "title": "Book Proposal Rejection Clip",
     "uploaded_files": [],

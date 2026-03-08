@@ -20,7 +20,7 @@ class CheckpointerConfig(BaseModel):
         default=None,
         description="Connection string for sqlite (file path) or postgres (DSN). "
         "Required for sqlite and postgres types. "
-        "For sqlite, use a file path like '.deer-flow/checkpoints.db' or ':memory:' for in-memory. "
+        "For sqlite, use a file path like '.edu-flow/checkpoints.db' or ':memory:' for in-memory. "
         "For postgres, use a DSN like 'postgresql://user:pass@localhost:5432/db'.",
     )
 

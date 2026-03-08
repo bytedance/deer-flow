@@ -94,7 +94,7 @@ export function RecentChatList() {
   const handleShare = useCallback(
     async (threadId: string) => {
       // Always use Vercel URL for sharing so others can access
-      const VERCEL_URL = "https://deer-flow-v2.vercel.app";
+      const VERCEL_URL = "https://edu-flow-v2.vercel.app";
       const isLocalhost =
         window.location.hostname === "localhost" ||
         window.location.hostname === "127.0.0.1";

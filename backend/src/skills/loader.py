@@ -10,7 +10,7 @@ def get_skills_root_path() -> Path:
     Get the root path of the skills directory.
 
     Returns:
-        Path to the skills directory (deer-flow/skills)
+        Path to the skills directory (edu-flow/skills)
     """
     # backend directory is current file's parent's parent's parent
     backend_dir = Path(__file__).resolve().parent.parent.parent
@@ -29,7 +29,7 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     Args:
         skills_path: Optional custom path to skills directory.
                      If not provided and use_config is True, uses path from config.
-                     Otherwise defaults to deer-flow/skills
+                     Otherwise defaults to edu-flow/skills
         use_config: Whether to load skills path from config (default: True)
         enabled_only: If True, only return enabled skills (default: False)
 

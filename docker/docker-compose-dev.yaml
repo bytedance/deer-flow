@@ -1,4 +1,4 @@
-# DeerFlow Development Environment
+# edu-flow Development Environment
 # Usage: docker-compose -f docker-compose-dev.yaml up --build
 #
 # Services:
@@ -24,18 +24,18 @@ services:
     build:
       context: ./provisioner
       dockerfile: Dockerfile
-    container_name: deer-flow-provisioner
+    container_name: edu-flow-provisioner
     volumes:
       - ~/.kube/config:/root/.kube/config:ro
     environment:
-      - K8S_NAMESPACE=deer-flow
+      - K8S_NAMESPACE=edu-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
-      #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      #   export EDU_FLOW_ROOT=/absolute/path/to/edu-flow
+      - SKILLS_HOST_PATH=${EDU_FLOW_ROOT}/skills
+      - THREADS_HOST_PATH=${EDU_FLOW_ROOT}/backend/.edu-flow/threads
       - KUBECONFIG_PATH=/root/.kube/config
       - NODE_HOST=host.docker.internal
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
@@ -46,7 +46,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - deer-flow-dev
+      - edu-flow-dev
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -62,7 +62,7 @@ services:
   # - nginx.conf: includes provisioner route (provisioner mode)
   nginx:
     image: nginx:alpine
-    container_name: deer-flow-nginx
+    container_name: edu-flow-nginx
     ports:
       - "2026:2026"
     volumes:
@@ -72,7 +72,7 @@ services:
       - gateway
       - langgraph
     networks:
-      - deer-flow-dev
+      - edu-flow-dev
     restart: unless-stopped
 
   # Frontend - Next.js Development Server
@@ -82,7 +82,7 @@ services:
       dockerfile: frontend/Dockerfile
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
-    container_name: deer-flow-frontend
+    container_name: edu-flow-frontend
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
     volumes:
       - ../frontend/src:/app/frontend/src
@@ -99,7 +99,7 @@ services:
     env_file:
       - ../frontend/.env
     networks:
-      - deer-flow-dev
+      - edu-flow-dev
     restart: unless-stopped
 
   # Backend - Gateway API
@@ -109,7 +109,7 @@ services:
       dockerfile: backend/Dockerfile
       cache_from:
         - type=local,src=/tmp/docker-cache-gateway
-    container_name: deer-flow-gateway
+    container_name: edu-flow-gateway
     command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/src:/app/backend/src
@@ -117,7 +117,7 @@ services:
       - ../config.yaml:/app/config.yaml
       - ../skills:/app/skills
       - ../logs:/app/logs
-      - ../backend/.deer-flow:/app/backend/.deer-flow
+      - ../backend/.edu-flow:/app/backend/.edu-flow
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
@@ -129,7 +129,7 @@ services:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"
     networks:
-      - deer-flow-dev
+      - edu-flow-dev
     restart: unless-stopped
 
   # Backend - LangGraph Server
@@ -139,7 +139,7 @@ services:
       dockerfile: backend/Dockerfile
       cache_from:
         - type=local,src=/tmp/docker-cache-langgraph
-    container_name: deer-flow-langgraph
+    container_name: edu-flow-langgraph
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/src:/app/backend/src
@@ -147,7 +147,7 @@ services:
       - ../config.yaml:/app/config.yaml
       - ../skills:/app/skills
       - ../logs:/app/logs
-      - ../backend/.deer-flow:/app/backend/.deer-flow
+      - ../backend/.edu-flow:/app/backend/.edu-flow
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
@@ -156,13 +156,13 @@ services:
     env_file:
       - ../.env
     networks:
-      - deer-flow-dev
+      - edu-flow-dev
     restart: unless-stopped
 
 volumes: {}
 
 networks:
-  deer-flow-dev:
+  edu-flow-dev:
     driver: bridge
     ipam:
       config:

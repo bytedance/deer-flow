@@ -13,7 +13,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
 
 # Docker Compose command with project name
-COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
+COMPOSE_CMD="docker compose -p edu-flow-dev -f docker-compose-dev.yaml"
 
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
@@ -73,7 +73,7 @@ trap cleanup INT TERM
 # Initialize: pre-pull the sandbox image so first Pod startup is fast
 init() {
     echo "=========================================="
-    echo "  DeerFlow Init — Pull Sandbox Image"
+    echo "  edu-flow Init — Pull Sandbox Image"
     echo "=========================================="
     echo ""
 
@@ -98,7 +98,7 @@ start() {
     local services
 
     echo "=========================================="
-    echo "  Starting DeerFlow Docker Development"
+    echo "  Starting edu-flow Docker Development"
     echo "=========================================="
     echo ""
 
@@ -118,10 +118,10 @@ start() {
     fi
     echo ""
     
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    # Set EDU_FLOW_ROOT for provisioner if not already set
+    if [ -z "$EDU_FLOW_ROOT" ]; then
+        export EDU_FLOW_ROOT="$PROJECT_ROOT"
+        echo -e "${BLUE}Setting EDU_FLOW_ROOT=$EDU_FLOW_ROOT${NC}"
         echo ""
     fi
     
@@ -129,7 +129,7 @@ start() {
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
     echo "=========================================="
-    echo "  DeerFlow Docker is starting!"
+    echo "  edu-flow Docker is starting!"
     echo "=========================================="
     echo ""
     echo "  🌐 Application: http://localhost:2026"
@@ -185,7 +185,7 @@ stop() {
 # Restart Docker development environment
 restart() {
     echo "========================================"
-    echo "  Restarting DeerFlow Docker Services"
+    echo "  Restarting edu-flow Docker Services"
     echo "========================================"
     echo ""
     echo -e "${BLUE}Restarting containers...${NC}"
@@ -200,7 +200,7 @@ restart() {
 
 # Show help
 help() {
-    echo "DeerFlow Docker Management Script"
+    echo "edu-flow Docker Management Script"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""

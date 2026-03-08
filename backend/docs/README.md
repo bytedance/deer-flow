@@ -1,6 +1,6 @@
 # Documentation
 
-This directory contains detailed documentation for the DeerFlow backend.
+This directory contains detailed documentation for the edu-flow backend.
 
 ## Quick Links
 
@@ -29,7 +29,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 
 ## Getting Started
 
-1. **New to DeerFlow?** Start with [SETUP.md](SETUP.md) for quick installation
+1. **New to edu-flow?** Start with [SETUP.md](SETUP.md) for quick installation
 2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
 3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Building integrations?** Check [API.md](API.md) for API reference

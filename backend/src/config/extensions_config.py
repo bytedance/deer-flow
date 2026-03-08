@@ -72,7 +72,7 @@ class ExtensionsConfig(BaseModel):
 
         Priority:
         1. If provided `config_path` argument, use it.
-        2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
+        2. If provided `EDU_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
         3. Otherwise, check for `extensions_config.json` in the current directory, then in the parent directory.
         4. For backward compatibility, also check for `mcp_config.json` if `extensions_config.json` is not found.
         5. If not found, return None (extensions are optional).
@@ -88,10 +88,10 @@ class ExtensionsConfig(BaseModel):
             if not path.exists():
                 raise FileNotFoundError(f"Extensions config file specified by param `config_path` not found at {path}")
             return path
-        elif os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
-            path = Path(os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"))
+        elif os.getenv("EDU_FLOW_EXTENSIONS_CONFIG_PATH"):
+            path = Path(os.getenv("EDU_FLOW_EXTENSIONS_CONFIG_PATH"))
             if not path.exists():
-                raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
+                raise FileNotFoundError(f"Extensions config file specified by environment variable `EDU_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
         else:
             # Check if the extensions_config.json is in the current directory

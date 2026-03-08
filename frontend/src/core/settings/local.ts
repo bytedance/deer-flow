@@ -14,7 +14,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
 };
 
-const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
+const LOCAL_SETTINGS_KEY = "edu-flow.local-settings";
 
 export interface LocalSettings {
   notification: {

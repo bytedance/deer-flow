@@ -17,7 +17,7 @@ def setup_agent(
     description: str,
     runtime: ToolRuntime,
 ) -> Command:
-    """Setup the custom DeerFlow agent.
+    """Setup the custom edu-flow agent.
 
     Args:
         soul: Full SOUL.md content defining the agent's personality and behavior.

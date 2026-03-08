@@ -1,9 +1,9 @@
-# DeerFlow - Unified Development Environment
+# edu-flow - Unified Development Environment
 
 .PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 help:
-	@echo "DeerFlow Development Commands:"
+	@echo "edu-flow Development Commands:"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
@@ -158,11 +158,11 @@ dev:
 	@-nginx -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) -s quit 2>/dev/null || true
 	@sleep 1
 	@-pkill -9 nginx 2>/dev/null || true
-	@-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
+	@-./scripts/cleanup-containers.sh edu-flow-sandbox 2>/dev/null || true
 	@sleep 1
 	@echo ""
 	@echo "=========================================="
-	@echo "  Starting DeerFlow Development Server"
+	@echo "  Starting edu-flow Development Server"
 	@echo "=========================================="
 	@echo ""
 	@echo "Services starting up..."
@@ -181,7 +181,7 @@ dev:
 		sleep 1; \
 		pkill -9 nginx 2>/dev/null || true; \
 		echo "Cleaning up sandbox containers..."; \
-		./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true; \
+		./scripts/cleanup-containers.sh edu-flow-sandbox 2>/dev/null || true; \
 		echo "✓ All services stopped"; \
 		exit 0; \
 	}; \
@@ -210,7 +210,7 @@ dev:
 	echo "✓ Nginx started on localhost:2026"; \
 	echo ""; \
 	echo "=========================================="; \
-	echo "  DeerFlow is ready!"; \
+	echo "  edu-flow is ready!"; \
 	echo "=========================================="; \
 	echo ""; \
 	echo "  🌐 Application: http://localhost:2026"; \
@@ -237,7 +237,7 @@ stop:
 	@sleep 1
 	@-pkill -9 nginx 2>/dev/null || true
 	@echo "Cleaning up sandbox containers..."
-	@-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
+	@-./scripts/cleanup-containers.sh edu-flow-sandbox 2>/dev/null || true
 	@echo "✓ All services stopped"
 
 # Clean up

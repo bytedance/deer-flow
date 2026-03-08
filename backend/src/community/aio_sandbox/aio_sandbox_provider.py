@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Default configuration
 DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 DEFAULT_PORT = 8080
-DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
+DEFAULT_CONTAINER_PREFIX = "edu-flow-sandbox"
 DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
 
@@ -60,7 +60,7 @@ class AioSandboxProvider(SandboxProvider):
         port: 8080                      # Base port for local containers
         base_url: http://...            # If set, uses remote backend (K8s/external)
         auto_start: true                # Whether to auto-start local containers
-        container_prefix: deer-flow-sandbox
+        container_prefix: edu-flow-sandbox
         idle_timeout: 600               # Idle timeout in seconds (0 to disable)
         mounts:                         # Volume mounts for local containers
           - host_path: /path/on/host

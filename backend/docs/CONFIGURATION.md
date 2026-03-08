@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This guide explains how to configure DeerFlow for your environment.
+This guide explains how to configure edu-flow for your environment.
 
 ## Configuration Sections
 
@@ -91,7 +91,7 @@ tools:
 
 ### Sandbox
 
-DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
+edu-flow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
 
 **Local Execution** (runs sandbox code directly on the host machine):
 ```yaml
@@ -115,7 +115,7 @@ sandbox:
    provisioner_url: http://provisioner:8002
 ```
 
-When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
+When using Docker development (`make docker-start`), edu-flow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
 See [Provisioner Setup Guide](docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
@@ -133,7 +133,7 @@ sandbox:
   use: src.community.aio_sandbox:AioSandboxProvider
   port: 8080
   auto_start: true
-  container_prefix: deer-flow-sandbox
+  container_prefix: edu-flow-sandbox
 
   # Optional: Additional mounts
   mounts:
@@ -156,7 +156,7 @@ skills:
 ```
 
 **How Skills Work**:
-- Skills are stored in `deer-flow/skills/{public,custom}/`
+- Skills are stored in `edu-flow/skills/{public,custom}/`
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
@@ -175,7 +175,7 @@ title:
 
 ## Environment Variables
 
-DeerFlow supports environment variable substitution using the `$` prefix:
+edu-flow supports environment variable substitution using the `$` prefix:
 
 ```yaml
 models:
@@ -188,20 +188,20 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
-- `DEER_FLOW_CONFIG_PATH` - Custom config file path
+- `EDU_FLOW_CONFIG_PATH` - Custom config file path
 
 ## Configuration Location
 
-The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`), not in the backend directory.
+The configuration file should be placed in the **project root directory** (`edu-flow/config.yaml`), not in the backend directory.
 
 ## Configuration Priority
 
-DeerFlow searches for configuration in this order:
+edu-flow searches for configuration in this order:
 
 1. Path specified in code via `config_path` argument
-2. Path from `DEER_FLOW_CONFIG_PATH` environment variable
+2. Path from `EDU_FLOW_CONFIG_PATH` environment variable
 3. `config.yaml` in current working directory (typically `backend/` when running)
-4. `config.yaml` in parent directory (project root: `deer-flow/`)
+4. `config.yaml` in parent directory (project root: `edu-flow/`)
 
 ## Best Practices
 
@@ -215,16 +215,16 @@ DeerFlow searches for configuration in this order:
 ## Troubleshooting
 
 ### "Config file not found"
-- Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
+- Ensure `config.yaml` exists in the **project root** directory (`edu-flow/config.yaml`)
 - The backend searches parent directory by default, so root location is preferred
-- Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location
+- Alternatively, set `EDU_FLOW_CONFIG_PATH` environment variable to custom location
 
 ### "Invalid API key"
 - Verify environment variables are set correctly
 - Check that `$` prefix is used for env var references
 
 ### "Skills not loading"
-- Check that `deer-flow/skills/` directory exists
+- Check that `edu-flow/skills/` directory exists
 - Verify skills have valid `SKILL.md` files
 - Check `skills.path` configuration if using custom path
 

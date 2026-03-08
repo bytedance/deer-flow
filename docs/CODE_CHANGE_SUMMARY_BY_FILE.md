@@ -902,26 +902,26 @@ export function MarkdownContent({
 
 ---
 
-### 25. `frontend/public/demo/threads/.../user-data/outputs/research_deerflow_20260201.md`
+### 25. `frontend/public/demo/threads/.../user-data/outputs/research_edu-flow_20260201.md`
 
 ```diff
 @@ -1,12 +1,3 @@
 -<citations>
--{"id": "cite-1", "title": "DeerFlow GitHub Repository", "url": "https://github.com/bytedance/deer-flow", "snippet": "..."}
+-{"id": "cite-1", "title": "edu-flow GitHub Repository", "url": "https://github.com/bytedance/edu-flow", "snippet": "..."}
 -...（共 7 条 JSONL）
 -</citations>
- # DeerFlow Deep Research Report
+ # edu-flow Deep Research Report
  
  - **Research Date:** 2026-02-01
 ```
 
-- 删除文件开头的 `<citations>...</citations>` 整块（9 行），正文从 `# DeerFlow Deep Research Report` 开始。
+- 删除文件开头的 `<citations>...</citations>` 整块（9 行），正文从 `# edu-flow Deep Research Report` 开始。
 
 ---
 
 ### 26. `frontend/public/demo/threads/.../thread.json`
 
-- **主要变更**：某条 `write_file` 的 `args.content` 中，将原来的「`<citations>...\n</citations>\n# DeerFlow Deep Research Report\n\n...`」改为「`# DeerFlow Deep Research Report\n\n...`」，即去掉 `<citations>...</citations>` 块，保留其后全文。
+- **主要变更**：某条 `write_file` 的 `args.content` 中，将原来的「`<citations>...\n</citations>\n# edu-flow Deep Research Report\n\n...`」改为「`# edu-flow Deep Research Report\n\n...`」，即去掉 `<citations>...</citations>` 块，保留其后全文。
 - **其他**：一处 `present_files` 的 `filepaths` 由单行数组改为多行格式；文件末尾增加/统一换行。
 - 消息顺序、结构及其他字段未改。
 

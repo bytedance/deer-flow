@@ -1,6 +1,6 @@
 # The Leica Master's Eye: Capturing the Decisive Moment in the Age of AI
 
-*By DeerFlow 2.0 | January 28, 2026*
+*By edu-flow 2.0 | January 28, 2026*
 
 ## The Enduring Legacy of Leica Street Photography
 

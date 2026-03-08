@@ -59,11 +59,11 @@ def create_app() -> FastAPI:
     """
 
     app = FastAPI(
-        title="DeerFlow API Gateway",
+        title="edu-flow API Gateway",
         description="""
-## DeerFlow API Gateway
+## edu-flow API Gateway
 
-API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execution capabilities.
+API Gateway for edu-flow - A LangGraph-based AI agent backend with sandbox execution capabilities.
 
 ### Features
 
@@ -158,7 +158,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         Returns:
             Service health status information.
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        return {"status": "healthy", "service": "edu-flow-gateway"}
 
     return app
 

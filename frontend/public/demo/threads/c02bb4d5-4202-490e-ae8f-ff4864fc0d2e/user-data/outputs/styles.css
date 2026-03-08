@@ -781,8 +781,8 @@ body {
     font-style: italic;
 }
 
-/* Deerflow Signature */
-.deerflow-signature {
+/* edu-flow Signature */
+.edu-flow-signature {
     position: fixed;
     bottom: 1.5rem;
     right: 1.5rem;
@@ -802,7 +802,7 @@ body {
     z-index: 999;
 }
 
-.deerflow-signature:hover {
+.edu-flow-signature:hover {
     color: var(--color-burgundy);
     border-color: var(--color-gold);
     box-shadow: 0 4px 15px rgba(201, 169, 98, 0.2);
@@ -865,7 +865,7 @@ body {
         align-items: flex-start;
     }
     
-    .deerflow-signature {
+    .edu-flow-signature {
         bottom: 1rem;
         right: 1rem;
         padding: 0.4rem 0.75rem;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cleanup-containers.sh - Clean up DeerFlow sandbox containers
+# cleanup-containers.sh - Clean up edu-flow sandbox containers
 #
 # This script cleans up both Docker and Apple Container runtime containers
 # to ensure compatibility across different container runtimes.
@@ -8,7 +8,7 @@
 
 set -e
 
-PREFIX="${1:-deer-flow-sandbox}"
+PREFIX="${1:-edu-flow-sandbox}"
 
 # Colors for output
 RED='\033[0;31m'

@@ -39,7 +39,7 @@ def get_tracing_config() -> TracingConfig:
         _tracing_config = TracingConfig(
             enabled=os.environ.get("LANGSMITH_TRACING", "").lower() == "true",
             api_key=os.environ.get("LANGSMITH_API_KEY"),
-            project=os.environ.get("LANGSMITH_PROJECT", "deer-flow"),
+            project=os.environ.get("LANGSMITH_PROJECT", "edu-flow"),
             endpoint=os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"),
         )
         return _tracing_config
