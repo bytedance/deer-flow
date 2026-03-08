@@ -136,7 +136,7 @@ class SlackChannel(Channel):
                 logger.warning("[Slack] failed to add reaction %s: %s", emoji, exc)
 
     def _send_running_reply(self, channel_id: str, thread_ts: str) -> None:
-        """Send a 'Task is running...' reply in the thread (called from SDK thread)."""
+        """Send a 'Working on it......' reply in the thread (called from SDK thread)."""
         if not self._web_client:
             return
         try:

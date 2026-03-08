@@ -26,7 +26,7 @@ class FeishuChannel(Channel):
 
     Message flow:
         1. User sends a message → bot adds "OK" emoji reaction
-        2. Bot replies in thread: "Task is running..."
+        2. Bot replies in thread: "Working on it......"
         3. Agent processes the message and returns a result
         4. Bot replies in thread with the result
         5. Bot adds "DONE" emoji reaction to the original message
@@ -231,11 +231,11 @@ class FeishuChannel(Channel):
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
     async def _send_running_reply(self, message_id: str) -> None:
-        """Reply to a message in-thread with a 'Task is running...' hint."""
+        """Reply to a message in-thread with a 'Working on it...' hint."""
         if not self._api_client:
             return
         try:
-            content = self._build_card_content("Task is running...")
+            content = self._build_card_content("Working on it...")
             request = (
                 self._ReplyMessageRequest.builder()
                 .message_id(message_id)
@@ -249,7 +249,7 @@ class FeishuChannel(Channel):
                 .build()
             )
             await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
-            logger.info("[Feishu] 'Task is running...' reply sent for message %s", message_id)
+            logger.info("[Feishu] 'Working on it......' reply sent for message %s", message_id)
         except Exception:
             logger.exception("[Feishu] failed to send running reply for message %s", message_id)
 

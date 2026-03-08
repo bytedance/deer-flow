@@ -129,16 +129,16 @@ class TelegramChannel(Channel):
     # -- helpers -----------------------------------------------------------
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
-        """Send a 'Task is running...' reply to the user's message."""
+        """Send a 'Working on it...' reply to the user's message."""
         if not self._application:
             return
         try:
             bot = self._application.bot
             await bot.send_message(
-                chat_id=int(chat_id), text="Task is running...",
+                chat_id=int(chat_id), text="Working on it...",
                 reply_to_message_id=reply_to_message_id,
             )
-            logger.info("[Telegram] 'Task is running...' reply sent in chat=%s", chat_id)
+            logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
 
