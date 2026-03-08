@@ -27,7 +27,9 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   threadId,
 }) => {
   const { thread } = useThread();
+  const threadIdRef = useRef(threadId);
   const layoutRef = useRef<GroupImperativeHandle>(null);
+
   const {
     artifacts,
     open: artifactsOpen,
@@ -40,13 +42,22 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
+    if (threadIdRef.current !== threadId) {
+      threadIdRef.current = threadId;
+      deselect();
+    }
+
+    // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
+
+    // Deselect if the currently selected artifact no longer exists
     if (
-      thread.values.artifacts?.length === 0 ||
-      (selectedArtifact && !thread.values.artifacts?.includes(selectedArtifact))
+      selectedArtifact &&
+      !thread.values.artifacts?.includes(selectedArtifact)
     ) {
       deselect();
     }
+
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
       autoSelectFirstArtifact
@@ -57,6 +68,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       }
     }
   }, [
+    threadId,
     autoSelectFirstArtifact,
     deselect,
     selectArtifact,
