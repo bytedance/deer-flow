@@ -1769,7 +1769,7 @@ def _select_tools_for_task(
     config: SubagentConfig,
     max_tools: int = 15,
 ) -> list[BaseTool]:
-    """5b: Task-aware tool selection for subagents."""
+    """4b: Task-aware tool selection for subagents."""
 
 def _tfidf_match_tools(prompt: str, tools: list, k: int) -> list
 ```
@@ -1887,7 +1887,7 @@ eval/
 | Skills 体系 | CLAUDE.md | 无 | SKILLS.md + ClawHub | Skills (beta) | **SKILL.md + 渐进式加载 + 10 内置** |
 | Sub-agent | 无 | 无 | 无 | 有（隔离） | **双线程池 + 类型化(GP/bash) + 3 并行** |
 | Tool 输出管理 | MicroCompact (hot/cold) | 无 | token 管理 + 选择性丢弃 | offload 到文件系统 | **三层(截断+压旧+去重)** |
-| Tool Schema 管理 | 无 | 无 | TOOLS.md 声明式 | 无 | **三层(5a 动态加载+5b Subagent裁剪+5c 渐进缩减)** |
+| Tool Schema 管理 | 无 | 无 | TOOLS.md 声明式 | 无 | **三层(4a 动态加载+4b Subagent裁剪+4c 渐进缩减)** |
 | 上下文摘要 | Auto-Compact + Rehydration | /compact (手动) | 自动摘要 | LLM 摘要 + 文件归档 | **参数化 SummarizationMW（trigger/keep 可配）** |
 | 长期记忆 | ~/.claude (Markdown) | transcript resume | persistent memory (MD) | 无内置 | **LLM 提取 + 三区块 + 用户可控注入** |
 | 沙箱执行 | 本地终端 | 本地 + sandbox policy | 本地 / VPS | 无内置 | **Local / Docker / K8s 三模式** |
@@ -1921,6 +1921,7 @@ eval/
 - LangGraph (LangChain)
 - LangChain Blog: Deep Agents / Context Engineering for Agents (2025/2026)
 - Anthropic: How We Built Our Multi-Agent Research System (engineering blog, 2025)
+- OpenAI Codex CLI (GitHub, Apache 2.0, 2025): Lightweight terminal Agent with /compact command
 - Devin/Cognition: Don't Build Multi-Agents (blog, 2025)
 - Harrison Chase (LangChain): 红杉播客 on Long-horizon Agents (2026)
 
