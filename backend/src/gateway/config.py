@@ -2,7 +2,6 @@ import os
 
 from pydantic import BaseModel, Field
 
-
 DEFAULT_CORS_ORIGINS = ["http://localhost:3000"]
 DEFAULT_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
