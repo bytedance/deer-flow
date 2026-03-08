@@ -27,7 +27,7 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
-  
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -46,6 +46,9 @@ models:
   #   api_key: $ANTHROPIC_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true  # Enable vision support for view_image tool
+  #   when_thinking_enabled:
+  #     thinking:
+  #       type: enabled
 
   # Example: Google Gemini model
   # - name: gemini-2.5-pro
