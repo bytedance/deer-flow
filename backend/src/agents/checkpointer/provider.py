@@ -111,10 +111,10 @@ _checkpointer: Checkpointer = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
 
 
-def get_checkpointer() -> Checkpointer | None:
+def get_checkpointer() -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
-    Returns ``None`` when no checkpointer is configured in *config.yaml*.
+    Returns an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
@@ -129,7 +129,11 @@ def get_checkpointer() -> Checkpointer | None:
 
     config = get_checkpointer_config()
     if config is None:
-        return None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
+        _checkpointer = InMemorySaver()
+        return _checkpointer
 
     _checkpointer_ctx = _sync_checkpointer_cm(config)
     _checkpointer = _checkpointer_ctx.__enter__()
