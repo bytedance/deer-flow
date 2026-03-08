@@ -1,5 +1,5 @@
 [project]
-name = "deer-flow"
+name = "edu-flow"
 version = "0.1.0"
 description = "LangGraph-based AI agent system with sandbox execution capabilities"
 readme = "README.md"

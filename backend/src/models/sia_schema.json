@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Alere Learning Situation (SIA) Core Schema",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "target_age": { "type": "string", "enum": ["Niños", "Adolescentes"] },
+        "global_theme": { "type": "string" },
+        "language": { "type": "string", "default": "Bilingual (ES/EN)" }
+      },
+      "required": ["title", "target_age", "global_theme"]
+    },
+    "nodes": {
+      "type": "object",
+      "properties": {
+        "node_1_activation": {
+          "type": "object",
+          "properties": {
+            "cognitive_imbalance": { "type": "string" },
+            "video_asset_prompt": { "type": "string" },
+            "video_url": { "type": "string" }
+          },
+          "required": ["cognitive_imbalance", "video_asset_prompt"]
+        },
+        "node_2_context": {
+          "type": "object",
+          "properties": {
+            "scenario": { "type": "string" },
+            "driving_question": { "type": "string" }
+          },
+          "required": ["scenario", "driving_question"]
+        },
+        "node_3_challenge": {
+          "type": "object",
+          "properties": {
+            "challenge_description": { "type": "string" },
+            "expected_outcomes": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["challenge_description"]
+        },
+        "node_4_sequence": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "properties": {
+              "session_title": { "type": "string" },
+              "methodology": { "type": "string" },
+              "activities": { "type": "array", "items": { "type": "string" } },
+              "resources": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["session_title", "methodology", "activities"]
+          }
+        },
+        "node_5_product": {
+          "type": "object",
+          "properties": {
+            "final_product": { "type": "string" },
+            "rubric": { "type": "object" },
+            "metacognition_checkins": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["final_product", "rubric", "metacognition_checkins"]
+        }
+      },
+      "required": ["node_1_activation", "node_2_context", "node_3_challenge", "node_4_sequence", "node_5_product"]
+    },
+    "competencies_mapping": {
+      "type": "object",
+      "properties": {
+        "comunicativa": { "type": "string" },
+        "matematica_cientifica": { "type": "string" },
+        "digital": { "type": "string" },
+        "innovacion": { "type": "string" },
+        "ciudadana": { "type": "string" },
+        "socioemocional": { "type": "string" },
+        "cultural_artistica": { "type": "string" },
+        "corporal": { "type": "string" }
+      },
+      "required": [
+        "comunicativa",
+        "matematica_cientifica",
+        "digital",
+        "innovacion",
+        "ciudadana",
+        "socioemocional",
+        "cultural_artistica",
+        "corporal"
+      ]
+    }
+  },
+  "required": ["metadata", "nodes", "competencies_mapping"]
+}
