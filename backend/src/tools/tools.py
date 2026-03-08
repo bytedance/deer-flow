@@ -6,11 +6,27 @@ from src.config import get_app_config
 from src.reflection import resolve_variable
 from src.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
 
+# Alere specific tools
+from src.tools.alere.scc_validator import scc_validator
+from src.tools.alere.video_veo import video_veo_tool
+from src.tools.alere.audio_tools import audio_producer_tool, suno_song_tool
+from src.tools.alere.rive_exporter import rive_logic_exporter
+from src.tools.alere.exporters import wiki_exporter, stitch_exporter, teacher_dashboard_generator
+
 logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
+    # Alere Tools
+    scc_validator,
+    video_veo_tool,
+    audio_producer_tool,
+    suno_song_tool,
+    rive_logic_exporter,
+    wiki_exporter,
+    stitch_exporter,
+    teacher_dashboard_generator,
 ]
 
 SUBAGENT_TOOLS = [
