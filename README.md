@@ -46,6 +46,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
+      - [Claude Code Integration](#claude-code-integration)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
     - [Context Engineering](#context-engineering)
@@ -310,6 +311,35 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 /mnt/skills/custom
 └── your-custom-skill/SKILL.md      ← yours
 ```
+
+#### Claude Code Integration
+
+The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
+
+**Install the skill**:
+
+```bash
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+```
+
+Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
+
+**What you can do**:
+- Send messages to DeerFlow and get streaming responses
+- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
+- Check DeerFlow health, list models/skills/agents
+- Manage threads and conversation history
+- Upload files for analysis
+
+**Environment variables** (optional, for custom endpoints):
+
+```bash
+DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
+DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
+DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
+```
+
+See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
 ### Sub-Agents
 
