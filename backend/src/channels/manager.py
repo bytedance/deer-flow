@@ -104,8 +104,8 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 
     filenames = [posixpath.basename(p) for p in artifacts]
     if len(filenames) == 1:
-        return f"📎 {filenames[0]}"
-    return "📎 " + "、".join(filenames)
+        return f"Created File: 📎 {filenames[0]}"
+    return "Created Files: 📎 " + "、".join(filenames)
 
 
 class ChannelManager:
@@ -143,6 +143,7 @@ class ChannelManager:
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
             from langgraph_sdk import get_client
+
             self._client = get_client(url=self._langgraph_url)
         return self._client
 
@@ -183,7 +184,9 @@ class ChannelManager:
 
             logger.info(
                 "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text=%r",
-                msg.channel_name, msg.chat_id, msg.msg_type.value,
+                msg.channel_name,
+                msg.chat_id,
+                msg.msg_type.value,
                 msg.text[:100] if msg.text else "",
             )
             task = asyncio.create_task(self._handle_message(msg))
@@ -262,7 +265,9 @@ class ChannelManager:
 
         logger.info(
             "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
-            thread_id, len(response_text) if response_text else 0, len(artifacts),
+            thread_id,
+            len(response_text) if response_text else 0,
+            len(artifacts),
         )
 
         # Append artifact filenames when present
@@ -315,14 +320,7 @@ class ChannelManager:
         elif command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory")
         elif command == "help":
-            reply = (
-                "Available commands:\n"
-                "/new — Start a new conversation\n"
-                "/status — Show current thread info\n"
-                "/models — List available models\n"
-                "/memory — Show memory status\n"
-                "/help — Show this help"
-            )
+            reply = "Available commands:\n/new — Start a new conversation\n/status — Show current thread info\n/models — List available models\n/memory — Show memory status\n/help — Show this help"
         else:
             reply = f"Unknown command: /{command}. Type /help for available commands."
 

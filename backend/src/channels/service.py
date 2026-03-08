@@ -113,6 +113,7 @@ class ChannelService:
 
         try:
             from src.reflection import resolve_class
+
             channel_cls = resolve_class(import_path, base_class=None)
         except Exception:
             logger.exception("Failed to import channel class for %s", name)

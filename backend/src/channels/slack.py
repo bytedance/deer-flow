@@ -95,16 +95,22 @@ class SlackChannel(Channel):
                 # Add a completion reaction to the thread root
                 if msg.thread_ts:
                     await asyncio.to_thread(
-                        self._add_reaction, msg.chat_id, msg.thread_ts, "white_check_mark",
+                        self._add_reaction,
+                        msg.chat_id,
+                        msg.thread_ts,
+                        "white_check_mark",
                     )
                 return
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
-                    delay = 2 ** attempt  # 1s, 2s
+                    delay = 2**attempt  # 1s, 2s
                     logger.warning(
                         "[Slack] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, _max_retries, delay, exc,
+                        attempt + 1,
+                        _max_retries,
+                        delay,
+                        exc,
                     )
                     await asyncio.sleep(delay)
 
@@ -113,7 +119,10 @@ class SlackChannel(Channel):
         if msg.thread_ts:
             try:
                 await asyncio.to_thread(
-                    self._add_reaction, msg.chat_id, msg.thread_ts, "x",
+                    self._add_reaction,
+                    msg.chat_id,
+                    msg.thread_ts,
+                    "x",
                 )
             except Exception:
                 pass
@@ -141,7 +150,9 @@ class SlackChannel(Channel):
             return
         try:
             self._web_client.chat_postMessage(
-                channel=channel_id, text=":hourglass_flowing_sand: Working on it...", thread_ts=thread_ts,
+                channel=channel_id,
+                text=":hourglass_flowing_sand: Working on it...",
+                thread_ts=thread_ts,
             )
             logger.info("[Slack] 'Working on it...' reply sent in channel=%s, thread_ts=%s", channel_id, thread_ts)
         except Exception:
@@ -209,6 +220,4 @@ class SlackChannel(Channel):
             self._add_reaction(channel_id, event.get("ts", thread_ts), "eyes")
             # Send "running" reply first (fire-and-forget from SDK thread)
             self._send_running_reply(channel_id, thread_ts)
-            asyncio.run_coroutine_threadsafe(
-                self.bus.publish_inbound(inbound), self._loop
-            )
+            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)

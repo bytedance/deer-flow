@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Message types
 # ---------------------------------------------------------------------------
 
+
 class InboundMessageType(StrEnum):
     """Types of messages arriving from IM channels."""
 
@@ -109,7 +110,10 @@ class MessageBus:
         await self._inbound_queue.put(msg)
         logger.info(
             "[Bus] inbound enqueued: channel=%s, chat_id=%s, type=%s, queue_size=%d",
-            msg.channel_name, msg.chat_id, msg.msg_type.value, self._inbound_queue.qsize(),
+            msg.channel_name,
+            msg.chat_id,
+            msg.msg_type.value,
+            self._inbound_queue.qsize(),
         )
 
     async def get_inbound(self) -> InboundMessage:
@@ -134,7 +138,10 @@ class MessageBus:
         """Dispatch an outbound message to all registered listeners."""
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
-            msg.channel_name, msg.chat_id, len(self._outbound_listeners), len(msg.text),
+            msg.channel_name,
+            msg.chat_id,
+            len(self._outbound_listeners),
+            len(msg.text),
         )
         for callback in self._outbound_listeners:
             try:

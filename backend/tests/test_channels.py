@@ -23,6 +23,18 @@ def _run(coro):
         loop.close()
 
 
+async def _wait_for(condition, *, timeout=5.0, interval=0.05):
+    """Poll *condition* until it returns True, or raise after *timeout* seconds."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(interval)
+    raise TimeoutError(f"Condition not met within {timeout}s")
+
+
 # ---------------------------------------------------------------------------
 # MessageBus tests
 # ---------------------------------------------------------------------------
@@ -34,7 +46,10 @@ class TestMessageBus:
 
         async def go():
             msg = InboundMessage(
-                channel_name="test", chat_id="chat1", user_id="user1", text="hello",
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hello",
             )
             await bus.publish_inbound(msg)
             result = await bus.get_inbound()
@@ -49,9 +64,7 @@ class TestMessageBus:
 
         async def go():
             for i in range(3):
-                await bus.publish_inbound(
-                    InboundMessage(channel_name="test", chat_id="c", user_id="u", text=f"msg{i}")
-                )
+                await bus.publish_inbound(InboundMessage(channel_name="test", chat_id="c", user_id="u", text=f"msg{i}"))
             for i in range(3):
                 msg = await bus.get_inbound()
                 assert msg.text == f"msg{i}"
@@ -67,9 +80,7 @@ class TestMessageBus:
 
         async def go():
             bus.subscribe_outbound(callback)
-            out = OutboundMessage(
-                channel_name="test", chat_id="c1", thread_id="t1", text="reply"
-            )
+            out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
             await bus.publish_outbound(out)
             assert len(received) == 1
             assert received[0].text == "reply"
@@ -86,9 +97,7 @@ class TestMessageBus:
         async def go():
             bus.subscribe_outbound(callback)
             bus.unsubscribe_outbound(callback)
-            out = OutboundMessage(
-                channel_name="test", chat_id="c1", thread_id="t1", text="reply"
-            )
+            out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
             await bus.publish_outbound(out)
             assert len(received) == 0
 
@@ -108,18 +117,14 @@ class TestMessageBus:
         async def go():
             bus.subscribe_outbound(bad_callback)
             bus.subscribe_outbound(good_callback)
-            out = OutboundMessage(
-                channel_name="test", chat_id="c1", thread_id="t1", text="reply"
-            )
+            out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
             await bus.publish_outbound(out)
             assert len(received) == 1
 
         _run(go())
 
     def test_inbound_message_defaults(self):
-        msg = InboundMessage(
-            channel_name="test", chat_id="c", user_id="u", text="hi"
-        )
+        msg = InboundMessage(channel_name="test", chat_id="c", user_id="u", text="hi")
         assert msg.msg_type == InboundMessageType.CHAT
         assert msg.thread_ts is None
         assert msg.files == []
@@ -127,9 +132,7 @@ class TestMessageBus:
         assert msg.created_at > 0
 
     def test_outbound_message_defaults(self):
-        msg = OutboundMessage(
-            channel_name="test", chat_id="c", thread_id="t", text="hi"
-        )
+        msg = OutboundMessage(channel_name="test", chat_id="c", thread_id="t", text="hi")
         assert msg.artifacts == []
         assert msg.is_final is True
         assert msg.thread_ts is None
@@ -230,7 +233,9 @@ class TestChannelBase:
         bus = MessageBus()
         ch = DummyChannel(bus)
         msg = ch._make_inbound(
-            chat_id="c1", user_id="u1", text="hello",
+            chat_id="c1",
+            user_id="u1",
+            text="hello",
             msg_type=InboundMessageType.COMMAND,
         )
         assert msg.channel_name == "dummy"
@@ -244,9 +249,7 @@ class TestChannelBase:
 
         async def go():
             await ch.start()
-            msg = OutboundMessage(
-                channel_name="dummy", chat_id="c1", thread_id="t1", text="hi"
-            )
+            msg = OutboundMessage(channel_name="dummy", chat_id="c1", thread_id="t1", text="hi")
             await bus.publish_outbound(msg)
             assert len(ch.sent_messages) == 1
 
@@ -258,9 +261,7 @@ class TestChannelBase:
 
         async def go():
             await ch.start()
-            msg = OutboundMessage(
-                channel_name="other", chat_id="c1", thread_id="t1", text="hi"
-            )
+            msg = OutboundMessage(channel_name="other", chat_id="c1", thread_id="t1", text="hi")
             await bus.publish_outbound(msg)
             assert len(ch.sent_messages) == 0
 
@@ -275,61 +276,78 @@ class TestChannelBase:
 class TestExtractResponseText:
     def test_string_content(self):
         from src.channels.manager import _extract_response_text
+
         result = {"messages": [{"type": "ai", "content": "hello"}]}
         assert _extract_response_text(result) == "hello"
 
     def test_list_content_blocks(self):
         from src.channels.manager import _extract_response_text
+
         result = {"messages": [{"type": "ai", "content": [{"type": "text", "text": "hello"}, {"type": "text", "text": " world"}]}]}
         assert _extract_response_text(result) == "hello world"
 
     def test_picks_last_ai_message(self):
         from src.channels.manager import _extract_response_text
-        result = {"messages": [
-            {"type": "ai", "content": "first"},
-            {"type": "human", "content": "question"},
-            {"type": "ai", "content": "second"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "ai", "content": "first"},
+                {"type": "human", "content": "question"},
+                {"type": "ai", "content": "second"},
+            ]
+        }
         assert _extract_response_text(result) == "second"
 
     def test_empty_messages(self):
         from src.channels.manager import _extract_response_text
+
         assert _extract_response_text({"messages": []}) == ""
 
     def test_no_ai_messages(self):
         from src.channels.manager import _extract_response_text
+
         result = {"messages": [{"type": "human", "content": "hi"}]}
         assert _extract_response_text(result) == ""
 
     def test_list_result(self):
         from src.channels.manager import _extract_response_text
+
         result = [{"type": "ai", "content": "from list"}]
         assert _extract_response_text(result) == "from list"
 
     def test_skips_empty_ai_content(self):
         from src.channels.manager import _extract_response_text
-        result = {"messages": [
-            {"type": "ai", "content": ""},
-            {"type": "ai", "content": "actual response"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "ai", "content": ""},
+                {"type": "ai", "content": "actual response"},
+            ]
+        }
         assert _extract_response_text(result) == "actual response"
 
     def test_clarification_tool_message(self):
         from src.channels.manager import _extract_response_text
-        result = {"messages": [
-            {"type": "human", "content": "健身"},
-            {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {"question": "您想了解哪方面？"}}]},
-            {"type": "tool", "name": "ask_clarification", "content": "您想了解哪方面？"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "健身"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "ask_clarification", "args": {"question": "您想了解哪方面？"}}]},
+                {"type": "tool", "name": "ask_clarification", "content": "您想了解哪方面？"},
+            ]
+        }
         assert _extract_response_text(result) == "您想了解哪方面？"
 
     def test_clarification_over_empty_ai(self):
         """When AI content is empty but ask_clarification tool message exists, use the tool message."""
         from src.channels.manager import _extract_response_text
-        result = {"messages": [
-            {"type": "ai", "content": ""},
-            {"type": "tool", "name": "ask_clarification", "content": "Could you clarify?"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "ai", "content": ""},
+                {"type": "tool", "name": "ask_clarification", "content": "Could you clarify?"},
+            ]
+        }
         assert _extract_response_text(result) == "Could you clarify?"
 
 
@@ -382,11 +400,9 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(
-                channel_name="test", chat_id="chat1", user_id="user1", text="hi"
-            )
+            inbound = InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text="hi")
             await bus.publish_inbound(inbound)
-            await asyncio.sleep(0.5)
+            await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             # Thread should be created on the LangGraph Server
@@ -425,11 +441,14 @@ class TestChannelManager:
             await manager.start()
 
             inbound = InboundMessage(
-                channel_name="test", chat_id="chat1", user_id="user1",
-                text="/help", msg_type=InboundMessageType.COMMAND,
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/help",
+                msg_type=InboundMessageType.COMMAND,
             )
             await bus.publish_inbound(inbound)
-            await asyncio.sleep(0.5)
+            await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             assert len(outbound_received) == 1
@@ -460,11 +479,14 @@ class TestChannelManager:
             await manager.start()
 
             inbound = InboundMessage(
-                channel_name="test", chat_id="chat1", user_id="user1",
-                text="/new", msg_type=InboundMessageType.COMMAND,
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/new",
+                msg_type=InboundMessageType.COMMAND,
             )
             await bus.publish_inbound(inbound)
-            await asyncio.sleep(0.5)
+            await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             new_thread = store.get_thread_id("test", "chat1")
@@ -506,10 +528,15 @@ class TestChannelManager:
 
             # Send two messages from the same chat
             for text in ["first", "second"]:
-                await bus.publish_inbound(InboundMessage(
-                    channel_name="test", chat_id="chat1", user_id="user1", text=text,
-                ))
-            await asyncio.sleep(1.0)
+                await bus.publish_inbound(
+                    InboundMessage(
+                        channel_name="test",
+                        chat_id="chat1",
+                        user_id="user1",
+                        text=text,
+                    )
+                )
+            await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
             # threads.create should be called twice (one per message)
@@ -546,12 +573,15 @@ class TestChannelManager:
             # Send two messages with the same topic_id (simulates replies in a thread)
             for text in ["first message", "follow-up"]:
                 msg = InboundMessage(
-                    channel_name="test", chat_id="chat1", user_id="user1", text=text,
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text=text,
                     topic_id="topic-root-123",
                 )
                 await bus.publish_inbound(msg)
 
-            await asyncio.sleep(1.0)
+            await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
             # threads.create should be called only ONCE (second message reuses the thread)
@@ -588,12 +618,15 @@ class TestChannelManager:
             # Send messages with different topic_ids
             for topic in ["topic-1", "topic-2"]:
                 msg = InboundMessage(
-                    channel_name="test", chat_id="chat1", user_id="user1", text="hi",
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="hi",
                     topic_id=topic,
                 )
                 await bus.publish_inbound(msg)
 
-            await asyncio.sleep(1.0)
+            await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
             # threads.create called twice (different topics)
@@ -614,69 +647,100 @@ class TestChannelManager:
 class TestExtractArtifacts:
     def test_extracts_from_present_files_tool_call(self):
         from src.channels.manager import _extract_artifacts
-        result = {"messages": [
-            {"type": "human", "content": "generate report"},
-            {"type": "ai", "content": "Here is your report.", "tool_calls": [
-                {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
-            ]},
-            {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "generate report"},
+                {
+                    "type": "ai",
+                    "content": "Here is your report.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+            ]
+        }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/report.md"]
 
     def test_empty_when_no_present_files(self):
         from src.channels.manager import _extract_artifacts
-        result = {"messages": [
-            {"type": "human", "content": "hello"},
-            {"type": "ai", "content": "hello"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "hello"},
+                {"type": "ai", "content": "hello"},
+            ]
+        }
         assert _extract_artifacts(result) == []
 
     def test_empty_for_list_result_no_tool_calls(self):
         from src.channels.manager import _extract_artifacts
+
         result = [{"type": "ai", "content": "hello"}]
         assert _extract_artifacts(result) == []
 
     def test_only_extracts_after_last_human_message(self):
         """Artifacts from previous turns (before the last human message) should be ignored."""
         from src.channels.manager import _extract_artifacts
-        result = {"messages": [
-            {"type": "human", "content": "make report"},
-            {"type": "ai", "content": "Created report.", "tool_calls": [
-                {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
-            ]},
-            {"type": "tool", "name": "present_files", "content": "ok"},
-            {"type": "human", "content": "add chart"},
-            {"type": "ai", "content": "Created chart.", "tool_calls": [
-                {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}},
-            ]},
-            {"type": "tool", "name": "present_files", "content": "ok"},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "make report"},
+                {
+                    "type": "ai",
+                    "content": "Created report.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "ok"},
+                {"type": "human", "content": "add chart"},
+                {
+                    "type": "ai",
+                    "content": "Created chart.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "ok"},
+            ]
+        }
         # Should only return chart.png (from the last turn)
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png"]
 
     def test_multiple_files_in_single_call(self):
         from src.channels.manager import _extract_artifacts
-        result = {"messages": [
-            {"type": "human", "content": "export"},
-            {"type": "ai", "content": "Done.", "tool_calls": [
-                {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]}},
-            ]},
-        ]}
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "export"},
+                {
+                    "type": "ai",
+                    "content": "Done.",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]}},
+                    ],
+                },
+            ]
+        }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]
 
 
 class TestFormatArtifactText:
     def test_single_artifact(self):
         from src.channels.manager import _format_artifact_text
+
         text = _format_artifact_text(["/mnt/user-data/outputs/report.md"])
-        assert text == "📎 report.md"
+        assert text == "Created File: 📎 report.md"
 
     def test_multiple_artifacts(self):
         from src.channels.manager import _format_artifact_text
+
         text = _format_artifact_text(
             ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"],
         )
-        assert text == "📎 a.txt、b.csv"
+        assert text == "Created Files: 📎 a.txt、b.csv"
 
 
 class TestHandleChatWithArtifacts:
@@ -691,9 +755,13 @@ class TestHandleChatWithArtifacts:
             run_result = {
                 "messages": [
                     {"type": "human", "content": "generate report"},
-                    {"type": "ai", "content": "Here is your report.", "tool_calls": [
-                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
-                    ]},
+                    {
+                        "type": "ai",
+                        "content": "Here is your report.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                        ],
+                    },
                     {"type": "tool", "name": "present_files", "content": "ok"},
                 ],
             }
@@ -704,10 +772,15 @@ class TestHandleChatWithArtifacts:
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
             await manager.start()
 
-            await bus.publish_inbound(InboundMessage(
-                channel_name="test", chat_id="c1", user_id="u1", text="generate report",
-            ))
-            await asyncio.sleep(0.5)
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text="generate report",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             assert len(outbound_received) == 1
@@ -729,9 +802,13 @@ class TestHandleChatWithArtifacts:
             run_result = {
                 "messages": [
                     {"type": "human", "content": "export data"},
-                    {"type": "ai", "content": "", "tool_calls": [
-                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/output.csv"]}},
-                    ]},
+                    {
+                        "type": "ai",
+                        "content": "",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/output.csv"]}},
+                        ],
+                    },
                     {"type": "tool", "name": "present_files", "content": "ok"},
                 ],
             }
@@ -742,10 +819,15 @@ class TestHandleChatWithArtifacts:
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
             await manager.start()
 
-            await bus.publish_inbound(InboundMessage(
-                channel_name="test", chat_id="c1", user_id="u1", text="export data",
-            ))
-            await asyncio.sleep(0.5)
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text="export data",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             assert len(outbound_received) == 1
@@ -769,9 +851,13 @@ class TestHandleChatWithArtifacts:
             turn1_result = {
                 "messages": [
                     {"type": "human", "content": "make report"},
-                    {"type": "ai", "content": "Created report.", "tool_calls": [
-                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
-                    ]},
+                    {
+                        "type": "ai",
+                        "content": "Created report.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                        ],
+                    },
                     {"type": "tool", "name": "present_files", "content": "ok"},
                 ],
             }
@@ -779,14 +865,22 @@ class TestHandleChatWithArtifacts:
             turn2_result = {
                 "messages": [
                     {"type": "human", "content": "make report"},
-                    {"type": "ai", "content": "Created report.", "tool_calls": [
-                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
-                    ]},
+                    {
+                        "type": "ai",
+                        "content": "Created report.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                        ],
+                    },
                     {"type": "tool", "name": "present_files", "content": "ok"},
                     {"type": "human", "content": "add chart"},
-                    {"type": "ai", "content": "Created chart.", "tool_calls": [
-                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}},
-                    ]},
+                    {
+                        "type": "ai",
+                        "content": "Created chart.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}},
+                        ],
+                    },
                     {"type": "tool", "name": "present_files", "content": "ok"},
                 ],
             }
@@ -802,12 +896,15 @@ class TestHandleChatWithArtifacts:
             # Send two messages with the same topic_id (same thread)
             for text in ["make report", "add chart"]:
                 msg = InboundMessage(
-                    channel_name="test", chat_id="c1", user_id="u1", text=text,
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="u1",
+                    text=text,
                     topic_id="topic-dup",
                 )
                 await bus.publish_inbound(msg)
 
-            await asyncio.sleep(1.0)
+            await _wait_for(lambda: len(outbound_received) >= 2)
             await manager.stop()
 
             assert len(outbound_received) == 2
@@ -846,9 +943,11 @@ class TestChannelService:
         from src.channels.service import ChannelService
 
         async def go():
-            service = ChannelService(channels_config={
-                "feishu": {"enabled": False, "app_id": "x", "app_secret": "y"},
-            })
+            service = ChannelService(
+                channels_config={
+                    "feishu": {"enabled": False, "app_id": "x", "app_secret": "y"},
+                }
+            )
             await service.start()
             assert "feishu" not in service._channels
             await service.stop()
@@ -976,17 +1075,20 @@ class TestSlackMarkdownConversion:
 
     def test_bold_converted(self):
         from src.channels.slack import _slack_md_converter
+
         result = _slack_md_converter.convert("this is **bold** text")
         assert "*bold*" in result
         assert "**" not in result
 
     def test_link_converted(self):
         from src.channels.slack import _slack_md_converter
+
         result = _slack_md_converter.convert("[click](https://example.com)")
         assert "<https://example.com|click>" in result
 
     def test_heading_converted(self):
         from src.channels.slack import _slack_md_converter
+
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result
         assert "#" not in result

@@ -8,6 +8,7 @@ from src.reflection.resolvers import resolve_variable
 
 def test_resolve_variable_reports_install_hint_for_missing_google_provider(monkeypatch: pytest.MonkeyPatch):
     """Missing google provider should return actionable install guidance."""
+
     def fake_import_module(module_path: str):
         raise ModuleNotFoundError(f"No module named '{module_path}'", name=module_path)
 
@@ -38,6 +39,8 @@ def test_resolve_variable_reports_install_hint_for_missing_google_transitive_dep
     message = str(exc_info.value)
     # Even when a transitive dependency is missing, the hint should still point to the provider package.
     assert "uv add langchain-google-genai" in message
+
+
 def test_resolve_variable_invalid_path_format():
     """Invalid variable path should fail with format guidance."""
     with pytest.raises(ImportError) as exc_info:

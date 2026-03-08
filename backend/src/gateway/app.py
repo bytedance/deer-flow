@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         await stop_channel_service()
     except Exception:
-        pass
+        logger.exception("Failed to stop channel service")
     logger.info("Shutting down API Gateway")
 
 

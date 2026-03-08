@@ -57,9 +57,7 @@ class FeishuChannel(Channel):
                 ReplyMessageRequestBody,
             )
         except ImportError:
-            logger.error(
-                "lark-oapi is not installed. Install it with: uv add lark-oapi"
-            )
+            logger.error("lark-oapi is not installed. Install it with: uv add lark-oapi")
             return
 
         self._lark = lark
@@ -120,11 +118,7 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = (
-                lark.EventDispatcherHandler.builder("", "")
-                .register_p2_im_message_receive_v1(self._on_message)
-                .build()
-            )
+            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -151,7 +145,9 @@ class FeishuChannel(Channel):
 
         logger.info(
             "[Feishu] sending reply: chat_id=%s, thread_ts=%s, text_len=%d",
-            msg.chat_id, msg.thread_ts, len(msg.text),
+            msg.chat_id,
+            msg.thread_ts,
+            len(msg.text),
         )
         content = self._build_card_content(msg.text)
 
@@ -160,19 +156,11 @@ class FeishuChannel(Channel):
             try:
                 if msg.thread_ts:
                     # Reply in thread (话题)
-                    request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(
-                        self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()
-                    ).build()
+                    request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
                     await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
                 else:
                     # Send new message
-                    request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(
-                        self._CreateMessageRequestBody.builder()
-                        .receive_id(msg.chat_id)
-                        .msg_type("interactive")
-                        .content(content)
-                        .build()
-                    ).build()
+                    request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type("interactive").content(content).build()).build()
                     await asyncio.to_thread(self._api_client.im.v1.message.create, request)
 
                 # Add "DONE" reaction to the original message on final reply
@@ -183,10 +171,13 @@ class FeishuChannel(Channel):
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
-                    delay = 2 ** attempt  # 1s, 2s
+                    delay = 2**attempt  # 1s, 2s
                     logger.warning(
                         "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, _max_retries, delay, exc,
+                        attempt + 1,
+                        _max_retries,
+                        delay,
+                        exc,
                     )
                     await asyncio.sleep(delay)
 
@@ -215,16 +206,7 @@ class FeishuChannel(Channel):
         if not self._api_client or not self._CreateMessageReactionRequest:
             return
         try:
-            request = (
-                self._CreateMessageReactionRequest.builder()
-                .message_id(message_id)
-                .request_body(
-                    self._CreateMessageReactionRequestBody.builder()
-                    .reaction_type(self._Emoji.builder().emoji_type(emoji_type).build())
-                    .build()
-                )
-                .build()
-            )
+            request = self._CreateMessageReactionRequest.builder().message_id(message_id).request_body(self._CreateMessageReactionRequestBody.builder().reaction_type(self._Emoji.builder().emoji_type(emoji_type).build()).build()).build()
             await asyncio.to_thread(self._api_client.im.v1.message_reaction.create, request)
             logger.info("[Feishu] reaction '%s' added to message %s", emoji_type, message_id)
         except Exception:
@@ -236,18 +218,7 @@ class FeishuChannel(Channel):
             return
         try:
             content = self._build_card_content("Working on it...")
-            request = (
-                self._ReplyMessageRequest.builder()
-                .message_id(message_id)
-                .request_body(
-                    self._ReplyMessageRequestBody.builder()
-                    .msg_type("interactive")
-                    .content(content)
-                    .reply_in_thread(True)
-                    .build()
-                )
-                .build()
-            )
+            request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
             await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
             logger.info("[Feishu] 'Working on it......' reply sent for message %s", message_id)
         except Exception:
@@ -283,7 +254,11 @@ class FeishuChannel(Channel):
             text = content.get("text", "").strip()
             logger.info(
                 "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
-                chat_id, msg_id, root_id, sender_id, text[:100] if text else "",
+                chat_id,
+                msg_id,
+                root_id,
+                sender_id,
+                text[:100] if text else "",
             )
 
             if not text:

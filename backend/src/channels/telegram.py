@@ -43,9 +43,7 @@ class TelegramChannel(Channel):
         try:
             from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
         except ImportError:
-            logger.error(
-                "python-telegram-bot is not installed. Install it with: uv add python-telegram-bot"
-            )
+            logger.error("python-telegram-bot is not installed. Install it with: uv add python-telegram-bot")
             return
 
         bot_token = self.config.get("bot_token", "")
@@ -116,10 +114,13 @@ class TelegramChannel(Channel):
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
-                    delay = 2 ** attempt  # 1s, 2s
+                    delay = 2**attempt  # 1s, 2s
                     logger.warning(
                         "[Telegram] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, _max_retries, delay, exc,
+                        attempt + 1,
+                        _max_retries,
+                        delay,
+                        exc,
                     )
                     await asyncio.sleep(delay)
 
@@ -135,7 +136,8 @@ class TelegramChannel(Channel):
         try:
             bot = self._application.bot
             await bot.send_message(
-                chat_id=int(chat_id), text="Working on it...",
+                chat_id=int(chat_id),
+                text="Working on it...",
                 reply_to_message_id=reply_to_message_id,
             )
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
@@ -149,9 +151,7 @@ class TelegramChannel(Channel):
         self._tg_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._tg_loop)
         try:
-            self._tg_loop.run_until_complete(
-                self._application.run_polling(close_loop=False)
-            )
+            self._tg_loop.run_until_complete(self._application.run_polling(close_loop=False))
         except Exception:
             if self._running:
                 logger.exception("Telegram polling error")
@@ -165,10 +165,7 @@ class TelegramChannel(Channel):
         """Handle /start command."""
         if not self._check_user(update.effective_user.id):
             return
-        await update.message.reply_text(
-            "Welcome to DeerFlow! Send me a message to start a conversation.\n"
-            "Type /help for available commands."
-        )
+        await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
@@ -189,12 +186,8 @@ class TelegramChannel(Channel):
         )
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._send_running_reply(chat_id, update.message.message_id), self._main_loop
-            )
-            asyncio.run_coroutine_threadsafe(
-                self.bus.publish_inbound(inbound), self._main_loop
-            )
+            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
+            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
 
     async def _on_text(self, update, context) -> None:
         """Handle regular text messages."""
@@ -228,9 +221,5 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._send_running_reply(chat_id, update.message.message_id), self._main_loop
-            )
-            asyncio.run_coroutine_threadsafe(
-                self.bus.publish_inbound(inbound), self._main_loop
-            )
+            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
+            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)

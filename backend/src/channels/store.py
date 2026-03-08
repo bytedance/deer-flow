@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -35,10 +36,12 @@ class ChannelStore:
     def __init__(self, path: str | Path | None = None) -> None:
         if path is None:
             from src.config.paths import get_paths
+
             path = Path(get_paths().base_dir) / "channels" / "store.json"
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._data: dict[str, dict[str, Any]] = self._load()
+        self._lock = threading.Lock()
 
     # -- persistence -------------------------------------------------------
 
@@ -52,7 +55,10 @@ class ChannelStore:
 
     def _save(self) -> None:
         fd = tempfile.NamedTemporaryFile(
-            mode="w", dir=self._path.parent, suffix=".tmp", delete=False,
+            mode="w",
+            dir=self._path.parent,
+            suffix=".tmp",
+            delete=False,
         )
         try:
             json.dump(self._data, fd, indent=2)
@@ -88,16 +94,17 @@ class ChannelStore:
         user_id: str = "",
     ) -> None:
         """Create or update the mapping for an IM conversation/topic."""
-        key = self._key(channel_name, chat_id, topic_id)
-        now = time.time()
-        existing = self._data.get(key)
-        self._data[key] = {
-            "thread_id": thread_id,
-            "user_id": user_id,
-            "created_at": existing["created_at"] if existing else now,
-            "updated_at": now,
-        }
-        self._save()
+        with self._lock:
+            key = self._key(channel_name, chat_id, topic_id)
+            now = time.time()
+            existing = self._data.get(key)
+            self._data[key] = {
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "created_at": existing["created_at"] if existing else now,
+                "updated_at": now,
+            }
+            self._save()
 
     def remove(self, channel_name: str, chat_id: str, topic_id: str | None = None) -> bool:
         """Remove a mapping.
@@ -108,27 +115,26 @@ class ChannelStore:
 
         Returns True if at least one mapping was removed.
         """
-        # Remove a specific conversation/topic mapping.
-        if topic_id is not None:
-            key = self._key(channel_name, chat_id, topic_id)
-            if key in self._data:
-                del self._data[key]
-                self._save()
-                return True
-            return False
+        with self._lock:
+            # Remove a specific conversation/topic mapping.
+            if topic_id is not None:
+                key = self._key(channel_name, chat_id, topic_id)
+                if key in self._data:
+                    del self._data[key]
+                    self._save()
+                    return True
+                return False
 
-        # Remove all mappings for this channel/chat_id (base and any topic-specific keys).
-        prefix = self._key(channel_name, chat_id)
-        keys_to_delete = [
-            k for k in self._data if k == prefix or k.startswith(prefix + ":")
-        ]
-        if not keys_to_delete:
-            return False
+            # Remove all mappings for this channel/chat_id (base and any topic-specific keys).
+            prefix = self._key(channel_name, chat_id)
+            keys_to_delete = [k for k in self._data if k == prefix or k.startswith(prefix + ":")]
+            if not keys_to_delete:
+                return False
 
-        for k in keys_to_delete:
-            del self._data[k]
-        self._save()
-        return True
+            for k in keys_to_delete:
+                del self._data[k]
+            self._save()
+            return True
 
     def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
         """List all stored mappings, optionally filtered by channel."""
