@@ -1,4 +1,4 @@
-# 🦌 [About edu-flow 2.0](https://github.com/bytedance/edu-flow)
+# 🦌 [About edu-flow 2.0](https://github.com/Editorenbici/edu-flow)
 
 > **From Open Source, Back to Open Source**
 
@@ -10,7 +10,7 @@ different levels of tasks that could take minutes to hours.
 
 ## 🌟 GitHub Repository
 
-Explore edu-flow on GitHub: [github.com/bytedance/edu-flow](https://github.com/bytedance/edu-flow)
+Explore edu-flow on GitHub: [github.com/Editorenbici/edu-flow](https://github.com/Editorenbici/edu-flow)
 
 ## 🌐 Official Website
 

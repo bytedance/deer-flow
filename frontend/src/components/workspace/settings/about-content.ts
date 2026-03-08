@@ -2,7 +2,7 @@
  * About edu-flow markdown content. Inlined to avoid raw-loader dependency
  * (Turbopack cannot resolve raw-loader for .md imports).
  */
-export const aboutMarkdown = `# 🦌 [About edu-flow 2.0](https://github.com/bytedance/edu-flow)
+export const aboutMarkdown = `# 🦌 [About edu-flow 2.0](https://github.com/Editorenbici/edu-flow)
 
 > **From Open Source, Back to Open Source**
 
@@ -22,9 +22,9 @@ edu-flow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is a
 
 ## 🌟 GitHub Repository
 
-![Star History Chart](https://api.star-history.com/svg?repos=bytedance/edu-flow&type=Date)
+![Star History Chart](https://api.star-history.com/svg?repos=Editorenbici/edu-flow&type=Date)
 
-Explore edu-flow on GitHub: [github.com/bytedance/edu-flow](https://github.com/bytedance/edu-flow)
+Explore edu-flow on GitHub: [github.com/Editorenbici/edu-flow](https://github.com/Editorenbici/edu-flow)
 
 ## 🌐 Official Website
 

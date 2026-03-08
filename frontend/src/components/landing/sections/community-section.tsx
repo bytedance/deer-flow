@@ -20,7 +20,7 @@ export function CommunitySection() {
     >
       <div className="flex justify-center">
         <Button className="text-xl" size="lg" asChild>
-          <Link href="https://github.com/bytedance/edu-flow" target="_blank">
+          <Link href="https://github.com/Editorenbici/edu-flow" target="_blank">
             <GitHubLogoIcon />
             Contribute Now
           </Link>

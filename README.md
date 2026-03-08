@@ -72,15 +72,65 @@ The edu-flow exporter distributes processed content to three key destinations:
 
 ## 🛠️ Installation and Development
 
-### Requirements
-*   Node.js 22+
-*   Python 3.12+ (uv recommended)
-*   API Keys: GEMINI_API_KEY (for Veo), SUNO_API_KEY.
+### Prerequisites
 
-### Quick Start
-1. `make install`
-2. Configure your models in `config.yaml`.
-3. Use the skill `alere-sia-creator` to start orchestrating.
+To ensure a smooth and secure installation, verify you have the following tools installed:
+- **Node.js 22+**
+- **pnpm 10+** (Fast and efficient package manager for the frontend)
+- **Python 3.12+**
+- **uv** (Extremely fast Python package manager and resolver)
+- **Docker** (Recommended for sandboxed tool execution)
+- **Nginx** (Required for the unified local development endpoint)
+
+### Quick Start Guide
+
+Follow these steps to set up your environment:
+
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/Editorenbici/edu-flow.git
+    cd edu-flow
+    ```
+
+2.  **Verify dependencies**:
+    Run the built-in check tool to ensure your environment is ready:
+    ```bash
+    make check
+    ```
+
+3.  **Initialize configuration**:
+    Generate your local configuration files from templates:
+    ```bash
+    make config
+    ```
+    This creates `config.yaml` and `.env` in the project root.
+
+4.  **Configure API Keys**:
+    Edit the `.env` file and add your credentials:
+    ```bash
+    GEMINI_API_KEY=your_key_here
+    SUNO_API_KEY=your_key_here
+    # Add other provider keys as needed (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+    ```
+
+5.  **Install dependencies**:
+    ```bash
+    make install
+    ```
+
+6.  **Start the development server**:
+    The easiest way to run all services (Backend, Frontend, and Nginx) is:
+    ```bash
+    make dev
+    ```
+    Once running, access the application at **http://localhost:2026**.
+
+### Deployment Options
+
+- **Local Execution**: Runs directly on your host machine. Best for rapid development.
+- **Docker (Recommended)**: Uses containers for complete isolation and security. Run `make docker-init` followed by `make docker-start`.
+
+For detailed architecture and configuration options, see the [Backend Documentation](backend/README.md) and [Configuration Guide](backend/docs/CONFIGURATION.md).
 
 ---
 *Developed by Maya Educación for Proyecto Alere.*

@@ -907,7 +907,7 @@ export function MarkdownContent({
 ```diff
 @@ -1,12 +1,3 @@
 -<citations>
--{"id": "cite-1", "title": "edu-flow GitHub Repository", "url": "https://github.com/bytedance/edu-flow", "snippet": "..."}
+-{"id": "cite-1", "title": "edu-flow GitHub Repository", "url": "https://github.com/Editorenbici/edu-flow", "snippet": "..."}
 -...（共 7 条 JSONL）
 -</citations>
  # edu-flow Deep Research Report

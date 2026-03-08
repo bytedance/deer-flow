@@ -261,9 +261,9 @@ Every pull request runs the backend regression workflow at [.github/workflows/ba
 
 ## Need Help?
 
-- Check existing [Issues](https://github.com/bytedance/edu-flow/issues)
+- Check existing [Issues](https://github.com/Editorenbici/edu-flow/issues)
 - Read the [Documentation](backend/docs/)
-- Ask questions in [Discussions](https://github.com/bytedance/edu-flow/discussions)
+- Ask questions in [Discussions](https://github.com/Editorenbici/edu-flow/discussions)
 
 ## License
 
