@@ -40,6 +40,10 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  // Track the thread ID that is currently streaming to handle thread changes during streaming
+  const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  // Ref to track current thread ID across async callbacks without causing re-renders,
+  // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
 
@@ -55,30 +59,40 @@ export function useThreadStream({
   }, [onStart, onFinish, onToolEnd]);
 
   useEffect(() => {
-    if (threadIdRef.current && threadIdRef.current !== threadId) {
-      threadIdRef.current = threadId ?? null;
+    const normalizedThreadId = threadId ?? null;
+    if (threadIdRef.current !== normalizedThreadId) {
+      threadIdRef.current = normalizedThreadId;
       startedRef.current = false; // Reset for new thread
+      setOnStreamThreadId(normalizedThreadId);
     }
   }, [threadId]);
 
-  const _handleStart = useCallback((id: string) => {
+  const _handleOnStart = useCallback((id: string) => {
     if (!startedRef.current) {
       listeners.current.onStart?.(id);
       startedRef.current = true;
     }
   }, []);
 
+  const handleStreamStart = useCallback(
+    (_threadId: string) => {
+      threadIdRef.current = _threadId;
+      setOnStreamThreadId(_threadId);
+      _handleOnStart(_threadId);
+    },
+    [_handleOnStart],
+  );
+
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
-    threadId: threadIdRef.current,
+    threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
-      threadIdRef.current = meta.thread_id;
-      _handleStart(meta.thread_id);
+      handleStreamStart(meta.thread_id);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
@@ -194,7 +208,7 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      _handleStart(threadId);
+      _handleOnStart(threadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -330,7 +344,7 @@ export function useThreadStream({
         throw error;
       }
     },
-    [thread, _handleStart, t.uploads.uploadingFiles, context, queryClient],
+    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
   // Merge thread with optimistic messages for display
