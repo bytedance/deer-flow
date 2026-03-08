@@ -107,8 +107,7 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
-      cache_from:
-        - type=local,src=/tmp/docker-cache-gateway
+      # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
     container_name: deer-flow-gateway
     command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
@@ -137,8 +136,7 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
-      cache_from:
-        - type=local,src=/tmp/docker-cache-langgraph
+      # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
     container_name: deer-flow-langgraph
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
