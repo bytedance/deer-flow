@@ -170,9 +170,18 @@ dev:
 	@echo "  → Frontend: Next.js"
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
-	@if [ ! -f config.yaml ]; then \
-		echo "✗ Missing config.yaml"; \
-		echo "  Run 'make config' first, then set required model API keys in .env or config.yaml."; \
+	@if ! { \
+			[ -n "$$DEER_FLOW_CONFIG_PATH" ] && [ -f "$$DEER_FLOW_CONFIG_PATH" ] || \
+			[ -f backend/config.yaml ] || \
+			[ -f config.yaml ]; \
+		}; then \
+		echo "✗ No DeerFlow config file found."; \
+		echo "  Checked these locations:"; \
+		echo "    - $$DEER_FLOW_CONFIG_PATH (when DEER_FLOW_CONFIG_PATH is set)"; \
+		echo "    - backend/config.yaml"; \
+		echo "    - ./config.yaml"; \
+		echo ""; \
+		echo "  Run 'make config' from the repo root to generate ./config.yaml, then set required model API keys in .env or your config file."; \
 		exit 1; \
 	fi
 	@cleanup() { \
