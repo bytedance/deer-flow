@@ -34,18 +34,33 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_thinking",
             "supports_reasoning_effort",
             "when_thinking_enabled",
+            "thinking",
             "supports_vision",
         },
     )
-    if thinking_enabled and model_config.when_thinking_enabled is not None:
+    # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
+    # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
+    has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
+    effective_wte: dict = dict(model_config.when_thinking_enabled) if model_config.when_thinking_enabled else {}
+    if model_config.thinking is not None:
+        merged_thinking = {**(effective_wte.get("thinking") or {}), **model_config.thinking}
+        effective_wte = {**effective_wte, "thinking": merged_thinking}
+    if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
             raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
-        model_settings_from_config.update(model_config.when_thinking_enabled)
-    if not thinking_enabled and model_config.when_thinking_enabled and model_config.when_thinking_enabled.get("extra_body", {}).get("thinking", {}).get("type"):
-        kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
-        kwargs.update({"reasoning_effort": "minimal"})
+        if effective_wte:
+            model_settings_from_config.update(effective_wte)
+    if not thinking_enabled and has_thinking_settings:
+        if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+            # OpenAI-compatible gateway: thinking is nested under extra_body
+            kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
+            kwargs.update({"reasoning_effort": "minimal"})
+        elif effective_wte.get("thinking", {}).get("type"):
+            # Native langchain_anthropic: thinking is a direct constructor parameter
+            kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort:
         kwargs.update({"reasoning_effort": None})
+
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
     if is_tracing_enabled():

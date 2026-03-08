@@ -40,37 +40,95 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
-  const [_threadId, setThreadId] = useState<string | null>(threadId ?? null);
+  // Track the thread ID that is currently streaming to handle thread changes during streaming
+  const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  // Ref to track current thread ID across async callbacks without causing re-renders,
+  // and to allow access to the current thread id in onUpdateEvent
+  const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
 
+  const listeners = useRef({
+    onStart,
+    onFinish,
+    onToolEnd,
+  });
+
+  // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    if (_threadId && _threadId !== threadId) {
-      setThreadId(threadId ?? null);
+    listeners.current = { onStart, onFinish, onToolEnd };
+  }, [onStart, onFinish, onToolEnd]);
+
+  useEffect(() => {
+    const normalizedThreadId = threadId ?? null;
+    if (threadIdRef.current !== normalizedThreadId) {
+      threadIdRef.current = normalizedThreadId;
       startedRef.current = false; // Reset for new thread
+      setOnStreamThreadId(normalizedThreadId);
     }
-  }, [threadId, _threadId]);
+  }, [threadId]);
+
+  const _handleOnStart = useCallback((id: string) => {
+    if (!startedRef.current) {
+      listeners.current.onStart?.(id);
+      startedRef.current = true;
+    }
+  }, []);
+
+  const handleStreamStart = useCallback(
+    (_threadId: string) => {
+      threadIdRef.current = _threadId;
+      setOnStreamThreadId(_threadId);
+      _handleOnStart(_threadId);
+    },
+    [_handleOnStart],
+  );
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
-    threadId: _threadId,
+    threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
-      setThreadId(meta.thread_id);
-      if (!startedRef.current) {
-        onStart?.(meta.thread_id);
-        startedRef.current = true;
-      }
+      handleStreamStart(meta.thread_id);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
-        onToolEnd?.({
+        listeners.current.onToolEnd?.({
           name: event.name,
           data: event.data,
         });
+      }
+    },
+    onUpdateEvent(data) {
+      const updates: Array<Partial<AgentThreadState> | null> = Object.values(
+        data || {},
+      );
+      for (const update of updates) {
+        if (update && "title" in update && update.title) {
+          void queryClient.setQueriesData(
+            {
+              queryKey: ["threads", "search"],
+              exact: false,
+            },
+            (oldData: Array<AgentThread> | undefined) => {
+              return oldData?.map((t) => {
+                if (t.thread_id === threadIdRef.current) {
+                  return {
+                    ...t,
+                    values: {
+                      ...t.values,
+                      title: update.title,
+                    },
+                  };
+                }
+                return t;
+              });
+            },
+          );
+        }
       }
     },
     onCustomEvent(event: unknown) {
@@ -89,7 +147,7 @@ export function useThreadStream({
       }
     },
     onFinish(state) {
-      onFinish?.(state.values);
+      listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
@@ -150,10 +208,7 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      if (!startedRef.current) {
-        onStart?.(threadId);
-        startedRef.current = true;
-      }
+      _handleOnStart(threadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -289,7 +344,7 @@ export function useThreadStream({
         throw error;
       }
     },
-    [thread, t.uploads.uploadingFiles, onStart, context, queryClient],
+    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
   // Merge thread with optimistic messages for display
