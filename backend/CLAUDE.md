@@ -74,7 +74,7 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx)
+make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight
 make stop       # Stop all services
 ```
 
