@@ -47,7 +47,16 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       deselect();
     }
 
+    // Update artifacts from the current thread
     setArtifacts(thread.values.artifacts);
+
+    // Deselect if the currently selected artifact no longer exists
+    if (
+      selectedArtifact &&
+      !thread.values.artifacts?.includes(selectedArtifact)
+    ) {
+      deselect();
+    }
 
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
