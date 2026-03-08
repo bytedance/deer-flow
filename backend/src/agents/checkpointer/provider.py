@@ -159,7 +159,7 @@ def reset_checkpointer() -> None:
 
 
 @contextlib.contextmanager
-def checkpointer_context() -> Iterator[Checkpointer | None]:
+def checkpointer_context() -> Iterator[Checkpointer]:
     """Sync context manager that yields a checkpointer and cleans up on exit.
 
     Unlike :func:`get_checkpointer`, this does **not** cache the instance —
@@ -168,11 +168,15 @@ def checkpointer_context() -> Iterator[Checkpointer | None]:
 
         with checkpointer_context() as cp:
             graph.invoke(input, config={"configurable": {"thread_id": "1"}})
+
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
     config = get_app_config()
     if config.checkpointer is None:
-        yield None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        yield InMemorySaver()
         return
 
     with _sync_checkpointer_cm(config.checkpointer) as saver:
