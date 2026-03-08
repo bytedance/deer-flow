@@ -40,37 +40,94 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
-  const [_threadId, setThreadId] = useState<string | null>(threadId ?? null);
+  const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
 
+  const listeners = useRef({
+    onStart,
+    onFinish,
+    onToolEnd,
+  });
+
+  // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    if (_threadId && _threadId !== threadId) {
-      setThreadId(threadId ?? null);
+    listeners.current = { onStart, onFinish, onToolEnd };
+  }, [onStart, onFinish, onToolEnd]);
+
+  useEffect(() => {
+    if (threadIdRef.current && threadIdRef.current !== threadId) {
+      threadIdRef.current = threadId ?? null;
       startedRef.current = false; // Reset for new thread
     }
-  }, [threadId, _threadId]);
+  }, [threadId]);
+
+  const _handleStart = useCallback((id: string) => {
+    if (!startedRef.current) {
+      listeners.current.onStart?.(id);
+      startedRef.current = true;
+    }
+  }, []);
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
-    threadId: _threadId,
+    threadId: threadIdRef.current,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
-      setThreadId(meta.thread_id);
-      if (!startedRef.current) {
-        onStart?.(meta.thread_id);
-        startedRef.current = true;
-      }
+      threadIdRef.current = meta.thread_id;
+      _handleStart(meta.thread_id);
     },
     onLangChainEvent(event) {
+      if (event.event === "on_tool_start") {
+        console.log("Tool started:", event.name, event.data);
+      }
+      if (event.event === "on_tool_stream") {
+        console.log("Tool stream:", event.name, event.data);
+      }
       if (event.event === "on_tool_end") {
-        onToolEnd?.({
+        listeners.current.onToolEnd?.({
           name: event.name,
           data: event.data,
         });
+      }
+    },
+    onUpdateEvent(data) {
+      const updates: Array<Partial<AgentThreadState> | null> = Object.values(
+        data || {},
+      );
+      console.log("Thread update event received:", updates);
+      for (const update of updates) {
+        if (update && "title" in update && update.title) {
+          console.log("Thread title updated:", update.title);
+          void queryClient.setQueriesData(
+            {
+              queryKey: ["threads", "search"],
+              exact: false,
+            },
+            (oldData: Array<AgentThread> | undefined) => {
+              console.log("Updating thread list with new title:", {
+                oldData,
+                threadId: threadIdRef.current,
+                title: update.title,
+              });
+              return oldData?.map((t) => {
+                if (t.thread_id === threadIdRef.current) {
+                  return {
+                    ...t,
+                    values: {
+                      ...t.values,
+                      title: update.title,
+                    },
+                  };
+                }
+                return t;
+              });
+            },
+          );
+        }
       }
     },
     onCustomEvent(event: unknown) {
@@ -89,7 +146,7 @@ export function useThreadStream({
       }
     },
     onFinish(state) {
-      onFinish?.(state.values);
+      listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
@@ -150,10 +207,7 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      if (!startedRef.current) {
-        onStart?.(threadId);
-        startedRef.current = true;
-      }
+      _handleStart(threadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -289,7 +343,7 @@ export function useThreadStream({
         throw error;
       }
     },
-    [thread, t.uploads.uploadingFiles, onStart, context, queryClient],
+    [thread, _handleStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
   // Merge thread with optimistic messages for display
