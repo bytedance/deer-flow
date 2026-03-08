@@ -123,6 +123,7 @@ class AioSandboxProvider(SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            runtime_user=self._config.get("runtime_user"),
         )
 
     def _create_state_store(self) -> SandboxStateStore:
@@ -160,6 +161,7 @@ class AioSandboxProvider(SandboxProvider):
             "idle_timeout": getattr(sandbox_config, "idle_timeout", None) or DEFAULT_IDLE_TIMEOUT,
             "mounts": self._resolve_config_mounts(sandbox_config.mounts or []),
             "environment": resolved_environment,
+            "runtime_user": getattr(sandbox_config, "runtime_user", None),
             "extensions_mount": extensions_mount,
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
@@ -234,8 +236,8 @@ class AioSandboxProvider(SandboxProvider):
             resolved_mounts.append(resolved_mount)
         return resolved_mounts
 
-    @staticmethod
-    def _get_thread_mounts(thread_id: str) -> list[tuple[str, str, bool]]:
+    @classmethod
+    def _get_thread_mounts(cls, thread_id: str) -> list[tuple[str, str, bool]]:
         """Get volume mounts for a thread's data directories.
 
         Creates directories if they don't exist (lazy initialization).
@@ -243,10 +245,25 @@ class AioSandboxProvider(SandboxProvider):
         paths = get_paths()
         paths.ensure_thread_dirs(thread_id)
 
+        host_home = os.getenv("DEER_FLOW_HOME_HOST_PATH")
+        if host_home:
+            host_base = Path(host_home).expanduser()
+            host_thread_dir = host_base / "threads" / thread_id / "user-data"
+            mounts = [
+                (str(host_thread_dir / "workspace"), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+                (str(host_thread_dir / "uploads"), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+                (str(host_thread_dir / "outputs"), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            ]
+            return mounts
+
+        workspace_dir = cls._resolve_mount_source_path(paths.sandbox_work_dir(thread_id))
+        uploads_dir = cls._resolve_mount_source_path(paths.sandbox_uploads_dir(thread_id))
+        outputs_dir = cls._resolve_mount_source_path(paths.sandbox_outputs_dir(thread_id))
+
         mounts = [
-            (str(paths.sandbox_work_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (str(paths.sandbox_uploads_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (str(paths.sandbox_outputs_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (str(workspace_dir), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (str(uploads_dir), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (str(outputs_dir), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
         ]
 
         return mounts
@@ -300,27 +317,33 @@ class AioSandboxProvider(SandboxProvider):
         """Get the skills directory mount configuration.
 
         Resolution priority for mount source path:
-        1. ``DEER_FLOW_SKILLS_HOST_PATH`` override (if set and exists)
+        1. ``DEER_FLOW_SKILLS_HOST_PATH`` override (if set)
         2. Host bind source discovered from ``/proc/self/mountinfo``
         3. Configured ``skills.path`` / default skills path
         """
         try:
             config = get_app_config()
             skills_path = cls._resolve_mount_source_path(config.skills.get_skills_path())
+            using_host_override = False
 
             host_skills_path = os.getenv("DEER_FLOW_SKILLS_HOST_PATH")
             if host_skills_path:
-                resolved_host_path = Path(host_skills_path).expanduser().resolve()
-                if resolved_host_path.exists():
-                    skills_path = resolved_host_path
-                else:
-                    logger.warning(f"DEER_FLOW_SKILLS_HOST_PATH does not exist: {resolved_host_path}. Falling back to auto detection.")
+                configured_host_path = Path(host_skills_path).expanduser()
+                if not configured_host_path.is_absolute():
+                    configured_host_path = (Path.cwd() / configured_host_path).resolve()
+                elif configured_host_path.exists():
+                    configured_host_path = configured_host_path.resolve()
+
+                if not configured_host_path.exists():
+                    logger.info(f"Using DEER_FLOW_SKILLS_HOST_PATH override as host mount source even though it is not visible in current runtime: {configured_host_path}")
+                skills_path = configured_host_path
+                using_host_override = True
             else:
                 skills_path = cls._resolve_mount_source_path(skills_path)
 
             container_path = config.skills.container_path
 
-            if skills_path.exists():
+            if using_host_override or skills_path.exists():
                 return (str(skills_path), container_path, True)  # Read-only for security
         except Exception as e:
             logger.warning(f"Could not setup skills mount: {e}")

@@ -51,7 +51,7 @@ def test_get_skills_mount_prefers_host_path_override_when_exists(monkeypatch, tm
     assert AioSandboxProvider._get_skills_mount() == (str(host_skills_path.resolve()), "/mnt/skills", True)
 
 
-def test_get_skills_mount_falls_back_when_host_override_missing(monkeypatch, tmp_path: Path):
+def test_get_skills_mount_uses_host_override_even_when_not_visible(monkeypatch, tmp_path: Path):
     skills_path = tmp_path / "skills"
     skills_path.mkdir()
 
@@ -63,7 +63,7 @@ def test_get_skills_mount_falls_back_when_host_override_missing(monkeypatch, tmp
     )
     monkeypatch.setenv("DEER_FLOW_SKILLS_HOST_PATH", str(missing_host_path))
 
-    assert AioSandboxProvider._get_skills_mount() == (str(skills_path), "/mnt/skills", True)
+    assert AioSandboxProvider._get_skills_mount() == (str(missing_host_path.resolve()), "/mnt/skills", True)
 
 
 def test_get_skills_mount_auto_resolves_bind_source_without_env(monkeypatch, tmp_path: Path):

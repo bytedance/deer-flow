@@ -125,9 +125,15 @@ class Paths:
 
     def ensure_thread_dirs(self, thread_id: str) -> None:
         """Create all standard sandbox directories for a thread."""
-        self.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
-        self.sandbox_uploads_dir(thread_id).mkdir(parents=True, exist_ok=True)
-        self.sandbox_outputs_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        sandbox_uid = int(os.getenv("DEER_FLOW_SANDBOX_UID", "1000"))
+        sandbox_gid = int(os.getenv("DEER_FLOW_SANDBOX_GID", "1000"))
+        for directory in (self.sandbox_work_dir(thread_id), self.sandbox_uploads_dir(thread_id), self.sandbox_outputs_dir(thread_id)):
+            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chown(directory, sandbox_uid, sandbox_gid)
+            except PermissionError:
+                pass
+            os.chmod(directory, 0o750)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -15,6 +16,24 @@ class SkillsConfig(BaseModel):
         description="Path where skills are mounted in the sandbox container",
     )
 
+    @staticmethod
+    def _resolve_relative_base_dir() -> Path:
+        config_env_path = os.getenv("DEER_FLOW_CONFIG_PATH")
+        if config_env_path:
+            config_path = Path(config_env_path).expanduser()
+            if not config_path.is_absolute():
+                config_path = (Path.cwd() / config_path).resolve()
+            return config_path.parent
+
+        cwd = Path.cwd()
+        if (cwd / "config.yaml").exists():
+            return cwd
+
+        if (cwd.parent / "config.yaml").exists():
+            return cwd.parent
+
+        return cwd
+
     def get_skills_path(self) -> Path:
         """
         Get the resolved skills directory path.
@@ -23,14 +42,11 @@ class SkillsConfig(BaseModel):
             Path to the skills directory
         """
         if self.path:
-            # Use configured path (can be absolute or relative)
             path = Path(self.path)
             if not path.is_absolute():
-                # If relative, resolve from current working directory
-                path = Path.cwd() / path
+                path = self._resolve_relative_base_dir() / path
             return path.resolve()
         else:
-            # Default: ../skills relative to backend directory
             from src.skills.loader import get_skills_root_path
 
             return get_skills_root_path()
