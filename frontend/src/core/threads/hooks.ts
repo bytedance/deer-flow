@@ -59,10 +59,11 @@ export function useThreadStream({
   }, [onStart, onFinish, onToolEnd]);
 
   useEffect(() => {
-    if (threadIdRef.current && threadIdRef.current !== threadId) {
-      threadIdRef.current = threadId ?? null;
+    const normalizedThreadId = threadId ?? null;
+    if (threadIdRef.current !== normalizedThreadId) {
+      threadIdRef.current = normalizedThreadId;
       startedRef.current = false; // Reset for new thread
-      setOnStreamThreadId(threadId);
+      setOnStreamThreadId(normalizedThreadId);
     }
   }, [threadId]);
 
