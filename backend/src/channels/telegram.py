@@ -79,10 +79,10 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._application and self._tg_loop:
+        if self._tg_loop and self._tg_loop.is_running():
             self._tg_loop.call_soon_threadsafe(self._tg_loop.stop)
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=10)
             self._thread = None
         self._application = None
         logger.info("Telegram channel stopped")
@@ -151,10 +151,25 @@ class TelegramChannel(Channel):
         self._tg_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._tg_loop)
         try:
-            self._tg_loop.run_until_complete(self._application.run_polling(close_loop=False))
+            # Cannot use run_polling() because it calls add_signal_handler(),
+            # which only works in the main thread.  Instead, manually
+            # initialize the application and start the updater.
+            self._tg_loop.run_until_complete(self._application.initialize())
+            self._tg_loop.run_until_complete(self._application.start())
+            self._tg_loop.run_until_complete(self._application.updater.start_polling())
+            self._tg_loop.run_forever()
         except Exception:
             if self._running:
                 logger.exception("Telegram polling error")
+        finally:
+            # Graceful shutdown
+            try:
+                if self._application.updater.running:
+                    self._tg_loop.run_until_complete(self._application.updater.stop())
+                self._tg_loop.run_until_complete(self._application.stop())
+                self._tg_loop.run_until_complete(self._application.shutdown())
+            except Exception:
+                logger.exception("Error during Telegram shutdown")
 
     def _check_user(self, user_id: int) -> bool:
         if not self._allowed_users:
