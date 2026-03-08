@@ -27,7 +27,7 @@ models:
   #     extra_body:
   #       thinking:
   #         type: enabled
-  
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -46,6 +46,9 @@ models:
   #   api_key: $ANTHROPIC_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true  # Enable vision support for view_image tool
+  #   when_thinking_enabled:
+  #     thinking:
+  #       type: enabled
 
   # Example: Google Gemini model
   # - name: gemini-2.5-pro
@@ -378,3 +381,31 @@ memory:
 # checkpointer:
 #   type: postgres
 #   connection_string: postgresql://user:password@localhost:5432/deerflow
+
+# ============================================================================
+# IM Channels Configuration
+# ============================================================================
+# Connect DeerFlow to external messaging platforms.
+# All channels use outbound connections (WebSocket or polling) — no public IP required.
+
+# channels:
+#   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   langgraph_url: http://localhost:2024
+#   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
+#   gateway_url: http://localhost:8001
+#
+#   feishu:
+#     enabled: false
+#     app_id: $FEISHU_APP_ID
+#     app_secret: $FEISHU_APP_SECRET
+#
+#   slack:
+#     enabled: false
+#     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
+#     app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
+#     allowed_users: []               # empty = allow all
+#
+#   telegram:
+#     enabled: false
+#     bot_token: $TELEGRAM_BOT_TOKEN
+#     allowed_users: []               # empty = allow all

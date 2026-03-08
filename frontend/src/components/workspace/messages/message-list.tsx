@@ -54,13 +54,15 @@ export function MessageList({
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
         {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
-            return (
-              <MessageListItem
-                key={group.id}
-                message={group.messages[0]!}
-                isLoading={thread.isLoading}
-              />
-            );
+            return group.messages.map((msg) => {
+              return (
+                <MessageListItem
+                  key={`${group.id}/${msg.id}`}
+                  message={msg}
+                  isLoading={thread.isLoading}
+                />
+              );
+            });
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {

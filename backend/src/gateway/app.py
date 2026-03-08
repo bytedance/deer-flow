@@ -1,5 +1,4 @@
 import logging
-import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -10,6 +9,7 @@ from src.gateway.config import get_gateway_config
 from src.gateway.routers import (
     agents,
     artifacts,
+    channels,
     mcp,
     memory,
     models,
@@ -37,8 +37,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         get_app_config()
         logger.info("Configuration loaded successfully")
     except Exception as e:
-        logger.error(f"Failed to load configuration: {e}")
-        sys.exit(1)
+        error_msg = f"Failed to load configuration during gateway startup: {e}"
+        logger.exception(error_msg)
+        raise RuntimeError(error_msg) from e
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
@@ -47,7 +48,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 2. Gateway and LangGraph Server are separate processes with independent caches
     # MCP tools are lazily initialized in LangGraph Server when first needed
 
+    # Start IM channel service if any channels are configured
+    try:
+        from src.channels.service import start_channel_service
+
+        channel_service = await start_channel_service()
+        logger.info("Channel service started: %s", channel_service.get_status())
+    except Exception:
+        logger.exception("No IM channels configured or channel service failed to start")
+
     yield
+
+    # Stop channel service on shutdown
+    try:
+        from src.channels.service import stop_channel_service
+
+        await stop_channel_service()
+    except Exception:
+        logger.exception("Failed to stop channel service")
     logger.info("Shutting down API Gateway")
 
 
@@ -118,6 +136,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Generate follow-up question suggestions for conversations",
             },
             {
+                "name": "channels",
+                "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -150,6 +172,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Channels API is mounted at /api/channels
+    app.include_router(channels.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

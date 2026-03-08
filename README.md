@@ -32,6 +32,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
@@ -41,14 +42,17 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
+    - [IM Channels](#im-channels)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
+      - [Claude Code Integration](#claude-code-integration)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
     - [Context Engineering](#context-engineering)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
+  - [Embedded Python Client](#embedded-python-client)
   - [Documentation](#documentation)
   - [Contributing](#contributing)
   - [License](#license)
@@ -143,6 +147,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
+Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
+
 1. **Check prerequisites**:
    ```bash
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
@@ -184,6 +190,91 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+#### IM Channels
+
+DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
+
+| Channel | Transport | Difficulty |
+|---------|-----------|------------|
+| Telegram | Bot API (long-polling) | Easy |
+| Slack | Socket Mode | Moderate |
+| Feishu / Lark | WebSocket | Moderate |
+
+**Configuration in `config.yaml`:**
+
+```yaml
+channels:
+  # LangGraph Server URL (default: http://localhost:2024)
+  langgraph_url: http://localhost:2024
+  # Gateway API URL (default: http://localhost:8001)
+  gateway_url: http://localhost:8001
+
+  feishu:
+    enabled: true
+    app_id: $FEISHU_APP_ID
+    app_secret: $FEISHU_APP_SECRET
+
+  slack:
+    enabled: true
+    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
+    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
+    allowed_users: []               # empty = allow all
+
+  telegram:
+    enabled: true
+    bot_token: $TELEGRAM_BOT_TOKEN
+    allowed_users: []               # empty = allow all
+```
+
+Set the corresponding API keys in your `.env` file:
+
+```bash
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+
+# Feishu / Lark
+FEISHU_APP_ID=cli_xxxx
+FEISHU_APP_SECRET=your_app_secret
+```
+
+**Telegram Setup**
+
+1. Chat with [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the HTTP API token.
+2. Set `TELEGRAM_BOT_TOKEN` in `.env` and enable the channel in `config.yaml`.
+
+**Slack Setup**
+
+1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
+2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`.
+3. Enable **Socket Mode** → generate an App-Level Token (`xapp-…`) with `connections:write` scope.
+4. Under **Event Subscriptions**, subscribe to bot events: `app_mention`, `message.im`.
+5. Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env` and enable the channel in `config.yaml`.
+
+**Feishu / Lark Setup**
+
+1. Create an app on [Feishu Open Platform](https://open.feishu.cn/) → enable **Bot** capability.
+2. Add permissions: `im:message`, `im:resource`.
+3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
+4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+
+**Commands**
+
+Once a channel is connected, you can interact with DeerFlow directly from the chat:
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new conversation |
+| `/status` | Show current thread info |
+| `/models` | List available models |
+| `/memory` | View memory |
+| `/help` | Show help |
+
+> Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
 ## From Deep Research to Super Agent Harness
 
 DeerFlow started as a Deep Research framework — and the community ran with it. Since launch, developers have pushed it far beyond research: building data pipelines, generating slide decks, spinning up dashboards, automating content workflows. Things we never anticipated.
@@ -220,6 +311,35 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 /mnt/skills/custom
 └── your-custom-skill/SKILL.md      ← yours
 ```
+
+#### Claude Code Integration
+
+The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
+
+**Install the skill**:
+
+```bash
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+```
+
+Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
+
+**What you can do**:
+- Send messages to DeerFlow and get streaming responses
+- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
+- Check DeerFlow health, list models/skills/agents
+- Manage threads and conversation history
+- Upload files for analysis
+
+**Environment variables** (optional, for custom endpoints):
+
+```bash
+DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
+DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
+DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
+```
+
+See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
 ### Sub-Agents
 
