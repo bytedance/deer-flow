@@ -262,7 +262,7 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 | Command | Description |
 |---------|-------------|
-| `/new <prompt>` | Create a new task |
+| `/new` | Start a new conversation |
 | `/status` | Show current thread info |
 | `/models` | List available models |
 | `/memory` | View memory |

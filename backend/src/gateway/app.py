@@ -50,12 +50,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Start IM channel service if any channels are configured
     try:
-        from src.channels.service import start_channel_service, stop_channel_service
+        from src.channels.service import start_channel_service
 
         channel_service = await start_channel_service()
         logger.info("Channel service started: %s", channel_service.get_status())
     except Exception:
-        logger.info("No IM channels configured or channel service failed to start")
+        logger.exception("No IM channels configured or channel service failed to start")
 
     yield
 

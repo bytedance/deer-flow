@@ -303,11 +303,12 @@ class ChannelManager:
                 msg.channel_name,
                 msg.chat_id,
                 new_thread_id,
+                topic_id=msg.topic_id,
                 user_id=msg.user_id,
             )
             reply = "New conversation started."
         elif command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id)
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")

@@ -251,7 +251,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
-- `store.py` - JSON-file persistence mapping `channel_name:chat_id` → `thread_id`
+- `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
 - `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, sends messages via `client.runs.wait()`, routes commands
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`

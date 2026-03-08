@@ -481,10 +481,7 @@ class TestChannelManager:
         """Every chat message should create a new DeerFlow thread (one-shot Q&A)."""
         from src.channels.manager import ChannelManager
 
-        call_count = 0
-
         async def go():
-            nonlocal call_count
             bus = MessageBus()
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)

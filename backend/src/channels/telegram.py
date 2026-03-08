@@ -103,8 +103,8 @@ class TelegramChannel(Channel):
 
         # Reply to the last bot message in this chat for threading
         reply_to = self._last_bot_message.get(msg.chat_id)
-        if reply_to and msg.thread_ts:
-            kwargs["reply_to_message_id"] = int(msg.thread_ts)
+        if reply_to:
+            kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
         last_exc: Exception | None = None

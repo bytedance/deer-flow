@@ -29,7 +29,7 @@ class ChannelService:
     def __init__(self, channels_config: dict[str, Any] | None = None) -> None:
         self.bus = MessageBus()
         self.store = ChannelStore()
-        config = channels_config or {}
+        config = dict(channels_config or {})
         langgraph_url = config.pop("langgraph_url", None) or "http://localhost:2024"
         gateway_url = config.pop("gateway_url", None) or "http://localhost:8001"
         self.manager = ChannelManager(
