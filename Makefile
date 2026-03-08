@@ -170,6 +170,20 @@ dev:
 	@echo "  → Frontend: Next.js"
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
+	@if ! { \
+			[ -n "$$DEER_FLOW_CONFIG_PATH" ] && [ -f "$$DEER_FLOW_CONFIG_PATH" ] || \
+			[ -f backend/config.yaml ] || \
+			[ -f config.yaml ]; \
+		}; then \
+		echo "✗ No DeerFlow config file found."; \
+		echo "  Checked these locations:"; \
+		echo "    - $$DEER_FLOW_CONFIG_PATH (when DEER_FLOW_CONFIG_PATH is set)"; \
+		echo "    - backend/config.yaml"; \
+		echo "    - ./config.yaml"; \
+		echo ""; \
+		echo "  Run 'make config' from the repo root to generate ./config.yaml, then set required model API keys in .env or your config file."; \
+		exit 1; \
+	fi
 	@cleanup() { \
 		trap - INT TERM; \
 		echo ""; \
@@ -196,7 +210,10 @@ dev:
 	sleep 3; \
 	if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
 		echo "✗ Gateway API failed to start. Last log output:"; \
-		tail -30 logs/gateway.log; \
+		tail -60 logs/gateway.log; \
+		echo ""; \
+		echo "Likely configuration errors:"; \
+		grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true; \
 		cleanup; \
 	fi; \
 	echo "✓ Gateway API started on localhost:8001"; \

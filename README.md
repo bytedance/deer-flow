@@ -32,6 +32,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
@@ -50,6 +51,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Context Engineering](#context-engineering)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
+  - [Embedded Python Client](#embedded-python-client)
   - [Documentation](#documentation)
   - [Contributing](#contributing)
   - [License](#license)
@@ -143,6 +145,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 #### Option 2: Local Development
 
 If you prefer running services locally:
+
+Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
 
 1. **Check prerequisites**:
    ```bash
