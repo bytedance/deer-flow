@@ -170,6 +170,11 @@ dev:
 	@echo "  → Frontend: Next.js"
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
+	@if [ ! -f config.yaml ]; then \
+		echo "✗ Missing config.yaml"; \
+		echo "  Run 'make config' first, then set required model API keys in .env or config.yaml."; \
+		exit 1; \
+	fi
 	@cleanup() { \
 		trap - INT TERM; \
 		echo ""; \
@@ -196,7 +201,10 @@ dev:
 	sleep 3; \
 	if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
 		echo "✗ Gateway API failed to start. Last log output:"; \
-		tail -30 logs/gateway.log; \
+		tail -60 logs/gateway.log; \
+		echo ""; \
+		echo "Likely configuration errors:"; \
+		grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true; \
 		cleanup; \
 	fi; \
 	echo "✓ Gateway API started on localhost:8001"; \
