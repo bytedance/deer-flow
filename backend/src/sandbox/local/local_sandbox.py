@@ -147,10 +147,7 @@ class LocalSandbox(Sandbox):
         shell_from_path = shutil.which("sh")
         if shell_from_path is not None:
             return shell_from_path
-        raise RuntimeError(
-            "No suitable shell executable found. Tried /bin/zsh, /bin/bash, "
-            "/bin/sh, and `sh` on PATH."
-        )
+        raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
     def execute_command(self, command: str) -> str:
         # Resolve container paths in command before execution

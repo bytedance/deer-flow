@@ -92,6 +92,11 @@ export const zhCN: Translations = {
     searchModels: "搜索模型...",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
+    followupLoading: "正在生成可能的后续问题...",
+    followupConfirmTitle: "发送建议问题？",
+    followupConfirmDescription: "当前输入框已有内容，选择发送方式。",
+    followupConfirmAppend: "追加并发送",
+    followupConfirmReplace: "替换并发送",
     suggestions: [
       {
         suggestion: "写作",
