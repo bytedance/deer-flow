@@ -237,7 +237,7 @@ class LocalContainerBackend(SandboxBackend):
 
         cmd.append(self._image)
 
-        logger.info(f"Starting container using {self._runtime}: {' '.join(cmd)}")
+        logger.info(f"Starting container using {self._runtime}: {self._sanitize_command_for_log(cmd)}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -247,6 +247,22 @@ class LocalContainerBackend(SandboxBackend):
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to start container using {self._runtime}: {e.stderr}")
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
+
+    @staticmethod
+    def _sanitize_command_for_log(cmd: list[str]) -> str:
+        sanitized: list[str] = []
+        i = 0
+        while i < len(cmd):
+            part = cmd[i]
+            if part == "-e" and i + 1 < len(cmd):
+                env_pair = cmd[i + 1]
+                key, _, _value = env_pair.partition("=")
+                sanitized.extend(["-e", f"{key}=***"])
+                i += 2
+                continue
+            sanitized.append(part)
+            i += 1
+        return " ".join(sanitized)
 
     def _resolve_runtime_user(self, extra_mounts: list[tuple[str, str, bool]] | None) -> str | None:
         if self._runtime_user:
