@@ -1,5 +1,4 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
-import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -8,6 +7,7 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -304,20 +304,80 @@ export function useThreadStream({
   return [mergedThread, sendMessage] as const;
 }
 
+type ThreadSummaryApiResponse = {
+  threads: AgentThread[];
+  next_offset: number | null;
+};
+
+type ThreadListQueryParams = {
+  limit?: number;
+  offset?: number;
+  sortBy?: "updated_at" | "created_at";
+  sortOrder?: "asc" | "desc";
+};
+
+async function fetchThreadSummariesPage(
+  params: Required<ThreadListQueryParams>,
+): Promise<ThreadSummaryApiResponse> {
+  const baseURL = getBackendBaseURL();
+  const url = new URL(`${baseURL}/api/threads/summaries`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost:2026",
+  );
+  url.searchParams.set("limit", String(params.limit));
+  url.searchParams.set("offset", String(params.offset));
+  url.searchParams.set("sort_by", params.sortBy);
+  url.searchParams.set("sort_order", params.sortOrder);
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(`Failed to fetch thread summaries: ${response.status}`);
+  }
+  return (await response.json()) as ThreadSummaryApiResponse;
+}
+
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
+  params: ThreadListQueryParams = {
     limit: 50,
     sortBy: "updated_at",
     sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values"],
   },
 ) {
-  const apiClient = getAPIClient();
+  const pageSize = params.limit ?? 50;
+  const initialOffset = params.offset ?? 0;
+  const sortBy = params.sortBy ?? "updated_at";
+  const sortOrder = params.sortOrder ?? "desc";
+
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params],
+    queryKey: ["threads", "summaries", pageSize, initialOffset, sortBy, sortOrder],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>(params);
-      return response as AgentThread[];
+      const allThreads: AgentThread[] = [];
+      let offset = initialOffset;
+      let safetyCounter = 0;
+      const MAX_PAGES = 200;
+
+      while (safetyCounter < MAX_PAGES) {
+        const page = await fetchThreadSummariesPage({
+          limit: pageSize,
+          offset,
+          sortBy,
+          sortOrder,
+        });
+
+        if (!Array.isArray(page.threads) || page.threads.length === 0) {
+          break;
+        }
+
+        allThreads.push(...page.threads);
+
+        if (page.next_offset == null || page.threads.length < pageSize) {
+          break;
+        }
+
+        offset = page.next_offset;
+        safetyCounter += 1;
+      }
+
+      return allThreads;
     },
     refetchOnWindowFocus: false,
   });
