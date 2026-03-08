@@ -1,8 +1,8 @@
 """Test for issue #1016: checkpointer should not return None."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 

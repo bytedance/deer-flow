@@ -107,7 +107,7 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 # Sync singleton
 # ---------------------------------------------------------------------------
 
-_checkpointer: Checkpointer = None
+_checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
 
 
@@ -125,7 +125,21 @@ def get_checkpointer() -> Checkpointer:
     if _checkpointer is not None:
         return _checkpointer
 
+    # Ensure app config is loaded before checking checkpointer config
+    # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
+    # but hasn't been loaded yet
+    from src.config.app_config import _app_config
     from src.config.checkpointer_config import get_checkpointer_config
+
+    if _app_config is None:
+        # Only load config if it hasn't been initialized yet
+        # In tests, config may be set directly via set_checkpointer_config()
+        try:
+            get_app_config()
+        except FileNotFoundError:
+            # In test environments without config.yaml, this is expected
+            # Tests will set config directly via set_checkpointer_config()
+            pass
 
     config = get_checkpointer_config()
     if config is None:

@@ -10,7 +10,7 @@ Usage (e.g. FastAPI lifespan)::
     from src.agents.checkpointer.async_provider import make_checkpointer
 
     async with make_checkpointer() as checkpointer:
-        app.state.checkpointer = checkpointer  # None if not configured
+        app.state.checkpointer = checkpointer  # InMemorySaver if not configured
 
 For sync usage see :mod:`src.agents.checkpointer.provider`.
 """
