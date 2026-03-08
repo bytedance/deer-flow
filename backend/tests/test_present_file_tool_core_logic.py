@@ -3,9 +3,7 @@
 import importlib
 from types import SimpleNamespace
 
-present_file_tool_module = importlib.import_module(
-    "src.tools.builtins.present_file_tool"
-)
+present_file_tool_module = importlib.import_module("src.tools.builtins.present_file_tool")
 
 
 def _make_runtime(outputs_path: str) -> SimpleNamespace:
@@ -40,9 +38,7 @@ def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         present_file_tool_module,
         "get_paths",
-        lambda: SimpleNamespace(
-            resolve_virtual_path=lambda thread_id, path: artifact_path
-        ),
+        lambda: SimpleNamespace(resolve_virtual_path=lambda thread_id, path: artifact_path),
     )
 
     result = present_file_tool_module.present_file_tool.func(
@@ -69,7 +65,4 @@ def test_present_files_rejects_paths_outside_outputs(tmp_path):
     )
 
     assert "artifacts" not in result.update
-    assert (
-        result.update["messages"][0].content
-        == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"
-    )
+    assert result.update["messages"][0].content == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"

@@ -125,7 +125,7 @@ class TestInfoQuestClient:
 
     def test_clean_results_with_image_search(self):
         """Test clean_results_with_image_search method with sample raw results."""
-        raw_results = [{"content": {"results": {"images_results": [{"image_url": "https://example.com/image1.jpg", "thumbnail_url": "https://example.com/thumb1.jpg","url": "https://example.com/page1"}]}}}]
+        raw_results = [{"content": {"results": {"images_results": [{"image_url": "https://example.com/image1.jpg", "thumbnail_url": "https://example.com/thumb1.jpg", "url": "https://example.com/page1"}]}}}]
         cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
 
         assert len(cleaned) == 1

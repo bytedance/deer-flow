@@ -257,9 +257,7 @@ def format_conversation_for_update(messages: list[Any]) -> str:
         # ephemeral file path info into long-term memory.  Skip the turn entirely
         # when nothing remains after stripping (upload-only message).
         if role == "human":
-            content = re.sub(
-                r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)
-            ).strip()
+            content = re.sub(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)).strip()
             if not content:
                 continue
 

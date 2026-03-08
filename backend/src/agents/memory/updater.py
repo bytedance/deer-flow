@@ -168,11 +168,7 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
     # Also remove any facts that describe upload events
     facts = memory_data.get("facts", [])
     if facts:
-        memory_data["facts"] = [
-            f
-            for f in facts
-            if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))
-        ]
+        memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
 
     return memory_data
 

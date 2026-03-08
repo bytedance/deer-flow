@@ -54,9 +54,7 @@ def _normalize_presented_filepath(
     try:
         relative_path = actual_path.relative_to(outputs_dir)
     except ValueError as exc:
-        raise ValueError(
-            f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}"
-        ) from exc
+        raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
 
     return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
 
@@ -87,22 +85,16 @@ def present_file_tool(
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
     """
     try:
-        normalized_paths = [
-            _normalize_presented_filepath(runtime, filepath) for filepath in filepaths
-        ]
+        normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
     except ValueError as exc:
         return Command(
-            update={
-                "messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]
-            },
+            update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
 
     # The merge_artifacts reducer will handle merging and deduplication
     return Command(
         update={
             "artifacts": normalized_paths,
-            "messages": [
-                ToolMessage("Successfully presented files", tool_call_id=tool_call_id)
-            ],
+            "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
         },
     )

@@ -34,6 +34,11 @@ dependencies = [
     "duckdb>=1.4.4",
     "langchain-google-genai>=4.2.1",
     "langgraph-checkpoint-sqlite>=3.0.3",
+    "lark-oapi>=1.4.0",
+    "slack-sdk>=3.33.0",
+    "python-telegram-bot>=21.0",
+    "langgraph-sdk>=0.1.51",
+    "markdown-to-mrkdwn>=0.3.1",
 ]
 
 [dependency-groups]

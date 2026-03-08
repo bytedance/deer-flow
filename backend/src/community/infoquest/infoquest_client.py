@@ -82,8 +82,7 @@ class InfoQuestClient:
                     return response_data["reader_result"]
                 elif "content" in response_data:
                     # Fallback to content field if reader_result is not available
-                    logger.debug("reader_result missing in JSON response, falling back to content field: %s",
-                                 response_data["content"])
+                    logger.debug("reader_result missing in JSON response, falling back to content field: %s", response_data["content"])
                     return response_data["content"]
                 else:
                     # If neither field exists, return the original response

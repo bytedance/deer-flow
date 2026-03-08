@@ -20,6 +20,7 @@ from src.gateway.routers.uploads import UploadResponse
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def mock_app_config():
     """Provide a minimal AppConfig mock."""
@@ -44,6 +45,7 @@ def client(mock_app_config):
 # ---------------------------------------------------------------------------
 # __init__
 # ---------------------------------------------------------------------------
+
 
 class TestClientInit:
     def test_default_params(self, client):
@@ -85,6 +87,7 @@ class TestClientInit:
 # ---------------------------------------------------------------------------
 # list_models / list_skills / get_memory
 # ---------------------------------------------------------------------------
+
 
 class TestConfigQueries:
     def test_list_models(self, client):
@@ -134,6 +137,7 @@ class TestConfigQueries:
 # ---------------------------------------------------------------------------
 # stream / chat
 # ---------------------------------------------------------------------------
+
 
 def _make_agent_mock(chunks: list[dict]):
     """Create a mock agent whose .stream() yields the given chunks."""
@@ -314,6 +318,7 @@ class TestChat:
 # _extract_text
 # ---------------------------------------------------------------------------
 
+
 class TestExtractText:
     def test_string(self):
         assert DeerFlowClient._extract_text("hello") == "hello"
@@ -339,6 +344,7 @@ class TestExtractText:
 # ---------------------------------------------------------------------------
 # _ensure_agent
 # ---------------------------------------------------------------------------
+
 
 class TestEnsureAgent:
     def test_creates_agent(self, client):
@@ -374,6 +380,7 @@ class TestEnsureAgent:
 # get_model
 # ---------------------------------------------------------------------------
 
+
 class TestGetModel:
     def test_found(self, client):
         model_cfg = MagicMock()
@@ -401,6 +408,7 @@ class TestGetModel:
 # ---------------------------------------------------------------------------
 # MCP config
 # ---------------------------------------------------------------------------
+
 
 class TestMcpConfig:
     def test_get_mcp_config(self, client):
@@ -456,6 +464,7 @@ class TestMcpConfig:
 # ---------------------------------------------------------------------------
 # Skills management
 # ---------------------------------------------------------------------------
+
 
 class TestSkillsManagement:
     def _make_skill(self, name="test-skill", enabled=True):
@@ -556,6 +565,7 @@ class TestSkillsManagement:
 # Memory management
 # ---------------------------------------------------------------------------
 
+
 class TestMemoryManagement:
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
@@ -604,6 +614,7 @@ class TestMemoryManagement:
 # ---------------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------------
+
 
 class TestUploads:
     def test_upload_files(self, client):
@@ -677,6 +688,7 @@ class TestUploads:
 # ---------------------------------------------------------------------------
 # Artifacts
 # ---------------------------------------------------------------------------
+
 
 class TestArtifacts:
     def test_get_artifact(self, client):
@@ -759,9 +771,13 @@ class TestScenarioMultiTurnConversation:
 
     def test_stream_collects_all_event_types_across_turns(self, client):
         """A full turn emits messages-tuple (tool_call, tool_result, ai text) + values + end."""
-        ai_tc = AIMessage(content="", id="ai-1", tool_calls=[
-            {"name": "web_search", "args": {"query": "LangGraph"}, "id": "tc-1"},
-        ])
+        ai_tc = AIMessage(
+            content="",
+            id="ai-1",
+            tool_calls=[
+                {"name": "web_search", "args": {"query": "LangGraph"}, "id": "tc-1"},
+            ],
+        )
         tool_r = ToolMessage(content="LangGraph is a framework...", id="tm-1", tool_call_id="tc-1", name="web_search")
         ai_final = AIMessage(content="LangGraph is a framework for building agents.", id="ai-2")
 
@@ -809,13 +825,21 @@ class TestScenarioToolChain:
 
     def test_multi_tool_chain(self, client):
         """Agent calls bash → reads output → calls write_file → responds."""
-        ai_bash = AIMessage(content="", id="ai-1", tool_calls=[
-            {"name": "bash", "args": {"cmd": "ls /mnt/user-data/workspace"}, "id": "tc-1"},
-        ])
+        ai_bash = AIMessage(
+            content="",
+            id="ai-1",
+            tool_calls=[
+                {"name": "bash", "args": {"cmd": "ls /mnt/user-data/workspace"}, "id": "tc-1"},
+            ],
+        )
         bash_result = ToolMessage(content="README.md\nsrc/", id="tm-1", tool_call_id="tc-1", name="bash")
-        ai_write = AIMessage(content="", id="ai-2", tool_calls=[
-            {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/listing.txt", "content": "README.md\nsrc/"}, "id": "tc-2"},
-        ])
+        ai_write = AIMessage(
+            content="",
+            id="ai-2",
+            tool_calls=[
+                {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/listing.txt", "content": "README.md\nsrc/"}, "id": "tc-2"},
+            ],
+        )
         write_result = ToolMessage(content="File written successfully.", id="tm-2", tool_call_id="tc-2", name="write_file")
         ai_final = AIMessage(content="I listed the workspace and saved the output.", id="ai-3")
 
@@ -862,10 +886,13 @@ class TestScenarioFileLifecycle:
 
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
                 # Step 1: Upload
-                result = client.upload_files("t-lifecycle", [
-                    tmp_path / "report.txt",
-                    tmp_path / "data.csv",
-                ])
+                result = client.upload_files(
+                    "t-lifecycle",
+                    [
+                        tmp_path / "report.txt",
+                        tmp_path / "data.csv",
+                    ],
+                )
                 assert result["success"] is True
                 assert len(result["files"]) == 2
                 assert {f["filename"] for f in result["files"]} == {"report.txt", "data.csv"}
@@ -1166,10 +1193,13 @@ class TestScenarioMemoryWorkflow:
     def test_memory_full_lifecycle(self, client):
         """get_memory → reload → get_status covers the full memory API."""
         initial_data = {"version": "1.0", "facts": [{"id": "f1", "content": "User likes Python"}]}
-        updated_data = {"version": "1.0", "facts": [
-            {"id": "f1", "content": "User likes Python"},
-            {"id": "f2", "content": "User prefers dark mode"},
-        ]}
+        updated_data = {
+            "version": "1.0",
+            "facts": [
+                {"id": "f1", "content": "User likes Python"},
+                {"id": "f2", "content": "User prefers dark mode"},
+            ],
+        }
 
         config = MagicMock()
         config.enabled = True
@@ -1208,9 +1238,7 @@ class TestScenarioSkillInstallAndUse:
             # Create .skill archive
             skill_src = tmp_path / "my-analyzer"
             skill_src.mkdir()
-            (skill_src / "SKILL.md").write_text(
-                "---\nname: my-analyzer\ndescription: Analyze code\nlicense: MIT\n---\nAnalysis skill"
-            )
+            (skill_src / "SKILL.md").write_text("---\nname: my-analyzer\ndescription: Analyze code\nlicense: MIT\n---\nAnalysis skill")
             archive = tmp_path / "my-analyzer.skill"
             with zipfile.ZipFile(archive, "w") as zf:
                 zf.write(skill_src / "SKILL.md", "my-analyzer/SKILL.md")
@@ -1319,11 +1347,15 @@ class TestScenarioEdgeCases:
 
     def test_concurrent_tool_calls_in_single_message(self, client):
         """Agent produces multiple tool_calls in one AIMessage — emitted as single messages-tuple."""
-        ai = AIMessage(content="", id="ai-1", tool_calls=[
-            {"name": "web_search", "args": {"q": "a"}, "id": "tc-1"},
-            {"name": "web_search", "args": {"q": "b"}, "id": "tc-2"},
-            {"name": "bash", "args": {"cmd": "echo hi"}, "id": "tc-3"},
-        ])
+        ai = AIMessage(
+            content="",
+            id="ai-1",
+            tool_calls=[
+                {"name": "web_search", "args": {"q": "a"}, "id": "tc-1"},
+                {"name": "web_search", "args": {"q": "b"}, "id": "tc-2"},
+                {"name": "bash", "args": {"cmd": "echo hi"}, "id": "tc-3"},
+            ],
+        )
         chunks = [{"messages": [ai]}]
         agent = _make_agent_mock(chunks)
 
@@ -1366,6 +1398,7 @@ class TestScenarioEdgeCases:
 # ---------------------------------------------------------------------------
 # Gateway conformance — validate client output against Gateway Pydantic models
 # ---------------------------------------------------------------------------
+
 
 class TestGatewayConformance:
     """Validate that DeerFlowClient return dicts conform to Gateway Pydantic response models.
@@ -1441,9 +1474,7 @@ class TestGatewayConformance:
     def test_install_skill(self, client, tmp_path):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: my-skill\ndescription: A test skill\n---\nBody\n"
-        )
+        (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\nBody\n")
 
         archive = tmp_path / "my-skill.skill"
         with zipfile.ZipFile(archive, "w") as zf:

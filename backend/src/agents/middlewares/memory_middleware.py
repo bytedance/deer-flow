@@ -40,9 +40,7 @@ def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
     Returns:
         Filtered list containing only user inputs and final assistant responses.
     """
-    _UPLOAD_BLOCK_RE = re.compile(
-        r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE
-    )
+    _UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
 
     filtered = []
     skip_next_ai = False
@@ -52,9 +50,7 @@ def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
         if msg_type == "human":
             content = getattr(msg, "content", "")
             if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content if isinstance(p, dict)
-                )
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
             content_str = str(content)
             if "<uploaded_files>" in content_str:
                 # Strip the ephemeral upload block; keep the user's real question.

@@ -41,6 +41,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
+    - [IM Channels](#im-channels)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -183,6 +184,91 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
+
+#### IM Channels
+
+DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
+
+| Channel | Transport | Difficulty |
+|---------|-----------|------------|
+| Telegram | Bot API (long-polling) | Easy |
+| Slack | Socket Mode | Moderate |
+| Feishu / Lark | WebSocket | Moderate |
+
+**Configuration in `config.yaml`:**
+
+```yaml
+channels:
+  # LangGraph Server URL (default: http://localhost:2024)
+  langgraph_url: http://localhost:2024
+  # Gateway API URL (default: http://localhost:8001)
+  gateway_url: http://localhost:8001
+
+  feishu:
+    enabled: true
+    app_id: $FEISHU_APP_ID
+    app_secret: $FEISHU_APP_SECRET
+
+  slack:
+    enabled: true
+    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
+    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
+    allowed_users: []               # empty = allow all
+
+  telegram:
+    enabled: true
+    bot_token: $TELEGRAM_BOT_TOKEN
+    allowed_users: []               # empty = allow all
+```
+
+Set the corresponding API keys in your `.env` file:
+
+```bash
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+
+# Feishu / Lark
+FEISHU_APP_ID=cli_xxxx
+FEISHU_APP_SECRET=your_app_secret
+```
+
+**Telegram Setup**
+
+1. Chat with [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the HTTP API token.
+2. Set `TELEGRAM_BOT_TOKEN` in `.env` and enable the channel in `config.yaml`.
+
+**Slack Setup**
+
+1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
+2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`.
+3. Enable **Socket Mode** → generate an App-Level Token (`xapp-…`) with `connections:write` scope.
+4. Under **Event Subscriptions**, subscribe to bot events: `app_mention`, `message.im`.
+5. Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env` and enable the channel in `config.yaml`.
+
+**Feishu / Lark Setup**
+
+1. Create an app on [Feishu Open Platform](https://open.feishu.cn/) → enable **Bot** capability.
+2. Add permissions: `im:message`, `im:resource`.
+3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
+4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+
+**Commands**
+
+Once a channel is connected, you can interact with DeerFlow directly from the chat:
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new conversation |
+| `/status` | Show current thread info |
+| `/models` | List available models |
+| `/memory` | View memory |
+| `/help` | Show help |
+
+> Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
 
 ## From Deep Research to Super Agent Harness
 
