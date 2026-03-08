@@ -81,12 +81,6 @@ export function useThreadStream({
       _handleStart(meta.thread_id);
     },
     onLangChainEvent(event) {
-      if (event.event === "on_tool_start") {
-        console.log("Tool started:", event.name, event.data);
-      }
-      if (event.event === "on_tool_stream") {
-        console.log("Tool stream:", event.name, event.data);
-      }
       if (event.event === "on_tool_end") {
         listeners.current.onToolEnd?.({
           name: event.name,
