@@ -285,8 +285,9 @@ export function ArtifactFilePreview({
     return (
       <iframe
         className="size-full"
+        title="Artifact preview"
         srcDoc={content}
-        sandbox="allow-scripts allow-forms allow-same-origin"
+        sandbox="allow-scripts allow-forms"
       />
     );
   }
