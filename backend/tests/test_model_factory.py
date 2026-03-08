@@ -29,6 +29,7 @@ def _make_model(
     supports_thinking: bool = False,
     supports_reasoning_effort: bool = False,
     when_thinking_enabled: dict | None = None,
+    thinking: dict | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         name=name,
@@ -39,6 +40,7 @@ def _make_model(
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
         when_thinking_enabled=when_thinking_enabled,
+        thinking=thinking,
         supports_vision=False,
     )
 
@@ -110,6 +112,17 @@ def test_thinking_enabled_raises_when_not_supported_but_when_thinking_enabled_is
 
     with pytest.raises(ValueError, match="does not support thinking"):
         factory_module.create_chat_model(name="no-think", thinking_enabled=True)
+
+
+def test_thinking_enabled_raises_for_empty_when_thinking_enabled_explicitly_set(monkeypatch):
+    """supports_thinking guard fires when when_thinking_enabled is set to an empty dict —
+    the user explicitly provided the section, so the guard must still fire even though
+    effective_wte would be falsy."""
+    cfg = _make_app_config([_make_model("no-think-empty", supports_thinking=False, when_thinking_enabled={})])
+    _patch_factory(monkeypatch, cfg)
+
+    with pytest.raises(ValueError, match="does not support thinking"):
+        factory_module.create_chat_model(name="no-think-empty", thinking_enabled=True)
 
 
 def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
@@ -266,6 +279,134 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
     # When supports_reasoning_effort=True, it should NOT be cleared to None
-    assert captured.get("reasoning_effort") != "something-unset"
     # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
     assert captured.get("reasoning_effort") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# thinking shortcut field
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_shortcut_enables_thinking_when_thinking_enabled(monkeypatch):
+    """thinking shortcut alone should act as when_thinking_enabled with a `thinking` key."""
+    thinking_settings = {"type": "enabled", "budget_tokens": 8000}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "shortcut-model",
+                use="langchain_anthropic:ChatAnthropic",
+                supports_thinking=True,
+                thinking=thinking_settings,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="shortcut-model", thinking_enabled=True)
+
+    assert captured.get("thinking") == thinking_settings
+
+
+def test_thinking_shortcut_disables_thinking_when_thinking_disabled(monkeypatch):
+    """thinking shortcut should participate in the disable path (langchain_anthropic format)."""
+    thinking_settings = {"type": "enabled", "budget_tokens": 8000}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "shortcut-disable",
+                use="langchain_anthropic:ChatAnthropic",
+                supports_thinking=True,
+                supports_reasoning_effort=False,
+                thinking=thinking_settings,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="shortcut-disable", thinking_enabled=False)
+
+    assert captured.get("thinking") == {"type": "disabled"}
+    assert "extra_body" not in captured
+
+
+def test_thinking_shortcut_merges_with_when_thinking_enabled(monkeypatch):
+    """thinking shortcut should be merged into when_thinking_enabled when both are provided."""
+    thinking_settings = {"type": "enabled", "budget_tokens": 8000}
+    wte = {"max_tokens": 16000}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "merge-model",
+                use="langchain_anthropic:ChatAnthropic",
+                supports_thinking=True,
+                thinking=thinking_settings,
+                when_thinking_enabled=wte,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="merge-model", thinking_enabled=True)
+
+    # Both the thinking shortcut and when_thinking_enabled settings should be applied
+    assert captured.get("thinking") == thinking_settings
+    assert captured.get("max_tokens") == 16000
+
+
+def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
+    """thinking shortcut must not be passed raw to the model constructor (excluded from model_dump)."""
+    thinking_settings = {"type": "enabled", "budget_tokens": 8000}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "no-leak",
+                use="langchain_anthropic:ChatAnthropic",
+                supports_thinking=True,
+                supports_reasoning_effort=False,
+                thinking=thinking_settings,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="no-leak", thinking_enabled=False)
+
+    # The disable path should have set thinking to disabled (not the raw enabled shortcut)
+    assert captured.get("thinking") == {"type": "disabled"}
