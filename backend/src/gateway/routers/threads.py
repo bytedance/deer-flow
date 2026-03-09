@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -9,6 +10,10 @@ from pydantic import BaseModel, Field
 from src.config.app_config import get_app_config
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
+logger = logging.getLogger(__name__)
+
+SortBy = Literal["updated_at", "created_at"]
+SortOrder = Literal["desc", "asc"]
 
 
 class ThreadSummary(BaseModel):
@@ -24,6 +29,10 @@ class ThreadSummariesResponse(BaseModel):
 
     threads: list[ThreadSummary]
     next_offset: int | None = None
+
+
+ThreadSummary.model_rebuild()
+ThreadSummariesResponse.model_rebuild()
 
 
 def _resolve_langgraph_url() -> str:
@@ -68,8 +77,8 @@ def _to_thread_summary(raw: Any) -> ThreadSummary | None:
 async def list_thread_summaries(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    sort_by: str = Query(default="updated_at"),
-    sort_order: str = Query(default="desc"),
+    sort_by: SortBy = Query(default="updated_at"),
+    sort_order: SortOrder = Query(default="desc"),
 ) -> ThreadSummariesResponse:
     """Fetch thread list from LangGraph and return compact title-only summaries."""
 
@@ -87,15 +96,19 @@ async def list_thread_summaries(
             }
         )
     except Exception as e:
+        logger.exception("Failed to query LangGraph thread summaries")
         raise HTTPException(status_code=502, detail=f"Failed to query LangGraph threads: {e}") from e
 
     summaries: list[ThreadSummary] = []
-    for row in rows if isinstance(rows, list) else []:
-        summary = _to_thread_summary(row)
-        if summary is not None:
-            summaries.append(summary)
+    row_count = 0
+    if isinstance(rows, list):
+        row_count = len(rows)
+        for row in rows:
+            summary = _to_thread_summary(row)
+            if summary is not None:
+                summaries.append(summary)
 
-    next_offset = offset + len(summaries) if len(summaries) >= limit else None
+    next_offset = offset + row_count if row_count >= limit else None
     return ThreadSummariesResponse(threads=summaries, next_offset=next_offset)
 
 

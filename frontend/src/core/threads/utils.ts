@@ -1,6 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import type { AgentThread } from "./types";
 
 export function pathOfThread(threadId: string) {
   return `/workspace/chats/${threadId}`;
@@ -19,6 +18,6 @@ export function textOfMessage(message: Message) {
   return null;
 }
 
-export function titleOfThread(thread: AgentThread) {
+export function titleOfThread(thread: { values?: { title?: string | null } | null }) {
   return thread.values?.title ?? "Untitled";
 }

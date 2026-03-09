@@ -15,7 +15,9 @@ import { useUpdateSubtask } from "../tasks/context";
 import type { UploadedFileInfo } from "../uploads";
 import { uploadFiles } from "../uploads";
 
-import type { AgentThread, AgentThreadState } from "./types";
+import type { AgentThreadState, ThreadListItem } from "./types";
+
+const THREADS_LIST_QUERY_KEY = ["threads", "search"] as const;
 
 export type ToolEndEvent = {
   name: string;
@@ -110,10 +112,10 @@ export function useThreadStream({
         if (update && "title" in update && update.title) {
           void queryClient.setQueriesData(
             {
-              queryKey: ["threads", "search"],
+              queryKey: THREADS_LIST_QUERY_KEY,
               exact: false,
             },
-            (oldData: Array<AgentThread> | undefined) => {
+            (oldData: Array<ThreadListItem> | undefined) => {
               return oldData?.map((t) => {
                 if (t.thread_id === threadIdRef.current) {
                   return {
@@ -148,7 +150,7 @@ export function useThreadStream({
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({ queryKey: THREADS_LIST_QUERY_KEY });
     },
   });
 
@@ -338,7 +340,7 @@ export function useThreadStream({
             },
           },
         );
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        void queryClient.invalidateQueries({ queryKey: THREADS_LIST_QUERY_KEY });
       } catch (error) {
         setOptimisticMessages([]);
         throw error;
@@ -359,8 +361,9 @@ export function useThreadStream({
   return [mergedThread, sendMessage] as const;
 }
 
+
 type ThreadSummaryApiResponse = {
-  threads: AgentThread[];
+  threads: ThreadListItem[];
   next_offset: number | null;
 };
 
@@ -402,15 +405,19 @@ export function useThreads(
   const sortBy = params.sortBy ?? "updated_at";
   const sortOrder = params.sortOrder ?? "desc";
 
-  return useQuery<AgentThread[]>({
-    queryKey: ["threads", "summaries", pageSize, initialOffset, sortBy, sortOrder],
+  return useQuery<ThreadListItem[]>({
+    queryKey: [...THREADS_LIST_QUERY_KEY, pageSize, initialOffset, sortBy, sortOrder],
     queryFn: async () => {
-      const allThreads: AgentThread[] = [];
+      const allThreads: ThreadListItem[] = [];
       let offset = initialOffset;
-      let safetyCounter = 0;
-      const MAX_PAGES = 200;
+      const seenOffsets = new Set<number>();
 
-      while (safetyCounter < MAX_PAGES) {
+      while (true) {
+        if (seenOffsets.has(offset)) {
+          throw new Error(`Detected repeated thread summaries offset: ${offset}`);
+        }
+        seenOffsets.add(offset);
+
         const page = await fetchThreadSummariesPage({
           limit: pageSize,
           offset,
@@ -424,12 +431,17 @@ export function useThreads(
 
         allThreads.push(...page.threads);
 
-        if (page.next_offset == null || page.threads.length < pageSize) {
+        if (page.next_offset == null) {
           break;
         }
 
+        if (page.next_offset <= offset) {
+          throw new Error(
+            `Thread summaries pagination did not advance: ${page.next_offset}`,
+          );
+        }
+
         offset = page.next_offset;
-        safetyCounter += 1;
       }
 
       return allThreads;
@@ -448,11 +460,11 @@ export function useDeleteThread() {
     onSuccess(_, { threadId }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: THREADS_LIST_QUERY_KEY,
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
-          return oldData.filter((t) => t.thread_id !== threadId);
+        (oldData: Array<ThreadListItem> | undefined) => {
+          return oldData?.filter((t) => t.thread_id !== threadId) ?? oldData;
         },
       );
     },
@@ -477,11 +489,11 @@ export function useRenameThread() {
     onSuccess(_, { threadId, title }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: THREADS_LIST_QUERY_KEY,
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
+        (oldData: Array<ThreadListItem> | undefined) => {
+          return oldData?.map((t) => {
             if (t.thread_id === threadId) {
               return {
                 ...t,
@@ -492,7 +504,7 @@ export function useRenameThread() {
               };
             }
             return t;
-          });
+          }) ?? oldData;
         },
       );
     },
