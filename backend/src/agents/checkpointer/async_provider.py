@@ -32,6 +32,7 @@ from src.agents.checkpointer.provider import (
 from src.config.app_config import get_app_config
 
 logger = logging.getLogger(__name__)
+_fallback_checkpointer: Checkpointer | None = None
 
 # ---------------------------------------------------------------------------
 # Async factory
@@ -100,7 +101,12 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer | None]:
     config = get_app_config()
 
     if config.checkpointer is None:
-        yield None
+        global _fallback_checkpointer
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        if _fallback_checkpointer is None:
+            _fallback_checkpointer = InMemorySaver()
+        yield _fallback_checkpointer
         return
 
     async with _async_checkpointer(config.checkpointer) as saver:

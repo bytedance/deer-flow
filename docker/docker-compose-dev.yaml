@@ -160,6 +160,7 @@ services:
     working_dir: /app
     environment:
       - CI=true
+      - BG_JOB_ISOLATED_LOOPS=true
       - DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/skills
       - DEER_FLOW_HOME_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/backend/.deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal

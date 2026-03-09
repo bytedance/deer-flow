@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -24,8 +24,12 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
+  const [hydrated, setHydrated] = useState(false);
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
 
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
   useSpecificChatMode();
@@ -67,6 +71,10 @@ export default function ChatPage() {
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
+
+  if (!hydrated) {
+    return <div className="size-full" />;
+  }
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
