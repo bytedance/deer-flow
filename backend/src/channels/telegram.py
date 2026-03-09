@@ -151,7 +151,7 @@ class TelegramChannel(Channel):
             try:
                 await bot.send_document(
                     chat_id=chat_id,
-                    document=str(artifact.file_path),
+                    document=artifact.file_path,
                     filename=artifact.file_name,
                     reply_to_message_id=reply_to_message_id,
                 )

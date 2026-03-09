@@ -1240,6 +1240,39 @@ class TestSlackSendRetry:
 
         _run(go())
 
+    def test_omits_thread_ts_for_non_threaded_artifact_uploads(self, tmp_path, monkeypatch):
+        from src.channels.slack import SlackChannel
+
+        async def go():
+            thread_id, virtual_path, file_path = _prepare_output_artifact(tmp_path, monkeypatch)
+
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+
+            mock_web = MagicMock()
+            mock_web.chat_postMessage = MagicMock(return_value=MagicMock())
+            mock_web.files_upload_v2 = MagicMock(return_value=MagicMock())
+            ch._web_client = mock_web
+
+            msg = OutboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                thread_id=thread_id,
+                text="hello",
+                artifacts=[virtual_path],
+                thread_ts=None,
+            )
+            await ch.send(msg)
+
+            mock_web.files_upload_v2.assert_called_once_with(
+                channel="C123",
+                file=str(file_path),
+                filename="report.md",
+                title="report.md",
+            )
+
+        _run(go())
+
     def test_raises_after_all_retries_exhausted(self):
         from src.channels.slack import SlackChannel
 
@@ -1295,7 +1328,7 @@ class TestTelegramSendRetry:
 
             mock_bot.send_document.assert_awaited_once_with(
                 chat_id=12345,
-                document=str(file_path),
+                document=file_path,
                 filename="report.md",
                 reply_to_message_id=321,
             )

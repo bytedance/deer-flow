@@ -148,13 +148,18 @@ class SlackChannel(Channel):
                 continue
 
             try:
+                upload_kwargs: dict[str, Any] = {
+                    "channel": msg.chat_id,
+                    "file": str(artifact.file_path),
+                    "filename": artifact.file_name,
+                    "title": artifact.file_name,
+                }
+                if msg.thread_ts:
+                    upload_kwargs["thread_ts"] = msg.thread_ts
+
                 await asyncio.to_thread(
                     self._web_client.files_upload_v2,
-                    channel=msg.chat_id,
-                    thread_ts=msg.thread_ts,
-                    file=str(artifact.file_path),
-                    filename=artifact.file_name,
-                    title=artifact.file_name,
+                    **upload_kwargs,
                 )
             except Exception as exc:
                 logger.warning(
