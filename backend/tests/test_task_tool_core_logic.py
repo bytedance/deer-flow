@@ -239,3 +239,171 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert output.startswith("Task polling timed out after 0 minutes")
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
+
+
+def test_cleanup_called_on_completed(monkeypatch):
+    """Verify cleanup_background_task is called when task completes."""
+    config = _make_subagent_config()
+    events = []
+    cleanup_calls = []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    output = task_tool_module.task_tool.func(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="complete task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cleanup-completed",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    assert cleanup_calls == ["tc-cleanup-completed"]
+
+
+def test_cleanup_called_on_failed(monkeypatch):
+    """Verify cleanup_background_task is called when task fails."""
+    config = _make_subagent_config()
+    events = []
+    cleanup_calls = []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.FAILED, error="error"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    output = task_tool_module.task_tool.func(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="fail task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cleanup-failed",
+    )
+
+    assert output == "Task failed. Error: error"
+    assert cleanup_calls == ["tc-cleanup-failed"]
+
+
+def test_cleanup_called_on_timed_out(monkeypatch):
+    """Verify cleanup_background_task is called when task times out."""
+    config = _make_subagent_config()
+    events = []
+    cleanup_calls = []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    output = task_tool_module.task_tool.func(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="timeout task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-cleanup-timedout",
+    )
+
+    assert output == "Task timed out. Error: timeout"
+    assert cleanup_calls == ["tc-cleanup-timedout"]
+
+
+def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
+    """Verify cleanup_background_task is NOT called on polling safety timeout.
+
+    This prevents race conditions where the background task is still running
+    but the polling loop gives up. The cleanup should happen later when the
+    executor completes and sets a terminal status.
+    """
+    config = _make_subagent_config()
+    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
+    config.timeout_seconds = 1
+    events = []
+    cleanup_calls = []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    output = task_tool_module.task_tool.func(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="never finish",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-cleanup-safety-timeout",
+    )
+
+    assert output.startswith("Task polling timed out after 0 minutes")
+    # cleanup should NOT be called because the task is still RUNNING
+    assert cleanup_calls == []

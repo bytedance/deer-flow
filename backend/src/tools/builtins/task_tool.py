@@ -13,7 +13,7 @@ from langgraph.typing import ContextT
 from src.agents.lead_agent.prompt import get_skills_prompt_section
 from src.agents.thread_state import ThreadState
 from src.subagents import SubagentExecutor, get_subagent_config
-from src.subagents.executor import SubagentStatus, get_background_task_result
+from src.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,7 @@ def task_tool(
         if result is None:
             logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
             writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+            cleanup_background_task(task_id)
             return f"Error: Task {task_id} disappeared from background tasks"
 
         # Log status changes for debugging
@@ -164,14 +165,17 @@ def task_tool(
         if result.status == SubagentStatus.COMPLETED:
             writer({"type": "task_completed", "task_id": task_id, "result": result.result})
             logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
+            cleanup_background_task(task_id)
             return f"Task Succeeded. Result: {result.result}"
         elif result.status == SubagentStatus.FAILED:
             writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+            cleanup_background_task(task_id)
             return f"Task failed. Error: {result.error}"
         elif result.status == SubagentStatus.TIMED_OUT:
             writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
             logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+            cleanup_background_task(task_id)
             return f"Task timed out. Error: {result.error}"
 
         # Still running, wait before next poll
@@ -181,6 +185,9 @@ def task_tool(
         # Polling timeout as a safety net (in case thread pool timeout doesn't work)
         # Set to execution timeout + 60s buffer, in 5s poll intervals
         # This catches edge cases where the background task gets stuck
+        # Note: We don't call cleanup_background_task here because the task may
+        # still be running in the background. The cleanup will happen when the
+        # executor completes and sets a terminal status.
         if poll_count > max_poll_count:
             timeout_minutes = config.timeout_seconds // 60
             logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
