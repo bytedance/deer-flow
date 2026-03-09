@@ -94,6 +94,23 @@ export interface Translations {
     newChat: string;
     chats: string;
     demoChats: string;
+    dateView: string;
+    projectView: string;
+    searchChats: string;
+    today: string;
+    yesterday: string;
+    lastSevenDays: string;
+    lastThirtyDays: string;
+    older: string;
+    defaultProject: string;
+    addToProject: string;
+    removeFromProject: string;
+    newProject: string;
+    createProject: string;
+    renameProject: string;
+    deleteProject: string;
+    deleteProjectConfirm: string;
+    projectName: string;
   };
 
   // Breadcrumb
@@ -138,6 +155,8 @@ export interface Translations {
     lessSteps: string;
     executeCommand: string;
     presentFiles: string;
+    runPython: string;
+    viewImage: string;
     needYourHelp: string;
     useTool: (toolName: string) => string;
     searchForRelatedInfo: string;
