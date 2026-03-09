@@ -10,7 +10,7 @@ Usage (e.g. FastAPI lifespan)::
     from src.agents.checkpointer.async_provider import make_checkpointer
 
     async with make_checkpointer() as checkpointer:
-        app.state.checkpointer = checkpointer  # None if not configured
+        app.state.checkpointer = checkpointer  # InMemorySaver if not configured
 
 For sync usage see :mod:`src.agents.checkpointer.provider`.
 """
@@ -87,20 +87,22 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer() -> AsyncIterator[Checkpointer | None]:
+async def make_checkpointer() -> AsyncIterator[Checkpointer]:
     """Async context manager that yields a checkpointer for the caller's lifetime.
     Resources are opened on enter and closed on exit — no global state::
 
         async with make_checkpointer() as checkpointer:
             app.state.checkpointer = checkpointer
 
-    Yields ``None`` when no checkpointer is configured in *config.yaml*.
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
     config = get_app_config()
 
     if config.checkpointer is None:
-        yield None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        yield InMemorySaver()
         return
 
     async with _async_checkpointer(config.checkpointer) as saver:
