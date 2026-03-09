@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -379,6 +381,18 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
+def _make_stream_part(event: str, data):
+    return SimpleNamespace(event=event, data=data)
+
+
+def _make_async_iterator(items):
+    async def iterator():
+        for item in items:
+            yield item
+
+    return iterator()
+
+
 class TestChannelManager:
     def test_handle_chat_creates_thread(self):
         from src.channels.manager import ChannelManager
@@ -527,6 +541,74 @@ class TestChannelManager:
             assert call_args[1]["context"]["thinking_enabled"] is True
             assert call_args[1]["context"]["subagent_enabled"] is True
             assert call_args[1]["context"]["is_plan_mode"] is True
+
+        _run(go())
+
+    def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
+        from src.channels.manager import ChannelManager
+
+        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            stream_events = [
+                _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": " world", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "Hello world"},
+                        ],
+                        "artifacts": [],
+                    },
+                ),
+            ]
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 3)
+            await manager.stop()
+
+            mock_client.runs.stream.assert_called_once()
+            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.is_final for msg in outbound_received] == [False, False, True]
+            assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
 
         _run(go())
 
@@ -1023,6 +1105,78 @@ class TestHandleChatWithArtifacts:
             assert "chart.png" in outbound_received[1].text
             assert "report.md" not in outbound_received[1].text
             assert outbound_received[1].artifacts == ["/mnt/user-data/outputs/chart.png"]
+
+        _run(go())
+
+
+class TestFeishuChannel:
+    def test_streaming_reuses_single_running_card(self):
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._PatchMessageRequest = PatchMessageRequest
+            channel._PatchMessageRequestBody = PatchMessageRequestBody
+            channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+            channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            channel._Emoji = Emoji
+
+            reply_response = MagicMock()
+            reply_response.data.message_id = "om-running-card"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+            channel._api_client.im.v1.message.patch = MagicMock()
+            channel._api_client.im.v1.message_reaction.create = MagicMock()
+
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Hello",
+                    is_final=False,
+                    thread_ts="om-source-msg",
+                )
+            )
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Hello world",
+                    is_final=True,
+                    thread_ts="om-source-msg",
+                )
+            )
+
+            assert channel._api_client.im.v1.message.reply.call_count == 1
+            assert channel._api_client.im.v1.message.patch.call_count == 2
+            assert channel._api_client.im.v1.message_reaction.create.call_count == 1
+            assert "om-source-msg" not in channel._running_card_ids
+
+            first_patch_request = channel._api_client.im.v1.message.patch.call_args_list[0].args[0]
+            final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]
+            assert first_patch_request.message_id == "om-running-card"
+            assert final_patch_request.message_id == "om-running-card"
+            assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "Hello"
+            assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "Hello world"
+            assert json.loads(final_patch_request.body.content)["config"]["update_multi"] is True
 
         _run(go())
 
