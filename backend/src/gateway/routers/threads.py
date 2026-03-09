@@ -20,6 +20,10 @@ from pydantic import BaseModel
 from src.config.paths import get_paths
 from src.gateway.auth.middleware import get_current_user
 from src.gateway.auth.ownership import verify_thread_ownership
+from src.gateway.auth.project_store import (
+    assign_thread_to_project,
+    get_thread_project,
+)
 from src.gateway.auth.thread_store import (
     claim_thread,
     get_user_threads,
@@ -74,6 +78,12 @@ class ThreadClaimResponse(BaseModel):
 
     success: bool
     thread_id: str
+
+
+class ThreadAssignProjectRequest(BaseModel):
+    """Request model for assigning a thread to a project."""
+
+    project_id: str | None = None
 
 
 # ── Collection Endpoints (/api/threads) ──────────────────────────────────────
@@ -135,6 +145,10 @@ async def list_threads(
                     "created_at": "",
                     "updated_at": "",
                 })
+
+        # Attach project_id to each thread
+        for t in user_threads:
+            t["project_id"] = get_thread_project(t["thread_id"])
 
         # Sort by updated_at desc (LangGraph threads have timestamps, stubs sort last)
         user_threads.sort(key=lambda t: t.get("updated_at", ""), reverse=True)
@@ -390,3 +404,29 @@ async def truncate_messages(
     except Exception as e:
         logger.error(f"Error truncating messages for thread {thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to truncate messages: {str(e)}")
+
+
+@router.patch("/project")
+async def assign_thread_project(
+    thread_id: str,
+    request: ThreadAssignProjectRequest,
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> dict[str, bool]:
+    """Assign a thread to a project, or unassign (null) to move to Default.
+
+    Args:
+        thread_id: The thread ID.
+        request: Request containing the project_id (or null to unassign).
+        current_user: The authenticated user (injected by dependency).
+
+    Returns:
+        Success status.
+    """
+    verify_thread_ownership(thread_id, current_user["id"])
+
+    success = assign_thread_to_project(thread_id, request.project_id, current_user["id"])
+    if not success:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    logger.info(f"Assigned thread {thread_id} to project {request.project_id}")
+    return {"success": True}
