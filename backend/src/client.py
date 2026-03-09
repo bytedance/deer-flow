@@ -152,7 +152,10 @@ class DeerFlowClient:
     def _atomic_write_json(path: Path, data: dict) -> None:
         """Write JSON to *path* atomically (temp file + replace)."""
         fd = tempfile.NamedTemporaryFile(
-            mode="w", dir=path.parent, suffix=".tmp", delete=False,
+            mode="w",
+            dir=path.parent,
+            suffix=".tmp",
+            delete=False,
         )
         try:
             json.dump(data, fd, indent=2)
@@ -205,8 +208,13 @@ class DeerFlowClient:
             ),
             "state_schema": ThreadState,
         }
-        if self._checkpointer is not None:
-            kwargs["checkpointer"] = self._checkpointer
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from src.agents.checkpointer import get_checkpointer
+
+            checkpointer = get_checkpointer()
+        if checkpointer is not None:
+            kwargs["checkpointer"] = checkpointer
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
@@ -320,10 +328,7 @@ class DeerFlowClient:
                                 "type": "ai",
                                 "content": "",
                                 "id": msg_id,
-                                "tool_calls": [
-                                    {"name": tc["name"], "args": tc["args"], "id": tc.get("id")}
-                                    for tc in msg.tool_calls
-                                ],
+                                "tool_calls": [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls],
                             },
                         )
 
@@ -494,10 +499,7 @@ class DeerFlowClient:
         """
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError(
-                "Cannot locate extensions_config.json. "
-                "Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root."
-            )
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         current_config = get_extensions_config()
 
@@ -561,10 +563,7 @@ class DeerFlowClient:
 
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
-            raise FileNotFoundError(
-                "Cannot locate extensions_config.json. "
-                "Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root."
-            )
+            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
         extensions_config = get_extensions_config()
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
@@ -739,7 +738,6 @@ class DeerFlowClient:
         uploaded_files: list[dict] = []
 
         for src_path in resolved_files:
-
             dest = uploads_dir / src_path.name
             shutil.copy2(src_path, dest)
 
@@ -756,6 +754,7 @@ class DeerFlowClient:
                     try:
                         asyncio.get_running_loop()
                         import concurrent.futures
+
                         with concurrent.futures.ThreadPoolExecutor() as pool:
                             md_path = pool.submit(lambda: asyncio.run(convert_file_to_markdown(dest))).result()
                     except RuntimeError:
@@ -795,15 +794,17 @@ class DeerFlowClient:
         for fp in sorted(uploads_dir.iterdir()):
             if fp.is_file():
                 stat = fp.stat()
-                files.append({
-                    "filename": fp.name,
-                    "size": str(stat.st_size),
-                    "path": str(fp),
-                    "virtual_path": f"/mnt/user-data/uploads/{fp.name}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{fp.name}",
-                    "extension": fp.suffix,
-                    "modified": stat.st_mtime,
-                })
+                files.append(
+                    {
+                        "filename": fp.name,
+                        "size": str(stat.st_size),
+                        "path": str(fp),
+                        "virtual_path": f"/mnt/user-data/uploads/{fp.name}",
+                        "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{fp.name}",
+                        "extension": fp.suffix,
+                        "modified": stat.st_mtime,
+                    }
+                )
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
@@ -858,7 +859,7 @@ class DeerFlowClient:
         if not clean_path.startswith(virtual_prefix):
             raise ValueError(f"Path must start with /{virtual_prefix}")
 
-        relative = clean_path[len(virtual_prefix):].lstrip("/")
+        relative = clean_path[len(virtual_prefix) :].lstrip("/")
         base_dir = get_paths().sandbox_user_data_dir(thread_id)
         actual = (base_dir / relative).resolve()
 

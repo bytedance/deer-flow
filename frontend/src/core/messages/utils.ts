@@ -33,96 +33,92 @@ export function groupMessages<T>(
   if (messages.length === 0) {
     return [];
   }
+
   const groups: MessageGroup[] = [];
 
+  // Returns the last group if it can still accept tool messages
+  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  function lastOpenGroup() {
+    const last = groups[groups.length - 1];
+    if (
+      last &&
+      last.type !== "human" &&
+      last.type !== "assistant" &&
+      last.type !== "assistant:clarification"
+    ) {
+      return last;
+    }
+    return null;
+  }
+
   for (const message of messages) {
-    const lastGroup = groups[groups.length - 1];
     if (message.type === "human") {
-      groups.push({
-        id: message.id,
-        type: "human",
-        messages: [message],
-      });
-    } else if (message.type === "tool") {
-      // Check if this is a clarification tool message
+      groups.push({ id: message.id, type: "human", messages: [message] });
+      continue;
+    }
+
+    if (message.type === "tool") {
       if (isClarificationToolMessage(message)) {
-        // Add to processing group if available (to maintain tool call association)
-        if (
-          lastGroup &&
-          lastGroup.type !== "human" &&
-          lastGroup.type !== "assistant" &&
-          lastGroup.type !== "assistant:clarification"
-        ) {
-          lastGroup.messages.push(message);
-        }
-        // Also create a separate clarification group for prominent display
+        // Add to the preceding processing group to preserve tool-call association,
+        // then also open a standalone clarification group for prominent display.
+        lastOpenGroup()?.messages.push(message);
         groups.push({
           id: message.id,
           type: "assistant:clarification",
           messages: [message],
         });
-      } else if (
-        lastGroup &&
-        lastGroup.type !== "human" &&
-        lastGroup.type !== "assistant" &&
-        lastGroup.type !== "assistant:clarification"
-      ) {
-        lastGroup.messages.push(message);
       } else {
-        throw new Error(
-          "Tool message must be matched with a previous assistant message with tool calls",
-        );
+        const open = lastOpenGroup();
+        if (open) {
+          open.messages.push(message);
+        } else {
+          console.error(
+            "Unexpected tool message outside a processing group",
+            message,
+          );
+        }
       }
-    } else if (message.type === "ai") {
-      if (hasReasoning(message) || hasToolCalls(message)) {
-        if (hasPresentFiles(message)) {
+      continue;
+    }
+
+    if (message.type === "ai") {
+      if (hasPresentFiles(message)) {
+        groups.push({
+          id: message.id,
+          type: "assistant:present-files",
+          messages: [message],
+        });
+      } else if (hasSubagent(message)) {
+        groups.push({
+          id: message.id,
+          type: "assistant:subagent",
+          messages: [message],
+        });
+      } else if (hasReasoning(message) || hasToolCalls(message)) {
+        const lastGroup = groups[groups.length - 1];
+        // Accumulate consecutive intermediate AI messages into one processing group.
+        if (lastGroup?.type !== "assistant:processing") {
           groups.push({
             id: message.id,
-            type: "assistant:present-files",
-            messages: [message],
-          });
-        } else if (hasSubagent(message)) {
-          groups.push({
-            id: message.id,
-            type: "assistant:subagent",
+            type: "assistant:processing",
             messages: [message],
           });
         } else {
-          if (lastGroup?.type !== "assistant:processing") {
-            groups.push({
-              id: message.id,
-              type: "assistant:processing",
-              messages: [],
-            });
-          }
-          const currentGroup = groups[groups.length - 1];
-          if (currentGroup?.type === "assistant:processing") {
-            currentGroup.messages.push(message);
-          } else {
-            throw new Error(
-              "Assistant message with reasoning or tool calls must be preceded by a processing group",
-            );
-          }
+          lastGroup.messages.push(message);
         }
       }
+
+      // Not an else-if: a message with reasoning + content (but no tool calls) goes
+      // into the processing group above AND gets its own assistant bubble here.
       if (hasContent(message) && !hasToolCalls(message)) {
-        groups.push({
-          id: message.id,
-          type: "assistant",
-          messages: [message],
-        });
+        groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }
   }
 
-  const resultsOfGroups: T[] = [];
-  for (const group of groups) {
-    const resultOfGroup = mapper(group);
-    if (resultOfGroup !== undefined && resultOfGroup !== null) {
-      resultsOfGroups.push(resultOfGroup);
-    }
-  }
-  return resultsOfGroups;
+  return groups
+    .map(mapper)
+    .filter((result) => result !== undefined && result !== null) as T[];
 }
 
 export function extractTextFromMessage(message: Message) {
@@ -162,11 +158,20 @@ export function extractContentFromMessage(message: Message) {
 }
 
 export function extractReasoningContentFromMessage(message: Message) {
-  if (message.type !== "ai" || !message.additional_kwargs) {
+  if (message.type !== "ai") {
     return null;
   }
-  if ("reasoning_content" in message.additional_kwargs) {
+  if (
+    message.additional_kwargs &&
+    "reasoning_content" in message.additional_kwargs
+  ) {
     return message.additional_kwargs.reasoning_content as string | null;
+  }
+  if (Array.isArray(message.content)) {
+    const part = message.content[0];
+    if (part && "thinking" in part) {
+      return part.thinking as string;
+    }
   }
   return null;
 }
@@ -202,10 +207,18 @@ export function hasContent(message: Message) {
 }
 
 export function hasReasoning(message: Message) {
-  return (
-    message.type === "ai" &&
-    typeof message.additional_kwargs?.reasoning_content === "string"
-  );
+  if (message.type !== "ai") {
+    return false;
+  }
+  if (typeof message.additional_kwargs?.reasoning_content === "string") {
+    return true;
+  }
+  if (Array.isArray(message.content)) {
+    const part = message.content[0];
+    // Compatible with the Anthropic gateway
+    return (part as unknown as { type: "thinking" })?.type === "thinking";
+  }
+  return false;
 }
 
 export function hasToolCalls(message: Message) {
@@ -263,57 +276,61 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 /**
- * Represents an uploaded file parsed from the <uploaded_files> tag
+ * Represents a file stored in message additional_kwargs.files.
+ * Used for optimistic UI (uploading state) and structured file metadata.
  */
-export interface UploadedFile {
+export interface FileInMessage {
   filename: string;
-  size: string;
-  path: string;
+  size: number; // bytes
+  path?: string; // virtual path, may not be set during upload
+  status?: "uploading" | "uploaded";
 }
 
 /**
- * Result of parsing uploaded files from message content
+ * Strip <uploaded_files> tag from message content.
+ * Returns the content with the tag removed.
  */
-export interface ParsedUploadedFiles {
-  files: UploadedFile[];
-  cleanContent: string;
+export function stripUploadedFilesTag(content: string): string {
+  return content
+    .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
+    .trim();
 }
 
-/**
- * Parse <uploaded_files> tag from message content and extract file information.
- * Returns the list of uploaded files and the content with the tag removed.
- */
-export function parseUploadedFiles(content: string): ParsedUploadedFiles {
+export function parseUploadedFiles(content: string): FileInMessage[] {
   // Match <uploaded_files>...</uploaded_files> tag
   const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
   if (!match) {
-    return { files: [], cleanContent: content };
+    return [];
   }
 
   const uploadedFilesContent = match[1];
-  const cleanContent = content.replace(uploadedFilesRegex, "").trim();
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
-    return { files: [], cleanContent };
+    return [];
+  }
+
+  // Check if the backend reported no new files were uploaded in this message
+  if (uploadedFilesContent?.includes("(empty)")) {
+    return [];
   }
 
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
   const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
-  const files: UploadedFile[] = [];
+  const files: FileInMessage[] = [];
   let fileMatch;
 
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: fileMatch[2].trim(),
+      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
       path: fileMatch[3].trim(),
     });
   }
 
-  return { files, cleanContent };
+  return files;
 }

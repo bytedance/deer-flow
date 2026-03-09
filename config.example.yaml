@@ -13,33 +13,30 @@
 # Configure available LLM models for the agent to use
 
 models:
-  # Example: OpenAI model
-  - name: gpt-4
-    display_name: GPT-4
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4
-    api_key: $OPENAI_API_KEY # Use environment variable
-    max_tokens: 4096
-    temperature: 0.7
-    supports_vision: true # Enable vision support for view_image tool
+  # Example: Volcengine (Doubao) model
+  # - name: doubao-seed-1.8
+  #   display_name: Doubao-Seed-1.8
+  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: doubao-seed-1-8-251228
+  #   api_base: https://ark.cn-beijing.volces.com/api/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
 
-  # Example: Novita AI (OpenAI-compatible)
-  # Novita provides an OpenAI-compatible API with competitive pricing
-  # See: https://novita.ai
-  - name: novita-deepseek-v3.2
-    display_name: Novita DeepSeek V3.2
-    use: langchain_openai:ChatOpenAI
-    model: deepseek/deepseek-v3.2
-    api_key: $NOVITA_API_KEY
-    base_url: https://api.novita.ai/openai
-    max_tokens: 4096
-    temperature: 0.7
-    supports_thinking: true
-    supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
+  # Example: OpenAI model
+  # - name: gpt-4
+  #   display_name: GPT-4
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4
+  #   api_key: $OPENAI_API_KEY # Use environment variable
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_vision: true # Enable vision support for view_image tool
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
@@ -49,6 +46,9 @@ models:
   #   api_key: $ANTHROPIC_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true  # Enable vision support for view_image tool
+  #   when_thinking_enabled:
+  #     thinking:
+  #       type: enabled
 
   # Example: Google Gemini model
   # - name: gemini-2.5-pro
@@ -73,21 +73,6 @@ models:
   #       thinking:
   #         type: enabled
 
-  # Example: Volcengine (Doubao) model
-  - name: doubao-seed-1.8
-    display_name: Doubao-Seed-1.8
-    use: src.models.patched_deepseek:PatchedChatDeepSeek
-    model: doubao-seed-1-8-251228
-    api_base: https://ark.cn-beijing.volces.com/api/v3
-    api_key: $VOLCENGINE_API_KEY
-    supports_thinking: true
-    supports_vision: true
-    supports_reasoning_effort: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
@@ -98,6 +83,24 @@ models:
   #   max_tokens: 32768
   #   supports_thinking: true
   #   supports_vision: true  # Check your specific model's capabilities
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
+  # Example: Novita AI (OpenAI-compatible)
+  # Novita provides an OpenAI-compatible API with competitive pricing
+  # See: https://novita.ai
+  # - name: novita-deepseek-v3.2
+  #   display_name: Novita DeepSeek V3.2
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek/deepseek-v3.2
+  #   api_key: $NOVITA_API_KEY
+  #   base_url: https://api.novita.ai/openai
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: true
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -127,11 +130,29 @@ tools:
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Set if needed
 
+  # Web search tool (requires InfoQuest API key)
+  # - name: web_search
+  #   group: web
+  #   use: src.community.infoquest.tools:web_search_tool
+  #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
+  #   search_time_range: 10
+
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
     use: src.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+
+  # Web fetch tool (uses InfoQuest AI reader)
+  # - name: web_fetch
+  #   group: web
+  #   use: src.community.infoquest.tools:web_fetch_tool
+  #   # Overall timeout for the entire crawling process (in seconds). Set to positive value to enable, -1 to disable
+  #   timeout: 10
+  #   # Waiting time after page loading (in seconds). Set to positive value to enable, -1 to disable
+  #   fetch_time: 10
+  #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
+  #   navigation_timeout: 30
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -326,3 +347,91 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+
+
+# ============================================================================
+# Checkpointer Configuration
+# ============================================================================
+# Configure state persistence for the embedded DeerFlowClient.
+# The LangGraph Server manages its own state persistence separately
+# via the server infrastructure (this setting does not affect it).
+#
+# When configured, DeerFlowClient will automatically use this checkpointer,
+# enabling multi-turn conversations to persist across process restarts.
+#
+# Supported types:
+#   memory   - In-process only. State is lost when the process exits. (default)
+#   sqlite   - File-based SQLite persistence. Survives restarts.
+#              Requires: uv add langgraph-checkpoint-sqlite
+#   postgres - PostgreSQL persistence. Suitable for multi-process deployments.
+#              Requires: uv add langgraph-checkpoint-postgres psycopg[binary] psycopg-pool
+#
+# Examples:
+#
+# In-memory (default when omitted — no persistence):
+# checkpointer:
+#   type: memory
+#
+# SQLite (file-based, single-process):
+# checkpointer:
+#   type: sqlite
+#   connection_string: checkpoints.db
+#
+# PostgreSQL (multi-process, production):
+# checkpointer:
+#   type: postgres
+#   connection_string: postgresql://user:password@localhost:5432/deerflow
+
+# ============================================================================
+# IM Channels Configuration
+# ============================================================================
+# Connect DeerFlow to external messaging platforms.
+# All channels use outbound connections (WebSocket or polling) — no public IP required.
+
+# channels:
+#   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   langgraph_url: http://localhost:2024
+#   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
+#   gateway_url: http://localhost:8001
+#
+#   # Optional: default mobile/session settings for all IM channels
+#   session:
+#     assistant_id: lead_agent
+#     config:
+#       recursion_limit: 100
+#     context:
+#       thinking_enabled: true
+#       is_plan_mode: false
+#       subagent_enabled: false
+#
+#   feishu:
+#     enabled: false
+#     app_id: $FEISHU_APP_ID
+#     app_secret: $FEISHU_APP_SECRET
+#
+#   slack:
+#     enabled: false
+#     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
+#     app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
+#     allowed_users: []               # empty = allow all
+#
+#   telegram:
+#     enabled: false
+#     bot_token: $TELEGRAM_BOT_TOKEN
+#     allowed_users: []               # empty = allow all
+#
+#     # Optional: channel-level session overrides
+#     session:
+#       assistant_id: mobile_agent
+#       context:
+#         thinking_enabled: false
+#
+#       # Optional: per-user overrides by user_id
+#       users:
+#         "123456789":
+#           assistant_id: vip_agent
+#           config:
+#             recursion_limit: 150
+#           context:
+#             thinking_enabled: true
+#             subagent_enabled: true

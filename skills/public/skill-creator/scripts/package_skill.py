@@ -14,7 +14,29 @@ import fnmatch
 import sys
 import zipfile
 from pathlib import Path
-from quick_validate import validate_skill
+from scripts.quick_validate import validate_skill
+
+# Patterns to exclude when packaging skills.
+EXCLUDE_DIRS = {"__pycache__", "node_modules"}
+EXCLUDE_GLOBS = {"*.pyc"}
+EXCLUDE_FILES = {".DS_Store"}
+# Directories excluded only at the skill root (not when nested deeper).
+ROOT_EXCLUDE_DIRS = {"evals"}
+
+
+def should_exclude(rel_path: Path) -> bool:
+    """Check if a path should be excluded from packaging."""
+    parts = rel_path.parts
+    if any(part in EXCLUDE_DIRS for part in parts):
+        return True
+    # rel_path is relative to skill_path.parent, so parts[0] is the skill
+    # folder name and parts[1] (if present) is the first subdir.
+    if len(parts) > 1 and parts[1] in ROOT_EXCLUDE_DIRS:
+        return True
+    name = rel_path.name
+    if name in EXCLUDE_FILES:
+        return True
+    return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_GLOBS)
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}

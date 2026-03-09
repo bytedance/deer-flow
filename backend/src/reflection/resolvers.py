@@ -19,10 +19,7 @@ def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
     if package_name is None:
         package_name = MODULE_TO_PACKAGE_HINTS.get(missing_module, missing_module.replace("_", "-"))
 
-    return (
-        f"Missing dependency '{missing_module}'. "
-        f"Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
-    )
+    return f"Missing dependency '{missing_module}'. Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
 
 
 def resolve_variable[T](

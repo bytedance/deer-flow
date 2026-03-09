@@ -4,6 +4,7 @@
 
 help:
 	@echo "DeerFlow Development Commands:"
+	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make status          - Check if all services are running properly"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
@@ -23,7 +24,11 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@test -f config.yaml || cp config.example.yaml config.yaml
+	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
+		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
+		exit 1; \
+	fi
+	@cp config.example.yaml config.yaml
 	@test -f .env || cp .env.example .env
 	@test -f frontend/.env || cp frontend/.env.example frontend/.env
 
@@ -168,7 +173,22 @@ dev:
 	@echo "  → Frontend: Next.js"
 	@echo "  → Nginx: Reverse Proxy"
 	@echo ""
+	@if ! { \
+			[ -n "$$DEER_FLOW_CONFIG_PATH" ] && [ -f "$$DEER_FLOW_CONFIG_PATH" ] || \
+			[ -f backend/config.yaml ] || \
+			[ -f config.yaml ]; \
+		}; then \
+		echo "✗ No DeerFlow config file found."; \
+		echo "  Checked these locations:"; \
+		echo "    - $$DEER_FLOW_CONFIG_PATH (when DEER_FLOW_CONFIG_PATH is set)"; \
+		echo "    - backend/config.yaml"; \
+		echo "    - ./config.yaml"; \
+		echo ""; \
+		echo "  Run 'make config' from the repo root to generate ./config.yaml, then set required model API keys in .env or your config file."; \
+		exit 1; \
+	fi
 	@cleanup() { \
+		trap - INT TERM; \
 		echo ""; \
 		echo "Shutting down services..."; \
 		pkill -f "langgraph dev" 2>/dev/null || true; \
@@ -193,7 +213,10 @@ dev:
 	sleep 3; \
 	if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
 		echo "✗ Gateway API failed to start. Last log output:"; \
-		tail -30 logs/gateway.log; \
+		tail -60 logs/gateway.log; \
+		echo ""; \
+		echo "Likely configuration errors:"; \
+		grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true; \
 		cleanup; \
 	fi; \
 	echo "✓ Gateway API started on localhost:8001"; \
