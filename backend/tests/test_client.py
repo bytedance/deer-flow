@@ -365,6 +365,41 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
 
+    def test_uses_dynamic_checkpointer_fallback_when_available(self, client):
+        mock_agent = MagicMock()
+        mock_checkpointer = MagicMock()
+        checkpointer_module = MagicMock()
+        checkpointer_module.get_checkpointer.return_value = mock_checkpointer
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("importlib.import_module", return_value=checkpointer_module),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_create_agent.call_args.kwargs["checkpointer"] is mock_checkpointer
+
+    def test_skips_dynamic_checkpointer_when_module_missing(self, client):
+        mock_agent = MagicMock()
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("importlib.import_module", side_effect=ModuleNotFoundError),
+        ):
+            client._ensure_agent(config)
+
+        assert "checkpointer" not in mock_create_agent.call_args.kwargs
+
     def test_reuses_agent_same_config(self, client):
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()

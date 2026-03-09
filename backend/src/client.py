@@ -209,8 +209,18 @@ class DeerFlowClient:
             ),
             "state_schema": ThreadState,
         }
-        if self._checkpointer is not None:
-            kwargs["checkpointer"] = self._checkpointer
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            import importlib
+
+            try:
+                checkpointer_module = importlib.import_module("src.agents.checkpointer")
+            except ModuleNotFoundError:
+                checkpointer = None
+            else:
+                checkpointer = checkpointer_module.get_checkpointer()
+        if checkpointer is not None:
+            kwargs["checkpointer"] = checkpointer
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
