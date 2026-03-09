@@ -56,20 +56,6 @@ models:
         thinking:
           type: enabled
 
-  # Example: Volcengine (Doubao) model
-  # - name: doubao-seed-1.8
-  #   display_name: Doubao 1.8 (Thinking)
-  #   use: langchain_deepseek:ChatDeepSeek
-  #   model: ep-m-20260106111913-xxxxx
-  #   api_base: https://ark.cn-beijing.volces.com/api/v3
-  #   api_key: $VOLCENGINE_API_KEY
-  #   supports_thinking: true
-  #   supports_vision: false  # Check your specific model's capabilities
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
@@ -328,9 +314,9 @@ brand:
 
 title:
   enabled: true
-  max_words: 6
-  max_chars: 60
-  model_name: null # Use default model (first model in models list)
+  max_words: 7
+  max_chars: 70
+  model_name: claude-haiku-4-5-20251001 # Use default model (first model in models list)
 
 # ============================================================================
 # Summarization Configuration
