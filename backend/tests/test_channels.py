@@ -1162,6 +1162,107 @@ class TestHandleChatWithArtifacts:
 
 
 class TestFeishuChannel:
+    def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = FeishuChannel(bus, config={})
+
+            reply_started = asyncio.Event()
+            release_reply = asyncio.Event()
+
+            async def slow_reply(message_id: str, text: str) -> str:
+                reply_started.set()
+                await release_reply.wait()
+                return "om-running-card"
+
+            channel._add_reaction = AsyncMock()
+            channel._reply_card = AsyncMock(side_effect=slow_reply)
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="hello",
+                thread_ts="om-source-msg",
+            )
+
+            prepare_task = asyncio.create_task(channel._prepare_inbound("om-source-msg", inbound))
+
+            await _wait_for(lambda: bus.publish_inbound.await_count == 1)
+            await prepare_task
+
+            assert reply_started.is_set()
+            assert "om-source-msg" in channel._running_card_tasks
+            assert channel._reply_card.await_count == 1
+
+            release_reply.set()
+            await _wait_for(lambda: channel._running_card_ids.get("om-source-msg") == "om-running-card")
+            await _wait_for(lambda: "om-source-msg" not in channel._running_card_tasks)
+
+        _run(go())
+
+    def test_prepare_inbound_and_send_share_running_card_task(self):
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            reply_started = asyncio.Event()
+            release_reply = asyncio.Event()
+
+            async def slow_reply(message_id: str, text: str) -> str:
+                reply_started.set()
+                await release_reply.wait()
+                return "om-running-card"
+
+            channel._add_reaction = AsyncMock()
+            channel._reply_card = AsyncMock(side_effect=slow_reply)
+            channel._update_card = AsyncMock()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="hello",
+                thread_ts="om-source-msg",
+            )
+
+            prepare_task = asyncio.create_task(channel._prepare_inbound("om-source-msg", inbound))
+            await _wait_for(lambda: bus.publish_inbound.await_count == 1)
+            await _wait_for(reply_started.is_set)
+
+            send_task = asyncio.create_task(
+                channel.send(
+                    OutboundMessage(
+                        channel_name="feishu",
+                        chat_id="chat-1",
+                        thread_id="thread-1",
+                        text="Hello",
+                        is_final=False,
+                        thread_ts="om-source-msg",
+                    )
+                )
+            )
+
+            await asyncio.sleep(0)
+            assert channel._reply_card.await_count == 1
+
+            release_reply.set()
+            await prepare_task
+            await send_task
+
+            assert channel._reply_card.await_count == 1
+            channel._update_card.assert_awaited_once_with("om-running-card", "Hello")
+            assert "om-source-msg" not in channel._running_card_tasks
+
+        _run(go())
+
     def test_streaming_reuses_single_running_card(self):
         from lark_oapi.api.im.v1 import (
             CreateMessageReactionRequest,
@@ -1221,6 +1322,7 @@ class TestFeishuChannel:
             assert channel._api_client.im.v1.message.patch.call_count == 2
             assert channel._api_client.im.v1.message_reaction.create.call_count == 1
             assert "om-source-msg" not in channel._running_card_ids
+            assert "om-source-msg" not in channel._running_card_tasks
 
             first_patch_request = channel._api_client.im.v1.message.patch.call_args_list[0].args[0]
             final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]

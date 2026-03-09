@@ -42,7 +42,9 @@ class FeishuChannel(Channel):
         self._Emoji = None
         self._PatchMessageRequest = None
         self._PatchMessageRequestBody = None
+        self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
+        self._running_card_tasks: dict[str, asyncio.Task] = {}
 
     async def start(self) -> None:
         if self._running:
@@ -140,6 +142,12 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
+        for task in list(self._running_card_tasks.values()):
+            task.cancel()
+        self._running_card_tasks.clear()
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
@@ -235,12 +243,17 @@ class FeishuChannel(Channel):
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
         await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
 
-    async def _ensure_running_card(self, source_message_id: str, text: str = "Working on it...") -> str | None:
-        """Ensure the in-thread running card exists and track its message ID."""
-        running_card_id = self._running_card_ids.get(source_message_id)
-        if running_card_id:
-            return running_card_id
+    def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
+        """Keep a strong reference to fire-and-forget tasks and surface errors."""
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda done_task, task_name=name, mid=msg_id: self._finalize_background_task(done_task, task_name, mid))
 
+    def _finalize_background_task(self, task: asyncio.Task, name: str, msg_id: str) -> None:
+        self._background_tasks.discard(task)
+        self._log_task_error(task, name, msg_id)
+
+    async def _create_running_card(self, source_message_id: str, text: str) -> str | None:
+        """Create the running card and cache its message ID when available."""
         running_card_id = await self._reply_card(source_message_id, text)
         if running_card_id:
             self._running_card_ids[source_message_id] = running_card_id
@@ -248,6 +261,37 @@ class FeishuChannel(Channel):
         else:
             logger.warning("[Feishu] running card creation returned no message_id for source=%s, subsequent updates will fall back to new replies", source_message_id)
         return running_card_id
+
+    def _ensure_running_card_started(self, source_message_id: str, text: str = "Working on it...") -> asyncio.Task | None:
+        """Start running-card creation once per source message."""
+        running_card_id = self._running_card_ids.get(source_message_id)
+        if running_card_id:
+            return None
+
+        running_card_task = self._running_card_tasks.get(source_message_id)
+        if running_card_task:
+            return running_card_task
+
+        running_card_task = asyncio.create_task(self._create_running_card(source_message_id, text))
+        self._running_card_tasks[source_message_id] = running_card_task
+        running_card_task.add_done_callback(lambda done_task, mid=source_message_id: self._finalize_running_card_task(mid, done_task))
+        return running_card_task
+
+    def _finalize_running_card_task(self, source_message_id: str, task: asyncio.Task) -> None:
+        if self._running_card_tasks.get(source_message_id) is task:
+            self._running_card_tasks.pop(source_message_id, None)
+        self._log_task_error(task, "create_running_card", source_message_id)
+
+    async def _ensure_running_card(self, source_message_id: str, text: str = "Working on it...") -> str | None:
+        """Ensure the in-thread running card exists and track its message ID."""
+        running_card_id = self._running_card_ids.get(source_message_id)
+        if running_card_id:
+            return running_card_id
+
+        running_card_task = self._ensure_running_card_started(source_message_id, text)
+        if running_card_task is None:
+            return self._running_card_ids.get(source_message_id)
+        return await running_card_task
 
     async def _send_running_reply(self, message_id: str) -> None:
         """Reply to a message in-thread with a running card."""
@@ -261,6 +305,13 @@ class FeishuChannel(Channel):
         source_message_id = msg.thread_ts
         if source_message_id:
             running_card_id = self._running_card_ids.get(source_message_id)
+            awaited_running_card_task = False
+
+            if not running_card_id:
+                running_card_task = self._running_card_tasks.get(source_message_id)
+                if running_card_task:
+                    awaited_running_card_task = True
+                    running_card_id = await running_card_task
 
             if running_card_id:
                 try:
@@ -277,6 +328,11 @@ class FeishuChannel(Channel):
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
                 await self._reply_card(source_message_id, msg.text)
+            elif awaited_running_card_task:
+                logger.warning(
+                    "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
+                    source_message_id,
+                )
             else:
                 await self._ensure_running_card(source_message_id, msg.text)
 
@@ -299,10 +355,23 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
+    @staticmethod
+    def _log_task_error(task: asyncio.Task, name: str, msg_id: str) -> None:
+        """Callback for background asyncio tasks to surface errors."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error("[Feishu] %s failed for msg_id=%s: %s", name, msg_id, exc)
+        except asyncio.CancelledError:
+            logger.info("[Feishu] %s cancelled for msg_id=%s", name, msg_id)
+        except Exception:
+            pass
+
     async def _prepare_inbound(self, msg_id: str, inbound) -> None:
-        """Create the running card before dispatching the inbound message."""
-        await self._add_reaction(msg_id, "OK")
-        await self._send_running_reply(msg_id)
+        """Kick off Feishu side effects without delaying inbound dispatch."""
+        reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
+        self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
+        self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
 
     def _on_message(self, event) -> None:
