@@ -110,6 +110,8 @@ export interface Translations {
     renameProject: string;
     deleteProject: string;
     deleteProjectConfirm: string;
+    deleteProjectKeepSessions: string;
+    deleteProjectAndSessions: string;
     projectName: string;
   };
 

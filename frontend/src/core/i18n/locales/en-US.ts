@@ -163,7 +163,9 @@ export const enUS: Translations = {
     renameProject: "Rename project",
     deleteProject: "Delete project",
     deleteProjectConfirm:
-      "All threads in this project will be moved to Default. Are you sure?",
+      "Would you like to also delete all sessions inside this project, or keep them and move them to Default?",
+    deleteProjectKeepSessions: "Keep sessions",
+    deleteProjectAndSessions: "Delete sessions too",
     projectName: "Project name",
   },
 

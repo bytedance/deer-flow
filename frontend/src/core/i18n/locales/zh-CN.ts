@@ -158,7 +158,9 @@ export const zhCN: Translations = {
     createProject: "创建项目",
     renameProject: "重命名项目",
     deleteProject: "删除项目",
-    deleteProjectConfirm: "该项目中的所有对话将移至默认项目。确定要删除吗？",
+    deleteProjectConfirm: "您是否也要删除该项目中的所有会话，还是保留并移至默认项目？",
+    deleteProjectKeepSessions: "保留会话",
+    deleteProjectAndSessions: "同时删除会话",
     projectName: "项目名称",
   },
 

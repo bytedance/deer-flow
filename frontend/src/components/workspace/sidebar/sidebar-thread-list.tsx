@@ -186,10 +186,18 @@ export function SidebarThreadList() {
   );
 
   const handleDeleteProject = useCallback(
-    (projectId: string) => {
+    (projectId: string, deleteSessions: boolean) => {
+      if (deleteSessions) {
+        const projectThreads = threads.filter(
+          (th) => th.project_id === projectId,
+        );
+        for (const thread of projectThreads) {
+          deleteThread({ threadId: thread.thread_id });
+        }
+      }
       deleteProject({ projectId });
     },
-    [deleteProject],
+    [deleteProject, deleteThread, threads],
   );
 
   if (threads.length === 0) {

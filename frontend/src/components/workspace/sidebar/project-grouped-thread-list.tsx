@@ -1,5 +1,6 @@
 import {
   ChevronDown,
+  Folder,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -45,7 +46,7 @@ interface ProjectGroupedThreadListProps {
   onAssignToProject: (threadId: string) => void;
   onCreateProject: (name: string) => void;
   onRenameProject: (projectId: string, name: string) => void;
-  onDeleteProject: (projectId: string) => void;
+  onDeleteProject: (projectId: string, deleteSessions: boolean) => void;
 }
 
 interface ProjectGroup {
@@ -139,9 +140,9 @@ export function ProjectGroupedThreadList({
     }
   };
 
-  const handleDeleteConfirm = () => {
+  const handleDeleteConfirm = (deleteSessions: boolean) => {
     if (deleteDialog.projectId) {
-      onDeleteProject(deleteDialog.projectId);
+      onDeleteProject(deleteDialog.projectId, deleteSessions);
       setDeleteDialog({ open: false, projectId: "" });
     }
   };
@@ -169,7 +170,7 @@ export function ProjectGroupedThreadList({
         </Button>
       </div>
 
-      {groups.map((group) => {
+      {groups.map((group, index) => {
         const groupKey = group.projectId ?? "__default__";
         const isOpen = !collapsedIds.has(groupKey);
 
@@ -183,21 +184,19 @@ export function ProjectGroupedThreadList({
             key={groupKey}
             open={isOpen}
             onOpenChange={() => toggleCollapsed(groupKey)}
-            className="px-2"
+            className={cn("px-2", index > 0 && "mt-2")}
           >
-            <div className="group/project flex items-center gap-0.5">
-              <CollapsibleTrigger className="flex flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors hover:bg-accent">
+            <div className="group/project flex items-center gap-0.5 rounded-md px-1.5 py-1.5 transition-colors hover:bg-accent">
+              <CollapsibleTrigger className="flex flex-1 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide">
                 <ChevronDown
                   className={cn(
-                    "text-muted-foreground size-3.5 shrink-0 transition-transform duration-200",
+                    "text-muted-foreground/70 size-3 shrink-0 transition-transform duration-200",
                     !isOpen && "-rotate-90",
                   )}
                 />
-                <span className="text-muted-foreground truncate">
+                <Folder className="text-muted-foreground/70 size-3.5 shrink-0" />
+                <span className="text-foreground/70 truncate">
                   {group.name}
-                </span>
-                <span className="text-muted-foreground/50 ml-auto text-[10px]">
-                  {group.threads.length}
                 </span>
               </CollapsibleTrigger>
 
@@ -245,7 +244,7 @@ export function ProjectGroupedThreadList({
             </div>
 
             <CollapsibleContent>
-              <SidebarMenu className="pl-2">
+              <SidebarMenu className="mt-1 ml-2 border-l border-border/40 pl-1.5 pr-1">
                 <div className="flex w-full flex-col gap-0.5">
                   {group.threads.map((thread) => (
                     <ThreadItem
@@ -313,7 +312,7 @@ export function ProjectGroupedThreadList({
           <p className="text-muted-foreground py-4 text-sm">
             {t.sidebar.deleteProjectConfirm}
           </p>
-          <DialogFooter>
+          <DialogFooter className="flex gap-2 sm:justify-between">
             <Button
               variant="outline"
               onClick={() =>
@@ -322,9 +321,20 @@ export function ProjectGroupedThreadList({
             >
               {t.common.cancel}
             </Button>
-            <Button variant="destructive" onClick={handleDeleteConfirm}>
-              {t.common.delete}
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => handleDeleteConfirm(false)}
+              >
+                {t.sidebar.deleteProjectKeepSessions}
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={() => handleDeleteConfirm(true)}
+              >
+                {t.sidebar.deleteProjectAndSessions}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
