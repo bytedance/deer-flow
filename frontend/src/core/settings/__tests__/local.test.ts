@@ -196,7 +196,7 @@ describe("LocalSettings", () => {
       const settings = {
         ...DEFAULT_LOCAL_SETTINGS,
         notification: { enabled: false },
-        layout: { sidebar_collapsed: true },
+        layout: { sidebar_collapsed: true, sidebar_view_mode: "date" as const },
       };
       saveLocalSettings(settings);
       const result = getLocalSettings();
