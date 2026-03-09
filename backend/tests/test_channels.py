@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +13,29 @@ import pytest
 from src.channels.base import Channel
 from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
 from src.channels.store import ChannelStore
+
+
+def _prepare_output_artifact(tmp_path, monkeypatch, *, thread_id="thread-artifact", relative_path="report.md", content="ok"):
+    from src.channels import artifacts as artifacts_module
+    from src.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    file_path = paths.sandbox_outputs_dir(thread_id) / Path(relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(artifacts_module, "get_paths", lambda: paths)
+    virtual_path = f"/mnt/user-data/outputs/{Path(relative_path).as_posix()}"
+    return thread_id, virtual_path, file_path.resolve()
+
+
+class _MockLarkResponse:
+    def __init__(self, *, file_key: str | None = None):
+        self.code = 0
+        self.msg = "success"
+        self.data = MagicMock(file_key=file_key)
+
+    def success(self) -> bool:
+        return True
 
 
 def _run(coro):
@@ -718,7 +742,10 @@ class TestChannelManager:
             mock_client.threads.create = AsyncMock(side_effect=create_thread)
             manager._client = mock_client
 
-            bus.subscribe_outbound(lambda msg: None)
+            async def ignore_outbound(msg):
+                return None
+
+            bus.subscribe_outbound(ignore_outbound)
             await manager.start()
 
             # Send messages with different topic_ids
@@ -875,7 +902,11 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
             await manager.start()
 
             await bus.publish_inbound(
@@ -922,7 +953,11 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
             await manager.start()
 
             await bus.publish_inbound(
@@ -996,7 +1031,11 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
             await manager.start()
 
             # Send two messages with the same topic_id (same thread)
@@ -1085,12 +1124,96 @@ class TestChannelService:
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
 
+class TestResolveChannelArtifact:
+    def test_resolves_outputs_file(self, tmp_path, monkeypatch):
+        from src.channels.artifacts import resolve_channel_artifact
+
+        thread_id, virtual_path, file_path = _prepare_output_artifact(tmp_path, monkeypatch)
+        artifact = resolve_channel_artifact(thread_id, virtual_path)
+
+        assert artifact.virtual_path == virtual_path
+        assert artifact.file_path == file_path
+        assert artifact.file_name == "report.md"
+
+    def test_rejects_non_outputs_path(self, tmp_path, monkeypatch):
+        from src.channels.artifacts import resolve_channel_artifact
+
+        thread_id, _, _ = _prepare_output_artifact(tmp_path, monkeypatch)
+
+        with pytest.raises(ValueError, match="/mnt/user-data/outputs"):
+            resolve_channel_artifact(thread_id, "/mnt/user-data/uploads/report.md")
+
+    def test_rejects_path_traversal_into_uploads(self, tmp_path, monkeypatch):
+        from src.channels.artifacts import resolve_channel_artifact
+        from src.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        thread_id = "thread-artifact"
+        secret_path = paths.sandbox_uploads_dir(thread_id) / "secret.txt"
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        secret_path.write_text("secret", encoding="utf-8")
+
+        from src.channels import artifacts as artifacts_module
+
+        monkeypatch.setattr(artifacts_module, "get_paths", lambda: paths)
+
+        with pytest.raises(ValueError, match="/mnt/user-data/outputs"):
+            resolve_channel_artifact(thread_id, "/mnt/user-data/outputs/../uploads/secret.txt")
+
+    def test_rejects_missing_file(self, tmp_path, monkeypatch):
+        from src.channels import artifacts as artifacts_module
+        from src.channels.artifacts import resolve_channel_artifact
+        from src.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        thread_id = "thread-artifact"
+        monkeypatch.setattr(artifacts_module, "get_paths", lambda: paths)
+
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            resolve_channel_artifact(thread_id, "/mnt/user-data/outputs/missing.txt")
+
+
 # ---------------------------------------------------------------------------
 # Slack send retry tests
 # ---------------------------------------------------------------------------
 
 
 class TestSlackSendRetry:
+    def test_uploads_artifacts_after_text_send(self, tmp_path, monkeypatch):
+        from src.channels.slack import SlackChannel
+
+        async def go():
+            thread_id, virtual_path, file_path = _prepare_output_artifact(tmp_path, monkeypatch)
+
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+
+            mock_web = MagicMock()
+            mock_web.chat_postMessage = MagicMock(return_value=MagicMock())
+            mock_web.files_upload_v2 = MagicMock(return_value=MagicMock())
+            ch._web_client = mock_web
+
+            msg = OutboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                thread_id=thread_id,
+                text="hello",
+                artifacts=[virtual_path],
+                thread_ts="thread-ts",
+            )
+            await ch.send(msg)
+
+            mock_web.chat_postMessage.assert_called_once()
+            mock_web.files_upload_v2.assert_called_once_with(
+                channel="C123",
+                thread_ts="thread-ts",
+                file=str(file_path),
+                filename="report.md",
+                title="report.md",
+            )
+
+        _run(go())
+
     def test_retries_on_failure_then_succeeds(self):
         from src.channels.slack import SlackChannel
 
@@ -1143,6 +1266,42 @@ class TestSlackSendRetry:
 
 
 class TestTelegramSendRetry:
+    def test_sends_documents_for_artifacts(self, tmp_path, monkeypatch):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            thread_id, virtual_path, file_path = _prepare_output_artifact(tmp_path, monkeypatch)
+
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            mock_app = MagicMock()
+            mock_bot = AsyncMock()
+            sent_message = MagicMock()
+            sent_message.message_id = 321
+            mock_bot.send_message = AsyncMock(return_value=sent_message)
+            mock_bot.send_document = AsyncMock()
+            mock_app.bot = mock_bot
+            ch._application = mock_app
+
+            msg = OutboundMessage(
+                channel_name="telegram",
+                chat_id="12345",
+                thread_id=thread_id,
+                text="hello",
+                artifacts=[virtual_path],
+            )
+            await ch.send(msg)
+
+            mock_bot.send_document.assert_awaited_once_with(
+                chat_id=12345,
+                document=str(file_path),
+                filename="report.md",
+                reply_to_message_id=321,
+            )
+
+        _run(go())
+
     def test_retries_on_failure_then_succeeds(self):
         from src.channels.telegram import TelegramChannel
 
@@ -1170,6 +1329,69 @@ class TestTelegramSendRetry:
             msg = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="hello")
             await ch.send(msg)
             assert call_count == 3
+
+        _run(go())
+
+
+class TestFeishuArtifactSending:
+    def test_replies_with_file_messages_for_artifacts(self, tmp_path, monkeypatch):
+        from lark_oapi.api.im.v1 import (
+            CreateFileRequest,
+            CreateFileRequestBody,
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+            Emoji,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            thread_id, virtual_path, _ = _prepare_output_artifact(tmp_path, monkeypatch)
+
+            bus = MessageBus()
+            ch = FeishuChannel(bus=bus, config={"app_id": "cli_test", "app_secret": "secret"})
+
+            api_client = MagicMock()
+            api_client.im = MagicMock()
+            api_client.im.v1 = MagicMock()
+            api_client.im.v1.file = MagicMock()
+            api_client.im.v1.message = MagicMock()
+            api_client.im.v1.message_reaction = MagicMock()
+            api_client.im.v1.file.create = MagicMock(return_value=_MockLarkResponse(file_key="file-key-123"))
+            api_client.im.v1.message.reply = MagicMock(return_value=_MockLarkResponse())
+            api_client.im.v1.message_reaction.create = MagicMock(return_value=_MockLarkResponse())
+
+            ch._api_client = api_client
+            ch._CreateFileRequest = CreateFileRequest
+            ch._CreateFileRequestBody = CreateFileRequestBody
+            ch._CreateMessageRequest = CreateMessageRequest
+            ch._CreateMessageRequestBody = CreateMessageRequestBody
+            ch._ReplyMessageRequest = ReplyMessageRequest
+            ch._ReplyMessageRequestBody = ReplyMessageRequestBody
+            ch._CreateMessageReactionRequest = CreateMessageReactionRequest
+            ch._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            ch._Emoji = Emoji
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="oc_test",
+                thread_id=thread_id,
+                text="hello",
+                artifacts=[virtual_path],
+                thread_ts="om_message",
+            )
+            await ch.send(msg)
+
+            assert api_client.im.v1.file.create.call_count == 1
+            assert api_client.im.v1.message.reply.call_count == 2
+
+            artifact_request = api_client.im.v1.message.reply.call_args_list[1].args[0]
+            assert artifact_request.request_body.msg_type == "file"
+            assert json.loads(artifact_request.request_body.content) == {"file_key": "file-key-123"}
 
         _run(go())
 

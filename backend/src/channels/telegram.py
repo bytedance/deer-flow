@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import Any
 
+from src.channels.artifacts import resolve_channel_artifact
 from src.channels.base import Channel
 from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -110,6 +111,7 @@ class TelegramChannel(Channel):
             try:
                 sent = await bot.send_message(**kwargs)
                 self._last_bot_message[msg.chat_id] = sent.message_id
+                await self._send_artifacts(msg, chat_id=chat_id, reply_to_message_id=sent.message_id)
                 return
             except Exception as exc:
                 last_exc = exc
@@ -126,6 +128,38 @@ class TelegramChannel(Channel):
 
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    async def _send_artifacts(self, msg: OutboundMessage, *, chat_id: int, reply_to_message_id: int) -> None:
+        if not self._application or not msg.artifacts:
+            return
+
+        bot = self._application.bot
+        for virtual_path in msg.artifacts:
+            try:
+                artifact = resolve_channel_artifact(msg.thread_id, virtual_path)
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning(
+                    "[Telegram] skipping artifact upload for thread_id=%s path=%s: %s",
+                    msg.thread_id,
+                    virtual_path,
+                    exc,
+                )
+                continue
+
+            try:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=str(artifact.file_path),
+                    filename=artifact.file_name,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Telegram] failed to upload artifact %s in chat=%s: %s",
+                    artifact.file_name,
+                    msg.chat_id,
+                    exc,
+                )
 
     # -- helpers -----------------------------------------------------------
 

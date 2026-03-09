@@ -8,6 +8,7 @@ import logging
 import threading
 from typing import Any
 
+from src.channels.artifacts import resolve_channel_artifact
 from src.channels.base import Channel
 from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -39,6 +40,8 @@ class FeishuChannel(Channel):
         self._api_client = None
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
+        self._CreateFileRequest = None
+        self._CreateFileRequestBody = None
         self._Emoji = None
 
     async def start(self) -> None:
@@ -48,6 +51,8 @@ class FeishuChannel(Channel):
         try:
             import lark_oapi as lark
             from lark_oapi.api.im.v1 import (
+                CreateFileRequest,
+                CreateFileRequestBody,
                 CreateMessageReactionRequest,
                 CreateMessageReactionRequestBody,
                 CreateMessageRequest,
@@ -61,6 +66,8 @@ class FeishuChannel(Channel):
             return
 
         self._lark = lark
+        self._CreateFileRequest = CreateFileRequest
+        self._CreateFileRequestBody = CreateFileRequestBody
         self._CreateMessageRequest = CreateMessageRequest
         self._CreateMessageRequestBody = CreateMessageRequestBody
         self._ReplyMessageRequest = ReplyMessageRequest
@@ -163,6 +170,8 @@ class FeishuChannel(Channel):
                     request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type("interactive").content(content).build()).build()
                     await asyncio.to_thread(self._api_client.im.v1.message.create, request)
 
+                await self._send_artifacts(msg)
+
                 # Add "DONE" reaction to the original message on final reply
                 if msg.is_final and msg.thread_ts:
                     await self._add_reaction(msg.thread_ts, "DONE")
@@ -183,6 +192,54 @@ class FeishuChannel(Channel):
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    async def _send_artifacts(self, msg: OutboundMessage) -> None:
+        if not self._api_client or not self._CreateFileRequest or not msg.artifacts:
+            return
+
+        for virtual_path in msg.artifacts:
+            try:
+                artifact = resolve_channel_artifact(msg.thread_id, virtual_path)
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning(
+                    "[Feishu] skipping artifact upload for thread_id=%s path=%s: %s",
+                    msg.thread_id,
+                    virtual_path,
+                    exc,
+                )
+                continue
+
+            try:
+                file_key = await self._upload_artifact(artifact.file_path, artifact.file_name)
+                content = json.dumps({"file_key": file_key})
+                if msg.thread_ts:
+                    request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type("file").content(content).reply_in_thread(True).build()).build()
+                    await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+                else:
+                    request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type("file").content(content).build()).build()
+                    await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+            except Exception as exc:
+                logger.warning(
+                    "[Feishu] failed to upload artifact %s in chat=%s: %s",
+                    artifact.file_name,
+                    msg.chat_id,
+                    exc,
+                )
+
+    async def _upload_artifact(self, file_path, file_name: str) -> str:
+        with file_path.open("rb") as file_obj:
+            request = self._CreateFileRequest.builder().request_body(
+                self._CreateFileRequestBody.builder().file_type("stream").file_name(file_name).file(file_obj).build()
+            ).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
+
+        if not response.success():
+            raise RuntimeError(f"file upload failed: code={response.code}, msg={response.msg}")
+
+        file_key = getattr(response.data, "file_key", None)
+        if not file_key:
+            raise RuntimeError("file upload succeeded without file_key")
+        return file_key
 
     # -- message formatting ------------------------------------------------
 

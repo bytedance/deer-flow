@@ -8,6 +8,7 @@ from typing import Any
 
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
+from src.channels.artifacts import resolve_channel_artifact
 from src.channels.base import Channel
 from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -92,7 +93,7 @@ class SlackChannel(Channel):
         for attempt in range(_max_retries):
             try:
                 await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
-                # Add a completion reaction to the thread root
+                await self._send_artifacts(msg)
                 if msg.thread_ts:
                     await asyncio.to_thread(
                         self._add_reaction,
@@ -127,6 +128,39 @@ class SlackChannel(Channel):
             except Exception:
                 pass
         raise last_exc  # type: ignore[misc]
+
+    async def _send_artifacts(self, msg: OutboundMessage) -> None:
+        if not self._web_client or not msg.artifacts:
+            return
+
+        for virtual_path in msg.artifacts:
+            try:
+                artifact = resolve_channel_artifact(msg.thread_id, virtual_path)
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning(
+                    "[Slack] skipping artifact upload for thread_id=%s path=%s: %s",
+                    msg.thread_id,
+                    virtual_path,
+                    exc,
+                )
+                continue
+
+            try:
+                await asyncio.to_thread(
+                    self._web_client.files_upload_v2,
+                    channel=msg.chat_id,
+                    thread_ts=msg.thread_ts,
+                    file=str(artifact.file_path),
+                    filename=artifact.file_name,
+                    title=artifact.file_name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Slack] failed to upload artifact %s in channel=%s: %s",
+                    artifact.file_name,
+                    msg.chat_id,
+                    exc,
+                )
 
     # -- internal ----------------------------------------------------------
 
