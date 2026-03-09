@@ -371,8 +371,34 @@ export function useThreads(
   return useQuery<AgentThread[]>({
     queryKey: ["threads", "search", params],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>(params);
-      return response as AgentThread[];
+      const pageSize = params.limit ?? 50;
+      const initialOffset = params.offset ?? 0;
+
+      if (pageSize <= 0) {
+        const response = await apiClient.threads.search<AgentThreadState>(params);
+        return response as AgentThread[];
+      }
+
+      const threads: AgentThread[] = [];
+      let offset = initialOffset;
+
+      while (true) {
+        const response = (await apiClient.threads.search<AgentThreadState>({
+          ...params,
+          limit: pageSize,
+          offset,
+        })) as AgentThread[];
+
+        threads.push(...response);
+
+        if (response.length < pageSize) {
+          break;
+        }
+
+        offset += response.length;
+      }
+
+      return threads;
     },
     refetchOnWindowFocus: false,
   });
