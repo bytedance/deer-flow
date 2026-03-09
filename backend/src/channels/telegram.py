@@ -153,8 +153,11 @@ class TelegramChannel(Channel):
                         kwargs["reply_to_message_id"] = reply_to
                     sent = await bot.send_photo(**kwargs)
             else:
+                from telegram import InputFile
+
                 with open(attachment.actual_path, "rb") as f:
-                    kwargs = {"chat_id": chat_id, "document": f, "filename": attachment.filename}
+                    input_file = InputFile(f, filename=attachment.filename)
+                    kwargs = {"chat_id": chat_id, "document": input_file}
                     if reply_to:
                         kwargs["reply_to_message_id"] = reply_to
                     sent = await bot.send_document(**kwargs)

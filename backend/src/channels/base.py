@@ -89,12 +89,15 @@ class Channel(ABC):
 
         Only forwards messages targeted at this channel.
         Sends the text message first, then uploads any file attachments.
+        File uploads are skipped entirely when the text send fails to avoid
+        partial deliveries (files without accompanying text).
         """
         if msg.channel_name == self.name:
             try:
                 await self.send(msg)
             except Exception:
                 logger.exception("Failed to send outbound message on channel %s", self.name)
+                return  # Do not attempt file uploads when the text message failed
 
             for attachment in msg.attachments:
                 try:
