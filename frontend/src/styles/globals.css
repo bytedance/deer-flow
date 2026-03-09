@@ -283,6 +283,7 @@
 }
 
 :root {
+  color-scheme: light;
   --radius: 0.75rem;
   --background: oklch(0.97 0.003 90);
   --foreground: oklch(0.12 0.02 270);
@@ -320,13 +321,14 @@
   --coral-light: oklch(0.72 0.16 30);
   --lavender: oklch(0.94 0.04 290);
   --lavender-foreground: oklch(0.38 0.12 290);
-  --code-bg: #f7f9fc;
-  --code-border: #e2e7ef;
-  --code-header-bg: #eef2f7;
-  --code-header-fg: #3e4a59;
+  --code-bg: #ffffff;
+  --code-border: #e8e8ec;
+  --code-header-bg: #f8f9fa;
+  --code-header-fg: #6b7280;
 }
 
 .dark {
+  color-scheme: dark;
   /* Background: RGB(29, 29, 27) - extracted from design */
   --background: #1d1d1b;
   --foreground: #e8e6e3;
@@ -363,10 +365,10 @@
   --coral-light: #d4846a;
   --lavender: #3d3a4a;
   --lavender-foreground: #b0a8c0;
-  --code-bg: #1e1e1e;
-  --code-border: #2a2a2a;
-  --code-header-bg: #242424;
-  --code-header-fg: #a9b0bb;
+  --code-bg: #161617;
+  --code-border: #2d2d2d;
+  --code-header-bg: #1c1c1d;
+  --code-header-fg: #9ca3af;
   font-weight: 300;
 }
 
@@ -385,6 +387,53 @@
   .code-block code {
     font-family: var(--font-code);
     font-variant-ligatures: none;
+  }
+
+  /* Shiki transformer styles */
+  .code-block .line.diff.add {
+    background-color: rgba(16, 185, 129, 0.14);
+  }
+  .code-block .line.diff.remove {
+    background-color: rgba(244, 63, 94, 0.14);
+  }
+  .code-block .line.diff::before {
+    position: absolute;
+    left: 0.5rem;
+  }
+  .code-block .line.diff.add::before {
+    content: "+";
+    color: rgb(16, 185, 129);
+  }
+  .code-block .line.diff.remove::before {
+    content: "-";
+    color: rgb(244, 63, 94);
+  }
+  .code-block .line.highlighted {
+    background-color: rgba(101, 117, 133, 0.16);
+  }
+  .code-block .has-focused .line:not(.focused) {
+    opacity: 0.7;
+    filter: blur(0.095rem);
+    transition: opacity 0.35s, filter 0.35s;
+  }
+  .code-block .has-focused:hover .line:not(.focused) {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  /* Code block scrollbar */
+  .code-block pre::-webkit-scrollbar {
+    height: 6px;
+  }
+  .code-block pre::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .code-block pre::-webkit-scrollbar-thumb {
+    background: var(--code-border);
+    border-radius: 3px;
+  }
+  .code-block pre::-webkit-scrollbar-thumb:hover {
+    background: var(--code-header-fg);
   }
 
   [data-streamdown="code-block"] {
