@@ -139,6 +139,8 @@ The fastest way to get started with a consistent environment:
 
    `make docker-start` now starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
+   For Dockerized backend services that launch local AIO sandbox containers, skills mounts are host-path aware: provider code first checks `DEER_FLOW_SKILLS_HOST_PATH` (set by `docker-compose-dev.yaml`) and otherwise auto-detects bind sources from `/proc/self/mountinfo` to avoid passing in-container paths (for example `/app/skills`) to nested sandbox runtime mounts. The same host-path resolution is now applied to custom `sandbox.mounts` entries and auto-mounted `extensions_config.json`, so nested AIO sandboxes can reliably load MCP server settings from `DEER_FLOW_EXTENSIONS_CONFIG_PATH`.
+
 2. **Access**: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.

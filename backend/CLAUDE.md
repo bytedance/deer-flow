@@ -182,6 +182,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
 - Physical: `backend/.deer-flow/threads/{thread_id}/user-data/...`, `deer-flow/skills/`
+- Docker-in-Docker note: when backend runs in Docker and starts local AIO containers, skills mount source resolution prefers `DEER_FLOW_SKILLS_HOST_PATH` (compose sets `${DEER_FLOW_ROOT}/skills`) and otherwise falls back to `/proc/self/mountinfo` bind-source auto-detection before using configured `skills.path`. Custom `sandbox.mounts[*].host_path` values go through the same bind-source resolution, and `extensions_config.json` is mounted into sandbox containers with `DEER_FLOW_EXTENSIONS_CONFIG_PATH` set automatically so MCP server configs are available in AIO sandboxes.
 - Translation: `replace_virtual_path()` / `replace_virtual_paths_in_command()`
 - Detection: `is_local_sandbox()` checks `sandbox_id == "local"`
 

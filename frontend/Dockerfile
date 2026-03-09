@@ -9,6 +9,9 @@ RUN corepack enable && corepack install -g pnpm@10.26.2
 
 RUN pnpm config set store-dir ${PNPM_STORE_PATH}
 
+# Set registry to China mirror for faster downloads
+RUN pnpm config set registry https://mirrors.cloud.tencent.com/npm/
+
 # Set working directory
 WORKDIR /app
 

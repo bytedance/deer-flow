@@ -34,8 +34,8 @@ services:
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/skills
+      - THREADS_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/backend/.deer-flow/threads
       - KUBECONFIG_PATH=/root/.kube/config
       - NODE_HOST=host.docker.internal
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
@@ -114,14 +114,20 @@ services:
       - ../backend/src:/app/backend/src
       - ../backend/.env:/app/backend/.env
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
+      - ../skills:/mnt/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
+      - /var/run/docker.sock:/var/run/docker.sock
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/skills
+      - DEER_FLOW_HOME_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/backend/.deer-flow
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
@@ -143,16 +149,25 @@ services:
       - ../backend/src:/app/backend/src
       - ../backend/.env:/app/backend/.env
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
+      - ../skills:/mnt/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
+      - /var/run/docker.sock:/var/run/docker.sock
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
     environment:
       - CI=true
+      - BG_JOB_ISOLATED_LOOPS=true
+      - DEER_FLOW_SKILLS_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/skills
+      - DEER_FLOW_HOME_HOST_PATH=${DEER_FLOW_ROOT:-/home/dingkd/deer-flow}/backend/.deer-flow
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - deer-flow-dev
     restart: unless-stopped

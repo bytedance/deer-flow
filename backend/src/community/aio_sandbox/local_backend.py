@@ -7,7 +7,9 @@ Handles container lifecycle, port allocation, and cross-process container discov
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+from pathlib import Path
 
 from src.utils.network import get_free_port, release_port
 
@@ -38,6 +40,7 @@ class LocalContainerBackend(SandboxBackend):
         container_prefix: str,
         config_mounts: list,
         environment: dict[str, str],
+        runtime_user: str | None = None,
     ):
         """Initialize the local container backend.
 
@@ -53,7 +56,9 @@ class LocalContainerBackend(SandboxBackend):
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._runtime_user = runtime_user
         self._runtime = self._detect_runtime()
+        self._sandbox_host = os.getenv("DEER_FLOW_SANDBOX_HOST", "localhost")
 
     @property
     def runtime(self) -> str:
@@ -113,7 +118,7 @@ class LocalContainerBackend(SandboxBackend):
 
         return SandboxInfo(
             sandbox_id=sandbox_id,
-            sandbox_url=f"http://localhost:{port}",
+            sandbox_url=f"http://{self._sandbox_host}:{port}",
             container_name=container_name,
             container_id=container_id,
         )
@@ -159,7 +164,7 @@ class LocalContainerBackend(SandboxBackend):
         if port is None:
             return None
 
-        sandbox_url = f"http://localhost:{port}"
+        sandbox_url = f"http://{self._sandbox_host}:{port}"
         if not wait_for_sandbox_ready(sandbox_url, timeout=5):
             return None
 
@@ -196,6 +201,10 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
+        runtime_user = self._resolve_runtime_user(extra_mounts)
+        if runtime_user:
+            cmd.extend(["--user", runtime_user])
+
         cmd.extend(
             [
                 "--rm",
@@ -228,7 +237,7 @@ class LocalContainerBackend(SandboxBackend):
 
         cmd.append(self._image)
 
-        logger.info(f"Starting container using {self._runtime}: {' '.join(cmd)}")
+        logger.info(f"Starting container using {self._runtime}: {self._sanitize_command_for_log(cmd)}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -238,6 +247,46 @@ class LocalContainerBackend(SandboxBackend):
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to start container using {self._runtime}: {e.stderr}")
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
+
+    @staticmethod
+    def _sanitize_command_for_log(cmd: list[str]) -> str:
+        sanitized: list[str] = []
+        i = 0
+        while i < len(cmd):
+            part = cmd[i]
+            if part == "-e" and i + 1 < len(cmd):
+                env_pair = cmd[i + 1]
+                key, _, _value = env_pair.partition("=")
+                sanitized.extend(["-e", f"{key}=***"])
+                i += 2
+                continue
+            sanitized.append(part)
+            i += 1
+        return " ".join(sanitized)
+
+    def _resolve_runtime_user(self, extra_mounts: list[tuple[str, str, bool]] | None) -> str | None:
+        if self._runtime_user:
+            return self._runtime_user
+
+        runtime_user_from_env = os.getenv("DEER_FLOW_SANDBOX_RUNTIME_USER")
+        if runtime_user_from_env:
+            return runtime_user_from_env
+
+        if not extra_mounts:
+            return None
+
+        for host_path, _container_path, read_only in extra_mounts:
+            if read_only:
+                continue
+            try:
+                stat = Path(host_path).stat()
+            except OSError:
+                continue
+            if stat.st_uid == 0:
+                continue
+            return f"{stat.st_uid}:{stat.st_gid}"
+
+        return None
 
     def _stop_container(self, container_id: str) -> None:
         """Stop a container (--rm ensures automatic removal)."""

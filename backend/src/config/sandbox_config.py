@@ -62,5 +62,9 @@ class SandboxConfig(BaseModel):
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
+    runtime_user: str | None = Field(
+        default=None,
+        description="Optional container runtime user in UID:GID format. When unset, provider infers from writable thread mount owner.",
+    )
 
     model_config = ConfigDict(extra="allow")

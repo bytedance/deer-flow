@@ -20,8 +20,11 @@ import signal
 import threading
 import time
 import uuid
+from copy import deepcopy
+from pathlib import Path
 
 from src.config import get_app_config
+from src.config.extensions_config import ExtensionsConfig
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import SandboxProvider
@@ -42,6 +45,7 @@ DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
+DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH = "/tmp/deer-flow/extensions_config.json"
 
 
 class AioSandboxProvider(SandboxProvider):
@@ -119,6 +123,7 @@ class AioSandboxProvider(SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            runtime_user=self._config.get("runtime_user"),
         )
 
     def _create_state_store(self) -> SandboxStateStore:
@@ -142,6 +147,10 @@ class AioSandboxProvider(SandboxProvider):
         """Load sandbox configuration from app config."""
         config = get_app_config()
         sandbox_config = config.sandbox
+        resolved_environment = self._resolve_env_vars(sandbox_config.environment or {})
+        extensions_mount = self._get_extensions_config_mount()
+        if extensions_mount and not resolved_environment.get("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+            resolved_environment["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = extensions_mount[1]
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
@@ -150,8 +159,10 @@ class AioSandboxProvider(SandboxProvider):
             "auto_start": sandbox_config.auto_start if sandbox_config.auto_start is not None else True,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": getattr(sandbox_config, "idle_timeout", None) or DEFAULT_IDLE_TIMEOUT,
-            "mounts": sandbox_config.mounts or [],
-            "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "mounts": self._resolve_config_mounts(sandbox_config.mounts or []),
+            "environment": resolved_environment,
+            "runtime_user": getattr(sandbox_config, "runtime_user", None),
+            "extensions_mount": extensions_mount,
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
         }
@@ -194,10 +205,39 @@ class AioSandboxProvider(SandboxProvider):
             mounts.append(skills_mount)
             logger.info(f"Adding skills mount: {skills_mount}")
 
+        extensions_mount = self._config.get("extensions_mount")
+        if extensions_mount:
+            mounts.append(extensions_mount)
+            logger.info(f"Adding extensions config mount: {extensions_mount}")
+
         return mounts
 
-    @staticmethod
-    def _get_thread_mounts(thread_id: str) -> list[tuple[str, str, bool]]:
+    @classmethod
+    def _resolve_mount_source_path(cls, mount_source: Path) -> Path:
+        """Resolve the host path for a mount source.
+
+        In Docker-in-Docker scenarios, a mount source may exist only inside the
+        backend container (e.g. ``/app/skills``) while nested runtime mounts need
+        the host bind source. In those cases we detect the bind source from
+        ``/proc/self/mountinfo``.
+        """
+        resolved_bind_source = cls._resolve_host_bind_path(mount_source)
+        if resolved_bind_source:
+            return resolved_bind_source
+        return mount_source
+
+    @classmethod
+    def _resolve_config_mounts(cls, config_mounts: list) -> list:
+        """Resolve host mount paths for config-defined mounts."""
+        resolved_mounts = []
+        for mount in config_mounts:
+            resolved_mount = deepcopy(mount)
+            resolved_mount.host_path = str(cls._resolve_mount_source_path(Path(mount.host_path).expanduser().resolve()))
+            resolved_mounts.append(resolved_mount)
+        return resolved_mounts
+
+    @classmethod
+    def _get_thread_mounts(cls, thread_id: str) -> list[tuple[str, str, bool]]:
         """Get volume mounts for a thread's data directories.
 
         Creates directories if they don't exist (lazy initialization).
@@ -205,26 +245,123 @@ class AioSandboxProvider(SandboxProvider):
         paths = get_paths()
         paths.ensure_thread_dirs(thread_id)
 
+        host_home = os.getenv("DEER_FLOW_HOME_HOST_PATH")
+        if host_home:
+            host_base = Path(host_home).expanduser()
+            host_thread_dir = host_base / "threads" / thread_id / "user-data"
+            mounts = [
+                (str(host_thread_dir / "workspace"), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+                (str(host_thread_dir / "uploads"), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+                (str(host_thread_dir / "outputs"), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            ]
+            return mounts
+
+        workspace_dir = cls._resolve_mount_source_path(paths.sandbox_work_dir(thread_id))
+        uploads_dir = cls._resolve_mount_source_path(paths.sandbox_uploads_dir(thread_id))
+        outputs_dir = cls._resolve_mount_source_path(paths.sandbox_outputs_dir(thread_id))
+
         mounts = [
-            (str(paths.sandbox_work_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (str(paths.sandbox_uploads_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (str(paths.sandbox_outputs_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (str(workspace_dir), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (str(uploads_dir), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (str(outputs_dir), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
         ]
 
         return mounts
 
     @staticmethod
-    def _get_skills_mount() -> tuple[str, str, bool] | None:
-        """Get the skills directory mount configuration."""
+    def _unescape_mountinfo_field(value: str) -> str:
+        """Decode escaped mountinfo fields (e.g. ``\040`` for spaces)."""
+        return value.replace("\040", " ").replace("\011", "\t").replace("\012", "\n").replace("\134", "\\")
+
+    @classmethod
+    def _resolve_host_bind_path(cls, container_path: Path) -> Path | None:
+        """Resolve host bind source for a mounted container path via /proc/self/mountinfo.
+
+        Returns None when mount metadata is unavailable or no bind source can be
+        determined.
+        """
+        mountinfo = Path("/proc/self/mountinfo")
+        if not mountinfo.exists():
+            return None
+
+        try:
+            target_path = container_path.resolve().as_posix()
+        except FileNotFoundError:
+            target_path = container_path.as_posix()
+
+        try:
+            for line in mountinfo.read_text().splitlines():
+                if " - " not in line:
+                    continue
+                left, right = line.split(" - ", 1)
+                left_parts = left.split()
+                right_parts = right.split()
+                if len(left_parts) < 5 or len(right_parts) < 2:
+                    continue
+
+                mount_point = cls._unescape_mountinfo_field(left_parts[4])
+                if mount_point != target_path:
+                    continue
+
+                source = cls._unescape_mountinfo_field(right_parts[1])
+                source_path = Path(source).expanduser()
+                if source_path.exists():
+                    return source_path.resolve()
+        except Exception as exc:
+            logger.debug(f"Failed to parse /proc/self/mountinfo for {container_path}: {exc}")
+
+        return None
+
+    @classmethod
+    def _get_skills_mount(cls) -> tuple[str, str, bool] | None:
+        """Get the skills directory mount configuration.
+
+        Resolution priority for mount source path:
+        1. ``DEER_FLOW_SKILLS_HOST_PATH`` override (if set)
+        2. Host bind source discovered from ``/proc/self/mountinfo``
+        3. Configured ``skills.path`` / default skills path
+        """
         try:
             config = get_app_config()
-            skills_path = config.skills.get_skills_path()
+            skills_path = cls._resolve_mount_source_path(config.skills.get_skills_path())
+            using_host_override = False
+
+            host_skills_path = os.getenv("DEER_FLOW_SKILLS_HOST_PATH")
+            if host_skills_path:
+                configured_host_path = Path(host_skills_path).expanduser()
+                if not configured_host_path.is_absolute():
+                    configured_host_path = (Path.cwd() / configured_host_path).resolve()
+                elif configured_host_path.exists():
+                    configured_host_path = configured_host_path.resolve()
+
+                if not configured_host_path.exists():
+                    logger.info(f"Using DEER_FLOW_SKILLS_HOST_PATH override as host mount source even though it is not visible in current runtime: {configured_host_path}")
+                skills_path = configured_host_path
+                using_host_override = True
+            else:
+                skills_path = cls._resolve_mount_source_path(skills_path)
+
             container_path = config.skills.container_path
 
-            if skills_path.exists():
+            if using_host_override or skills_path.exists():
                 return (str(skills_path), container_path, True)  # Read-only for security
         except Exception as e:
             logger.warning(f"Could not setup skills mount: {e}")
+        return None
+
+    @classmethod
+    def _get_extensions_config_mount(cls) -> tuple[str, str, bool] | None:
+        """Get mount tuple for extensions_config.json when present."""
+        try:
+            resolved_config_path = ExtensionsConfig.resolve_config_path()
+            if resolved_config_path is None:
+                return None
+
+            host_extensions_path = cls._resolve_mount_source_path(resolved_config_path.expanduser().resolve())
+            if host_extensions_path.exists():
+                return (str(host_extensions_path), DEFAULT_EXTENSIONS_CONFIG_CONTAINER_PATH, True)
+        except Exception as exc:
+            logger.warning(f"Could not setup extensions config mount: {exc}")
         return None
 
     # ── Idle timeout management ──────────────────────────────────────────

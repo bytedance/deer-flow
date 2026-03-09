@@ -208,8 +208,6 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      _handleOnStart(threadId);
-
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
       try {
@@ -288,9 +286,7 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
-            setOptimisticMessages([]);
-            throw error;
+            throw new Error(errorMessage);
           }
         }
 
@@ -341,10 +337,12 @@ export function useThreadStream({
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       } catch (error) {
         setOptimisticMessages([]);
-        throw error;
+        const errorMessage =
+          error instanceof Error ? error.message : "Failed to send message.";
+        toast.error(errorMessage);
       }
     },
-    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
+    [thread, t.uploads.uploadingFiles, context, queryClient],
   );
 
   // Merge thread with optimistic messages for display
