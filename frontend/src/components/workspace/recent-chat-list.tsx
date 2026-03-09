@@ -147,7 +147,7 @@ export function RecentChatList() {
         }
         toast.success(t.common.exportSuccess);
       } catch {
-        toast.error(t.common.export);
+        toast.error("Failed to export conversation");
       }
     },
     [t],

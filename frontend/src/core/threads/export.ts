@@ -72,7 +72,7 @@ export function formatThreadAsMarkdown(
         lines.push("", toolCalls);
       }
 
-      if (content && hasContent(message) && !hasToolCalls(message)) {
+      if (content && hasContent(message)) {
         lines.push("", content);
       }
 
@@ -105,7 +105,9 @@ export function formatThreadAsJSON(
 }
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_\- ]/g, "").trim() || "conversation";
+  return (
+    name.replace(/[^\p{L}\p{N}_\- ]/gu, "").trim() || "conversation"
+  );
 }
 
 export function downloadAsFile(
