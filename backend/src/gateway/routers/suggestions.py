@@ -99,7 +99,7 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
         "- Output MUST be a JSON array of strings only.\n\n"
         "Conversation:\n"
         f"{conversation}\n"
-    ).format(n=n, conversation=conversation)
+    )
 
     try:
         model = create_chat_model(name=request.model_name, thinking_enabled=False)
