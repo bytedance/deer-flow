@@ -16,6 +16,7 @@ from src.gateway.routers import (
     mcp,
     memory,
     models,
+    projects,
     providers,
     skills,
     threads,
@@ -43,6 +44,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         sys.exit(1)
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+
+    # Ensure DB schema is up to date before serving requests.
+    from src.db.engine import is_db_enabled, run_db_migrations
+
+    if is_db_enabled():
+        try:
+            run_db_migrations()
+            logger.info("Database migrations applied successfully")
+        except Exception as e:
+            logger.error(f"Failed to apply database migrations: {e}", exc_info=True)
+            sys.exit(1)
 
     # Log tracing status
     try:
@@ -187,6 +199,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
+
+    # Projects API is mounted at /api/projects
+    app.include_router(projects.router)
 
     # Threads API: collection-level at /api/threads, item-level at /api/threads/{thread_id}
     app.include_router(threads.router_list)
