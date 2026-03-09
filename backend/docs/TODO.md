@@ -20,6 +20,13 @@
 - [ ] Add metrics and monitoring
 - [ ] Support for more document formats in upload
 - [ ] Skill marketplace / remote skill installation
+- [ ] Optimize async concurrency in agent hot path (IM channels multi-task scenario)
+  - Replace `time.sleep(5)` with `asyncio.sleep()` in `src/tools/builtins/task_tool.py` (subagent polling)
+  - Replace `subprocess.run()` with `asyncio.create_subprocess_shell()` in `src/sandbox/local/local_sandbox.py`
+  - Replace sync `requests` with `httpx.AsyncClient` in community tools (tavily, jina_ai, firecrawl, infoquest, image_search)
+  - Replace sync `model.invoke()` with async `model.ainvoke()` in title_middleware and memory updater
+  - Consider `asyncio.to_thread()` wrapper for remaining blocking file I/O
+  - For production: use `langgraph up` (multi-worker) instead of `langgraph dev` (single-worker)
 
 ## Resolved Issues
 

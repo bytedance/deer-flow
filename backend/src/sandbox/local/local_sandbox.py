@@ -147,10 +147,7 @@ class LocalSandbox(Sandbox):
         shell_from_path = shutil.which("sh")
         if shell_from_path is not None:
             return shell_from_path
-        raise RuntimeError(
-            "No suitable shell executable found. Tried /bin/zsh, /bin/bash, "
-            "/bin/sh, and `sh` on PATH."
-        )
+        raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
     def execute_command(self, command: str) -> str:
         # Resolve container paths in command before execution
@@ -182,22 +179,34 @@ class LocalSandbox(Sandbox):
 
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
-        with open(resolved_path) as f:
-            return f.read()
+        try:
+            with open(resolved_path) as f:
+                return f.read()
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved_path = self._resolve_path(path)
-        dir_path = os.path.dirname(resolved_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        mode = "a" if append else "w"
-        with open(resolved_path, mode) as f:
-            f.write(content)
+        try:
+            dir_path = os.path.dirname(resolved_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            mode = "a" if append else "w"
+            with open(resolved_path, mode) as f:
+                f.write(content)
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None
 
     def update_file(self, path: str, content: bytes) -> None:
         resolved_path = self._resolve_path(path)
-        dir_path = os.path.dirname(resolved_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        with open(resolved_path, "wb") as f:
-            f.write(content)
+        try:
+            dir_path = os.path.dirname(resolved_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(resolved_path, "wb") as f:
+                f.write(content)
+        except OSError as e:
+            # Re-raise with the original path for clearer error messages, hiding internal resolved paths
+            raise type(e)(e.errno, e.strerror, path) from None

@@ -16,14 +16,7 @@ from src.agents.middlewares.memory_middleware import _filter_messages_for_memory
 # Helpers
 # ---------------------------------------------------------------------------
 
-_UPLOAD_BLOCK = (
-    "<uploaded_files>\n"
-    "The following files have been uploaded and are available for use:\n\n"
-    "- filename: secret.txt\n"
-    "  path: /mnt/user-data/uploads/abc123/secret.txt\n"
-    "  size: 42 bytes\n"
-    "</uploaded_files>"
-)
+_UPLOAD_BLOCK = "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- filename: secret.txt\n  path: /mnt/user-data/uploads/abc123/secret.txt\n  size: 42 bytes\n</uploaded_files>"
 
 
 def _human(text: str) -> HumanMessage:
@@ -103,7 +96,7 @@ class TestFilterMessagesForMemory:
         msgs = [
             _human("Hello, how are you?"),
             _ai("I'm doing well, thank you!"),
-            _human(_UPLOAD_BLOCK),           # upload-only → dropped
+            _human(_UPLOAD_BLOCK),  # upload-only → dropped
             _ai("I read the uploaded file."),  # paired AI → dropped
             _human("What is 2 + 2?"),
             _ai("4"),
@@ -122,9 +115,11 @@ class TestFilterMessagesForMemory:
 
     def test_multimodal_content_list_handled(self):
         """Human messages with list-style content (multimodal) are handled."""
-        msg = HumanMessage(content=[
-            {"type": "text", "text": _UPLOAD_BLOCK},
-        ])
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": _UPLOAD_BLOCK},
+            ]
+        )
         msgs = [msg, _ai("Done.")]
         result = _filter_messages_for_memory(msgs)
         assert result == []
@@ -134,9 +129,7 @@ class TestFilterMessagesForMemory:
         combined = _UPLOAD_BLOCK + "\n\nSummarise the file please."
         msgs = [_human(combined), _ai("It says hello.")]
         result = _filter_messages_for_memory(msgs)
-        all_content = " ".join(
-            m.content for m in result if isinstance(m.content, str)
-        )
+        all_content = " ".join(m.content for m in result if isinstance(m.content, str))
         assert "/mnt/user-data/uploads/" not in all_content
         assert "<uploaded_files>" not in all_content
 
@@ -157,11 +150,7 @@ class TestStripUploadMentionsFromMemory:
     # --- summaries ---
 
     def test_upload_event_sentence_removed_from_summary(self):
-        mem = self._make_memory(
-            "User is interested in AI. "
-            "User uploaded a test file for verification purposes. "
-            "User prefers concise answers."
-        )
+        mem = self._make_memory("User is interested in AI. User uploaded a test file for verification purposes. User prefers concise answers.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
         assert "uploaded a test file" not in summary
@@ -169,11 +158,7 @@ class TestStripUploadMentionsFromMemory:
         assert "User prefers concise answers" in summary
 
     def test_upload_path_sentence_removed_from_summary(self):
-        mem = self._make_memory(
-            "User uses Python. "
-            "User uploaded file to /mnt/user-data/uploads/tid/data.csv. "
-            "User likes clean code."
-        )
+        mem = self._make_memory("User uses Python. User uploaded file to /mnt/user-data/uploads/tid/data.csv. User likes clean code.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
         assert "/mnt/user-data/uploads/" not in summary
@@ -193,10 +178,7 @@ class TestStripUploadMentionsFromMemory:
 
     def test_uploading_a_test_file_removed(self):
         """'uploading a test file' (with intervening words) must be caught."""
-        mem = self._make_memory(
-            "User conducted a hands-on test by uploading a test file titled "
-            "'test_deerflow_memory_bug.txt'. User is also learning Python."
-        )
+        mem = self._make_memory("User conducted a hands-on test by uploading a test file titled 'test_deerflow_memory_bug.txt'. User is also learning Python.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
         assert "test_deerflow_memory_bug.txt" not in summary
