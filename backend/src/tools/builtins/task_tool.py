@@ -185,9 +185,11 @@ def task_tool(
         # Polling timeout as a safety net (in case thread pool timeout doesn't work)
         # Set to execution timeout + 60s buffer, in 5s poll intervals
         # This catches edge cases where the background task gets stuck
+        # Note: We don't call cleanup_background_task here because the task may
+        # still be running in the background. The cleanup will happen when the
+        # executor completes and sets a terminal status.
         if poll_count > max_poll_count:
             timeout_minutes = config.timeout_seconds // 60
             logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
             writer({"type": "task_timed_out", "task_id": task_id})
-            cleanup_background_task(task_id)
             return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"

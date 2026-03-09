@@ -460,10 +460,32 @@ def cleanup_background_task(task_id: str) -> None:
     Should be called by task_tool after it finishes polling and returns the result.
     This prevents memory leaks from accumulated completed tasks.
 
+    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
+    to avoid race conditions with the background executor still updating the task entry.
+
     Args:
         task_id: The task ID to remove.
     """
     with _background_tasks_lock:
-        if task_id in _background_tasks:
+        result = _background_tasks.get(task_id)
+        if result is None:
+            # Nothing to clean up; may have been removed already.
+            logger.debug("Requested cleanup for unknown background task %s", task_id)
+            return
+
+        # Only clean up tasks that are in a terminal state to avoid races with
+        # the background executor still updating the task entry.
+        is_terminal_status = result.status in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.TIMED_OUT,
+        }
+        if is_terminal_status or result.completed_at is not None:
             del _background_tasks[task_id]
-            logger.debug(f"Cleaned up background task: {task_id}")
+            logger.debug("Cleaned up background task: %s", task_id)
+        else:
+            logger.debug(
+                "Skipping cleanup for non-terminal background task %s (status=%s)",
+                task_id,
+                result.status.value if hasattr(result.status, "value") else result.status,
+            )
