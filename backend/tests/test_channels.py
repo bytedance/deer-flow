@@ -612,6 +612,58 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_feishu_stream_error_still_sends_final(self, monkeypatch):
+        """When the stream raises mid-way, a final outbound with is_final=True must still be published."""
+        from src.channels.manager import ChannelManager
+
+        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            async def _failing_stream():
+                yield _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                )
+                raise ConnectionError("stream broken")
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_failing_stream())
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await manager.stop()
+
+            # Should have at least one intermediate and one final message
+            final_msgs = [m for m in outbound_received if m.is_final]
+            assert len(final_msgs) == 1
+            assert final_msgs[0].thread_ts == "om-source-1"
+
+        _run(go())
+
     def test_handle_command_help(self):
         from src.channels.manager import ChannelManager
 

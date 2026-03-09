@@ -245,6 +245,8 @@ class FeishuChannel(Channel):
         if running_card_id:
             self._running_card_ids[source_message_id] = running_card_id
             logger.info("[Feishu] running card created: source=%s card=%s", source_message_id, running_card_id)
+        else:
+            logger.warning("[Feishu] running card creation returned no message_id for source=%s, subsequent updates will fall back to new replies", source_message_id)
         return running_card_id
 
     async def _send_running_reply(self, message_id: str) -> None:
