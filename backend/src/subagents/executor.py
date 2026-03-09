@@ -452,3 +452,18 @@ def list_background_tasks() -> list[SubagentResult]:
     """
     with _background_tasks_lock:
         return list(_background_tasks.values())
+
+
+def cleanup_background_task(task_id: str) -> None:
+    """Remove a completed task from background tasks.
+
+    Should be called by task_tool after it finishes polling and returns the result.
+    This prevents memory leaks from accumulated completed tasks.
+
+    Args:
+        task_id: The task ID to remove.
+    """
+    with _background_tasks_lock:
+        if task_id in _background_tasks:
+            del _background_tasks[task_id]
+            logger.debug(f"Cleaned up background task: {task_id}")
