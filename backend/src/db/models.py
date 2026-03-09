@@ -74,10 +74,30 @@ class ThreadModel(Base):
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     local_evicted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
 
+    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
     __table_args__ = (
         Index("idx_threads_user_id", "user_id"),
         Index("idx_threads_s3_sync_status", "s3_sync_status"),
         Index("idx_threads_last_accessed_at", "last_accessed_at"),
+        Index("idx_threads_project_id", "project_id"),
+    )
+
+
+class ProjectModel(Base):
+    """Project model for organizing threads into folders."""
+
+    __tablename__ = "projects"
+
+    project_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_projects_user_name"),
+        Index("idx_projects_user_id", "user_id"),
     )
 
 

@@ -11,6 +11,7 @@ import logging
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -112,6 +113,34 @@ def init_db() -> None:
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
+
+
+def run_db_migrations() -> None:
+    """Run Alembic migrations to bring the schema to head.
+
+    This is safe to call at startup. If DATABASE_URL is not configured,
+    this function is a no-op.
+    """
+    if not is_db_enabled():
+        return
+
+    # Import lazily so file-based mode does not require Alembic.
+    from alembic import command
+    from alembic.config import Config
+
+    sync_url = get_sync_database_url()
+    if not sync_url:
+        return
+
+    backend_dir = Path(__file__).resolve().parents[2]
+    alembic_ini = backend_dir / "alembic.ini"
+    migrations_dir = backend_dir / "src" / "db" / "migrations"
+
+    config = Config(str(alembic_ini))
+    config.set_main_option("script_location", str(migrations_dir))
+    config.set_main_option("sqlalchemy.url", sync_url)
+
+    command.upgrade(config, "head")
 
 
 def check_db_connection() -> str:
