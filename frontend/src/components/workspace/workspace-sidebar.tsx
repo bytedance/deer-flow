@@ -11,9 +11,8 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { RecentChatList } from "./recent-chat-list";
+import { SidebarThreadList } from "./sidebar/sidebar-thread-list";
 import { WorkspaceHeader } from "./workspace-header";
-import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
 import { WorkspaceNavMenu } from "./workspace-nav-menu";
 
 export function WorkspaceSidebar({
@@ -35,8 +34,7 @@ export function WorkspaceSidebar({
           <WorkspaceHeader />
         </SidebarHeader>
         <SidebarContent>
-          <WorkspaceNavChatList />
-          {isSidebarOpen && <RecentChatList />}
+          {isSidebarOpen && <SidebarThreadList />}
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />
