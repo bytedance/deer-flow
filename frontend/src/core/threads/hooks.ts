@@ -31,6 +31,8 @@ export type ThreadStreamOptions = {
   onToolEnd?: (event: ToolEndEvent) => void;
 };
 
+export type AgentThreadStream = ReturnType<typeof useThreadStream>[0];
+
 export function useThreadStream({
   threadId,
   context,

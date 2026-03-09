@@ -1,8 +1,7 @@
-import type { BaseStream } from "@langchain/langgraph-sdk";
 import { useEffect } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";
-import type { AgentThreadState } from "@/core/threads";
+import type { AgentThreadStream } from "@/core/threads/hooks";
 
 import { useThreadChat } from "./chats";
 import { FlipDisplay } from "./flip-display";
@@ -13,7 +12,7 @@ export function ThreadTitle({
 }: {
   className?: string;
   threadId: string;
-  thread: BaseStream<AgentThreadState>;
+  thread: AgentThreadStream;
 }) {
   const { t } = useI18n();
   const { isNewThread } = useThreadChat();

@@ -1,10 +1,9 @@
-import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { createContext, useContext } from "react";
 
-import type { AgentThreadState } from "@/core/threads";
+import type { AgentThreadStream } from "@/core/threads/hooks";
 
 export interface ThreadContextType {
-  thread: BaseStream<AgentThreadState>;
+  thread: AgentThreadStream;
   isMock?: boolean;
 }
 

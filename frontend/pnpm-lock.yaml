@@ -33,7 +33,7 @@ importers:
         specifier: ^1.1.15
         version: 1.1.20(@opentelemetry/api@1.9.0)
       '@langchain/langgraph-sdk':
-        specifier: ^1.5.3
+        specifier: 1.6.0
         version: 1.6.0(@langchain/core@1.1.20(@opentelemetry/api@1.9.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-avatar':
         specifier: ^1.1.11

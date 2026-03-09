@@ -1,5 +1,3 @@
-import type { BaseStream } from "@langchain/langgraph-sdk/react";
-
 import {
   Conversation,
   ConversationContent,
@@ -17,7 +15,7 @@ import {
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
-import type { AgentThreadState } from "@/core/threads";
+import type { AgentThreadStream } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -37,7 +35,7 @@ export function MessageList({
 }: {
   className?: string;
   threadId: string;
-  thread: BaseStream<AgentThreadState>;
+  thread: AgentThreadStream;
   paddingBottom?: number;
 }) {
   const { t } = useI18n();

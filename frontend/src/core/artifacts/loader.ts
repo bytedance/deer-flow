@@ -1,6 +1,4 @@
-import type { BaseStream } from "@langchain/langgraph-sdk/react";
-
-import type { AgentThreadState } from "../threads";
+import type { AgentThreadStream } from "../threads/hooks";
 
 import { urlOfArtifact } from "./utils";
 
@@ -28,7 +26,7 @@ export function loadArtifactContentFromToolCall({
   thread,
 }: {
   url: string;
-  thread: BaseStream<AgentThreadState>;
+  thread: AgentThreadStream;
 }) {
   const url = new URL(urlString);
   const toolCallId = url.searchParams.get("tool_call_id");
