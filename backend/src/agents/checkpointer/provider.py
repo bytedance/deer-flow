@@ -107,14 +107,14 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
 # Sync singleton
 # ---------------------------------------------------------------------------
 
-_checkpointer: Checkpointer = None
+_checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
 
 
-def get_checkpointer() -> Checkpointer | None:
+def get_checkpointer() -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
-    Returns ``None`` when no checkpointer is configured in *config.yaml*.
+    Returns an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
@@ -125,11 +125,29 @@ def get_checkpointer() -> Checkpointer | None:
     if _checkpointer is not None:
         return _checkpointer
 
+    # Ensure app config is loaded before checking checkpointer config
+    # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
+    # but hasn't been loaded yet
+    from src.config.app_config import _app_config
     from src.config.checkpointer_config import get_checkpointer_config
+
+    if _app_config is None:
+        # Only load config if it hasn't been initialized yet
+        # In tests, config may be set directly via set_checkpointer_config()
+        try:
+            get_app_config()
+        except FileNotFoundError:
+            # In test environments without config.yaml, this is expected
+            # Tests will set config directly via set_checkpointer_config()
+            pass
 
     config = get_checkpointer_config()
     if config is None:
-        return None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
+        _checkpointer = InMemorySaver()
+        return _checkpointer
 
     _checkpointer_ctx = _sync_checkpointer_cm(config)
     _checkpointer = _checkpointer_ctx.__enter__()
@@ -159,7 +177,7 @@ def reset_checkpointer() -> None:
 
 
 @contextlib.contextmanager
-def checkpointer_context() -> Iterator[Checkpointer | None]:
+def checkpointer_context() -> Iterator[Checkpointer]:
     """Sync context manager that yields a checkpointer and cleans up on exit.
 
     Unlike :func:`get_checkpointer`, this does **not** cache the instance —
@@ -168,11 +186,15 @@ def checkpointer_context() -> Iterator[Checkpointer | None]:
 
         with checkpointer_context() as cp:
             graph.invoke(input, config={"configurable": {"thread_id": "1"}})
+
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
     config = get_app_config()
     if config.checkpointer is None:
-        yield None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        yield InMemorySaver()
         return
 
     with _sync_checkpointer_cm(config.checkpointer) as saver:
