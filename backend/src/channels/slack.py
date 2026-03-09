@@ -93,15 +93,7 @@ class SlackChannel(Channel):
         for attempt in range(_max_retries):
             try:
                 await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
-                await self._send_artifacts(msg)
-                if msg.thread_ts:
-                    await asyncio.to_thread(
-                        self._add_reaction,
-                        msg.chat_id,
-                        msg.thread_ts,
-                        "white_check_mark",
-                    )
-                return
+                break
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
@@ -114,23 +106,33 @@ class SlackChannel(Channel):
                         exc,
                     )
                     await asyncio.sleep(delay)
+        else:
+            logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
+            # Add failure reaction on error
+            if msg.thread_ts:
+                try:
+                    await asyncio.to_thread(
+                        self._add_reaction,
+                        msg.chat_id,
+                        msg.thread_ts,
+                        "x",
+                    )
+                except Exception:
+                    pass
+            raise last_exc  # type: ignore[misc]
 
-        logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
-        # Add failure reaction on error
+        await self._send_artifacts(msg)
+        # Add completion reaction to the thread root
         if msg.thread_ts:
-            try:
-                await asyncio.to_thread(
-                    self._add_reaction,
-                    msg.chat_id,
-                    msg.thread_ts,
-                    "x",
-                )
-            except Exception:
-                pass
-        raise last_exc  # type: ignore[misc]
+            await asyncio.to_thread(
+                self._add_reaction,
+                msg.chat_id,
+                msg.thread_ts,
+                "white_check_mark",
+            )
 
     async def _send_artifacts(self, msg: OutboundMessage) -> None:
-        if not self._web_client or not msg.artifacts:
+        if not self._web_client or not msg.is_final or not msg.artifacts:
             return
 
         for virtual_path in msg.artifacts:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 from src.channels.artifacts import resolve_channel_artifact
@@ -170,13 +171,7 @@ class FeishuChannel(Channel):
                     request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type("interactive").content(content).build()).build()
                     await asyncio.to_thread(self._api_client.im.v1.message.create, request)
 
-                await self._send_artifacts(msg)
-
-                # Add "DONE" reaction to the original message on final reply
-                if msg.is_final and msg.thread_ts:
-                    await self._add_reaction(msg.thread_ts, "DONE")
-
-                return  # success
+                break
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
@@ -189,12 +184,18 @@ class FeishuChannel(Channel):
                         exc,
                     )
                     await asyncio.sleep(delay)
+        else:
+            logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
+            raise last_exc  # type: ignore[misc]
 
-        logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_artifacts(msg)
+
+        # Add "DONE" reaction to the original message on final reply
+        if msg.is_final and msg.thread_ts:
+            await self._add_reaction(msg.thread_ts, "DONE")
 
     async def _send_artifacts(self, msg: OutboundMessage) -> None:
-        if not self._api_client or not self._CreateFileRequest or not msg.artifacts:
+        if not self._api_client or not self._CreateFileRequest or not msg.is_final or not msg.artifacts:
             return
 
         for virtual_path in msg.artifacts:
@@ -226,11 +227,9 @@ class FeishuChannel(Channel):
                     exc,
                 )
 
-    async def _upload_artifact(self, file_path, file_name: str) -> str:
+    async def _upload_artifact(self, file_path: Path, file_name: str) -> str:
         with file_path.open("rb") as file_obj:
-            request = self._CreateFileRequest.builder().request_body(
-                self._CreateFileRequestBody.builder().file_type("stream").file_name(file_name).file(file_obj).build()
-            ).build()
+            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type("stream").file_name(file_name).file(file_obj).build()).build()
             response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
 
         if not response.success():

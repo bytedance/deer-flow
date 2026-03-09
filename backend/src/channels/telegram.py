@@ -107,12 +107,12 @@ class TelegramChannel(Channel):
 
         bot = self._application.bot
         last_exc: Exception | None = None
+        sent = None
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
                 self._last_bot_message[msg.chat_id] = sent.message_id
-                await self._send_artifacts(msg, chat_id=chat_id, reply_to_message_id=sent.message_id)
-                return
+                break
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
@@ -125,12 +125,14 @@ class TelegramChannel(Channel):
                         exc,
                     )
                     await asyncio.sleep(delay)
+        else:
+            logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
+            raise last_exc  # type: ignore[misc]
 
-        logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_artifacts(msg, chat_id=chat_id, reply_to_message_id=sent.message_id)
 
     async def _send_artifacts(self, msg: OutboundMessage, *, chat_id: int, reply_to_message_id: int) -> None:
-        if not self._application or not msg.artifacts:
+        if not self._application or not msg.is_final or not msg.artifacts:
             return
 
         bot = self._application.bot
