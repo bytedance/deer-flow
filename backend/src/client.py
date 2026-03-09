@@ -211,14 +211,9 @@ class DeerFlowClient:
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
-            import importlib
+            from src.agents.checkpointer import get_checkpointer
 
-            try:
-                checkpointer_module = importlib.import_module("src.agents.checkpointer")
-            except ModuleNotFoundError:
-                checkpointer = None
-            else:
-                checkpointer = checkpointer_module.get_checkpointer()
+            checkpointer = get_checkpointer()
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 

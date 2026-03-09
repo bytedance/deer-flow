@@ -365,11 +365,9 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
 
-    def test_uses_dynamic_checkpointer_fallback_when_available(self, client):
+    def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()
-        checkpointer_module = MagicMock()
-        checkpointer_module.get_checkpointer.return_value = mock_checkpointer
         config = client._get_runnable_config("t1")
 
         with (
@@ -378,13 +376,13 @@ class TestEnsureAgent:
             patch("src.client._build_middlewares", return_value=[]),
             patch("src.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("importlib.import_module", return_value=checkpointer_module),
+            patch("src.agents.checkpointer.get_checkpointer", return_value=mock_checkpointer),
         ):
             client._ensure_agent(config)
 
         assert mock_create_agent.call_args.kwargs["checkpointer"] is mock_checkpointer
 
-    def test_skips_dynamic_checkpointer_when_module_missing(self, client):
+    def test_skips_default_checkpointer_when_unconfigured(self, client):
         mock_agent = MagicMock()
         config = client._get_runnable_config("t1")
 
@@ -394,7 +392,7 @@ class TestEnsureAgent:
             patch("src.client._build_middlewares", return_value=[]),
             patch("src.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
-            patch("importlib.import_module", side_effect=ModuleNotFoundError),
+            patch("src.agents.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(config)
 
