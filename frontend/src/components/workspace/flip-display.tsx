@@ -12,12 +12,12 @@ export function FlipDisplay({
   className?: string;
 }) {
   return (
-    <div className={cn("relative overflow-hidden", className)}>
+    <div className={cn("relative overflow-clip", className)}>
       <AnimatePresence mode="wait">
         <motion.div
           key={uniqueKey}
           initial={{ y: 8, opacity: 0 }}
-          animate={{ y: 2, opacity: 1 }}
+          animate={{ y: 0, opacity: 1 }}
           exit={{ y: -8, opacity: 0 }}
           transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
         >

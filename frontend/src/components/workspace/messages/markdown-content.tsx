@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { CitationLink } from "../citations/citation-link";
 
 import { CollapsibleCodeBlock } from "./collapsible-code-block";
+import { ScrollableTable } from "./scrollable-table";
 
 export type MarkdownContentProps = {
   content: string;
@@ -32,6 +33,9 @@ export const MarkdownContent = memo(function MarkdownContent({
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
+      table: (props: HTMLAttributes<HTMLTableElement>) => (
+        <ScrollableTable {...props} />
+      ),
       a: (props: ComponentProps<"a">) => {
         if (typeof props.children === "string") {
           const match = /^citation:(.+)$/.exec(props.children);

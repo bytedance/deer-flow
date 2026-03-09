@@ -1,5 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
+  BarChart3Icon,
   BookOpenTextIcon,
   CheckCircle2Icon,
   ChevronRight,
@@ -8,6 +9,7 @@ import {
   DatabaseIcon,
   FolderOpenIcon,
   GlobeIcon,
+  ImageIcon,
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
@@ -40,6 +42,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   describeMcpTool,
   extractMcpMeta,
+  getToolDisplayCategory,
+  getToolIconHint,
   isMcpDataResult,
 } from "@/core/mcp/tools";
 import {
@@ -173,14 +177,14 @@ export const MessageGroup = memo(function MessageGroup({
                     key={step.id}
                     icon={ClockIcon}
                     className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
-                    label={
-                      <MarkdownContent
-                        content={step.reasoning ?? ""}
-                        isLoading={isLoading}
-                        rehypePlugins={rehypePlugins}
-                      />
-                    }
-                  ></ChainOfThoughtStep>
+                    label={step.title ?? t.common.thinking}
+                  >
+                    <MarkdownContent
+                      content={step.body ?? ""}
+                      isLoading={isLoading}
+                      rehypePlugins={rehypePlugins}
+                    />
+                  </ChainOfThoughtStep>
                 ) : (
                   <ToolCall key={step.id} {...step} isLoading={isLoading} />
                 ),
@@ -239,14 +243,14 @@ export const MessageGroup = memo(function MessageGroup({
                   key={lastReasoningStep.id}
                   icon={ClockIcon}
                   className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
-                  label={
-                    <MarkdownContent
-                      content={lastReasoningStep.reasoning ?? ""}
-                      isLoading={isLoading}
-                      rehypePlugins={rehypePlugins}
-                    />
-                  }
-                ></ChainOfThoughtStep>
+                  label={lastReasoningStep.title ?? t.common.thinking}
+                >
+                  <MarkdownContent
+                    content={lastReasoningStep.body ?? ""}
+                    isLoading={isLoading}
+                    rehypePlugins={rehypePlugins}
+                  />
+                </ChainOfThoughtStep>
               </div>
             </ChainOfThoughtContent>
           )}
@@ -299,9 +303,9 @@ const ToolCall = memo(function ToolCall({
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const headerOnlyToolStepClass = hideContent ? "mb-7" : undefined;
+  const displayCategory = getToolDisplayCategory(name);
 
-  if (name === "web_search") {
+  if (displayCategory === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -313,17 +317,24 @@ const ToolCall = memo(function ToolCall({
         return url;
       }
     };
+    // Normalize search results: built-in web_search returns a flat array,
+    // while MCP tools (e.g. firecrawl_search) may wrap results in {web: [...]}.
+    const searchResults: { url: string; title: string }[] | undefined =
+      Array.isArray(result)
+        ? result
+        : result && typeof result === "object" && Array.isArray((result as Record<string, unknown>).web)
+          ? (result as Record<string, unknown>).web as { url: string; title: string }[]
+          : undefined;
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={label}
         icon={SearchIcon}
       >
-        {!hideContent && Array.isArray(result) && (
+        {!hideContent && searchResults && (
           <div className="bg-background/80 mt-2 overflow-hidden rounded-lg border">
             <ul className="divide-y divide-border/70">
-              {result.map((item) => (
+              {searchResults.map((item) => (
                 <li key={item.url}>
                   <a
                     className="group flex items-center gap-3 px-3 py-2 text-sm transition-colors hover:bg-muted/60"
@@ -363,7 +374,6 @@ const ToolCall = memo(function ToolCall({
     )?.results;
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={label}
         icon={SearchIcon}
@@ -395,7 +405,7 @@ const ToolCall = memo(function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
+  } else if (displayCategory === "web_fetch") {
     const url = (args as { url: string })?.url;
     let title = url;
     if (typeof result === "string") {
@@ -403,16 +413,19 @@ const ToolCall = memo(function ToolCall({
       if (potentialTitle && potentialTitle.toLowerCase() !== "untitled") {
         title = potentialTitle;
       }
+    } else if (result && typeof result === "object") {
+      // MCP tools (e.g. firecrawl_scrape) return metadata with title fields
+      const meta = (result as Record<string, unknown>).metadata as Record<string, unknown> | undefined;
+      const metaTitle = meta?.ogTitle ?? meta?.["og:title"] ?? meta?.title;
+      if (typeof metaTitle === "string" && metaTitle) {
+        title = metaTitle;
+      }
     }
     return (
       <ChainOfThoughtStep
         key={id}
-        className={cn("cursor-pointer", headerOnlyToolStepClass)}
         label={t.toolCalls.viewWebPage}
         icon={GlobeIcon}
-        onClick={() => {
-          window.open(url, "_blank");
-        }}
       >
         {!hideContent && (
           <ChainOfThoughtSearchResult>
@@ -434,7 +447,6 @@ const ToolCall = memo(function ToolCall({
     const path: string | undefined = (args as { path: string })?.path;
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={description}
         icon={FolderOpenIcon}
@@ -455,7 +467,6 @@ const ToolCall = memo(function ToolCall({
     const { path } = args as { path: string; content: string };
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={description}
         icon={BookOpenTextIcon}
@@ -476,7 +487,6 @@ const ToolCall = memo(function ToolCall({
           : "";
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={t.common.reflecting}
         icon={SparklesIcon}
@@ -513,22 +523,23 @@ const ToolCall = memo(function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className={cn("cursor-pointer", headerOnlyToolStepClass)}
         label={description}
         icon={NotebookPenIcon}
-        onClick={() => {
-          startTransition(() => {
-            select(
-              new URL(
-                `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-              ).toString(),
-            );
-            setOpen(true);
-          });
-        }}
       >
         {!hideContent && path && (
-          <ChainOfThoughtSearchResult className="cursor-pointer">
+          <ChainOfThoughtSearchResult
+            className="cursor-pointer"
+            onClick={() => {
+              startTransition(() => {
+                select(
+                  new URL(
+                    `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+                  ).toString(),
+                );
+                setOpen(true);
+              });
+            }}
+          >
             {path}
           </ChainOfThoughtSearchResult>
         )}
@@ -543,7 +554,6 @@ const ToolCall = memo(function ToolCall({
     const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
-        className={headerOnlyToolStepClass}
         key={id}
         label={description}
         icon={SquareTerminalIcon}
@@ -561,7 +571,6 @@ const ToolCall = memo(function ToolCall({
   } else if (name === "ask_clarification") {
     return (
       <ChainOfThoughtStep
-        className="mb-7"
         key={id}
         label={t.toolCalls.needYourHelp}
         icon={MessageCircleQuestionMarkIcon}
@@ -570,10 +579,43 @@ const ToolCall = memo(function ToolCall({
   } else if (name === "write_todos") {
     return (
       <ChainOfThoughtStep
-        className="mb-7"
         key={id}
         label={t.toolCalls.writeTodos}
         icon={ListTodoIcon}
+      ></ChainOfThoughtStep>
+    );
+  } else if (name === "execute_python") {
+    const code: string | undefined = (args as { code: string })?.code;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.runPython}
+        icon={SquareTerminalIcon}
+      >
+        {!hideContent && code && (
+          <CodeBlock
+            className="mx-0 cursor-pointer border-none px-0"
+            showLineNumbers={false}
+            language="python"
+            code={code}
+          />
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (name === "present_files") {
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.presentFiles}
+        icon={FolderOpenIcon}
+      ></ChainOfThoughtStep>
+    );
+  } else if (name === "view_image") {
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.viewImage}
+        icon={ImageIcon}
       ></ChainOfThoughtStep>
     );
   } else if (isMcpDataResult(result)) {
@@ -588,14 +630,21 @@ const ToolCall = memo(function ToolCall({
       />
     );
   } else {
+    // Smart fallback: use describeMcpTool for label, pick icon by tool type
     const description: string | undefined = (args as { description: string })
       ?.description;
+    const label = description ?? describeMcpTool(name, args, t.toolCalls.useTool(name));
+    const iconHint = getToolIconHint(name);
+    const icon =
+      iconHint === "database" ? DatabaseIcon
+        : iconHint === "globe" ? GlobeIcon
+          : iconHint === "chart" ? BarChart3Icon
+            : WrenchIcon;
     return (
       <ChainOfThoughtStep
-        className="mb-7"
         key={id}
-        label={description ?? t.toolCalls.useTool(name)}
-        icon={WrenchIcon}
+        label={label}
+        icon={icon}
       ></ChainOfThoughtStep>
     );
   }
@@ -628,7 +677,6 @@ const McpDataToolCall = memo(function McpDataToolCall({
 }) {
   const { t } = useI18n();
   const { setOpen, select } = useArtifacts();
-  const headerOnlyToolStepClass = hideContent ? "mb-7" : undefined;
 
   const label = useMemo(
     () => describeMcpTool(name, args, t.toolCalls.useTool(name)),
@@ -663,7 +711,6 @@ const McpDataToolCall = memo(function McpDataToolCall({
 
   return (
     <ChainOfThoughtStep
-      className={headerOnlyToolStepClass}
       key={id}
       label={label}
       icon={DatabaseIcon}
@@ -758,6 +805,8 @@ interface GenericCoTStep<T extends string = string> {
 
 interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
+  title: string | null;
+  body: string | null;
 }
 
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
@@ -777,11 +826,33 @@ function convertToSteps(
     if (message.type === "ai") {
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
+        let title: string | null = null;
+        let body: string = reasoning;
+        const firstLine = reasoning.split("\n")[0]?.trim() ?? "";
+        if (firstLine.startsWith("# ")) {
+          title = firstLine.slice(2).trim();
+          body = reasoning.slice(reasoning.indexOf("\n") + 1).replace(/^\n+/, "");
+        } else {
+          const breakIdx = reasoning.indexOf("\n\n");
+          if (breakIdx > 0) {
+            const firstPara = reasoning.slice(0, breakIdx).trim();
+            if (firstPara.length > 0 && firstPara.length < 100) {
+              title = firstPara;
+              body = reasoning.slice(breakIdx).replace(/^\n+/, "");
+            }
+          }
+        }
+        // Strip markdown bold/italic markers from the title
+        if (title) {
+          title = title.replace(/\*+/g, "").trim();
+        }
         const step: CoTReasoningStep = {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
+          reasoning,
+          title,
+          body,
         };
         steps.push(step);
       }

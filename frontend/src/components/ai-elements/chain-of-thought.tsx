@@ -11,16 +11,18 @@ import { cn } from "@/lib/utils";
 import {
   BrainIcon,
   ChevronDownIcon,
+  ChevronRightIcon,
   DotIcon,
   type LucideIcon,
 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import React, { type ComponentProps, type ReactNode } from "react";
 import {
   createContext,
   isValidElement,
   memo,
   useContext,
   useMemo,
+  useState,
 } from "react";
 
 type ChainOfThoughtContextValue = {
@@ -132,6 +134,9 @@ export const ChainOfThoughtStep = memo(
     children,
     ...props
   }: ChainOfThoughtStepProps) => {
+    const hasChildren = React.Children.toArray(children).length > 0;
+    const [isExpanded, setIsExpanded] = useState(false);
+
     const statusStyles = {
       complete: "text-muted-foreground",
       active: "text-foreground",
@@ -151,15 +156,32 @@ export const ChainOfThoughtStep = memo(
         <div className="relative mt-0.5">
           {isValidElement(Icon) ? Icon : <Icon className="size-4" />}
           {showConnector && (
-            <div className="bg-border absolute top-7 -bottom-2 left-1/2 w-[2px] min-h-2 -translate-x-1/2" />
+            <div className="bg-border absolute top-5 -bottom-4 left-1/2 w-[2px] min-h-2 -translate-x-1/2" />
           )}
         </div>
         <div className="flex-1 space-y-2 overflow-hidden">
-          <div>{label}</div>
+          <div
+            className={cn(
+              "flex items-center gap-1",
+              hasChildren && "cursor-pointer select-none",
+            )}
+            onClick={hasChildren ? () => setIsExpanded((v) => !v) : undefined}
+            role={hasChildren ? "button" : undefined}
+          >
+            <div className="flex-1">{label}</div>
+            {hasChildren && (
+              <ChevronRightIcon
+                className={cn(
+                  "text-muted-foreground/60 size-3.5 shrink-0 transition-transform duration-200",
+                  isExpanded && "rotate-90",
+                )}
+              />
+            )}
+          </div>
           {description && (
             <div className="text-muted-foreground text-xs">{description}</div>
           )}
-          {children}
+          {isExpanded && children}
         </div>
       </div>
     );

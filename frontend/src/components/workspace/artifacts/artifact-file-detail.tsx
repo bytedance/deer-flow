@@ -9,6 +9,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { type BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
@@ -20,6 +21,7 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
   SelectContent,
@@ -28,10 +30,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { CodeEditor } from "@/components/workspace/code-editor";
-import { authFetch } from "@/core/auth/fetch";
 import { useArtifactContent, useMcpDataContent } from "@/core/artifacts/hooks";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { authFetch } from "@/core/auth/fetch";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
@@ -290,10 +291,11 @@ function FileArtifactDetail({
             />
           )}
         {isCodeFile && viewMode === "code" && (
-          <CodeEditor
-            className="size-full resize-none rounded-none border-none"
-            value={displayContent ?? ""}
-            readonly
+          <CodeBlock
+            code={displayContent ?? ""}
+            language={(language ?? "text") as BundledLanguage}
+            showLineNumbers
+            className="rounded-none border-none"
           />
         )}
         {!isCodeFile && isImageFile(filepath) && (

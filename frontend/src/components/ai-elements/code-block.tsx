@@ -1,16 +1,21 @@
 "use client";
 
+import {
+  transformerNotationDiff,
+  transformerNotationFocus,
+  transformerNotationHighlight,
+} from "@shikijs/transformers";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import {
   type ComponentProps,
   createContext,
   type HTMLAttributes,
   useContext,
-  useEffect,
-  useRef,
+  useMemo,
   useState,
 } from "react";
-import { type BundledLanguage, codeToHtml, type ShikiTransformer } from "shiki";
+import { ShikiHighlighter } from "react-shiki";
+import { type BundledLanguage } from "shiki";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -29,50 +34,6 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
   code: "",
 });
 
-const lineNumberTransformer: ShikiTransformer = {
-  name: "line-numbers",
-  line(node, line) {
-    node.children.unshift({
-      type: "element",
-      tagName: "span",
-      properties: {
-        className: [
-          "inline-block",
-          "min-w-10",
-          "mr-4",
-          "text-right",
-          "select-none",
-          "text-muted-foreground",
-        ],
-      },
-      children: [{ type: "text", value: String(line) }],
-    });
-  },
-};
-
-export async function highlightCode(
-  code: string,
-  language: BundledLanguage,
-  showLineNumbers = false,
-) {
-  const transformers: ShikiTransformer[] = showLineNumbers
-    ? [lineNumberTransformer]
-    : [];
-
-  return await Promise.all([
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-light",
-      transformers,
-    }),
-    codeToHtml(code, {
-      lang: language,
-      theme: "one-dark-pro",
-      transformers,
-    }),
-  ]);
-}
-
 export const CodeBlock = ({
   code,
   language,
@@ -81,33 +42,25 @@ export const CodeBlock = ({
   children,
   ...props
 }: CodeBlockProps) => {
-  const [html, setHtml] = useState<string>("");
-  const [darkHtml, setDarkHtml] = useState<string>("");
-  const mounted = useRef(false);
   const rawLanguageLabel = String(language || "text");
   const languageLabel = ["bash", "sh", "shell"].includes(rawLanguageLabel)
     ? rawLanguageLabel
     : rawLanguageLabel.replace(/^\w/, (c) => c.toUpperCase());
 
-  useEffect(() => {
-    highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (!mounted.current) {
-        setHtml(light);
-        setDarkHtml(dark);
-        mounted.current = true;
-      }
-    });
-
-    return () => {
-      mounted.current = false;
-    };
-  }, [code, language, showLineNumbers]);
+  const transformers = useMemo(
+    () => [
+      transformerNotationDiff(),
+      transformerNotationHighlight(),
+      transformerNotationFocus(),
+    ],
+    [],
+  );
 
   return (
     <CodeBlockContext.Provider value={{ code }}>
       <div
         className={cn(
-          "font-claude-code-body group bg-[var(--code-bg)] text-foreground relative size-full overflow-hidden rounded-xl border border-[var(--code-border)] shadow-[0_10px_30px_-18px_rgba(0,0,0,0.45)]",
+          "font-claude-code-body code-block group bg-[var(--code-bg)] text-foreground relative flex flex-col size-full overflow-hidden rounded-xl border border-[var(--code-border)]",
           className,
         )}
         data-language={languageLabel}
@@ -117,19 +70,24 @@ export const CodeBlock = ({
           <div className="flex items-center gap-2">
             <span>{languageLabel}</span>
           </div>
-          {children && <div className="flex items-center gap-1.5">{children}</div>}
+          {children && (
+            <div className="flex items-center gap-1.5">{children}</div>
+          )}
         </div>
-        <div className="relative size-full" data-code-body>
-          <div
-            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! size-full overflow-auto dark:hidden [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:px-4 [&>pre]:py-3 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
-            dangerouslySetInnerHTML={{ __html: html }}
-          />
-          <div
-            className="[&>pre]:bg-transparent! [&>pre]:text-foreground! hidden size-full overflow-auto dark:block [&_code]:font-mono [&_code]:text-sm [&>pre]:m-0 [&>pre]:px-4 [&>pre]:py-3 [&>pre]:text-sm [&>pre]:whitespace-pre [&>pre]:leading-relaxed"
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
-            dangerouslySetInnerHTML={{ __html: darkHtml }}
-          />
+        <div className="relative w-full grow basis-auto min-h-0 overflow-auto" data-code-body>
+          <ShikiHighlighter
+            as="div"
+            language={language}
+            theme={{ light: "github-light", dark: "github-dark" }}
+            defaultColor="light-dark()"
+            showLanguage={false}
+            showLineNumbers={showLineNumbers}
+            transformers={transformers}
+            addDefaultStyles={false}
+            className="[&_pre.shiki]:!bg-transparent [&_pre.shiki]:m-0 [&_pre.shiki]:px-4 [&_pre.shiki]:py-3 [&_pre.shiki]:text-sm [&_pre.shiki]:whitespace-pre [&_pre.shiki]:leading-relaxed [&_code]:text-sm [&_code]:font-normal"
+          >
+            {code}
+          </ShikiHighlighter>
         </div>
       </div>
     </CodeBlockContext.Provider>
