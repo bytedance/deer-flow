@@ -9,7 +9,7 @@ import threading
 from typing import Any
 
 from src.channels.base import Channel
-from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ class FeishuChannel(Channel):
         self._CreateMessageReactionRequest = None
         self._CreateMessageReactionRequestBody = None
         self._Emoji = None
+        self._CreateFileRequest = None
+        self._CreateFileRequestBody = None
+        self._CreateImageRequest = None
+        self._CreateImageRequestBody = None
 
     async def start(self) -> None:
         if self._running:
@@ -48,6 +52,10 @@ class FeishuChannel(Channel):
         try:
             import lark_oapi as lark
             from lark_oapi.api.im.v1 import (
+                CreateFileRequest,
+                CreateFileRequestBody,
+                CreateImageRequest,
+                CreateImageRequestBody,
                 CreateMessageReactionRequest,
                 CreateMessageReactionRequestBody,
                 CreateMessageRequest,
@@ -68,6 +76,10 @@ class FeishuChannel(Channel):
         self._CreateMessageReactionRequest = CreateMessageReactionRequest
         self._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
         self._Emoji = Emoji
+        self._CreateFileRequest = CreateFileRequest
+        self._CreateFileRequestBody = CreateFileRequestBody
+        self._CreateImageRequest = CreateImageRequest
+        self._CreateImageRequestBody = CreateImageRequestBody
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -183,6 +195,71 @@ class FeishuChannel(Channel):
 
         logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._api_client:
+            return False
+
+        # Check size limits (image: 10MB, file: 30MB)
+        if attachment.is_image and attachment.size > 10 * 1024 * 1024:
+            logger.warning("[Feishu] image too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+        if not attachment.is_image and attachment.size > 30 * 1024 * 1024:
+            logger.warning("[Feishu] file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
+        try:
+            if attachment.is_image:
+                file_key = await self._upload_image(attachment.actual_path)
+                msg_type = "image"
+                content = json.dumps({"image_key": file_key})
+            else:
+                file_key = await self._upload_file(attachment.actual_path, attachment.filename)
+                msg_type = "file"
+                content = json.dumps({"file_key": file_key})
+
+            if msg.thread_ts:
+                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).reply_in_thread(True).build()).build()
+                await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+            else:
+                request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
+                await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+
+            logger.info("[Feishu] file sent: %s (type=%s)", attachment.filename, msg_type)
+            return True
+        except Exception:
+            logger.exception("[Feishu] failed to upload/send file: %s", attachment.filename)
+            return False
+
+    async def _upload_image(self, path) -> str:
+        """Upload an image to Feishu and return the image_key."""
+        with open(str(path), "rb") as f:
+            request = self._CreateImageRequest.builder().request_body(self._CreateImageRequestBody.builder().image_type("message").image(f).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.image.create, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
+        return response.data.image_key
+
+    async def _upload_file(self, path, filename: str) -> str:
+        """Upload a file to Feishu and return the file_key."""
+        suffix = path.suffix.lower() if hasattr(path, "suffix") else ""
+        if suffix in (".xls", ".xlsx", ".csv"):
+            file_type = "xls"
+        elif suffix in (".ppt", ".pptx"):
+            file_type = "ppt"
+        elif suffix == ".pdf":
+            file_type = "pdf"
+        elif suffix in (".doc", ".docx"):
+            file_type = "doc"
+        else:
+            file_type = "stream"
+
+        with open(str(path), "rb") as f:
+            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
+        return response.data.file_key
 
     # -- message formatting ------------------------------------------------
 

@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,27 @@ class InboundMessage:
 
 
 @dataclass
+class ResolvedAttachment:
+    """A file attachment resolved to a host filesystem path, ready for upload.
+
+    Attributes:
+        virtual_path: Original virtual path (e.g. /mnt/user-data/outputs/report.pdf).
+        actual_path: Resolved host filesystem path.
+        filename: Basename of the file.
+        mime_type: MIME type (e.g. "application/pdf").
+        size: File size in bytes.
+        is_image: True for image/* MIME types (platforms may handle images differently).
+    """
+
+    virtual_path: str
+    actual_path: Path
+    filename: str
+    mime_type: str
+    size: int
+    is_image: bool
+
+
+@dataclass
 class OutboundMessage:
     """A message from the agent dispatcher back to a channel.
 
@@ -78,6 +100,7 @@ class OutboundMessage:
     thread_id: str
     text: str
     artifacts: list[str] = field(default_factory=list)
+    attachments: list[ResolvedAttachment] = field(default_factory=list)
     is_final: bool = True
     thread_ts: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
