@@ -17,7 +17,9 @@ export interface AgentThreadState extends Record<string, unknown> {
   token_usage?: TokenUsage;
 }
 
-export interface AgentThread extends Thread<AgentThreadState> {}
+export interface AgentThread extends Thread<AgentThreadState> {
+  project_id?: string | null;
+}
 
 export interface AgentThreadContext {
   thread_id: string;

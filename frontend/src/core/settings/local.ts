@@ -50,6 +50,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   layout: {
     sidebar_collapsed: false,
+    sidebar_view_mode: "date",
   },
 };
 
@@ -106,6 +107,7 @@ export interface LocalSettings {
   };
   layout: {
     sidebar_collapsed: boolean;
+    sidebar_view_mode: "date" | "project";
   };
 }
 

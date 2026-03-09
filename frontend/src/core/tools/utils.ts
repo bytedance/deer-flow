@@ -2,6 +2,7 @@ import type { ToolCall } from "@langchain/core/messages";
 import type { AIMessage } from "@langchain/langgraph-sdk";
 
 import type { Translations } from "../i18n";
+import { getToolDisplayCategory } from "../mcp/tools";
 import { hasToolCalls } from "../messages/utils";
 
 export function explainLastToolCall(message: AIMessage, t: Translations) {
@@ -13,9 +14,10 @@ export function explainLastToolCall(message: AIMessage, t: Translations) {
 }
 
 export function explainToolCall(toolCall: ToolCall, t: Translations) {
-  if (toolCall.name === "web_search" || toolCall.name === "image_search") {
+  const category = getToolDisplayCategory(toolCall.name);
+  if (category === "web_search" || toolCall.name === "image_search") {
     return t.toolCalls.searchFor(toolCall.args.query);
-  } else if (toolCall.name === "web_fetch") {
+  } else if (category === "web_fetch") {
     return t.toolCalls.viewWebPage;
   } else if (toolCall.name === "present_files") {
     return t.toolCalls.presentFiles;
