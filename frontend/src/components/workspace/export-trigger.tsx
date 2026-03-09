@@ -35,7 +35,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
       }
       const agentThread = {
         thread_id: threadId,
-        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
         values: thread.values,
       } as AgentThread;
 
