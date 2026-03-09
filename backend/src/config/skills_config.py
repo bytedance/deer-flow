@@ -14,6 +14,10 @@ class SkillsConfig(BaseModel):
         default="/mnt/skills",
         description="Path where skills are mounted in the sandbox container",
     )
+    python_path: str = Field(
+        default=".venv",
+        description="Path to Python virtual environment for skills (relative to skills.path or absolute)",
+    )
 
     def get_skills_path(self) -> Path:
         """

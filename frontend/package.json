@@ -7,7 +7,7 @@
     "demo:save": "node scripts/save-demo.js",
     "build": "next build",
     "check": "next lint && tsc --noEmit",
-    "dev": "next dev --turbo",
+    "dev": "next dev --turbo -p 3000",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "preview": "next build && next start",

@@ -26,3 +26,10 @@ config.yaml
 
 # Claude Code settings
 .claude/settings.local.json
+
+
+.agents
+.claude
+.log
+.langgraph_api/*
+.playwright-cli/*

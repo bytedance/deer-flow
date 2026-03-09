@@ -1,13 +1,16 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway frontend frontend-stop status
 
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make check           - Check if all required tools are installed"
+	@echo "  make status          - Check if all services are running properly"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services (frontend + backend + nginx on localhost:2026)"
+	@echo "  make frontend        - Start frontend only (localhost:3000)"
+	@echo "  make frontend-stop   - Stop frontend only"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
@@ -221,6 +224,33 @@ dev:
 	echo ""; \
 	wait
 
+nginx:
+	@echo "Starting Nginx reverse proxy..."
+	@mkdir -p logs && nginx -g 'daemon off;' -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) > logs/nginx.log 2>&1 &
+	@sleep 2
+	@echo "✓ Nginx started on localhost:2026"
+	wait
+
+web:
+	@echo "Starting Frontend..."
+	@cd frontend && pnpm run dev > ../logs/frontend.log 2>&1 &
+	@sleep 3
+	@echo "✓ Frontend started on localhost:3000"
+	wait
+
+langGraph:
+	@echo "Starting LangGraph server..."
+	@cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1 &
+	@sleep 3
+	@echo "✓ LangGraph server started on localhost:2024"
+	wait
+
+make web_stop:
+	@echo "Stopping Frontend..."
+	@-pkill -f "next dev" 2>/dev/null || true
+	@sleep 1
+	@echo "✓ Frontend stopped"
+
 # Stop all services
 stop:
 	@echo "Stopping all services..."
@@ -265,3 +295,105 @@ docker-logs-frontend:
 	@./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@./scripts/docker.sh logs --gateway
+
+# Check service status
+status:
+	@echo "=========================================="
+	@echo "  Checking Service Status"
+	@echo "=========================================="
+	@echo ""
+	@FAILED=0; \
+	echo "Checking Frontend (Next.js on port 3000)..."; \
+	if lsof -i :3000 -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		FRONTEND_PID=$$(lsof -i :3000 -sTCP:LISTEN -t); \
+		echo "  ✓ Frontend running (PID: $$FRONTEND_PID)"; \
+	elif ss -tlnp | grep :3000 >/dev/null 2>&1; then \
+		echo "  ✓ Frontend running (detected via ss)"; \
+	elif netstat -tlnp 2>/dev/null | grep :3000 >/dev/null 2>&1; then \
+		echo "  ✓ Frontend running (detected via netstat)"; \
+	elif curl -s -f http://localhost:3000 >/dev/null 2>&1; then \
+		echo "  ✓ Frontend running (HTTP connectivity confirmed)"; \
+	else \
+		echo "  ✗ Frontend not running on port 3000"; \
+		echo "  ℹ️  Checking frontend logs..."; \
+		if [ -f logs/frontend.log ]; then \
+			tail -5 logs/frontend.log; \
+		else \
+			echo "    No frontend log file found"; \
+		fi; \
+		FAILED=1; \
+	fi; \
+	echo ""; \
+	echo "Checking Gateway API (Uvicorn on port 8001)..."; \
+	if lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		GATEWAY_PID=$$(lsof -i :8001 -sTCP:LISTEN -t); \
+		echo "  ✓ Gateway API running (PID: $$GATEWAY_PID)"; \
+	else \
+		echo "  ✗ Gateway API not running on port 8001"; \
+		FAILED=1; \
+	fi; \
+	echo ""; \
+	echo "Checking LangGraph Server (port 2024)..."; \
+	if netstat -tlnp 2>/dev/null | grep :2024 >/dev/null 2>&1; then \
+		LANGGRAPH_PID=$$(netstat -tlnp 2>/dev/null | grep :2024 | awk '{print $$7}' | cut -d'/' -f1); \
+		echo "  ✓ LangGraph server running (PID: $$LANGGRAPH_PID)"; \
+	else \
+		echo "  ✗ LangGraph server not running on port 2024"; \
+		FAILED=1; \
+	fi; \
+	echo ""; \
+	echo "Checking Nginx (port 2026)..."; \
+	if lsof -i :2026 -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		NGINX_PID=$$(lsof -i :2026 -sTCP:LISTEN -t); \
+		echo "  ✓ Nginx running (PID: $$NGINX_PID)"; \
+	else \
+		echo "  ✗ Nginx not running on port 2026"; \
+		FAILED=1; \
+	fi; \
+	echo ""; \
+	echo "Checking API connectivity..."; \
+	echo "  Gateway API (http://localhost:8001/health)..."; \
+	if curl -s -f http://localhost:8001/health >/dev/null 2>&1; then \
+		echo "    ✓ Gateway API health check passed"; \
+	else \
+		echo "    ✗ Gateway API health check failed"; \
+		FAILED=1; \
+	fi; \
+	echo "  LangGraph API (http://localhost:2024)..."; \
+	if curl -s -f http://localhost:2024 >/dev/null 2>&1; then \
+		echo "    ✓ LangGraph API health check passed"; \
+	else \
+		echo "    ✗ LangGraph API health check failed"; \
+		FAILED=1; \
+	fi; \
+	echo ""; \
+	if [ $$FAILED -eq 0 ]; then \
+		echo "=========================================="; \
+		echo "  ✓ All services are running properly!"; \
+		echo "=========================================="; \
+		echo ""; \
+		echo "Service URLs:"; \
+		echo "  🌐 Application: http://localhost:2026"; \
+		echo "  📡 API Gateway: http://localhost:2026/api/*"; \
+		echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"; \
+		echo "  🖥️  Frontend:    http://localhost:3000"; \
+		echo ""; \
+	else \
+		echo "=========================================="; \
+		echo "  ✗ Some services are not running properly"; \
+		echo "=========================================="; \
+		echo ""; \
+		echo "Troubleshooting:"; \
+		echo "  1. Run 'make dev' to start all services"; \
+		echo "  2. Check logs in the 'logs/' directory"; \
+		echo "  3. Verify all dependencies are installed"; \
+		exit 1; \
+	fi
+
+# Quick status check (silent version)
+status-quick:
+	@FRONTEND=$$(lsof -i :3000 -sTCP:LISTEN -t 2>/dev/null || echo "DOWN"); \
+	GATEWAY=$$(lsof -i :8001 -sTCP:LISTEN -t 2>/dev/null || echo "DOWN"); \
+	LANGGRAPH=$$(netstat -tlnp 2>/dev/null | grep :2024 >/dev/null && echo "UP" || echo "DOWN"); \
+	NGINX=$$(lsof -i :2026 -sTCP:LISTEN -t 2>/dev/null || echo "DOWN"); \
+	echo "Frontend: $$FRONTEND | Gateway: $$GATEWAY | LangGraph: $$LANGGRAPH | Nginx: $$NGINX"

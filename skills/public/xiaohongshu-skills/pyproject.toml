@@ -1,0 +1,53 @@
+[project]
+name = "xiaohongshu-skills"
+version = "0.1.0"
+description = "小红书自动化 Skills，基于 CDP 浏览器自动化"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.28.0",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9.0",
+    "pytest>=8.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E402",   # module-level imports not at top (needed for sys.path manipulation)
+    "RUF001", # ambiguous unicode characters (Chinese punctuation is intentional)
+    "RUF002", # ambiguous unicode in docstrings (Chinese punctuation is intentional)
+    "RUF003", # ambiguous unicode in comments (Chinese punctuation is intentional)
+]
+
+[tool.ruff.lint.per-file-ignores]
+
+[tool.ruff.lint.isort]
+known-first-party = ["xiaohongshu_skills"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

@@ -342,6 +342,7 @@ You have access to skills that provide optimized workflows for specific tasks. E
 3. The skill file contains references to external resources under the same folder
 4. Load referenced resources only when needed during execution
 5. Follow the skill's instructions precisely
+6. 所有技能的python解释器地址为: {config.skills.python_path}/bin/python，注意只有执行*.py文件时才需要使用该路径下的Python解释器
 
 **Skills are located at:** {container_base_path}
 

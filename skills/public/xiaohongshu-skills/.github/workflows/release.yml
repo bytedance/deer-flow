@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "CLAUDE.md"
+      - "PROMPT.md"
+      - "README.md"
+      - ".gitignore"
+      - ".claude/**"
+      - ".github/**"
+      - "tests/**"
+      - "docs/**"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version and generate tag
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          TAG="v${VERSION}-${SHORT_SHA}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package source
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          PREFIX="xiaohongshu-skills-${TAG}"
+          tar czf "${PREFIX}.tar.gz" \
+            --transform "s,^,${PREFIX}/," \
+            skills/ scripts/ SKILL.md pyproject.toml uv.lock LICENSE README.md
+          zip -r "${PREFIX}.zip" \
+            skills/ scripts/ SKILL.md pyproject.toml uv.lock LICENSE README.md \
+            -x '*.pyc' '__pycache__/*'
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          PREFIX="xiaohongshu-skills-${TAG}"
+          gh release create "$TAG" \
+            "${PREFIX}.tar.gz" \
+            "${PREFIX}.zip" \
+            --title "$TAG" \
+            --generate-notes
