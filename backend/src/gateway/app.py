@@ -15,6 +15,7 @@ from src.gateway.routers import (
     models,
     skills,
     suggestions,
+    threads,
     uploads,
 )
 
@@ -140,6 +141,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "threads",
+                "description": "Thread summary and list endpoints for lightweight UI loading",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -175,6 +180,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Threads API is mounted at /api/threads
+    app.include_router(threads.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

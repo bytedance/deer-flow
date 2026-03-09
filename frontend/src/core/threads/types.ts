@@ -11,6 +11,10 @@ export interface AgentThreadState extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {}
 
+export type ThreadListItem = Pick<AgentThread, "thread_id" | "updated_at"> & {
+  values: Pick<AgentThreadState, "title">;
+};
+
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
