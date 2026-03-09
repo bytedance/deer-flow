@@ -209,6 +209,16 @@ channels:
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
+  # Optional: global session defaults for all mobile channels
+  session:
+    assistant_id: lead_agent
+    config:
+      recursion_limit: 100
+    context:
+      thinking_enabled: true
+      is_plan_mode: false
+      subagent_enabled: false
+
   feishu:
     enabled: true
     app_id: $FEISHU_APP_ID
@@ -224,6 +234,20 @@ channels:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []               # empty = allow all
+
+    # Optional: per-channel / per-user session settings
+    session:
+      assistant_id: mobile_agent
+      context:
+        thinking_enabled: false
+      users:
+        "123456789":
+          assistant_id: vip_agent
+          config:
+            recursion_limit: 150
+          context:
+            thinking_enabled: true
+            subagent_enabled: true
 ```
 
 Set the corresponding API keys in your `.env` file:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
+from typing import Any
 
 from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
 from src.channels.store import ChannelStore
@@ -13,6 +15,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+
+DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+DEFAULT_RUN_CONTEXT: dict[str, Any] = {
+    "thinking_enabled": True,
+    "is_plan_mode": False,
+    "subagent_enabled": False,
+}
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _merge_dicts(*layers: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for layer in layers:
+        if isinstance(layer, Mapping):
+            merged.update(layer)
+    return merged
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -125,6 +146,8 @@ class ChannelManager:
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
+        default_session: dict[str, Any] | None = None,
+        channel_sessions: dict[str, Any] | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -132,10 +155,47 @@ class ChannelManager:
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
         self._assistant_id = assistant_id
+        self._default_session = _as_dict(default_session)
+        self._channel_sessions = dict(channel_sessions or {})
         self._client = None  # lazy init — langgraph_sdk async client
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+
+    def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
+        channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
+        users_layer = _as_dict(channel_layer.get("users"))
+        user_layer = _as_dict(users_layer.get(msg.user_id))
+        return channel_layer, user_layer
+
+    def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        channel_layer, user_layer = self._resolve_session_layer(msg)
+
+        assistant_id = (
+            user_layer.get("assistant_id")
+            or channel_layer.get("assistant_id")
+            or self._default_session.get("assistant_id")
+            or self._assistant_id
+        )
+        if not isinstance(assistant_id, str) or not assistant_id.strip():
+            assistant_id = self._assistant_id
+
+        run_config = _merge_dicts(
+            DEFAULT_RUN_CONFIG,
+            self._default_session.get("config"),
+            channel_layer.get("config"),
+            user_layer.get("config"),
+        )
+
+        run_context = _merge_dicts(
+            DEFAULT_RUN_CONTEXT,
+            self._default_session.get("context"),
+            channel_layer.get("context"),
+            user_layer.get("context"),
+            {"thread_id": thread_id},
+        )
+
+        return assistant_id, run_config, run_context
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
@@ -246,18 +306,14 @@ class ChannelManager:
         if thread_id is None:
             thread_id = await self._create_thread(client, msg)
 
+        assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
         result = await client.runs.wait(
             thread_id,
-            self._assistant_id,
+            assistant_id,
             input={"messages": [{"role": "human", "content": msg.text}]},
-            config={"recursion_limit": 100},
-            context={
-                "thread_id": thread_id,
-                "thinking_enabled": True,
-                "is_plan_mode": False,
-                "subagent_enabled": False,
-            },
+            config=run_config,
+            context=run_context,
         )
 
         response_text = _extract_response_text(result)

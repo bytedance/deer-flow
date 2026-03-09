@@ -394,6 +394,16 @@ memory:
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
 #
+#   # Optional: default mobile/session settings for all IM channels
+#   session:
+#     assistant_id: lead_agent
+#     config:
+#       recursion_limit: 100
+#     context:
+#       thinking_enabled: true
+#       is_plan_mode: false
+#       subagent_enabled: false
+#
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
@@ -409,3 +419,19 @@ memory:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
+#
+#     # Optional: channel-level session overrides
+#     session:
+#       assistant_id: mobile_agent
+#       context:
+#         thinking_enabled: false
+#
+#       # Optional: per-user overrides by user_id
+#       users:
+#         "123456789":
+#           assistant_id: vip_agent
+#           config:
+#             recursion_limit: 150
+#           context:
+#             thinking_enabled: true
+#             subagent_enabled: true
