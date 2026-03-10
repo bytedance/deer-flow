@@ -1,4 +1,4 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
@@ -21,6 +21,20 @@ class ViewedImageData(TypedDict):
 class TokenUsageState(TypedDict):
     input_tokens: int
     output_tokens: int
+
+
+class SubagentTrajectoryState(TypedDict, total=False):
+    task_id: str
+    subagent_type: str
+    description: str
+    prompt: str
+    status: str
+    result: str | None
+    error: str | None
+    started_at: str | None
+    completed_at: str | None
+    token_usage: TokenUsageState
+    messages: list[dict[str, Any]]
 
 
 def merge_token_usage(existing: TokenUsageState | None, new: TokenUsageState | None) -> TokenUsageState:
@@ -62,6 +76,21 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_subagent_trajectories(
+    existing: dict[str, SubagentTrajectoryState] | None,
+    new: dict[str, SubagentTrajectoryState] | None,
+) -> dict[str, SubagentTrajectoryState]:
+    """Reducer for subagent trajectories keyed by task_id.
+
+    New entries overwrite existing task IDs and preserve all other records.
+    """
+    if existing is None:
+        return new or {}
+    if new is None:
+        return existing
+    return {**existing, **new}
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -71,3 +100,4 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     token_usage: Annotated[TokenUsageState, merge_token_usage]
+    subagent_trajectories: Annotated[dict[str, SubagentTrajectoryState], merge_subagent_trajectories]

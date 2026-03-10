@@ -77,6 +77,7 @@ def _load_timeline(file_path: str, thread_id: str) -> dict:
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
         "last_message_index": 0,
+        "last_subagent_signatures": {},
         "events": [],
     }
 
@@ -96,6 +97,8 @@ def _write_timeline(file_path: str, data: dict) -> None:
 # Initialised lazily from the latest DB row on first access per thread.
 _db_last_index: dict[str, int] = {}
 _db_last_index_lock = threading.Lock()
+_db_subagent_signatures: dict[str, dict[str, str]] = {}
+_db_subagent_signatures_lock = threading.Lock()
 
 
 def _db_get_last_message_index(session: Any, thread_id: str) -> int:
@@ -112,7 +115,15 @@ def _db_get_last_message_index(session: Any, thread_id: str) -> int:
 
     from src.db.models import TimelineEventModel
 
-    latest = session.query(TimelineEventModel).filter(TimelineEventModel.thread_id == thread_id).order_by(TimelineEventModel.id.desc()).first()
+    latest = (
+        session.query(TimelineEventModel)
+        .filter(
+            TimelineEventModel.thread_id == thread_id,
+            TimelineEventModel.event_type.in_(["message", "history_truncated"]),
+        )
+        .order_by(TimelineEventModel.id.desc())
+        .first()
+    )
 
     if latest is None:
         idx = 0
@@ -132,6 +143,37 @@ def _db_get_last_message_index(session: Any, thread_id: str) -> int:
 def _db_set_last_message_index(thread_id: str, value: int) -> None:
     with _db_last_index_lock:
         _db_last_index[thread_id] = value
+
+
+def _json_signature(payload: Any) -> str:
+    try:
+        return json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    except Exception:
+        return repr(payload)
+
+
+def _db_get_subagent_signatures(session: Any, thread_id: str) -> dict[str, str]:
+    with _db_subagent_signatures_lock:
+        cached = _db_subagent_signatures.get(thread_id)
+    if cached is not None:
+        return cached
+
+    from src.db.models import TimelineEventModel
+
+    signatures: dict[str, str] = {}
+    rows = (
+        session.query(TimelineEventModel)
+        .filter(TimelineEventModel.thread_id == thread_id, TimelineEventModel.event_type == "subagent_trajectory")
+        .order_by(TimelineEventModel.id.asc())
+        .all()
+    )
+    for row in rows:
+        if row.message_id and row.message_data is not None:
+            signatures[row.message_id] = _json_signature(row.message_data)
+
+    with _db_subagent_signatures_lock:
+        _db_subagent_signatures[thread_id] = signatures
+    return signatures
 
 
 def _db_record_messages(
@@ -180,6 +222,45 @@ def _db_record_messages(
             _db_set_last_message_index(thread_id, current_len)
 
         # session.commit() is handled by the get_db_session context manager.
+
+
+def _db_record_subagent_trajectories(
+    thread_id: str,
+    trajectories: dict[str, Any],
+    stage: str,
+) -> None:
+    """Persist changed subagent trajectory snapshots to the database."""
+    from src.db.engine import get_db_session
+    from src.db.models import TimelineEventModel
+
+    if not isinstance(trajectories, dict) or not trajectories:
+        return
+
+    with get_db_session() as session:
+        signatures = _db_get_subagent_signatures(session, thread_id)
+        changed = False
+
+        for task_id, trajectory in trajectories.items():
+            signature = _json_signature(trajectory)
+            if signatures.get(task_id) == signature:
+                continue
+
+            session.add(
+                TimelineEventModel(
+                    thread_id=thread_id,
+                    event_type="subagent_trajectory",
+                    stage=stage,
+                    role="subagent",
+                    message_id=task_id,
+                    message_data=trajectory if isinstance(trajectory, dict) else {"value": trajectory},
+                )
+            )
+            signatures[task_id] = signature
+            changed = True
+
+        if changed:
+            with _db_subagent_signatures_lock:
+                _db_subagent_signatures[thread_id] = signatures
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +315,49 @@ def _file_record_messages(
         _write_timeline(timeline_path, timeline)
 
 
+def _file_record_subagent_trajectories(
+    state: AgentState,
+    thread_id: str,
+    trajectories: dict[str, Any],
+    stage: str,
+) -> None:
+    """Persist changed subagent trajectory snapshots to timeline JSON."""
+    if not isinstance(trajectories, dict) or not trajectories:
+        return
+
+    outputs_path = _resolve_outputs_path(state, thread_id)
+    timeline_path = os.path.join(outputs_path, "agent_timeline.json")
+
+    with _WRITE_LOCK:
+        timeline = _load_timeline(timeline_path, thread_id)
+        signatures = timeline.get("last_subagent_signatures", {})
+        if not isinstance(signatures, dict):
+            signatures = {}
+
+        changed = False
+        for task_id, trajectory in trajectories.items():
+            signature = _json_signature(trajectory)
+            if signatures.get(task_id) == signature:
+                continue
+
+            timeline["events"].append(
+                {
+                    "event": "subagent_trajectory",
+                    "timestamp": _utc_now(),
+                    "stage": stage,
+                    "task_id": task_id,
+                    "trajectory": trajectory,
+                }
+            )
+            signatures[task_id] = signature
+            changed = True
+
+        if changed:
+            timeline["last_subagent_signatures"] = signatures
+            timeline["updated_at"] = _utc_now()
+            _write_timeline(timeline_path, timeline)
+
+
 # ---------------------------------------------------------------------------
 # Middleware class
 # ---------------------------------------------------------------------------
@@ -261,8 +385,10 @@ class TimelineLoggingMiddleware(AgentMiddleware[AgentState]):
 
             if not _FORCE_FILE_MODE and is_db_enabled():
                 _db_record_messages(thread_id, messages, stage)
+                _db_record_subagent_trajectories(thread_id, state.get("subagent_trajectories", {}), stage)
             else:
                 _file_record_messages(state, thread_id, messages, stage)
+                _file_record_subagent_trajectories(state, thread_id, state.get("subagent_trajectories", {}), stage)
         except Exception:
             # Timeline logging should never break the agent loop.
             logger.exception("Timeline recording failed for thread %s", thread_id)

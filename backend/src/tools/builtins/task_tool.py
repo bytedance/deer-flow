@@ -7,16 +7,73 @@ from dataclasses import replace
 from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
+from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from src.agents.lead_agent.prompt import get_skills_prompt_section
 from src.agents.middlewares.usage_tracking_middleware import add_subagent_usage
-from src.agents.thread_state import ThreadState
+from src.agents.thread_state import SubagentTrajectoryState, ThreadState
 from src.subagents import SubagentExecutor, get_subagent_config
 from src.subagents.executor import SubagentStatus, get_background_task_result
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_subagent_status(status: SubagentStatus) -> str:
+    if status == SubagentStatus.COMPLETED:
+        return "completed"
+    if status == SubagentStatus.FAILED:
+        return "failed"
+    if status == SubagentStatus.TIMED_OUT:
+        return "timed_out"
+    if status == SubagentStatus.RUNNING:
+        return "running"
+    return "pending"
+
+
+def _build_subagent_trajectory(
+    *,
+    task_id: str,
+    subagent_type: str,
+    description: str,
+    prompt: str,
+    status: SubagentStatus,
+    result: str | None,
+    error: str | None,
+    started_at: str | None,
+    completed_at: str | None,
+    token_usage: dict[str, int] | None,
+    messages: list[dict],
+) -> dict[str, SubagentTrajectoryState]:
+    return {
+        task_id: {
+            "task_id": task_id,
+            "subagent_type": subagent_type,
+            "description": description,
+            "prompt": prompt,
+            "status": _serialize_subagent_status(status),
+            "result": result,
+            "error": error,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "token_usage": token_usage or {"input_tokens": 0, "output_tokens": 0},
+            "messages": messages,
+        }
+    }
+
+
+def _command_with_tool_message(
+    *,
+    content: str,
+    tool_call_id: str,
+    subagent_trajectories: dict[str, SubagentTrajectoryState] | None = None,
+) -> Command:
+    update: dict = {"messages": [ToolMessage(content, tool_call_id=tool_call_id)]}
+    if subagent_trajectories is not None:
+        update["subagent_trajectories"] = subagent_trajectories
+    return Command(update=update)
 
 
 @tool("task", parse_docstring=True)
@@ -27,7 +84,7 @@ def task_tool(
     subagent_type: Literal["general-purpose", "bash"],
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
-) -> str:
+) -> Command | str:
     """Delegate a task to a specialized subagent that runs in its own context.
 
     Subagents help you:
@@ -61,7 +118,10 @@ def task_tool(
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        return _command_with_tool_message(
+            content=f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash",
+            tool_call_id=tool_call_id,
+        )
 
     # Build config overrides
     overrides: dict = {}
@@ -81,8 +141,11 @@ def task_tool(
     thread_data = None
     thread_id = None
     parent_model = None
+    parent_model_spec = None
     trace_id = None
     user_id = None
+    parent_thinking_enabled = False
+    parent_thinking_effort = None
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -94,6 +157,21 @@ def task_tool(
         metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
 
+        # Get runtime model spec for provider-based models (e.g. "anthropic:claude-sonnet-4-6")
+        # This is needed so subagents can inherit the correct model + API key
+        configurable = runtime.config.get("configurable", {})
+        model_spec = configurable.get("model_spec")
+        if isinstance(model_spec, dict):
+            parent_model_spec = dict(model_spec)  # shallow copy
+            # Ensure user_id is included for API key lookup
+            if user_id and "user_id" not in parent_model_spec:
+                parent_model_spec["user_id"] = user_id
+        parent_thinking_enabled = bool(configurable.get("thinking_enabled", False))
+        thinking_effort = configurable.get("thinking_effort")
+        if isinstance(thinking_effort, str):
+            normalized_effort = thinking_effort.strip().lower()
+            parent_thinking_effort = normalized_effort or None
+
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
 
@@ -101,14 +179,19 @@ def task_tool(
     # Lazy import to avoid circular dependency
     from src.tools import get_available_tools
 
-    # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    # Subagents should not have subagent tools enabled (prevent recursive nesting).
+    # MCP tools are excluded because they are async-only (StructuredTool with only
+    # coroutine, no func) and subagents run synchronously in a thread pool.
+    tools = get_available_tools(model_name=parent_model, subagent_enabled=False, include_mcp=False)
 
     # Create executor
     executor = SubagentExecutor(
         config=config,
         tools=tools,
         parent_model=parent_model,
+        parent_model_spec=parent_model_spec,
+        parent_thinking_enabled=parent_thinking_enabled,
+        parent_thinking_effort=parent_thinking_effort,
         sandbox_state=sandbox_state,
         thread_data=thread_data,
         thread_id=thread_id,
@@ -123,11 +206,19 @@ def task_tool(
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
     last_status = None
-    last_message_count = 0  # Track how many AI messages we've already sent
+    last_trajectory_count = 0  # Track how many trajectory messages we've streamed
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({"type": "task_started", "task_id": task_id, "description": description})
+    writer(
+        {
+            "type": "task_started",
+            "task_id": task_id,
+            "description": description,
+            "subagent_type": subagent_type,
+            "prompt": prompt,
+        }
+    )
 
     while True:
         result = get_background_task_result(task_id)
@@ -135,30 +226,47 @@ def task_tool(
         if result is None:
             logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
             writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
-            return f"Error: Task {task_id} disappeared from background tasks"
+            return _command_with_tool_message(
+                content=f"Error: Task {task_id} disappeared from background tasks",
+                tool_call_id=tool_call_id,
+                subagent_trajectories=_build_subagent_trajectory(
+                    task_id=task_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status=SubagentStatus.FAILED,
+                    result=None,
+                    error="Task disappeared from background tasks",
+                    started_at=None,
+                    completed_at=None,
+                    token_usage=None,
+                    messages=[],
+                ),
+            )
 
         # Log status changes for debugging
         if result.status != last_status:
             logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
             last_status = result.status
 
-        # Check for new AI messages and send task_running events
-        current_message_count = len(result.ai_messages)
-        if current_message_count > last_message_count:
-            # Send task_running event for each new message
-            for i in range(last_message_count, current_message_count):
-                message = result.ai_messages[i]
+        # Check for new trajectory messages (AI + tool) and send task_running events
+        current_trajectory_count = len(result.trajectory_messages)
+        if current_trajectory_count > last_trajectory_count:
+            # Send task_running event for each new message in the trajectory
+            for i in range(last_trajectory_count, current_trajectory_count):
+                message = result.trajectory_messages[i]
                 writer(
                     {
                         "type": "task_running",
                         "task_id": task_id,
                         "message": message,
                         "message_index": i + 1,  # 1-based index for display
-                        "total_messages": current_message_count,
+                        "total_messages": current_trajectory_count,
                     }
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
-            last_message_count = current_message_count
+                msg_type = message.get("type", "unknown") if isinstance(message, dict) else "unknown"
+                logger.info(f"[trace={trace_id}] Task {task_id} sent {msg_type} message #{i + 1}/{current_trajectory_count}")
+            last_trajectory_count = current_trajectory_count
 
         # Check if task completed, failed, or timed out
         if result.status in (SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
@@ -175,17 +283,68 @@ def task_tool(
                 )
 
             if result.status == SubagentStatus.COMPLETED:
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result})
+                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "trajectory": result.trajectory_messages or []})
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
-                return f"Task Succeeded. Result: {result.result}"
+                final_text = f"Task Succeeded. Result: {result.result}"
+                return _command_with_tool_message(
+                    content=final_text,
+                    tool_call_id=tool_call_id,
+                    subagent_trajectories=_build_subagent_trajectory(
+                        task_id=task_id,
+                        subagent_type=subagent_type,
+                        description=description,
+                        prompt=prompt,
+                        status=result.status,
+                        result=result.result,
+                        error=result.error,
+                        started_at=result.started_at.isoformat() if result.started_at else None,
+                        completed_at=result.completed_at.isoformat() if result.completed_at else None,
+                        token_usage=result.token_usage,
+                        messages=result.trajectory_messages or [],
+                    ),
+                )
             elif result.status == SubagentStatus.FAILED:
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error})
+                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "trajectory": result.trajectory_messages or []})
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
-                return f"Task failed. Error: {result.error}"
+                final_text = f"Task failed. Error: {result.error}"
+                return _command_with_tool_message(
+                    content=final_text,
+                    tool_call_id=tool_call_id,
+                    subagent_trajectories=_build_subagent_trajectory(
+                        task_id=task_id,
+                        subagent_type=subagent_type,
+                        description=description,
+                        prompt=prompt,
+                        status=result.status,
+                        result=result.result,
+                        error=result.error,
+                        started_at=result.started_at.isoformat() if result.started_at else None,
+                        completed_at=result.completed_at.isoformat() if result.completed_at else None,
+                        token_usage=result.token_usage,
+                        messages=result.trajectory_messages or [],
+                    ),
+                )
             else:
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
-                return f"Task timed out. Error: {result.error}"
+                final_text = f"Task timed out. Error: {result.error}"
+                return _command_with_tool_message(
+                    content=final_text,
+                    tool_call_id=tool_call_id,
+                    subagent_trajectories=_build_subagent_trajectory(
+                        task_id=task_id,
+                        subagent_type=subagent_type,
+                        description=description,
+                        prompt=prompt,
+                        status=result.status,
+                        result=result.result,
+                        error=result.error,
+                        started_at=result.started_at.isoformat() if result.started_at else None,
+                        completed_at=result.completed_at.isoformat() if result.completed_at else None,
+                        token_usage=result.token_usage,
+                        messages=result.trajectory_messages or [],
+                    ),
+                )
 
         # Still running, wait before next poll
         time.sleep(5)  # Poll every 5 seconds
@@ -197,4 +356,20 @@ def task_tool(
         if poll_count > 192:  # 192 * 5s = 16 minutes
             logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
             writer({"type": "task_timed_out", "task_id": task_id})
-            return f"Task polling timed out after 16 minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+            return _command_with_tool_message(
+                content=f"Task polling timed out after 16 minutes. This may indicate the background task is stuck. Status: {result.status.value}",
+                tool_call_id=tool_call_id,
+                subagent_trajectories=_build_subagent_trajectory(
+                    task_id=task_id,
+                    subagent_type=subagent_type,
+                    description=description,
+                    prompt=prompt,
+                    status=SubagentStatus.TIMED_OUT,
+                    result=result.result,
+                    error="Polling timed out after 16 minutes",
+                    started_at=result.started_at.isoformat() if result.started_at else None,
+                    completed_at=result.completed_at.isoformat() if result.completed_at else None,
+                    token_usage=result.token_usage,
+                    messages=result.trajectory_messages or [],
+                ),
+            )
