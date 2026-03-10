@@ -166,10 +166,12 @@ class SubagentExecutor:
         model_name = _get_model_name(self.config, self.parent_model)
         model = create_chat_model(name=model_name, thinking_enabled=False)
 
+        from src.agents.middlewares.budget_enforcement_middleware import BudgetEnforcementMiddleware
         from src.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        # Reuse shared middleware composition with lead agent.
+        # Reuse shared middleware composition, then add budget enforcement.
         middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+        middlewares.append(BudgetEnforcementMiddleware(max_turns=self.config.max_turns))
 
         return create_agent(
             model=model,
