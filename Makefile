@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config check install dev dev-daemon stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -9,6 +9,7 @@ help:
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services (frontend + backend + nginx on localhost:2026)"
+	@echo "  make dev-daemon      - Start all services in background (daemon mode)"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
@@ -152,6 +153,10 @@ setup-sandbox:
 # Start all services
 dev:
 	@./scripts/start.sh
+
+# Start all services in daemon mode (background)
+dev-daemon:
+	@./scripts/start-daemon.sh
 
 # Stop all services
 stop:
