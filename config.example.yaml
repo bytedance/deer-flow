@@ -360,15 +360,19 @@ memory:
 # enabling multi-turn conversations to persist across process restarts.
 #
 # Supported types:
-#   memory   - In-process only. State is lost when the process exits. (default)
+#   memory   - In-process only. State is lost when the process exits.
 #   sqlite   - File-based SQLite persistence. Survives restarts.
 #              Requires: uv add langgraph-checkpoint-sqlite
 #   postgres - PostgreSQL persistence. Suitable for multi-process deployments.
 #              Requires: uv add langgraph-checkpoint-postgres psycopg[binary] psycopg-pool
 #
+# Default behavior (when this section is omitted):
+#   SQLite (checkpoints.db) if langgraph-checkpoint-sqlite is installed,
+#   otherwise falls back to in-memory (no persistence).
+#
 # Examples:
 #
-# In-memory (default when omitted — no persistence):
+# In-memory (no persistence, state lost on restart):
 # checkpointer:
 #   type: memory
 #

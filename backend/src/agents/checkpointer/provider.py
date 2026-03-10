@@ -143,10 +143,25 @@ def get_checkpointer() -> Checkpointer:
 
     config = get_checkpointer_config()
     if config is None:
-        from langgraph.checkpoint.memory import InMemorySaver
+        # Default to SQLite for persistence across restarts/upgrades (#1066)
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError:
+            from langgraph.checkpoint.memory import InMemorySaver
 
-        logger.info("Checkpointer: using InMemorySaver (in-process, not persistent)")
-        _checkpointer = InMemorySaver()
+            logger.warning(
+                "Checkpointer: falling back to InMemorySaver (install "
+                "langgraph-checkpoint-sqlite for persistent history)"
+            )
+            _checkpointer = InMemorySaver()
+            return _checkpointer
+
+        conn_str = _resolve_sqlite_conn_str("checkpoints.db")
+        logger.info("Checkpointer: using default SqliteSaver (%s)", conn_str)
+        _checkpointer_ctx = _sync_checkpointer_cm(
+            CheckpointerConfig(type="sqlite", connection_string="checkpoints.db")
+        )
+        _checkpointer = _checkpointer_ctx.__enter__()
         return _checkpointer
 
     _checkpointer_ctx = _sync_checkpointer_cm(config)
@@ -192,9 +207,24 @@ def checkpointer_context() -> Iterator[Checkpointer]:
 
     config = get_app_config()
     if config.checkpointer is None:
-        from langgraph.checkpoint.memory import InMemorySaver
+        # Default to SQLite for persistence across restarts/upgrades (#1066)
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError:
+            from langgraph.checkpoint.memory import InMemorySaver
 
-        yield InMemorySaver()
+            logger.warning(
+                "Checkpointer: falling back to InMemorySaver (install "
+                "langgraph-checkpoint-sqlite for persistent history)"
+            )
+            yield InMemorySaver()
+            return
+
+        conn_str = _resolve_sqlite_conn_str("checkpoints.db")
+        logger.info("Checkpointer: using default SqliteSaver (%s)", conn_str)
+        with SqliteSaver.from_conn_string(conn_str) as saver:
+            saver.setup()
+            yield saver
         return
 
     with _sync_checkpointer_cm(config.checkpointer) as saver:

@@ -94,15 +94,37 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer]:
         async with make_checkpointer() as checkpointer:
             app.state.checkpointer = checkpointer
 
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+    When no checkpointer is configured in *config.yaml*, defaults to a persistent
+    SQLite backend (``checkpoints.db`` in the application data directory) so that
+    conversation history survives restarts and upgrades.  Falls back to
+    ``InMemorySaver`` only if the SQLite package is not installed.
     """
 
     config = get_app_config()
 
     if config.checkpointer is None:
-        from langgraph.checkpoint.memory import InMemorySaver
+        # Default to SQLite for persistence across restarts/upgrades (#1066)
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        except ImportError:
+            from langgraph.checkpoint.memory import InMemorySaver
 
-        yield InMemorySaver()
+            logger.warning(
+                "Checkpointer: falling back to InMemorySaver (install "
+                "langgraph-checkpoint-sqlite for persistent history)"
+            )
+            yield InMemorySaver()
+            return
+
+        import pathlib
+
+        conn_str = _resolve_sqlite_conn_str("checkpoints.db")
+        if conn_str != ":memory:" and not conn_str.startswith("file:"):
+            pathlib.Path(conn_str).parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Checkpointer: using default AsyncSqliteSaver (%s)", conn_str)
+        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+            await saver.setup()
+            yield saver
         return
 
     async with _async_checkpointer(config.checkpointer) as saver:

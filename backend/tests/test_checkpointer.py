@@ -71,13 +71,13 @@ class TestCheckpointerConfig:
 
 
 class TestGetCheckpointer:
-    def test_returns_in_memory_saver_when_not_configured(self):
-        """get_checkpointer should return InMemorySaver when not configured."""
-        from langgraph.checkpoint.memory import InMemorySaver
+    def test_returns_sqlite_saver_when_not_configured(self):
+        """get_checkpointer should default to SqliteSaver for persistence (#1066)."""
+        from langgraph.checkpoint.sqlite import SqliteSaver
 
         cp = get_checkpointer()
         assert cp is not None
-        assert isinstance(cp, InMemorySaver)
+        assert isinstance(cp, SqliteSaver)
 
     def test_memory_returns_in_memory_saver(self):
         load_checkpointer_config_from_dict({"type": "memory"})
