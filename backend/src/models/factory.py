@@ -58,8 +58,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             kwargs.update({"thinking": {"type": "disabled"}})
-    if not model_config.supports_reasoning_effort:
-        kwargs.update({"reasoning_effort": None})
+    if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
+        del kwargs["reasoning_effort"]
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
