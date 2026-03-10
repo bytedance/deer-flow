@@ -90,9 +90,11 @@ Per-thread isolated execution with virtual path translation:
 Async task delegation with concurrent execution:
 
 - **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist)
+- **Per-agent reasoning controls**: each `SubagentConfig` can set `thinking_enabled` and `thinking_effort` with `inherit` semantics
 - **Concurrency**: Max 3 subagents per turn, 15-minute timeout
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
+- **Persistence**: Each completed subagent run is saved to thread checkpoints/state (`subagent_trajectories`) and timeline events (`subagent_trajectory`), including thinking/tool-call trajectory
 
 ### Memory System
 
