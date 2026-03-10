@@ -172,7 +172,9 @@ def checkpointer_context() -> Iterator[Checkpointer | None]:
 
     config = get_app_config()
     if config.checkpointer is None:
-        yield None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        yield InMemorySaver()
         return
 
     with _sync_checkpointer_cm(config.checkpointer) as saver:

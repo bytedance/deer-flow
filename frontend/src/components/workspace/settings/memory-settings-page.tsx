@@ -1,9 +1,15 @@
 "use client";
 
+import { Trash2 } from "lucide-react";
 import { Streamdown } from "streamdown";
 
+import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
-import { useMemory } from "@/core/memory/hooks";
+import {
+  useDeleteMemoryFact,
+  useMemory,
+  useMemoryConfig,
+} from "@/core/memory/hooks";
 import type { UserMemory } from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
@@ -114,28 +120,6 @@ function memoryToMarkdown(
     ),
   );
 
-  parts.push(`\n## ${t.settings.memory.markdown.facts}`);
-  if (memory.facts.length === 0) {
-    parts.push(
-      `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`,
-    );
-  } else {
-    parts.push(
-      [
-        `| ${t.settings.memory.markdown.table.category} | ${t.settings.memory.markdown.table.confidence} | ${t.settings.memory.markdown.table.content} | ${t.settings.memory.markdown.table.source} | ${t.settings.memory.markdown.table.createdAt} |`,
-        "|---|---|---|---|---|",
-        ...memory.facts.map((f) => {
-          const { key, value } = confidenceToLevelKey(f.confidence);
-          const levelLabel =
-            t.settings.memory.markdown.table.confidenceLevel[key];
-          const confidenceText =
-            typeof value === "number" ? `${levelLabel}` : levelLabel;
-          return `| ${upperFirst(f.category)} | ${confidenceText} | ${f.content} | [${t.settings.memory.markdown.table.view}](${pathOfThread(f.source)}) | ${formatTimeAgo(f.createdAt)} |`;
-        }),
-      ].join("\n"),
-    );
-  }
-
   const markdown = parts.join("\n\n");
 
   // Ensure every level-2 heading (##) is preceded by a horizontal rule.
@@ -155,14 +139,86 @@ function memoryToMarkdown(
   return out.join("\n");
 }
 
+function FactsList({ memory }: { memory: UserMemory }) {
+  const { t } = useI18n();
+  const { mutate: deleteFact, isPending } = useDeleteMemoryFact();
+
+  if (memory.facts.length === 0) {
+    return (
+      <p className="text-muted-foreground text-sm">
+        {t.settings.memory.markdown.empty}
+      </p>
+    );
+  }
+
+  return (
+    <ul className="divide-y">
+      {memory.facts.map((f) => {
+        const { key } = confidenceToLevelKey(f.confidence);
+        const levelLabel =
+          t.settings.memory.markdown.table.confidenceLevel[key];
+        return (
+          <li key={f.id} className="flex items-start gap-3 py-2">
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <p className="text-sm">{f.content}</p>
+              <p className="text-muted-foreground text-xs">
+                {upperFirst(f.category)} · {levelLabel} ·{" "}
+                <a
+                  href={pathOfThread(f.source)}
+                  className="hover:underline"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t.settings.memory.markdown.table.view}
+                </a>{" "}
+                · {formatTimeAgo(f.createdAt)}
+              </p>
+            </div>
+            <button
+              aria-label={t.settings.memory.deleteFact}
+              title={t.settings.memory.deleteFact}
+              disabled={isPending}
+              onClick={() => deleteFact(f.id)}
+              className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0 transition-colors disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
+  const { config, updateConfig, isUpdating } = useMemoryConfig();
+
   return (
     <SettingsSection
       title={t.settings.memory.title}
       description={t.settings.memory.description}
     >
+      {/* injection_enabled toggle */}
+      <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+        <div className="space-y-0.5">
+          <p className="text-sm font-medium">
+            {t.settings.memory.injectionEnabled}
+          </p>
+          <p className="text-muted-foreground text-xs">
+            {t.settings.memory.injectionEnabledDescription}
+          </p>
+        </div>
+        <Switch
+          checked={config?.injection_enabled ?? true}
+          disabled={isUpdating}
+          onCheckedChange={(checked) =>
+            updateConfig({ injection_enabled: checked })
+          }
+        />
+      </div>
+
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
       ) : error ? (
@@ -172,14 +228,25 @@ export function MemorySettingsPage() {
           {t.settings.memory.empty}
         </div>
       ) : (
-        <div className="rounded-lg border p-4">
-          <Streamdown
-            className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-            {...streamdownPlugins}
-          >
-            {memoryToMarkdown(memory, t)}
-          </Streamdown>
-        </div>
+        <>
+          {/* Summary sections (user/history) - unchanged Markdown rendering */}
+          <div className="rounded-lg border p-4">
+            <Streamdown
+              className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+              {...streamdownPlugins}
+            >
+              {memoryToMarkdown(memory, t)}
+            </Streamdown>
+          </div>
+
+          {/* Facts section - interactive list with delete buttons */}
+          <div className="rounded-lg border p-4">
+            <h3 className="mb-3 text-sm font-semibold">
+              {t.settings.memory.markdown.facts}
+            </h3>
+            <FactsList memory={memory} />
+          </div>
+        </>
       )}
     </SettingsSection>
   );

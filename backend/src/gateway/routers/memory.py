@@ -1,10 +1,10 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.agents.memory.updater import get_memory_data, reload_memory_data
-from src.config.memory_config import get_memory_config
+from src.agents.memory.updater import delete_memory_fact, get_memory_data, reload_memory_data, set_memory_settings
+from src.config.memory_config import get_memory_config, set_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
 
@@ -63,6 +63,17 @@ class MemoryConfigResponse(BaseModel):
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
+
+
+class MemoryConfigUpdateRequest(BaseModel):
+    """Request model for updating memory configuration."""
+
+    enabled: bool | None = Field(default=None, description="Whether to enable memory mechanism")
+    injection_enabled: bool | None = Field(default=None, description="Whether to inject memory into system prompt")
+    max_injection_tokens: int | None = Field(default=None, description="Maximum tokens for memory injection")
+    debounce_seconds: int | None = Field(default=None, description="Debounce time for memory updates")
+    max_facts: int | None = Field(default=None, description="Maximum number of facts to store")
+    fact_confidence_threshold: float | None = Field(default=None, description="Minimum confidence threshold for facts")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -199,3 +210,64 @@ async def get_memory_status() -> MemoryStatusResponse:
         ),
         data=MemoryResponse(**memory_data),
     )
+
+
+@router.patch(
+    "/memory/config",
+    response_model=MemoryConfigResponse,
+    summary="Update Memory Configuration",
+    description="Update memory configuration at runtime. Changes take effect immediately but are not persisted across restarts.",
+)
+async def update_memory_config_endpoint(request: MemoryConfigUpdateRequest) -> MemoryConfigResponse:
+    """Update memory configuration at runtime.
+
+    Only provided fields are updated; omitted fields retain their current values.
+
+    Returns:
+        The updated memory configuration.
+    """
+    config = get_memory_config()
+    update_data = request.model_dump(exclude_none=True)
+    updated = config.model_copy(update=update_data)
+    set_memory_config(updated)
+
+    # Persist settings that must be visible to the LangGraph server process
+    # (a separate process that cannot receive in-memory updates).
+    file_settings: dict = {}
+    if "injection_enabled" in update_data:
+        file_settings["injection_enabled"] = update_data["injection_enabled"]
+    if file_settings:
+        set_memory_settings(file_settings)
+
+    return MemoryConfigResponse(
+        enabled=updated.enabled,
+        storage_path=updated.storage_path,
+        debounce_seconds=updated.debounce_seconds,
+        max_facts=updated.max_facts,
+        fact_confidence_threshold=updated.fact_confidence_threshold,
+        injection_enabled=updated.injection_enabled,
+        max_injection_tokens=updated.max_injection_tokens,
+    )
+
+
+@router.delete(
+    "/memory/facts/{fact_id}",
+    summary="Delete Memory Fact",
+    description="Delete a single fact from memory by its ID.",
+)
+async def delete_memory_fact_endpoint(fact_id: str) -> dict:
+    """Delete a single memory fact by ID.
+
+    Args:
+        fact_id: The unique identifier of the fact to delete.
+
+    Returns:
+        {"success": true} if deleted successfully.
+
+    Raises:
+        404 if the fact is not found.
+    """
+    deleted = delete_memory_fact(fact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Fact '{fact_id}' not found")
+    return {"success": True}

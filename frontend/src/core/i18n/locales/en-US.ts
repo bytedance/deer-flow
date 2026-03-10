@@ -288,6 +288,10 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      injectionEnabled: "Inject memory into conversations",
+      injectionEnabledDescription:
+        "When enabled, DeerFlow includes your memory context in every conversation.",
+      deleteFact: "Delete fact",
       markdown: {
         overview: "Overview",
         userContext: "User context",

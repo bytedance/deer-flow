@@ -100,7 +100,9 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer | None]:
     config = get_app_config()
 
     if config.checkpointer is None:
-        yield None
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        yield InMemorySaver()
         return
 
     async with _async_checkpointer(config.checkpointer) as saver:
