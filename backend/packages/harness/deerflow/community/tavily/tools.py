@@ -57,6 +57,10 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
-        return f"# {result['title']}\n\n{result['raw_content'][:4096]}"
+        config = get_app_config().get_tool_config("web_fetch")
+        max_content_chars = 16384
+        if config is not None and "max_content_chars" in config.model_extra:
+            max_content_chars = config.model_extra.get("max_content_chars")
+        return f"# {result['title']}\n\n{result['raw_content'][:max_content_chars]}"
     else:
         return "Error: No results found"

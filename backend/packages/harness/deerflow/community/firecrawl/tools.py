@@ -70,4 +70,8 @@ def web_fetch_tool(url: str) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
-    return f"# {title}\n\n{markdown_content[:4096]}"
+    config = get_app_config().get_tool_config("web_fetch")
+    max_content_chars = 16384
+    if config is not None and "max_content_chars" in config.model_extra:
+        max_content_chars = config.model_extra.get("max_content_chars")
+    return f"# {title}\n\n{markdown_content[:max_content_chars]}"
