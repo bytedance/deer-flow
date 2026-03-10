@@ -239,6 +239,16 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    agentSwarm: "智能体集群",
+    taskProgress: (completed: number, total: number) =>
+      `${completed}/${total} 个任务`,
+    agentConsole: "智能体控制台",
+    taskPrompt: "任务指令",
+    agentTimeline: "智能体时间线",
+    result: "结果",
+    error: "错误",
+    running: "运行中",
+    done: "已完成",
   },
 
   // Settings

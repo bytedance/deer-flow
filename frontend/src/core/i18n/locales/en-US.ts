@@ -246,6 +246,16 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    agentSwarm: "Agent Swarm",
+    taskProgress: (completed: number, total: number) =>
+      `${completed}/${total} Tasks`,
+    agentConsole: "Agent Console",
+    taskPrompt: "Task Prompt",
+    agentTimeline: "Agent Timeline",
+    result: "Result",
+    error: "Error",
+    running: "Running",
+    done: "Done",
   },
 
   // Settings
