@@ -280,7 +280,7 @@ export const MessageGroup = memo(function MessageGroup({
   return prevLast === nextLast;
 });
 
-const ToolCall = memo(function ToolCall({
+export const ToolCall = memo(function ToolCall({
   id,
   messageId,
   name,
@@ -660,7 +660,7 @@ const ToolCall = memo(function ToolCall({
 
 const MAX_PREVIEW_COLUMNS = 6;
 
-const McpDataToolCall = memo(function McpDataToolCall({
+export const McpDataToolCall = memo(function McpDataToolCall({
   id,
   messageId,
   name,
@@ -797,27 +797,27 @@ const McpDataToolCall = memo(function McpDataToolCall({
     && prev.hideContent === next.hideContent;
 });
 
-interface GenericCoTStep<T extends string = string> {
+export interface GenericCoTStep<T extends string = string> {
   id?: string;
   messageId?: string;
   type: T;
 }
 
-interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
+export interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
   title: string | null;
   body: string | null;
 }
 
-interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
+export interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+export type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
-function convertToSteps(
+export function convertToSteps(
   messages: Message[],
   resultCache: Map<string, unknown>,
 ): CoTStep[] {

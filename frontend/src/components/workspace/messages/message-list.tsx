@@ -20,12 +20,14 @@ import {
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { agentNameFromType } from "@/core/tasks/utils";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { StreamingIndicator } from "../streaming-indicator";
 
+import { AgentSwarmBlock } from "./agent-swarm-block";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -149,6 +151,83 @@ export function MessageList({
     lastVisibleMessagesRef.current = [];
   }, [threadId]);
 
+  // Persisted subagent trajectory data from the backend thread state.
+  // Keyed by task_id, contains full trajectory messages for each completed subagent.
+  const subagentTrajectories = (
+    thread.values as Record<string, unknown> | undefined
+  )?.subagent_trajectories as
+    | Record<
+        string,
+        {
+          task_id: string;
+          messages?: unknown[];
+        }
+      >
+    | undefined;
+
+  // Sync subagent task state from messages into context (via useEffect, not render).
+  // This avoids the React rule violation of updating state during render.
+  const subagentTaskUpdates = useMemo(() => {
+    const updates: (Partial<Subtask> & { id: string })[] = [];
+    // We need to walk through all messages to find subagent groups.
+    // Use the same grouping logic to identify tool calls and results.
+    let agentCounter = 0;
+    for (const message of stableMessages) {
+      if (message.type === "ai") {
+        for (const toolCall of message.tool_calls ?? []) {
+          if (toolCall.name === "task" && toolCall.id) {
+            // Check for persisted trajectory data from backend state
+            const trajectory = subagentTrajectories?.[toolCall.id];
+            const trajectoryMessages = Array.isArray(trajectory?.messages)
+              ? (trajectory.messages as Message[])
+              : [];
+            updates.push({
+              id: toolCall.id,
+              subagent_type: toolCall.args?.subagent_type ?? "agent",
+              description: toolCall.args?.description ?? "",
+              prompt: toolCall.args?.prompt ?? "",
+              status: "in_progress",
+              agentName: agentNameFromType(toolCall.args?.subagent_type ?? "agent"),
+              agentIndex: agentCounter++,
+              messageIndex: 0,
+              totalMessages: trajectoryMessages.length,
+              messageHistory: trajectoryMessages,
+              createdAt: Date.now(),
+            });
+          }
+        }
+      } else if (message.type === "tool" && message.tool_call_id) {
+        const text = extractTextFromMessage(message);
+        if (text.startsWith("Task Succeeded. Result:")) {
+          updates.push({
+            id: message.tool_call_id,
+            status: "completed",
+            result: text.split("Task Succeeded. Result:")[1]?.trim(),
+          });
+        } else if (text.startsWith("Task failed.")) {
+          updates.push({
+            id: message.tool_call_id,
+            status: "failed",
+            error: text.split("Task failed.")[1]?.trim(),
+          });
+        } else if (text.startsWith("Task timed out")) {
+          updates.push({
+            id: message.tool_call_id,
+            status: "failed",
+            error: text,
+          });
+        }
+      }
+    }
+    return updates;
+  }, [stableMessages, subagentTrajectories]);
+
+  useEffect(() => {
+    for (const update of subagentTaskUpdates) {
+      updateSubtask(update);
+    }
+  }, [subagentTaskUpdates, updateSubtask]);
+
   // Find the last human message ID for attaching pending file badges
   // Must be before early return to satisfy rules of hooks
   const lastHumanMessageId = useMemo(() => {
@@ -227,54 +306,10 @@ export function MessageList({
         </div>
       );
     } else if (group.type === "assistant:subagent") {
-      const tasks = new Set<Subtask>();
-      for (const message of group.messages) {
-        if (message.type === "ai") {
-          for (const toolCall of message.tool_calls ?? []) {
-            if (toolCall.name === "task") {
-              const task: Subtask = {
-                id: toolCall.id!,
-                subagent_type: toolCall.args.subagent_type,
-                description: toolCall.args.description,
-                prompt: toolCall.args.prompt,
-                status: "in_progress",
-              };
-              updateSubtask(task);
-              tasks.add(task);
-            }
-          }
-        } else if (message.type === "tool") {
-          const taskId = message.tool_call_id;
-          if (taskId) {
-            const result = extractTextFromMessage(message);
-            if (result.startsWith("Task Succeeded. Result:")) {
-              updateSubtask({
-                id: taskId,
-                status: "completed",
-                result: result.split("Task Succeeded. Result:")[1]?.trim(),
-              });
-            } else if (result.startsWith("Task failed.")) {
-              updateSubtask({
-                id: taskId,
-                status: "failed",
-                error: result.split("Task failed.")[1]?.trim(),
-              });
-            } else if (result.startsWith("Task timed out")) {
-              updateSubtask({
-                id: taskId,
-                status: "failed",
-                error: result,
-              });
-            } else {
-              updateSubtask({
-                id: taskId,
-                status: "in_progress",
-              });
-            }
-          }
-        }
-      }
+      // Task state is synced via useEffect above — here we only collect IDs and render.
       const results: React.ReactNode[] = [];
+      const allTaskIds: string[] = [];
+      let taskCount = 0;
       for (const message of group.messages.filter(
         (message) => message.type === "ai",
       )) {
@@ -287,25 +322,44 @@ export function MessageList({
             />,
           );
         }
+        const taskIds = message.tool_calls
+          ?.filter((tc) => tc.name === "task")
+          ?.map((toolCall) => toolCall.id)
+          .filter(Boolean) as string[];
+        if (taskIds) {
+          allTaskIds.push(...taskIds);
+          taskCount += taskIds.length;
+        }
+      }
+
+      // Use AgentSwarmBlock for 2+ tasks, SubtaskCard for single task
+      if (allTaskIds.length >= 2) {
+        results.push(
+          <AgentSwarmBlock
+            key={"swarm-" + group.id}
+            taskIds={allTaskIds}
+          />,
+        );
+      } else {
         results.push(
           <div
             key="subtask-count"
             className="text-muted-foreground font-norma pt-2 text-sm"
           >
-            {t.subtasks.executing(tasks.size)}
+            {t.subtasks.executing(taskCount)}
           </div>,
         );
-        const taskIds = message.tool_calls?.map((toolCall) => toolCall.id);
-        for (const taskId of taskIds ?? []) {
+        for (const taskId of allTaskIds) {
           results.push(
             <SubtaskCard
               key={"task-group-" + taskId}
-              taskId={taskId!}
+              taskId={taskId}
               isLoading={thread.isLoading}
             />,
           );
         }
       }
+
       return (
         <div
           key={"subtask-group-" + group.id}
