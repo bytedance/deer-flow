@@ -7,7 +7,6 @@ This module provides a global memory mechanism that:
 """
 
 from src.agents.memory.prompt import (
-    FACT_EXTRACTION_PROMPT,
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
     format_memory_for_injection,
@@ -28,7 +27,6 @@ from src.agents.memory.updater import (
 __all__ = [
     # Prompt utilities
     "MEMORY_UPDATE_PROMPT",
-    "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
     # Queue
