@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import time
 from collections.abc import Mapping
 from typing import Any
 
-from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from src.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
@@ -56,12 +57,17 @@ def _extract_response_text(result: dict | list) -> str:
     else:
         return ""
 
-    # Walk backwards to find usable response text
+    # Walk backwards to find usable response text, but stop at the last
+    # human message to avoid returning text from a previous turn.
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
 
         msg_type = msg.get("type")
+
+        # Stop at the last human message — anything before it is a previous turn
+        if msg_type == "human":
+            break
 
         # Check for tool messages from ask_clarification (interrupt case)
         if msg_type == "tool" and msg.get("name") == "ask_clarification":
@@ -223,6 +229,83 @@ def _format_artifact_text(artifacts: list[str]) -> str:
     return "Created Files: 📎 " + "、".join(filenames)
 
 
+_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+
+
+def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+    """Resolve virtual artifact paths to host filesystem paths with metadata.
+
+    Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
+    virtual path is rejected with a warning to prevent exfiltrating uploads
+    or workspace files via IM channels.
+
+    Skips artifacts that cannot be resolved (missing files, invalid paths)
+    and logs warnings for them.
+    """
+    from src.config.paths import get_paths
+
+    attachments: list[ResolvedAttachment] = []
+    paths = get_paths()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
+    for virtual_path in artifacts:
+        # Security: only allow files from the agent outputs directory
+        if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
+            continue
+        try:
+            actual = paths.resolve_virtual_path(thread_id, virtual_path)
+            # Verify the resolved path is actually under the outputs directory
+            # (guards against path-traversal even after prefix check)
+            try:
+                actual.resolve().relative_to(outputs_dir)
+            except ValueError:
+                logger.warning("[Manager] artifact path escapes outputs dir: %s -> %s", virtual_path, actual)
+                continue
+            if not actual.is_file():
+                logger.warning("[Manager] artifact not found on disk: %s -> %s", virtual_path, actual)
+                continue
+            mime, _ = mimetypes.guess_type(str(actual))
+            mime = mime or "application/octet-stream"
+            attachments.append(ResolvedAttachment(
+                virtual_path=virtual_path,
+                actual_path=actual,
+                filename=actual.name,
+                mime_type=mime,
+                size=actual.stat().st_size,
+                is_image=mime.startswith("image/"),
+            ))
+        except (ValueError, OSError) as exc:
+            logger.warning("[Manager] failed to resolve artifact %s: %s", virtual_path, exc)
+    return attachments
+
+
+def _prepare_artifact_delivery(
+    thread_id: str,
+    response_text: str,
+    artifacts: list[str],
+) -> tuple[str, list[ResolvedAttachment]]:
+    """Resolve attachments and append filename fallbacks to the text response."""
+    attachments: list[ResolvedAttachment] = []
+    if not artifacts:
+        return response_text, attachments
+
+    attachments = _resolve_attachments(thread_id, artifacts)
+    resolved_virtuals = {attachment.virtual_path for attachment in attachments}
+    unresolved = [path for path in artifacts if path not in resolved_virtuals]
+
+    if unresolved:
+        artifact_text = _format_artifact_text(unresolved)
+        response_text = (response_text + "\n\n" + artifact_text) if response_text else artifact_text
+
+    # Always include resolved attachment filenames as a text fallback so files
+    # remain discoverable even when the upload is skipped or fails.
+    if attachments:
+        resolved_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+        response_text = (response_text + "\n\n" + resolved_text) if response_text else resolved_text
+
+    return response_text, attachments
+
+
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -265,7 +348,12 @@ class ChannelManager:
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
 
-        assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
+        assistant_id = (
+            user_layer.get("assistant_id")
+            or channel_layer.get("assistant_id")
+            or self._default_session.get("assistant_id")
+            or self._assistant_id
+        )
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
@@ -426,16 +514,13 @@ class ChannelManager:
             len(artifacts),
         )
 
-        # Append artifact filenames when present
-        if artifacts:
-            artifact_text = _format_artifact_text(artifacts)
-            if response_text:
-                response_text = response_text + "\n\n" + artifact_text
-            else:
-                response_text = artifact_text
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
         if not response_text:
-            response_text = "(No response from agent)"
+            if attachments:
+                response_text = _format_artifact_text([a.virtual_path for a in attachments])
+            else:
+                response_text = "(No response from agent)"
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
@@ -443,6 +528,7 @@ class ChannelManager:
             thread_id=thread_id,
             text=response_text,
             artifacts=artifacts,
+            attachments=attachments,
             thread_ts=msg.thread_ts,
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
@@ -515,16 +601,12 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-
-            if artifacts:
-                artifact_text = _format_artifact_text(artifacts)
-                if response_text:
-                    response_text = response_text + "\n\n" + artifact_text
-                else:
-                    response_text = artifact_text
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
             if not response_text:
-                if stream_error:
+                if attachments:
+                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+                elif stream_error:
                     response_text = "An error occurred while processing your request. Please try again."
                 else:
                     response_text = latest_text or "(No response from agent)"
@@ -543,6 +625,7 @@ class ChannelManager:
                     thread_id=thread_id,
                     text=response_text,
                     artifacts=artifacts,
+                    attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
                 )
