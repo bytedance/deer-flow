@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+
 # Install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
