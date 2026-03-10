@@ -6,6 +6,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from src.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
@@ -240,10 +241,13 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         middlewares.append(ViewImageMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
+    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", True)
     if subagent_enabled:
         max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
+
+    # LoopDetectionMiddleware — detect and break repetitive tool call loops
+    middlewares.append(LoopDetectionMiddleware())
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
@@ -261,7 +265,7 @@ def make_lead_agent(config: RunnableConfig):
     reasoning_effort = cfg.get("reasoning_effort", None)
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    subagent_enabled = cfg.get("subagent_enabled", True)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
