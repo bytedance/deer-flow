@@ -16,11 +16,20 @@
   src: url("/fonts/SwissMono_Roman_Code.woff2") format("woff2");
 }
 
+@font-face {
+  font-family: "PixelifySans";
+  src: url("/fonts/PixelifySans-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --font-response: "SwissSerif-AI", ui-serif, Georgia, serif;
   --font-user: "SwissSans-UI", ui-serif, Georgia, sans-serif;
   --font-code: "SwissMono-Code", ui-monospace, SFMono-Regular, Menlo, Monaco,
     Consolas, "Liberation Mono", "Courier New", monospace;
+  --font-pixel: "PixelifySans", sans-serif;
 }
 
 .font-claude-response-body {
@@ -130,6 +139,8 @@
     "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
   --font-serif:
     "Georgia", "Times New Roman", ui-serif, serif;
+  --font-pixel:
+    "PixelifySans", sans-serif;
 
   --animate-fade-in: fade-in 1.1s;
   @keyframes fade-in {

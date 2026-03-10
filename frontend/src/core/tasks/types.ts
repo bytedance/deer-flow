@@ -1,4 +1,4 @@
-import type { AIMessage } from "@langchain/langgraph-sdk";
+import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 export interface Subtask {
   id: string;
@@ -9,4 +9,13 @@ export interface Subtask {
   prompt: string;
   result?: string;
   error?: string;
+
+  // Agent Swarm visualization fields
+  agentName: string;
+  agentIndex: number;
+  messageIndex: number;
+  totalMessages: number;
+  /** Full trajectory including both AI and tool messages */
+  messageHistory: Message[];
+  createdAt: number;
 }

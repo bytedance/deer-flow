@@ -1,5 +1,5 @@
 import type { HumanMessage } from "@langchain/core/messages";
-import type { AIMessage } from "@langchain/langgraph-sdk";
+import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 import { useStream, type UseStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect } from "react";
@@ -62,14 +62,88 @@ export function useThreadStream({
         event !== null &&
         "type" in event
       ) {
-        if (event.type === "task_running") {
+        const eventType = (event as { type: string }).type;
+
+        if (eventType === "task_started") {
+          const e = event as {
+            type: "task_started";
+            task_id: string;
+            description: string;
+            subagent_type?: string;
+            prompt?: string;
+          };
+          updateSubtask({
+            id: e.task_id,
+            status: "in_progress",
+            description: e.description ?? "",
+            subagent_type: e.subagent_type ?? "agent",
+            prompt: e.prompt ?? "",
+            createdAt: Date.now(),
+            messageIndex: 0,
+            totalMessages: 0,
+            messageHistory: [],
+          });
+        } else if (eventType === "task_running") {
           const e = event as {
             type: "task_running";
             task_id: string;
-            message: AIMessage;
+            message: Message;
+            message_index?: number;
+            total_messages?: number;
           };
-          updateSubtask({ id: e.task_id, latestMessage: e.message });
-        } else if (event.type === "usage_update") {
+          // Only update latestMessage for AI messages (used by card status display).
+          // All messages (AI + tool) go into trajectory via _trajectoryMessage.
+          const isAiMessage = e.message?.type === "ai";
+          updateSubtask({
+            id: e.task_id,
+            latestMessage: isAiMessage ? (e.message as AIMessage) : undefined,
+            messageIndex: e.message_index ?? 0,
+            totalMessages: e.total_messages ?? 0,
+            _trajectoryMessage: e.message,
+          });
+        } else if (eventType === "task_completed") {
+          const e = event as {
+            type: "task_completed";
+            task_id: string;
+            result?: string;
+            trajectory?: Message[];
+          };
+          updateSubtask({
+            id: e.task_id,
+            status: "completed",
+            result: e.result,
+            // Replace messageHistory with the complete trajectory if provided
+            ...(e.trajectory && e.trajectory.length > 0
+              ? { messageHistory: e.trajectory }
+              : {}),
+          });
+        } else if (eventType === "task_failed") {
+          const e = event as {
+            type: "task_failed";
+            task_id: string;
+            error?: string;
+            trajectory?: Message[];
+          };
+          updateSubtask({
+            id: e.task_id,
+            status: "failed",
+            error: e.error ?? "Task failed",
+            ...(e.trajectory && e.trajectory.length > 0
+              ? { messageHistory: e.trajectory }
+              : {}),
+          });
+        } else if (eventType === "task_timed_out") {
+          const e = event as {
+            type: "task_timed_out";
+            task_id: string;
+            error?: string;
+          };
+          updateSubtask({
+            id: e.task_id,
+            status: "failed",
+            error: e.error ?? "Task timed out",
+          });
+        } else if (eventType === "usage_update") {
           const e = event as {
             type: "usage_update";
             input_tokens: number;
