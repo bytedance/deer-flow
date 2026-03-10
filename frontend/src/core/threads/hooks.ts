@@ -59,11 +59,11 @@ export function useThreadStream({
   }, [onStart, onFinish, onToolEnd]);
 
   useEffect(() => {
-    threadIdRef.current = threadId ?? null;
-    if (!threadId) {
-      // If threadId becomes null/undefined, reset the stream state
+    const normalizedThreadId = threadId ?? null;
+    if (threadIdRef.current !== normalizedThreadId) {
+      threadIdRef.current = normalizedThreadId;
       startedRef.current = false; // Reset for new thread
-      setOnStreamThreadId(threadId ?? null);
+      setOnStreamThreadId(normalizedThreadId);
     }
   }, [threadId]);
 
@@ -96,9 +96,6 @@ export function useThreadStream({
       setOnStreamThreadId(meta.thread_id);
     },
     onLangChainEvent(event) {
-      if (event.event === "on_tool_start") {
-        console.log("Tool started:", event.name, event.data);
-      }
       if (event.event === "on_tool_end") {
         listeners.current.onToolEnd?.({
           name: event.name,

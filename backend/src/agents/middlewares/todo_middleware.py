@@ -26,6 +26,14 @@ def _todos_in_messages(messages: list[Any]) -> bool:
     return False
 
 
+def _reminder_in_messages(messages: list[Any]) -> bool:
+    """Return True if a todo_reminder HumanMessage is already present in *messages*."""
+    for msg in messages:
+        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_reminder":
+            return True
+    return False
+
+
 def _format_todos(todos: list[Todo]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
@@ -59,6 +67,10 @@ class TodoMiddleware(TodoListMiddleware):
         messages = state.get("messages") or []
         if _todos_in_messages(messages):
             # write_todos is still visible in context — nothing to do.
+            return None
+
+        if _reminder_in_messages(messages):
+            # A reminder was already injected and hasn't been truncated yet.
             return None
 
         # The todo list exists in state but the original write_todos call is gone.

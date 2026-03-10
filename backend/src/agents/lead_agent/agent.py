@@ -88,7 +88,7 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
         is_plan_mode: Whether to enable plan mode with TodoList middleware.
 
     Returns:
-        TodoListMiddleware instance if plan mode is enabled, None otherwise.
+        TodoMiddleware instance if plan mode is enabled, None otherwise.
     """
     if not is_plan_mode:
         return None
