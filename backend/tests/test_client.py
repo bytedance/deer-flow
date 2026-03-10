@@ -367,10 +367,48 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False)
+        
+        # Mock the key that _ensure_agent would compute
+        # It includes skill state and memory mtime now
+        mock_skill_state = (('bootstrap', True), ('chart-visualization', True), ('claude-to-deerflow', True), 
+                           ('consulting-analysis', True), ('data-analysis', True), ('deep-research', True),
+                           ('find-skills', True), ('frontend-design', True), ('github-deep-research', True),
+                           ('image-generation', True), ('podcast-generation', True), ('ppt-generation', True),
+                           ('skill-creator', True), ('surprise-me', True), ('vercel-deploy', True),
+                           ('video-generation', True), ('web-design-guidelines', True))
+        mock_memory_mtime = 123456.789
+        
+        client._agent_config_key = (None, True, False, False, mock_skill_state, mock_memory_mtime)
 
         config = client._get_runnable_config("t1")
-        client._ensure_agent(config)
+        
+        # Mock the functions that _ensure_agent calls
+        mock_skill = MagicMock()
+        mock_skill.name = "test-skill"
+        mock_skill.enabled = True
+        
+        with (
+            patch("src.skills.loader.load_skills", return_value=[mock_skill]),
+            patch("src.agents.memory.updater._get_memory_file_path") as mock_get_memory_path,
+            patch("src.client.os.path.exists", return_value=True),
+            patch("src.client.os.stat") as mock_stat,
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent),
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+        ):
+            # Mock the stat result
+            mock_stat_result = MagicMock()
+            mock_stat_result.st_mtime = mock_memory_mtime
+            mock_stat.return_value = mock_stat_result
+            
+            # Mock the memory file path
+            mock_memory_file = MagicMock()
+            mock_memory_file.exists.return_value = True
+            mock_get_memory_path.return_value = mock_memory_file
+            
+            client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
