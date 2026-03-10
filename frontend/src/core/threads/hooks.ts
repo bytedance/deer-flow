@@ -60,11 +60,12 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
-    if (threadIdRef.current !== normalizedThreadId) {
-      threadIdRef.current = normalizedThreadId;
-      startedRef.current = false; // Reset for new thread
+    if (!normalizedThreadId) {
+      // Just reset for new thread creation when threadId becomes null/undefined
+      startedRef.current = false;
       setOnStreamThreadId(normalizedThreadId);
     }
+    threadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
   const _handleOnStart = useCallback((id: string) => {
@@ -77,7 +78,6 @@ export function useThreadStream({
   const handleStreamStart = useCallback(
     (_threadId: string) => {
       threadIdRef.current = _threadId;
-      setOnStreamThreadId(_threadId);
       _handleOnStart(_threadId);
     },
     [_handleOnStart],
@@ -85,6 +85,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
@@ -93,6 +94,7 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
+      setOnStreamThreadId(meta.thread_id);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {

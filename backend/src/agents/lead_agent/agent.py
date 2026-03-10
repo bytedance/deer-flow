@@ -1,7 +1,7 @@
 import logging
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware, TodoListMiddleware
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from src.agents.lead_agent.prompt import apply_prompt_template
@@ -11,6 +11,7 @@ from src.agents.middlewares.memory_middleware import MemoryMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
+from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
@@ -80,14 +81,14 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     return SummarizationMiddleware(**kwargs)
 
 
-def _create_todo_list_middleware(is_plan_mode: bool) -> TodoListMiddleware | None:
+def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
     """Create and configure the TodoList middleware.
 
     Args:
         is_plan_mode: Whether to enable plan mode with TodoList middleware.
 
     Returns:
-        TodoListMiddleware instance if plan mode is enabled, None otherwise.
+        TodoMiddleware instance if plan mode is enabled, None otherwise.
     """
     if not is_plan_mode:
         return None
@@ -192,7 +193,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 **Remember**: If you only need a few tool calls to complete a task and it's clear what to do, it's better to just do the task directly and NOT use this tool at all.
 """
 
-    return TodoListMiddleware(system_prompt=system_prompt, tool_description=tool_description)
+    return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
 
 
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
