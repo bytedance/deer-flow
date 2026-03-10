@@ -189,6 +189,8 @@ export interface Translations {
     writeFile: string;
     clickToViewContent: string;
     writeTodos: string;
+    renderVideo: string;
+    generateMusic: string;
     skillInstallTooltip: string;
   };
 

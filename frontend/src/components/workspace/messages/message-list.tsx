@@ -43,7 +43,17 @@ export function MessageList({
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  const messages = thread.messages;
+  // Filter out summarization messages so users always see the real conversation.
+  // The SummarizationMiddleware injects a HumanMessage starting with
+  // "Here is a summary of the conversation to date:" — hide it from the UI.
+  const messages = thread.messages.filter(
+    (msg) =>
+      !(
+        msg.type === "human" &&
+        typeof msg.content === "string" &&
+        msg.content.startsWith("Here is a summary of the conversation")
+      ),
+  );
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }

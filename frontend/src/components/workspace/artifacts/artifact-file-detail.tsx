@@ -34,7 +34,12 @@ import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
-import { checkCodeFile, getFileName } from "@/core/utils/files";
+import {
+  checkCodeFile,
+  getFileName,
+  isAudioFile,
+  isVideoFile,
+} from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -250,7 +255,25 @@ export function ArtifactFileDetail({
             readonly
           />
         )}
-        {!isCodeFile && (
+        {!isCodeFile && isVideoFile(filepath) && (
+          <video
+            className="size-full"
+            src={urlOfArtifact({ filepath, threadId, isMock })}
+            controls
+            autoPlay={false}
+          />
+        )}
+        {!isCodeFile && isAudioFile(filepath) && (
+          <div className="flex size-full items-center justify-center p-8">
+            <audio
+              className="w-full"
+              src={urlOfArtifact({ filepath, threadId, isMock })}
+              controls
+              autoPlay={false}
+            />
+          </div>
+        )}
+        {!isCodeFile && !isVideoFile(filepath) && !isAudioFile(filepath) && (
           <iframe
             className="size-full"
             src={urlOfArtifact({ filepath, threadId, isMock })}

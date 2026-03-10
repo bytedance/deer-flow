@@ -21,6 +21,10 @@ export function explainToolCall(toolCall: ToolCall, t: Translations) {
     return t.toolCalls.presentFiles;
   } else if (toolCall.name === "write_todos") {
     return t.toolCalls.writeTodos;
+  } else if (toolCall.name === "render_remotion_video") {
+    return t.toolCalls.renderVideo;
+  } else if (toolCall.name === "generate_music") {
+    return t.toolCalls.generateMusic;
   } else if (toolCall.args.description) {
     return toolCall.args.description;
   } else {

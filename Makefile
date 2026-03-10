@@ -8,13 +8,13 @@ help:
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
-	@echo "  make dev             - Start all services (frontend + backend + nginx on localhost:2026)"
+	@echo "  make dev             - Start all services (frontend + backend + nginx on localhost:3050)"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
-	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
+	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:3050)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
@@ -224,15 +224,15 @@ dev:
 	echo "Starting Nginx reverse proxy..."; \
 	mkdir -p logs && nginx -g 'daemon off;' -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) > logs/nginx.log 2>&1 & \
 	sleep 2; \
-	echo "✓ Nginx started on localhost:2026"; \
+	echo "✓ Nginx started on localhost:3050"; \
 	echo ""; \
 	echo "=========================================="; \
 	echo "  DeerFlow is ready!"; \
 	echo "=========================================="; \
 	echo ""; \
-	echo "  🌐 Application: http://localhost:2026"; \
-	echo "  📡 API Gateway: http://localhost:2026/api/*"; \
-	echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"; \
+	echo "  🌐 Application: http://localhost:3050"; \
+	echo "  📡 API Gateway: http://localhost:3050/api/*"; \
+	echo "  🤖 LangGraph:   http://localhost:3050/api/langgraph/*"; \
 	echo ""; \
 	echo "  📋 Logs:"; \
 	echo "     - LangGraph: logs/langgraph.log"; \

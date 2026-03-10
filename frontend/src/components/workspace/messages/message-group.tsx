@@ -2,11 +2,13 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
   ChevronUp,
+  FilmIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
+  Music2Icon,
   NotebookPenIcon,
   SearchIcon,
   SquareTerminalIcon,
@@ -408,6 +410,39 @@ function ToolCall({
         label={t.toolCalls.writeTodos}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
+    );
+  } else if (name === "render_remotion_video") {
+    const compositionId: string | undefined = (
+      args as { composition_id: string }
+    )?.composition_id;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.renderVideo}
+        icon={FilmIcon}
+      >
+        {compositionId && (
+          <ChainOfThoughtSearchResult>{compositionId}</ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (name === "generate_music") {
+    const description: string | undefined = (args as { prompt: string })
+      ?.prompt;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.generateMusic}
+        icon={Music2Icon}
+      >
+        {description && (
+          <ChainOfThoughtSearchResult>
+            {description.length > 80
+              ? description.slice(0, 80) + "..."
+              : description}
+          </ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtStep>
     );
   } else {
     const description: string | undefined = (args as { description: string })

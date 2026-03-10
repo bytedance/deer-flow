@@ -452,3 +452,48 @@ def list_background_tasks() -> list[SubagentResult]:
     """
     with _background_tasks_lock:
         return list(_background_tasks.values())
+
+
+def cancel_background_task(task_id: str) -> bool:
+    """Cancel a background task if it's still running.
+
+    Args:
+        task_id: The task ID to cancel.
+
+    Returns:
+        True if the task was found and marked as failed, False otherwise.
+    """
+    with _background_tasks_lock:
+        result = _background_tasks.get(task_id)
+        if result is None:
+            return False
+        if result.status in (SubagentStatus.PENDING, SubagentStatus.RUNNING):
+            result.status = SubagentStatus.FAILED
+            result.error = "Cancelled: parent run was interrupted"
+            result.completed_at = datetime.now()
+            logger.info(f"[trace={result.trace_id}] Task {task_id} cancelled (parent interrupted)")
+            return True
+    return False
+
+
+def cleanup_stale_tasks(max_age_seconds: int = 1800) -> int:
+    """Remove completed/failed tasks older than max_age_seconds.
+
+    Args:
+        max_age_seconds: Maximum age in seconds before cleanup (default: 30 minutes).
+
+    Returns:
+        Number of tasks cleaned up.
+    """
+    now = datetime.now()
+    to_remove = []
+    with _background_tasks_lock:
+        for task_id, result in _background_tasks.items():
+            if result.status in (SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
+                if result.completed_at and (now - result.completed_at).total_seconds() > max_age_seconds:
+                    to_remove.append(task_id)
+        for task_id in to_remove:
+            del _background_tasks[task_id]
+    if to_remove:
+        logger.info(f"Cleaned up {len(to_remove)} stale background tasks")
+    return len(to_remove)

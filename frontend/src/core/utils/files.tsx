@@ -192,6 +192,27 @@ export function getFileExtensionDisplayName(filepath: string) {
   }
 }
 
+const videoExtensions = new Set(["mp4", "mov", "m4v", "webm", "ogv"]);
+const audioExtensions = new Set([
+  "mp3",
+  "wav",
+  "ogg",
+  "aac",
+  "m4a",
+  "flac",
+  "wma",
+  "aiff",
+  "ape",
+]);
+
+export function isVideoFile(filepath: string): boolean {
+  return videoExtensions.has(getFileExtension(filepath));
+}
+
+export function isAudioFile(filepath: string): boolean {
+  return audioExtensions.has(getFileExtension(filepath));
+}
+
 export function getFileIcon(filepath: string, className?: string) {
   const extension = getFileExtension(filepath);
   const { isCodeFile } = checkCodeFile(filepath);

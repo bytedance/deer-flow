@@ -6,7 +6,7 @@
   "scripts": {
     "demo:save": "node scripts/save-demo.js",
     "build": "next build",
-    "check": "next lint && tsc --noEmit",
+    "check": "eslint . --ext .ts,.tsx && tsc --noEmit",
     "dev": "next dev --turbo",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
