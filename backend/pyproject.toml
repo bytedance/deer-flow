@@ -29,6 +29,7 @@ dependencies = [
     "tavily-python>=0.7.17",
     "firecrawl-py>=1.15.0",
     "tiktoken>=0.8.0",
+    "scikit-learn>=1.6.1",
     "uvicorn[standard]>=0.34.0",
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
