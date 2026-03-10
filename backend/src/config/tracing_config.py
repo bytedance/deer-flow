@@ -25,6 +25,25 @@ class TracingConfig(BaseModel):
 _tracing_config: TracingConfig | None = None
 
 
+def _env_flag_true(*names: str) -> bool:
+    """Return True when any provided env var is set to a truthy value."""
+    truthy_values = {"1", "true", "yes", "on"}
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip().lower() in truthy_values:
+            return True
+    return False
+
+
+def _first_env_value(*names: str) -> str | None:
+    """Return the first non-empty environment value from candidate names."""
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def get_tracing_config() -> TracingConfig:
     """Get the current tracing configuration from environment variables.
     Returns:
@@ -37,10 +56,11 @@ def get_tracing_config() -> TracingConfig:
         if _tracing_config is not None:  # Double-check after acquiring lock
             return _tracing_config
         _tracing_config = TracingConfig(
-            enabled=os.environ.get("LANGSMITH_TRACING", "").lower() == "true",
-            api_key=os.environ.get("LANGSMITH_API_KEY"),
-            project=os.environ.get("LANGSMITH_PROJECT", "deer-flow"),
-            endpoint=os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"),
+            # Keep compatibility with both legacy LANGCHAIN_* and newer LANGSMITH_* variables.
+            enabled=_env_flag_true("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"),
+            api_key=_first_env_value("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
+            project=_first_env_value("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT") or "deer-flow",
+            endpoint=_first_env_value("LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com",
         )
         return _tracing_config
 
