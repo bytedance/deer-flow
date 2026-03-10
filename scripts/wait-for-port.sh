@@ -20,7 +20,34 @@ SERVICE="${3:-Service}"
 elapsed=0
 interval=1
 
-while ! lsof -i :"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; do
+is_port_listening() {
+    if command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${PORT}$"; then
+            return 0
+        fi
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+while ! is_port_listening; do
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"
