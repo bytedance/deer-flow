@@ -46,6 +46,19 @@ def test_falls_back_to_langchain_env_names(monkeypatch):
     assert tracing_module.is_tracing_enabled() is True
 
 
+def test_langsmith_tracing_false_overrides_langchain_tracing_v2_true(monkeypatch):
+    """LANGSMITH_TRACING=false must win over LANGCHAIN_TRACING_V2=true."""
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "some-key")
+
+    _reset_tracing_cache()
+    cfg = tracing_module.get_tracing_config()
+
+    assert cfg.enabled is False
+    assert tracing_module.is_tracing_enabled() is False
+
+
 def test_defaults_when_project_not_set(monkeypatch):
     monkeypatch.setenv("LANGSMITH_TRACING", "yes")
     monkeypatch.setenv("LANGSMITH_API_KEY", "key")
