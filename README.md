@@ -273,7 +273,7 @@ FEISHU_APP_SECRET=your_app_secret
 **Slack Setup**
 
 1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
-2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`.
+2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `files:write`.
 3. Enable **Socket Mode** → generate an App-Level Token (`xapp-…`) with `connections:write` scope.
 4. Under **Event Subscriptions**, subscribe to bot events: `app_mention`, `message.im`.
 5. Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env` and enable the channel in `config.yaml`.
@@ -281,7 +281,7 @@ FEISHU_APP_SECRET=your_app_secret
 **Feishu / Lark Setup**
 
 1. Create an app on [Feishu Open Platform](https://open.feishu.cn/) → enable **Bot** capability.
-2. Add permissions: `im:message`, `im:resource`.
+2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
 

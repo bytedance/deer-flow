@@ -350,6 +350,26 @@ class TestExtractResponseText:
         }
         assert _extract_response_text(result) == "Could you clarify?"
 
+    def test_does_not_leak_previous_turn_text(self):
+        """When current turn AI has no text (only tool calls), do not return previous turn's text."""
+        from src.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "hello"},
+                {"type": "ai", "content": "Hi there!"},
+                {"type": "human", "content": "export data"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/data.csv"]}}],
+                },
+                {"type": "tool", "name": "present_files", "content": "ok"},
+            ]
+        }
+        # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
+        assert _extract_response_text(result) == ""
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests

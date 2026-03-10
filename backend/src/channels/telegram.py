@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 from src.channels.base import Channel
-from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,48 @@ class TelegramChannel(Channel):
 
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._application:
+            return False
+
+        try:
+            chat_id = int(msg.chat_id)
+        except (ValueError, TypeError):
+            logger.error("[Telegram] Invalid chat_id: %s", msg.chat_id)
+            return False
+
+        # Telegram limits: 10MB for photos, 50MB for documents
+        if attachment.size > 50 * 1024 * 1024:
+            logger.warning("[Telegram] file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
+        bot = self._application.bot
+        reply_to = self._last_bot_message.get(msg.chat_id)
+
+        try:
+            if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
+                with open(attachment.actual_path, "rb") as f:
+                    kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
+                    if reply_to:
+                        kwargs["reply_to_message_id"] = reply_to
+                    sent = await bot.send_photo(**kwargs)
+            else:
+                from telegram import InputFile
+
+                with open(attachment.actual_path, "rb") as f:
+                    input_file = InputFile(f, filename=attachment.filename)
+                    kwargs = {"chat_id": chat_id, "document": input_file}
+                    if reply_to:
+                        kwargs["reply_to_message_id"] = reply_to
+                    sent = await bot.send_document(**kwargs)
+
+            self._last_bot_message[msg.chat_id] = sent.message_id
+            logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
+            return True
+        except Exception:
+            logger.exception("[Telegram] failed to send file: %s", attachment.filename)
+            return False
 
     # -- helpers -----------------------------------------------------------
 

@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,14 @@ class Channel(ABC):
         to route the reply to the correct conversation/thread.
         """
 
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        """Upload a single file attachment to the platform.
+
+        Returns True if the upload succeeded, False otherwise.
+        Default implementation returns False (no file upload support).
+        """
+        return False
+
     # -- helpers -----------------------------------------------------------
 
     def _make_inbound(
@@ -80,9 +88,21 @@ class Channel(ABC):
         """Outbound callback registered with the bus.
 
         Only forwards messages targeted at this channel.
+        Sends the text message first, then uploads any file attachments.
+        File uploads are skipped entirely when the text send fails to avoid
+        partial deliveries (files without accompanying text).
         """
         if msg.channel_name == self.name:
             try:
                 await self.send(msg)
             except Exception:
                 logger.exception("Failed to send outbound message on channel %s", self.name)
+                return  # Do not attempt file uploads when the text message failed
+
+            for attachment in msg.attachments:
+                try:
+                    success = await self.send_file(msg, attachment)
+                    if not success:
+                        logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
+                except Exception:
+                    logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)

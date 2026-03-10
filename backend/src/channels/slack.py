@@ -9,7 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from src.channels.base import Channel
-from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,27 @@ class SlackChannel(Channel):
             except Exception:
                 pass
         raise last_exc  # type: ignore[misc]
+
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._web_client:
+            return False
+
+        try:
+            kwargs: dict[str, Any] = {
+                "channel": msg.chat_id,
+                "file": str(attachment.actual_path),
+                "filename": attachment.filename,
+                "title": attachment.filename,
+            }
+            if msg.thread_ts:
+                kwargs["thread_ts"] = msg.thread_ts
+
+            await asyncio.to_thread(self._web_client.files_upload_v2, **kwargs)
+            logger.info("[Slack] file uploaded: %s to channel=%s", attachment.filename, msg.chat_id)
+            return True
+        except Exception:
+            logger.exception("[Slack] failed to upload file: %s", attachment.filename)
+            return False
 
     # -- internal ----------------------------------------------------------
 
