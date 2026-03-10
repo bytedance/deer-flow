@@ -166,6 +166,15 @@ def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
         return len(text) // 4
 
 
+def _coerce_confidence(value: Any, default: float = 0.0) -> float:
+    """Coerce a confidence-like value to a bounded float in [0, 1]."""
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = default
+    return max(0.0, min(1.0, confidence))
+
+
 def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
     """Format memory data for injection into system prompt.
 
@@ -216,6 +225,34 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
+
+    # Format facts (sorted by confidence; include as many as token budget allows)
+    facts_data = memory_data.get("facts", [])
+    if isinstance(facts_data, list) and facts_data:
+        ranked_facts = sorted(
+            (f for f in facts_data if isinstance(f, dict) and str(f.get("content", "")).strip()),
+            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
+            reverse=True,
+        )
+
+        fact_lines: list[str] = []
+        for fact in ranked_facts:
+            content = str(fact.get("content", "")).strip()
+            category = str(fact.get("category", "context")).strip() or "context"
+            confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+            line = f"- [{category} | {confidence:.2f}] {content}"
+
+            candidate_section = "Facts:\n" + "\n".join(fact_lines + [line])
+            candidate_sections = sections + [candidate_section]
+            candidate_result = "\n\n".join(candidate_sections)
+
+            if _count_tokens(candidate_result) <= max_tokens:
+                fact_lines.append(line)
+            else:
+                break
+
+        if fact_lines:
+            sections.append("Facts:\n" + "\n".join(fact_lines))
 
     if not sections:
         return ""
