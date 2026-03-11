@@ -166,7 +166,7 @@ stop:
 	@-pkill -f "next dev" 2>/dev/null || true
 	@-nginx -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) -s quit 2>/dev/null || true
 	@sleep 1
-	@-pkill -9 nginx 2>/dev/null || true
+	@-pkill -9 -f nginx.local.conf 2>/dev/null || true
 	@echo "Cleaning up sandbox containers..."
 	@-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
 	@echo "✓ All services stopped"
