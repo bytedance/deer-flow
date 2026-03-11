@@ -86,8 +86,8 @@ def main() -> int:
             failed = True
     else:
         print("  ✗ uv not found")
-        print("    Install: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        print("    Or visit: https://docs.astral.sh/uv/getting-started/installation/")
+        print("    Visit the official installation guide for your platform:")
+        print("    https://docs.astral.sh/uv/getting-started/installation/")
         failed = True
 
     print()

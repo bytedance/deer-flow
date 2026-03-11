@@ -40,8 +40,14 @@ def main() -> int:
             project_root / "frontend" / ".env.example",
             project_root / "frontend" / ".env",
         )
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}")
+    except (FileNotFoundError, OSError) as exc:
+        print("Error while generating configuration files:")
+        print(f"  {exc}")
+        if isinstance(exc, PermissionError):
+            print(
+                "Hint: Check file permissions and ensure the files are not "
+                "read-only or locked by another process."
+            )
         return 1
 
     print("✓ Configuration files generated")
