@@ -72,6 +72,7 @@ if [ "$FAILED" -eq 0 ]; then
     echo "  make install  - Install project dependencies"
     echo "  make config   - Generate local config files"
     echo "  make dev      - Start development server"
+    echo "  make start    - Start production server"
 else
     echo "=========================================="
     echo "  ✗ Some dependencies are missing"
