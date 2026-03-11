@@ -43,11 +43,11 @@ export default function AgentChatPage() {
     context: { ...settings.context, agent_name: agent_name },
     onStart: () => {
       setIsNewThread(false);
-      history.replaceState(
-        null,
-        "",
-        `/workspace/agents/${agent_name}/chats/${threadId}`,
-      );
+      // Use router.replace so Next.js Router's internal state is updated.
+      // This ensures subsequent "New Chat" clicks are treated as a real
+      // cross-route navigation (actual-id → "new") rather than a no-op
+      // same-path navigation, which was causing stale content to persist.
+      router.replace(`/workspace/agents/${agent_name}/chats/${threadId}`);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
