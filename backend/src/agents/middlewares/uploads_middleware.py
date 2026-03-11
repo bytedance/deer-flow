@@ -2,14 +2,16 @@
 
 import logging
 from pathlib import Path
-from typing import NotRequired, override
+from typing import Callable, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from src.config.app_config import get_app_config
 from src.config.paths import Paths, get_paths
+from src.storage import get_thread_file_backend
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
-    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
+    def _files_from_kwargs(self, message: HumanMessage, file_exists: Callable[[str], bool] | None = None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
@@ -87,7 +89,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         Args:
             message: The human message to inspect.
-            uploads_dir: Physical uploads directory used to verify file existence.
+            file_exists: Optional existence callback for uploaded filenames.
                          When provided, entries whose files no longer exist are skipped.
 
         Returns:
@@ -104,7 +106,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             filename = f.get("filename") or ""
             if not filename or Path(filename).name != filename:
                 continue
-            if uploads_dir is not None and not (uploads_dir / filename).is_file():
+            if file_exists is not None and not file_exists(filename):
                 continue
             files.append(
                 {
@@ -145,26 +147,59 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
-        # Resolve uploads directory for existence checks
+        # Resolve uploads backend and existence checks.
+        # Local mode keeps existing path-based behavior to stay compatible with
+        # base_dir overrides in middleware tests and local runtime semantics.
         thread_id = runtime.context.get("thread_id")
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+        backend_kind = "local"
+        try:
+            backend_kind = get_app_config().thread_files.backend_for_feature("uploads")
+        except Exception:
+            # Unit tests may run without a full app config file; keep legacy local behavior.
+            backend_kind = "local"
 
-        # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        if backend_kind == "local":
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+            new_files = self._files_from_kwargs(last_message, (lambda name: bool(uploads_dir and (uploads_dir / name).is_file())) if thread_id else None) or []
+        else:
+            uploads_backend = get_thread_file_backend("uploads") if thread_id else None
+
+            def _exists(filename: str) -> bool:
+                if not thread_id or uploads_backend is None:
+                    return False
+                return uploads_backend.exists_virtual_file(thread_id, f"/mnt/user-data/uploads/{filename}")
+
+            new_files = self._files_from_kwargs(last_message, _exists if thread_id else None) or []
 
         # Collect historical files from the uploads directory (all except the new ones)
         new_filenames = {f["filename"] for f in new_files}
         historical_files: list[dict] = []
-        if uploads_dir and uploads_dir.exists():
-            for file_path in sorted(uploads_dir.iterdir()):
-                if file_path.is_file() and file_path.name not in new_filenames:
-                    stat = file_path.stat()
+        if backend_kind == "local":
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+            if uploads_dir and uploads_dir.exists():
+                for file_path in sorted(uploads_dir.iterdir()):
+                    if file_path.is_file() and file_path.name not in new_filenames:
+                        stat = file_path.stat()
+                        historical_files.append(
+                            {
+                                "filename": file_path.name,
+                                "size": stat.st_size,
+                                "path": f"/mnt/user-data/uploads/{file_path.name}",
+                                "extension": file_path.suffix,
+                            }
+                        )
+        else:
+            uploads_backend = get_thread_file_backend("uploads") if thread_id else None
+            if thread_id and uploads_backend is not None:
+                for item in uploads_backend.list_uploads(thread_id):
+                    if item.filename in new_filenames:
+                        continue
                     historical_files.append(
                         {
-                            "filename": file_path.name,
-                            "size": stat.st_size,
-                            "path": f"/mnt/user-data/uploads/{file_path.name}",
-                            "extension": file_path.suffix,
+                            "filename": item.filename,
+                            "size": item.size,
+                            "path": f"/mnt/user-data/uploads/{item.filename}",
+                            "extension": item.extension,
                         }
                     )
 

@@ -15,7 +15,7 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
+        ├── USER.md          <-- global user profile document exposed via /api/user-profile
         ├── agents/
         │   └── {agent_name}/
         │       ├── config.yaml

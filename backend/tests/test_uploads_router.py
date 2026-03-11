@@ -3,7 +3,9 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import UploadFile
+from fastapi import HTTPException
 
 from src.gateway.routers import uploads
 
@@ -20,6 +22,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "get_thread_file_backend", return_value=MagicMock()),
     ):
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
@@ -50,6 +53,7 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(uploads, "get_thread_file_backend", return_value=MagicMock()),
     ):
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
         result = asyncio.run(uploads.upload_files("thread-aio", files=[file]))
@@ -79,6 +83,7 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "get_thread_file_backend", return_value=MagicMock()),
     ):
         # These filenames must be rejected outright
         for bad_name in ["..", "."]:
@@ -96,3 +101,108 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
 
     # Only the safely normalised file should exist
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
+
+
+def test_finalize_upload_references_accepts_trusted_descriptor(monkeypatch, tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    uploads_backend = MagicMock()
+    uploads_backend.exists_virtual_file.return_value = True
+
+    def _backend(feature: str):
+        if feature == "uploads":
+            return uploads_backend
+        return MagicMock()
+
+    materialized = []
+
+    def _materialize(thread_id: str, virtual_path: str):
+        materialized.append((thread_id, virtual_path))
+        return thread_uploads_dir / "report.pdf"
+
+    with (
+        patch.object(uploads, "get_paths", return_value=MagicMock(sandbox_uploads_dir=lambda _thread_id: thread_uploads_dir)),
+        patch.object(uploads, "get_thread_file_backend", side_effect=_backend),
+        patch.object(uploads, "materialize_upload_to_local_cache", side_effect=_materialize),
+    ):
+        request = uploads.FinalizeReferencesRequest(
+            attachments=[
+                uploads.TrustedAttachmentDescriptor(
+                    thread_id="thread-1",
+                    filename="report.pdf",
+                    size=128,
+                    content_type="application/pdf",
+                    object_key="thread-files/thread-1/uploads/report.pdf",
+                    trusted_url="https://r2.example.com/thread-files/thread-1/uploads/report.pdf",
+                    etag='"abc"',
+                )
+            ]
+        )
+        result = asyncio.run(uploads.finalize_upload_references("thread-1", request))
+
+    assert result.success is True
+    assert result.files[0]["filename"] == "report.pdf"
+    assert materialized == [("thread-1", "/mnt/user-data/uploads/report.pdf")]
+
+
+def test_finalize_upload_references_rejects_wrong_thread_binding():
+    request = uploads.FinalizeReferencesRequest(
+        attachments=[
+            uploads.TrustedAttachmentDescriptor(
+                thread_id="thread-2",
+                filename="report.pdf",
+                size=128,
+                content_type="application/pdf",
+                object_key="thread-files/thread-1/uploads/report.pdf",
+            )
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(uploads.finalize_upload_references("thread-1", request))
+
+    assert exc.value.status_code == 400
+    assert "thread_id mismatch" in str(exc.value.detail)
+
+
+def test_finalize_upload_references_rejects_noncanonical_object_key():
+    request = uploads.FinalizeReferencesRequest(
+        attachments=[
+            uploads.TrustedAttachmentDescriptor(
+                thread_id="thread-1",
+                filename="report.pdf",
+                size=128,
+                content_type="application/pdf",
+                object_key="external-bucket/public/report.pdf",
+            )
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(uploads.finalize_upload_references("thread-1", request))
+
+    assert exc.value.status_code == 400
+    assert "canonical thread uploads namespace" in str(exc.value.detail)
+
+
+def test_finalize_upload_references_requires_durable_object_presence(monkeypatch):
+    uploads_backend = MagicMock()
+    uploads_backend.exists_virtual_file.return_value = False
+
+    with patch.object(uploads, "get_thread_file_backend", return_value=uploads_backend):
+        request = uploads.FinalizeReferencesRequest(
+            attachments=[
+                uploads.TrustedAttachmentDescriptor(
+                    thread_id="thread-1",
+                    filename="report.pdf",
+                    size=128,
+                    content_type="application/pdf",
+                    object_key="thread-files/thread-1/uploads/report.pdf",
+                )
+            ]
+        )
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(uploads.finalize_upload_references("thread-1", request))
+
+    assert exc.value.status_code == 404

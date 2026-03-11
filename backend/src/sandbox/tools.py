@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
 from langgraph.typing import ContextT
@@ -12,6 +13,7 @@ from src.sandbox.exceptions import (
 )
 from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import get_sandbox_provider
+from src.storage import OUTPUTS_VIRTUAL_PREFIX, is_uploads_virtual_path, materialize_upload_to_local_cache, publish_output_file
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -232,6 +234,88 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
     runtime.state["thread_directories_created"] = True
 
 
+def _thread_id(runtime: ToolRuntime[ContextT, ThreadState] | None) -> str | None:
+    if runtime is None:
+        return None
+    return runtime.context.get("thread_id")
+
+
+def _outputs_dir(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Path | None:
+    thread_data = get_thread_data(runtime)
+    if not thread_data:
+        return None
+    outputs_path = thread_data.get("outputs_path")
+    if not outputs_path:
+        return None
+    return Path(outputs_path)
+
+
+def _materialize_upload_path_if_needed(runtime: ToolRuntime[ContextT, ThreadState] | None, virtual_path: str) -> None:
+    """Ensure upload file exists in local cache when command/tool needs a local path."""
+    if runtime is None or not is_uploads_virtual_path(virtual_path):
+        return
+    thread_id = _thread_id(runtime)
+    if not thread_id:
+        return
+    try:
+        materialize_upload_to_local_cache(thread_id, virtual_path)
+    except Exception:
+        # Let downstream file operations surface the user-facing error details.
+        return
+
+
+def _materialize_uploads_in_command(runtime: ToolRuntime[ContextT, ThreadState] | None, command: str) -> None:
+    """Materialize upload file arguments referenced directly in bash commands."""
+    if runtime is None or VIRTUAL_PATH_PREFIX not in command:
+        return
+    matches = re.findall(rf"{re.escape(VIRTUAL_PATH_PREFIX)}/uploads/[^\s\"';&|<>()]+", command)
+    for upload_path in sorted(set(matches)):
+        _materialize_upload_path_if_needed(runtime, upload_path)
+
+
+def _snapshot_outputs(runtime: ToolRuntime[ContextT, ThreadState] | None) -> dict[str, int]:
+    outputs_dir = _outputs_dir(runtime)
+    if outputs_dir is None or not outputs_dir.exists():
+        return {}
+    snapshot: dict[str, int] = {}
+    for file_path in outputs_dir.rglob("*"):
+        if not file_path.is_file():
+            continue
+        try:
+            rel = file_path.relative_to(outputs_dir).as_posix()
+            snapshot[rel] = file_path.stat().st_mtime_ns
+        except OSError:
+            continue
+    return snapshot
+
+
+def _publish_changed_outputs(runtime: ToolRuntime[ContextT, ThreadState] | None, before: dict[str, int]) -> None:
+    thread_id = _thread_id(runtime)
+    outputs_dir = _outputs_dir(runtime)
+    if not thread_id or outputs_dir is None or not outputs_dir.exists():
+        return
+
+    after = _snapshot_outputs(runtime)
+    for rel, mtime_ns in after.items():
+        if before.get(rel) == mtime_ns:
+            continue
+        file_path = outputs_dir / rel
+        virtual_path = f"{OUTPUTS_VIRTUAL_PREFIX}{rel}"
+        publish_output_file(thread_id, virtual_path, file_path)
+
+
+def _publish_single_output(runtime: ToolRuntime[ContextT, ThreadState] | None, original_path: str, resolved_path: str) -> None:
+    thread_id = _thread_id(runtime)
+    if not thread_id:
+        return
+
+    virtual_path = f"/{original_path.lstrip('/')}"
+    if not virtual_path.startswith(OUTPUTS_VIRTUAL_PREFIX):
+        return
+
+    publish_output_file(thread_id, virtual_path, resolved_path)
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -247,10 +331,14 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        _materialize_uploads_in_command(runtime, command)
+        outputs_before = _snapshot_outputs(runtime)
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             command = replace_virtual_paths_in_command(command, thread_data)
-        return sandbox.execute_command(command)
+        result = sandbox.execute_command(command)
+        _publish_changed_outputs(runtime, outputs_before)
+        return result
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -268,6 +356,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        _materialize_upload_path_if_needed(runtime, path)
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
@@ -304,6 +393,7 @@ def read_file_tool(
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        _materialize_upload_path_if_needed(runtime, path)
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
@@ -343,10 +433,12 @@ def write_file_tool(
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        original_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
         sandbox.write_file(path, content, append)
+        _publish_single_output(runtime, original_path, path)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
@@ -382,6 +474,7 @@ def str_replace_tool(
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        original_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
@@ -395,6 +488,7 @@ def str_replace_tool(
         else:
             content = content.replace(old_str, new_str, 1)
         sandbox.write_file(path, content)
+        _publish_single_output(runtime, original_path, path)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"

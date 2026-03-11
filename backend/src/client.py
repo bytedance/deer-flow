@@ -9,6 +9,8 @@ Usage:
     client = DeerFlowClient()
     response = client.chat("Analyze this paper for me", thread_id="my-thread")
     print(response)
+                # Reuse one worker when already inside an event loop to avoid
+                # creating a new ThreadPoolExecutor per converted file.
 
     # Streaming
     for event in client.stream("hello"):
@@ -18,7 +20,7 @@ Usage:
 import asyncio
 import json
 import logging
-import mimetypes
+                uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
 import os
 import re
 import shutil
@@ -41,10 +43,12 @@ from src.config.app_config import get_app_config, reload_app_config
 from src.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
+from src.storage import build_upload_metadata, extract_file_from_skill_archive_bytes, get_thread_file_backend, guess_mime_type, is_text_bytes
 
 logger = logging.getLogger(__name__)
 
 
+                        sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
 @dataclass
 class StreamEvent:
     """A single event from the streaming agent response.
@@ -67,28 +71,10 @@ class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
     Provides direct programmatic access to DeerFlow's agent capabilities
-    without requiring LangGraph Server or Gateway API processes.
-
-    Note:
         Multi-turn conversations require a ``checkpointer``. Without one,
-        each ``stream()`` / ``chat()`` call is stateless — ``thread_id``
-        is only used for file isolation (uploads / artifacts).
-
         The system prompt (including date, memory, and skills context) is
-        generated when the internal agent is first created and cached until
-        the configuration key changes. Call :meth:`reset_agent` to force
-        a refresh in long-running processes.
-
-    Example::
-
-        from src.client import DeerFlowClient
-
-        client = DeerFlowClient()
-
-        # Simple one-shot
-        print(client.chat("hello"))
-
-        # Streaming
+        uploads_backend = get_thread_file_backend("uploads")
+        files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
         for event in client.stream("hello"):
             print(event.type, event.data)
 
@@ -743,8 +729,11 @@ class DeerFlowClient:
                 has_convertible_file = True
 
         uploads_dir = self._get_uploads_dir(thread_id)
+        uploads_backend = get_thread_file_backend("uploads")
+        sidecar_backend = get_thread_file_backend("upload_markdown_sidecars")
         uploaded_files: list[dict] = []
 
+<<<<<<< HEAD
         conversion_pool = None
         if has_convertible_file:
             try:
@@ -753,6 +742,12 @@ class DeerFlowClient:
                 conversion_pool = None
             else:
                 import concurrent.futures
+=======
+        for src_path in resolved_files:
+            dest = uploads_dir / src_path.name
+            shutil.copy2(src_path, dest)
+            uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
+>>>>>>> 31ec7c3 (Blob user uploads)
 
                 # Reuse one worker when already inside an event loop to avoid
                 # creating a new ThreadPoolExecutor per converted file.
@@ -793,10 +788,20 @@ class DeerFlowClient:
                         info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
                         info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
+<<<<<<< HEAD
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
+=======
+                if md_path is not None:
+                    sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
+                    info["markdown_file"] = md_path.name
+                    info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
+                    info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
+
+            uploaded_files.append(info)
+>>>>>>> 31ec7c3 (Blob user uploads)
 
         return {
             "success": True,
@@ -814,6 +819,7 @@ class DeerFlowClient:
             Dict with "files" and "count" keys, matching the Gateway API
             ``list_uploaded_files`` response.
         """
+<<<<<<< HEAD
         uploads_dir = self._get_uploads_dir(thread_id)
         if not uploads_dir.exists():
             return {"files": [], "count": 0}
@@ -836,6 +842,10 @@ class DeerFlowClient:
                     "modified": stat.st_mtime,
                 }
             )
+=======
+        uploads_backend = get_thread_file_backend("uploads")
+        files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
+>>>>>>> 31ec7c3 (Blob user uploads)
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
@@ -855,16 +865,27 @@ class DeerFlowClient:
         """
         uploads_dir = self._get_uploads_dir(thread_id)
         file_path = (uploads_dir / filename).resolve()
+        virtual_path = f"/mnt/user-data/uploads/{filename}"
 
         try:
             file_path.relative_to(uploads_dir.resolve())
         except ValueError as exc:
             raise PermissionError("Access denied: path traversal detected") from exc
 
-        if not file_path.is_file():
+        uploads_backend = get_thread_file_backend("uploads")
+        if not file_path.is_file() and not uploads_backend.exists_virtual_file(thread_id, virtual_path):
             raise FileNotFoundError(f"File not found: {filename}")
 
-        file_path.unlink()
+        if file_path.is_file():
+            file_path.unlink()
+        uploads_backend.delete_virtual_file(thread_id, virtual_path)
+
+        md_name = f"{Path(filename).stem}.md"
+        md_path = uploads_dir / md_name
+        if md_path.is_file():
+            md_path.unlink()
+        get_thread_file_backend("upload_markdown_sidecars").delete_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_name}")
+
         return {"success": True, "message": f"Deleted {filename}"}
 
     # ------------------------------------------------------------------
@@ -890,18 +911,34 @@ class DeerFlowClient:
         if not clean_path.startswith(virtual_prefix):
             raise ValueError(f"Path must start with /{virtual_prefix}")
 
-        relative = clean_path[len(virtual_prefix) :].lstrip("/")
-        base_dir = get_paths().sandbox_user_data_dir(thread_id)
-        actual = (base_dir / relative).resolve()
+        virtual_path = f"/{clean_path}"
+        backend = get_thread_file_backend("artifact_reads")
 
-        try:
-            actual.relative_to(base_dir.resolve())
-        except ValueError as exc:
-            raise PermissionError("Access denied: path traversal detected") from exc
-        if not actual.exists():
+        if ".skill/" in clean_path:
+            skill_marker = ".skill/"
+            marker_pos = clean_path.find(skill_marker)
+            skill_file_path = clean_path[: marker_pos + len(".skill")]
+            internal_path = clean_path[marker_pos + len(skill_marker) :]
+            skill_virtual_path = f"/{skill_file_path.lstrip('/')}"
+
+            if not backend.exists_virtual_file(thread_id, skill_virtual_path):
+                raise FileNotFoundError(f"Artifact not found: {path}")
+
+            archive_bytes = backend.read_virtual_file(thread_id, skill_virtual_path)
+            content = extract_file_from_skill_archive_bytes(archive_bytes, internal_path)
+            if content is None:
+                raise FileNotFoundError(f"Artifact not found: {path}")
+
+            mime_type = guess_mime_type(internal_path) or "application/octet-stream"
+            if mime_type == "application/octet-stream" and is_text_bytes(content):
+                mime_type = "text/plain"
+            return content, mime_type
+
+        if not backend.exists_virtual_file(thread_id, virtual_path):
             raise FileNotFoundError(f"Artifact not found: {path}")
-        if not actual.is_file():
-            raise ValueError(f"Path is not a file: {path}")
 
-        mime_type, _ = mimetypes.guess_type(actual)
-        return actual.read_bytes(), mime_type or "application/octet-stream"
+        content = backend.read_virtual_file(thread_id, virtual_path)
+        mime_type = guess_mime_type(path) or "application/octet-stream"
+        if mime_type == "application/octet-stream" and is_text_bytes(content):
+            mime_type = "text/plain"
+        return content, mime_type

@@ -2,6 +2,7 @@
 
 import asyncio
 import concurrent.futures
+import io
 import json
 import tempfile
 import zipfile
@@ -663,7 +664,11 @@ class TestUploads:
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            backend = MagicMock()
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("src.client.get_thread_file_backend", return_value=backend),
+            ):
                 result = client.upload_files("thread-1", [src_file])
 
             assert result["success"] is True
@@ -740,7 +745,15 @@ class TestUploads:
             (uploads_dir / "a.txt").write_text("a")
             (uploads_dir / "b.txt").write_text("bb")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            backend = MagicMock()
+            backend.list_uploads.return_value = [
+                MagicMock(filename="a.txt", size=1, extension=".txt", modified=1.0),
+                MagicMock(filename="b.txt", size=2, extension=".txt", modified=2.0),
+            ]
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("src.client.get_thread_file_backend", return_value=backend),
+            ):
                 result = client.list_uploads("thread-1")
 
             assert result["count"] == 2
@@ -756,7 +769,12 @@ class TestUploads:
             uploads_dir = Path(tmp)
             (uploads_dir / "delete-me.txt").write_text("gone")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            backend = MagicMock()
+            backend.exists_virtual_file.return_value = True
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("src.client.get_thread_file_backend", return_value=backend),
+            ):
                 result = client.delete_upload("thread-1", "delete-me.txt")
 
             assert result["success"] is True
@@ -765,7 +783,12 @@ class TestUploads:
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=Path(tmp)):
+            backend = MagicMock()
+            backend.exists_virtual_file.return_value = False
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=Path(tmp)),
+                patch("src.client.get_thread_file_backend", return_value=backend),
+            ):
                 with pytest.raises(FileNotFoundError):
                     client.delete_upload("thread-1", "nope.txt")
 
@@ -784,48 +807,48 @@ class TestUploads:
 
 class TestArtifacts:
     def test_get_artifact(self, client):
-        with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            outputs = user_data_dir / "outputs"
-            outputs.mkdir(parents=True)
-            (outputs / "result.txt").write_text("artifact content")
+        backend = MagicMock()
+        backend.exists_virtual_file.return_value = True
+        backend.read_virtual_file.return_value = b"artifact content"
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
+        with patch("src.client.get_thread_file_backend", return_value=backend):
+            content, mime = client.get_artifact("t1", "mnt/user-data/outputs/result.txt")
 
-            with patch("src.client.get_paths", return_value=mock_paths):
-                content, mime = client.get_artifact("t1", "mnt/user-data/outputs/result.txt")
-
-            assert content == b"artifact content"
-            assert "text" in mime
+        assert content == b"artifact content"
+        assert "text" in mime
 
     def test_get_artifact_not_found(self, client):
-        with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            user_data_dir.mkdir()
-
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("src.client.get_paths", return_value=mock_paths):
-                with pytest.raises(FileNotFoundError):
-                    client.get_artifact("t1", "mnt/user-data/outputs/nope.txt")
+        backend = MagicMock()
+        backend.exists_virtual_file.return_value = False
+        with patch("src.client.get_thread_file_backend", return_value=backend):
+            with pytest.raises(FileNotFoundError):
+                client.get_artifact("t1", "mnt/user-data/outputs/nope.txt")
 
     def test_get_artifact_bad_prefix(self, client):
         with pytest.raises(ValueError, match="must start with"):
             client.get_artifact("t1", "bad/path/file.txt")
 
     def test_get_artifact_path_traversal(self, client):
-        with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            user_data_dir.mkdir()
+        backend = MagicMock()
+        backend.exists_virtual_file.side_effect = PermissionError("Access denied: path traversal detected")
+        with patch("src.client.get_thread_file_backend", return_value=backend):
+            with pytest.raises(PermissionError):
+                client.get_artifact("t1", "mnt/user-data/../../../etc/passwd")
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
+    def test_get_artifact_from_skill_archive(self, client):
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as zf:
+            zf.writestr("SKILL.md", "# Example Skill")
 
-            with patch("src.client.get_paths", return_value=mock_paths):
-                with pytest.raises(PermissionError):
-                    client.get_artifact("t1", "mnt/user-data/../../../etc/passwd")
+        backend = MagicMock()
+        backend.exists_virtual_file.return_value = True
+        backend.read_virtual_file.return_value = archive_bytes.getvalue()
+
+        with patch("src.client.get_thread_file_backend", return_value=backend):
+            content, mime = client.get_artifact("t1", "mnt/user-data/outputs/example.skill/SKILL.md")
+
+        assert content == b"# Example Skill"
+        assert mime == "text/markdown"
 
 
 # ===========================================================================
@@ -1009,9 +1032,6 @@ class TestScenarioFileLifecycle:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
-            user_data_dir = tmp_path / "user-data"
-            outputs_dir = user_data_dir / "outputs"
-            outputs_dir.mkdir(parents=True)
 
             # Upload phase
             src_file = tmp_path / "input.txt"
@@ -1021,14 +1041,11 @@ class TestScenarioFileLifecycle:
                 uploaded = client.upload_files("t-artifact", [src_file])
                 assert len(uploaded["files"]) == 1
 
-            # Simulate agent writing an artifact
-            (outputs_dir / "analysis.json").write_text('{"result": "processed"}')
+            backend = MagicMock()
+            backend.exists_virtual_file.return_value = True
+            backend.read_virtual_file.return_value = b'{"result": "processed"}'
 
-            # Retrieve artifact
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("src.client.get_paths", return_value=mock_paths):
+            with patch("src.client.get_thread_file_backend", return_value=backend):
                 content, mime = client.get_artifact("t-artifact", "mnt/user-data/outputs/analysis.json")
 
             assert json.loads(content) == {"result": "processed"}
@@ -1268,10 +1285,18 @@ class TestScenarioThreadIsolation:
             (data_b / "outputs").mkdir(parents=True)
             (data_a / "outputs" / "result.txt").write_text("thread-a artifact")
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.side_effect = lambda tid: data_a if tid == "thread-a" else data_b
+            backend = MagicMock()
 
-            with patch("src.client.get_paths", return_value=mock_paths):
+            def _artifact_path(tid: str, virtual_path: str) -> Path:
+                assert virtual_path.startswith("/mnt/user-data/")
+                rel = virtual_path[len("/mnt/user-data/") :]
+                base = data_a if tid == "thread-a" else data_b
+                return (base / rel).resolve()
+
+            backend.exists_virtual_file.side_effect = lambda tid, vp: _artifact_path(tid, vp).is_file()
+            backend.read_virtual_file.side_effect = lambda tid, vp: _artifact_path(tid, vp).read_bytes()
+
+            with patch("src.client.get_thread_file_backend", return_value=backend):
                 content, _ = client.get_artifact("thread-a", "mnt/user-data/outputs/result.txt")
                 assert content == b"thread-a artifact"
 

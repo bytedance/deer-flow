@@ -8,12 +8,13 @@ Covers:
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.config.paths import Paths
+from src.storage.thread_files import ThreadUploadItem
 
 THREAD_ID = "thread-abc123"
 
@@ -93,14 +94,14 @@ class TestFilesFromKwargs:
         uploads_dir = _uploads_dir(tmp_path)
         # file is NOT written to disk
         msg = _human("hi", files=[{"filename": "missing.txt", "size": 50, "path": "/mnt/user-data/uploads/missing.txt"}])
-        assert mw._files_from_kwargs(msg, uploads_dir) is None
+        assert mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file()) is None
 
     def test_accepts_file_that_exists_on_disk(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "data.csv").write_text("a,b,c")
         msg = _human("hi", files=[{"filename": "data.csv", "size": 5, "path": "/mnt/user-data/uploads/data.csv"}])
-        result = mw._files_from_kwargs(msg, uploads_dir)
+        result = mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file())
         assert result is not None
         assert len(result) == 1
         assert result[0]["filename"] == "data.csv"
@@ -117,7 +118,7 @@ class TestFilesFromKwargs:
                 {"filename": "gone.txt", "size": 4, "path": "/mnt/user-data/uploads/gone.txt"},
             ],
         )
-        result = mw._files_from_kwargs(msg, uploads_dir)
+        result = mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file())
         assert result is not None
         assert [f["filename"] for f in result] == ["present.txt"]
 
@@ -125,7 +126,7 @@ class TestFilesFromKwargs:
         """Without an uploads_dir argument the existence check is skipped entirely."""
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": "phantom.txt", "size": 10, "path": "/mnt/user-data/uploads/phantom.txt"}])
-        result = mw._files_from_kwargs(msg, uploads_dir=None)
+        result = mw._files_from_kwargs(msg, None)
         assert result is not None
         assert result[0]["filename"] == "phantom.txt"
 
@@ -339,3 +340,28 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result["messages"][-1].id == "original-id-42"
+
+    def test_non_local_mode_reads_historical_from_backend_not_local_dir(self, tmp_path):
+        mw = _middleware(tmp_path)
+
+        # Do not create local uploads files; historical visibility should come from backend list_uploads.
+        msg = _human("go", files=[{"filename": "new.txt", "size": 3, "path": "/mnt/user-data/uploads/new.txt"}])
+
+        app_config = MagicMock()
+        app_config.thread_files.backend_for_feature.return_value = "r2"
+
+        backend = MagicMock()
+        backend.exists_virtual_file.side_effect = lambda thread_id, virtual_path: virtual_path.endswith("/new.txt")
+        backend.list_uploads.return_value = [ThreadUploadItem(filename="old.txt", size=7, extension=".txt", modified=123.0), ThreadUploadItem(filename="new.txt", size=3, extension=".txt", modified=124.0)]
+
+        with (
+            patch("src.agents.middlewares.uploads_middleware.get_app_config", return_value=app_config),
+            patch("src.agents.middlewares.uploads_middleware.get_thread_file_backend", return_value=backend),
+        ):
+            result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "new.txt" in content
+        assert "old.txt" in content
+        assert "previous messages" in content
