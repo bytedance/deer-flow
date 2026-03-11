@@ -11,6 +11,7 @@ The provider itself handles:
 """
 
 import atexit
+import fcntl
 import hashlib
 import logging
 import os
@@ -124,12 +125,15 @@ class AioSandboxProvider(SandboxProvider):
         config = get_app_config()
         sandbox_config = config.sandbox
 
+        idle_timeout = getattr(sandbox_config, "idle_timeout", None)
+        replicas = getattr(sandbox_config, "replicas", None)
+
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
-            "idle_timeout": getattr(sandbox_config, "idle_timeout", None) or DEFAULT_IDLE_TIMEOUT,
-            "replicas": getattr(sandbox_config, "replicas", None) or DEFAULT_REPLICAS,
+            "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
@@ -378,22 +382,62 @@ class AioSandboxProvider(SandboxProvider):
                     logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
                     return sandbox_id
 
-        # ── Layer 2: Backend discovery ──
-        # sandbox_id is deterministic from thread_id, so any process can discover
-        # an existing container without needing a shared state file.
+        # ── Layer 2: Backend discovery + create (protected by cross-process lock) ──
+        # Use a file lock so that two processes racing to create the same sandbox
+        # for the same thread_id serialize here: the second process will discover
+        # the container started by the first instead of hitting a name-conflict.
         if thread_id:
-            discovered = self._backend.discover(sandbox_id)
-            if discovered is not None:
-                sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
-                with self._lock:
-                    self._sandboxes[discovered.sandbox_id] = sandbox
-                    self._sandbox_infos[discovered.sandbox_id] = discovered
-                    self._last_activity[discovered.sandbox_id] = time.time()
-                    self._thread_sandboxes[thread_id] = discovered.sandbox_id
-                logger.info(f"Discovered existing sandbox {discovered.sandbox_id} for thread {thread_id} at {discovered.sandbox_url}")
-                return discovered.sandbox_id
+            return self._discover_or_create_with_lock(thread_id, sandbox_id)
 
         return self._create_sandbox(thread_id, sandbox_id)
+
+    def _discover_or_create_with_lock(self, thread_id: str, sandbox_id: str) -> str:
+        """Discover an existing sandbox or create a new one under a cross-process file lock.
+
+        The file lock serializes concurrent sandbox creation for the same thread_id
+        across multiple processes, preventing container-name conflicts.
+        """
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id)
+        lock_path = paths.thread_dir(thread_id) / f"{sandbox_id}.lock"
+
+        with open(lock_path, "a") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                # Re-check in-process caches under the file lock in case another
+                # thread in this process won the race while we were waiting.
+                with self._lock:
+                    if thread_id in self._thread_sandboxes:
+                        existing_id = self._thread_sandboxes[thread_id]
+                        if existing_id in self._sandboxes:
+                            logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id} (post-lock check)")
+                            self._last_activity[existing_id] = time.time()
+                            return existing_id
+                    if sandbox_id in self._warm_pool:
+                        info, _ = self._warm_pool.pop(sandbox_id)
+                        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+                        self._sandboxes[sandbox_id] = sandbox
+                        self._sandbox_infos[sandbox_id] = info
+                        self._last_activity[sandbox_id] = time.time()
+                        self._thread_sandboxes[thread_id] = sandbox_id
+                        logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id} (post-lock check)")
+                        return sandbox_id
+
+                # Backend discovery: another process may have created the container.
+                discovered = self._backend.discover(sandbox_id)
+                if discovered is not None:
+                    sandbox = AioSandbox(id=discovered.sandbox_id, base_url=discovered.sandbox_url)
+                    with self._lock:
+                        self._sandboxes[discovered.sandbox_id] = sandbox
+                        self._sandbox_infos[discovered.sandbox_id] = discovered
+                        self._last_activity[discovered.sandbox_id] = time.time()
+                        self._thread_sandboxes[thread_id] = discovered.sandbox_id
+                    logger.info(f"Discovered existing sandbox {discovered.sandbox_id} for thread {thread_id} at {discovered.sandbox_url}")
+                    return discovered.sandbox_id
+
+                return self._create_sandbox(thread_id, sandbox_id)
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.

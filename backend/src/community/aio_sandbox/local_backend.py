@@ -122,10 +122,20 @@ class LocalContainerBackend(SandboxBackend):
             except RuntimeError as exc:
                 release_port(port)
                 err = str(exc)
-                if "port is already allocated" in err or "address already in use" in err.lower():
+                err_lower = err.lower()
+                # Port already bound: skip this port and retry with the next one.
+                if "port is already allocated" in err or "address already in use" in err_lower:
                     logger.warning(f"Port {port} rejected by Docker (already allocated), retrying with next port")
                     _next_start = port + 1
                     continue
+                # Container-name conflict: another process may have already started
+                # the deterministic sandbox container for this sandbox_id. Try to
+                # discover and adopt the existing container instead of failing.
+                if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
+                    logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
+                    existing = self.discover(sandbox_id)
+                    if existing is not None:
+                        return existing
                 raise
         else:
             raise RuntimeError("Could not start sandbox container: all candidate ports are already allocated by Docker")

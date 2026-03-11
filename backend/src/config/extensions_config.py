@@ -160,8 +160,10 @@ class ExtensionsConfig(BaseModel):
                 if value.startswith("$"):
                     env_value = os.getenv(value[1:])
                     if env_value is None:
-                        # Provide the environment value at a later time on the settings page.
-                        config[key] = value
+                        # Unresolved placeholder — store empty string so downstream
+                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
+                        # token as an actual environment value.
+                        config[key] = ""
                     else:
                         config[key] = env_value
                 else:

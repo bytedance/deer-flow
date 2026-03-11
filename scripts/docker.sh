@@ -129,7 +129,17 @@ start() {
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
         if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
             cp "$PROJECT_ROOT/config.example.yaml" "$PROJECT_ROOT/config.yaml"
-            echo -e "${BLUE}Created config.yaml from example — please review and set required API keys before continuing.${NC}"
+            echo ""
+            echo -e "${YELLOW}============================================================${NC}"
+            echo -e "${YELLOW}  config.yaml has been created from config.example.yaml.${NC}"
+            echo -e "${YELLOW}  Please edit config.yaml to set your API keys and model   ${NC}"
+            echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
+            echo -e "${YELLOW}============================================================${NC}"
+            echo ""
+            echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
+            echo -e "${YELLOW}  Then run:        make docker-start${NC}"
+            echo ""
+            exit 0
         else
             echo -e "${YELLOW}✗ config.yaml not found and no config.example.yaml to copy from.${NC}"
             exit 1
