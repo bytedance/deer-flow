@@ -20,7 +20,6 @@ from langchain_core.runnables import RunnableConfig
 from src.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from src.models import create_chat_model
 from src.subagents.config import SubagentConfig
-from .constants import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +75,11 @@ _execution_workers = 3
 try:
     env_workers = os.environ.get("DEERFLOW_SUBAGENT_WORKERS")
     if env_workers is not None:
-        _execution_workers = int(env_workers)
-        logger.info(f"Using DEERFLOW_SUBAGENT_WORKERS={_execution_workers} from environment")
+        _execution_workers = max(1, int(env_workers))
+        if int(env_workers) < 1:
+            logger.warning(f"DEERFLOW_SUBAGENT_WORKERS={env_workers} is less than 1, clamped to 1")
+        else:
+            logger.info(f"Using DEERFLOW_SUBAGENT_WORKERS={_execution_workers} from environment")
     else:
         cpu_count = os.cpu_count() or 4
         _execution_workers = max(3, min(cpu_count, 10))
