@@ -237,12 +237,12 @@ async def get_skill(skill_name: str) -> SkillResponse:
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description="Update a skill's enabled status by modifying the skills_state_config.json file.",
+    description="Update a skill's enabled status by modifying the extensions_config.json file.",
 )
 async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillResponse:
     """Update a skill's enabled status.
 
-    This will modify the skills_state_config.json file to update the enabled state.
+    This will modify the extensions_config.json file to update the enabled state.
     The SKILL.md file itself is not modified.
 
     Args:
