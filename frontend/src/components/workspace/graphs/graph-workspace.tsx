@@ -1,7 +1,7 @@
 "use client";
 
 import type { JSONContent } from "@tiptap/react";
-import { toPng } from "html-to-image";
+import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import {
   BarChart3Icon,
@@ -257,34 +257,35 @@ export function GraphWorkspace({
     return () => document.removeEventListener("mousedown", handler);
   }, [themePopoverOpen, graphsPopoverOpen, downloadMenuOpen]);
 
-  // Capture the content area as a PNG data URL
-  const captureContent = useCallback(async (): Promise<string | null> => {
+  // Capture the content area as a canvas
+  const captureContent = useCallback(async (): Promise<HTMLCanvasElement | null> => {
     const el = contentRef.current;
     if (!el) return null;
     // Temporarily expand the container so the full content is captured (not clipped by overflow)
     const prevOverflow = el.style.overflow;
     const prevHeight = el.style.height;
+    const prevMaxHeight = el.style.maxHeight;
     el.style.overflow = "visible";
     el.style.height = "auto";
+    el.style.maxHeight = "none";
     try {
-      const dataUrl = await toPng(el, {
+      const canvas = await html2canvas(el, {
         backgroundColor: "#ffffff",
-        pixelRatio: 2,
-        filter: (node) => {
-          // Skip the slash-command and bubble menus from capture
-          if (node instanceof HTMLElement) {
-            const cls = node.className;
-            if (typeof cls === "string" && (cls.includes("tippy") || cls.includes("bubble-menu"))) {
-              return false;
-            }
-          }
-          return true;
-        },
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        // Capture the full scrollable content
+        scrollX: 0,
+        scrollY: 0,
+        windowWidth: el.scrollWidth,
+        windowHeight: el.scrollHeight,
       });
-      return dataUrl;
+      return canvas;
     } finally {
       el.style.overflow = prevOverflow;
       el.style.height = prevHeight;
+      el.style.maxHeight = prevMaxHeight;
     }
   }, []);
 
@@ -292,8 +293,9 @@ export function GraphWorkspace({
     setExporting(true);
     setDownloadMenuOpen(false);
     try {
-      const dataUrl = await captureContent();
-      if (!dataUrl) return;
+      const canvas = await captureContent();
+      if (!canvas) return;
+      const dataUrl = canvas.toDataURL("image/png");
       const link = document.createElement("a");
       link.download = `${projectName || "dashboard"}.png`;
       link.href = dataUrl;
@@ -309,18 +311,14 @@ export function GraphWorkspace({
     setExporting(true);
     setDownloadMenuOpen(false);
     try {
-      const dataUrl = await captureContent();
-      if (!dataUrl) return;
-      // Load the image to get dimensions
-      const img = new Image();
-      img.src = dataUrl;
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = reject;
-      });
-      // Create PDF sized to content (landscape A4 width, auto height)
+      const canvas = await captureContent();
+      if (!canvas) return;
+      const dataUrl = canvas.toDataURL("image/png");
+      const imgWidth = canvas.width;
+      const imgHeight = canvas.height;
+      // Create PDF sized to content (A4 landscape width, scale height proportionally)
       const pdfWidth = 297; // A4 landscape width in mm
-      const pdfHeight = (img.height / img.width) * pdfWidth;
+      const pdfHeight = (imgHeight / imgWidth) * pdfWidth;
       const pdf = new jsPDF({
         orientation: pdfHeight > pdfWidth ? "portrait" : "landscape",
         unit: "mm",

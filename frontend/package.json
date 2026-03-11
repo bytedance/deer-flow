@@ -73,7 +73,7 @@
     "embla-carousel-react": "^8.6.0",
     "gsap": "^3.13.0",
     "hast": "^1.0.0",
-    "html-to-image": "^1.11.13",
+    "html2canvas": "^1.4.1",
     "jspdf": "^4.2.0",
     "katex": "^0.16.28",
     "lucide-react": "^0.562.0",
