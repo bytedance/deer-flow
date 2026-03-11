@@ -62,6 +62,8 @@ cleanup_on_failure() {
     echo "✓ Cleanup complete"
 }
 
+trap cleanup_on_failure INT TERM
+
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
