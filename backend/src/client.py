@@ -697,6 +697,55 @@ class DeerFlowClient:
             "data": self.get_memory(),
         }
 
+    def update_memory_config(self, updates: dict) -> dict:
+        """Update memory configuration at runtime.
+
+        Only provided keys are updated; omitted keys retain their current values.
+        ``injection_enabled`` is also persisted to the memory storage file so the
+        LangGraph process picks it up cross-process. Other settings are only kept
+        in-process and reset on restart.
+
+        Args:
+            updates: Dict of config fields to update (e.g. {"injection_enabled": False}).
+
+        Returns:
+            Updated memory config dict matching the Gateway API ``MemoryConfigResponse`` schema.
+        """
+        from src.agents.memory.updater import set_memory_settings
+        from src.config.memory_config import get_memory_config, set_memory_config
+
+        config = get_memory_config()
+        updated = config.model_copy(update=updates)
+        set_memory_config(updated)
+
+        # Mirror the Gateway behaviour: persist injection_enabled to the shared
+        # memory file so the LangGraph server process can read it cross-process.
+        if "injection_enabled" in updates:
+            set_memory_settings({"injection_enabled": updates["injection_enabled"]})
+
+        return {
+            "enabled": updated.enabled,
+            "storage_path": updated.storage_path,
+            "debounce_seconds": updated.debounce_seconds,
+            "max_facts": updated.max_facts,
+            "fact_confidence_threshold": updated.fact_confidence_threshold,
+            "injection_enabled": updated.injection_enabled,
+            "max_injection_tokens": updated.max_injection_tokens,
+        }
+
+    def delete_memory_fact(self, fact_id: str) -> bool:
+        """Delete a single memory fact by ID.
+
+        Args:
+            fact_id: The unique identifier of the fact to delete.
+
+        Returns:
+            True if the fact was found and deleted, False if not found.
+        """
+        from src.agents.memory.updater import delete_memory_fact
+
+        return delete_memory_fact(fact_id)
+
     # ------------------------------------------------------------------
     # Public API — file uploads
     # ------------------------------------------------------------------

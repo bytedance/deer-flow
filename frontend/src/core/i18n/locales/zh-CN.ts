@@ -275,6 +275,9 @@ export const zhCN: Translations = {
         "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
+      injectionEnabled: "在对话中注入记忆",
+      injectionEnabledDescription: "开启后，DeerFlow 会在每次对话中携带你的记忆上下文。",
+      deleteFact: "删除",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",

@@ -224,6 +224,9 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      injectionEnabled: string;
+      injectionEnabledDescription: string;
+      deleteFact: string;
       markdown: {
         overview: string;
         userContext: string;

@@ -192,6 +192,18 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         # Update lastUpdated timestamp
         memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
 
+        # Preserve settings written by another process (e.g. Gateway toggling
+        # injection_enabled) while this background LLM update was in flight.
+        # Only applies when memory_data has no "settings" key of its own.
+        if "settings" not in memory_data and file_path.exists():
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    on_disk = json.load(f)
+                if "settings" in on_disk:
+                    memory_data["settings"] = on_disk["settings"]
+            except (json.JSONDecodeError, OSError):
+                pass
+
         # Write atomically using temp file
         temp_path = file_path.with_suffix(".tmp")
         with open(temp_path, "w", encoding="utf-8") as f:
@@ -367,6 +379,43 @@ class MemoryUpdater:
             )[: config.max_facts]
 
         return current_memory
+
+
+def set_memory_settings(settings: dict[str, Any], agent_name: str | None = None) -> bool:
+    """Persist memory settings to the shared memory file.
+
+    Writes settings under the ``settings`` key so all processes that share the
+    same file (e.g. gateway + langgraph server) see the change on the next
+    call to ``get_memory_data()``.
+
+    Args:
+        settings: Key-value pairs to merge into the ``settings`` section.
+        agent_name: If provided, updates per-agent memory. If None, updates global memory.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    memory_data = get_memory_data(agent_name)
+    memory_data.setdefault("settings", {}).update(settings)
+    return _save_memory_to_file(memory_data, agent_name)
+
+
+def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> bool:
+    """Delete a single fact by ID.
+
+    Args:
+        fact_id: The ID of the fact to delete.
+        agent_name: If provided, deletes from per-agent memory. If None, deletes from global memory.
+
+    Returns:
+        True if the fact was found and deleted, False if not found or save failed.
+    """
+    memory_data = get_memory_data(agent_name)
+    original_len = len(memory_data.get("facts", []))
+    memory_data["facts"] = [f for f in memory_data.get("facts", []) if f.get("id") != fact_id]
+    if len(memory_data["facts"]) == original_len:
+        return False
+    return _save_memory_to_file(memory_data, agent_name)
 
 
 def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
