@@ -15,6 +15,7 @@ from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
+from src.agents.middlewares.usage_middleware import UsageMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
 from src.config.agents_config import load_agent_config
@@ -227,6 +228,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
+
+    # Add UsageMiddleware to aggregate normalized token usage in thread state.
+    middlewares.append(UsageMiddleware())
 
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
