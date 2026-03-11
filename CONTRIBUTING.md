@@ -209,102 +209,25 @@ Nginx (port 2026) ← Unified entry point
 
 ## Development Workflow
 
-### Git Repository Structure
-
-This project uses a fork-based workflow:
-- **Upstream**: `origin` → `git@github.com:bytedance/deer-flow.git` (read-only for most contributors)
-- **Your fork**: `fork` → `git@github.com:YOUR_USERNAME/deer-flow.git` (your working copy)
-
-Check your remotes:
-```bash
-git remote -v
-# Should show both 'origin' and 'fork'
-```
-
-### Creating a Pull Request
-
-1. **Create a feature branch** with proper naming:
+1. **Create a feature branch**:
    ```bash
-   # Format: <type>/<description-in-kebab-case>
-   git checkout -b fix/sqlite-checkpointer-default
-   git checkout -b feat/add-memory-system
-   git checkout -b docs/update-readme
-
-   # ❌ Avoid: issue numbers, dates, or unclear names
-   # git checkout -b 20260309-issue
-   # git checkout -b fix/issue-1066-sqlite-checkpointer
+   git checkout -b feature/your-feature-name
    ```
 
 2. **Make your changes** with hot-reload enabled
 
-3. **Test your changes** thoroughly:
+3. **Test your changes** thoroughly
+
+4. **Commit your changes**:
    ```bash
-   cd backend && make test
+   git add .
+   git commit -m "feat: description of your changes"
    ```
 
-4. **Commit your changes** following conventional commits:
+5. **Push and create a Pull Request**:
    ```bash
-   git add <files>
-   git commit -m "fix: default to SqliteSaver for persistent conversation history
-
-   Changes the default checkpointer from InMemorySaver to SqliteSaver when
-   no checkpointer is configured in config.yaml.
-
-   Fixes #1066"
+   git push origin feature/your-feature-name
    ```
-
-   **Important**:
-   - ❌ Never add `Co-Authored-By: Claude` or AI attribution
-   - ✅ Use conventional commit types: `fix`, `feat`, `docs`, `refactor`, `test`, `chore`
-   - ✅ Reference issue numbers with `Fixes #<number>` or `Closes #<number>`
-
-5. **Push to your fork** (not upstream):
-   ```bash
-   # ✅ Correct: Push to your fork
-   git push fork fix/sqlite-checkpointer-default
-
-   # ❌ Wrong: Pushing to upstream will fail with permission denied
-   # git push origin fix/sqlite-checkpointer-default
-   ```
-
-6. **Create a Pull Request**:
-   ```bash
-   # Option 1: Using gh CLI (recommended)
-   gh pr create --draft \
-     --repo bytedance/deer-flow \
-     --head YOUR_USERNAME:fix/sqlite-checkpointer-default \
-     --title "fix: default to SqliteSaver for persistent conversation history" \
-     --body "Description of your changes"
-
-   # Option 2: Via GitHub web interface
-   # Visit: https://github.com/bytedance/deer-flow/compare
-   # Select: base: main <- compare: YOUR_USERNAME:fix/sqlite-checkpointer-default
-   ```
-
-### Common Pitfalls
-
-#### ❌ Wrong: Pushing to upstream directly
-```bash
-git push origin my-branch
-# Error: Permission to bytedance/deer-flow.git denied
-```
-
-#### ✅ Correct: Push to your fork
-```bash
-git push fork my-branch
-```
-
-#### ❌ Wrong: Creating PR without pushing first
-```bash
-gh pr create --draft
-# Error: you must first push the current branch to a remote
-```
-
-#### ✅ Correct: Push first, then create PR with --head
-```bash
-git push fork my-branch
-gh pr create --draft --head YOUR_USERNAME:my-branch
-```
 
 ## Testing
 
