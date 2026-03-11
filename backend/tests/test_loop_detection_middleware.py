@@ -1,6 +1,5 @@
 """Tests for LoopDetectionMiddleware."""
 
-import pytest
 from langchain_core.messages import AIMessage, SystemMessage
 
 from src.agents.middlewares.loop_detection_middleware import (

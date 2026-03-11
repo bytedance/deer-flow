@@ -16,13 +16,11 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
 from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -36,7 +34,7 @@ _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
     """Deterministic hash of a set of tool calls (name + args)."""
     normalized = []
-    for tc in sorted(tool_calls, key=lambda t: t.get("name", "")):
+    for tc in sorted(tool_calls, key=lambda t: (t.get("name", ""), json.dumps(t.get("args", {}), sort_keys=True, default=str))):
         normalized.append({
             "name": tc.get("name", ""),
             "args": tc.get("args", {}),
