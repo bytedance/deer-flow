@@ -9,12 +9,30 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Argument parsing ─────────────────────────────────────────────────────────
+
+DEV_MODE=true
+for arg in "$@"; do
+    case "$arg" in
+        --dev)  DEV_MODE=true ;;
+        --prod) DEV_MODE=false ;;
+        *) echo "Unknown argument: $arg"; echo "Usage: $0 [--dev|--prod]"; exit 1 ;;
+    esac
+done
+
+if $DEV_MODE; then
+    FRONTEND_CMD="pnpm run dev"
+else
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+fi
+
 # ── Stop existing services ────────────────────────────────────────────────────
 
 echo "Stopping existing services if any..."
 pkill -f "langgraph dev" 2>/dev/null || true
 pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
+pkill -f "next-server" 2>/dev/null || true
 nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
 sleep 1
 pkill -9 nginx 2>/dev/null || true
@@ -28,6 +46,14 @@ echo ""
 echo "=========================================="
 echo "  Starting DeerFlow Development Server"
 echo "=========================================="
+echo ""
+if $DEV_MODE; then
+    echo "  Mode: DEV  (hot-reload enabled)"
+    echo "  Tip:  run \`make start\` in production mode"
+else
+    echo "  Mode: PROD (hot-reload disabled)"
+    echo "  Tip:  run \`make dev\` to start in development mode"
+fi
 echo ""
 echo "Services starting up..."
 echo "  → Backend: LangGraph + Gateway"
@@ -61,6 +87,7 @@ cleanup() {
     pkill -f "langgraph dev" 2>/dev/null || true
     pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
+    pkill -f "next start" 2>/dev/null || true
     # Kill nginx using the captured PID first (most reliable),
     # then fall back to pkill/killall for any stray nginx workers.
     if [ -n "${NGINX_PID:-}" ] && kill -0 "$NGINX_PID" 2>/dev/null; then
@@ -81,8 +108,16 @@ trap cleanup INT TERM
 
 mkdir -p logs
 
+if $DEV_MODE; then
+    LANGGRAPH_EXTRA_FLAGS=""
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env'"
+else
+    LANGGRAPH_EXTRA_FLAGS="--no-reload"
+    GATEWAY_EXTRA_FLAGS=""
+fi
+
 echo "Starting LangGraph server..."
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1) &
+(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "  See logs/langgraph.log for details"
     tail -20 logs/langgraph.log
@@ -91,7 +126,7 @@ echo "Starting LangGraph server..."
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-(cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1) &
+(cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
@@ -103,7 +138,7 @@ echo "Starting Gateway API..."
 echo "✓ Gateway API started on localhost:8001"
 
 echo "Starting Frontend..."
-(cd frontend && pnpm run dev > ../logs/frontend.log 2>&1) &
+(cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1) &
 ./scripts/wait-for-port.sh 3000 120 "Frontend" || {
     echo "  See logs/frontend.log for details"
     tail -20 logs/frontend.log
@@ -125,7 +160,11 @@ echo "✓ Nginx started on localhost:2026"
 
 echo ""
 echo "=========================================="
-echo "  DeerFlow is ready!"
+if $DEV_MODE; then
+    echo "  ✓ DeerFlow development server is running!"
+else
+    echo "  ✓ DeerFlow production server is running!"
+fi
 echo "=========================================="
 echo ""
 echo "  🌐 Application: http://localhost:2026"
@@ -139,6 +178,5 @@ echo "     - Frontend:  logs/frontend.log"
 echo "     - Nginx:     logs/nginx.log"
 echo ""
 echo "Press Ctrl+C to stop all services"
-echo ""
 
 wait
