@@ -1,17 +1,21 @@
 "use client";
 
 import type { JSONContent } from "@tiptap/react";
+import { toPng } from "html-to-image";
+import { jsPDF } from "jspdf";
 import {
   BarChart3Icon,
   CheckIcon,
   ChevronDownIcon,
   ClockIcon,
   DownloadIcon,
+  FileImageIcon,
   FileTextIcon,
   FilterIcon,
   ImageIcon,
   LayersIcon,
   LayoutDashboardIcon,
+  Loader2Icon,
   PaletteIcon,
   PlayIcon,
   PlusIcon,
@@ -165,6 +169,11 @@ export function GraphWorkspace({
   const [activePage, setActivePage] = useState(0);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [presenting, setPresenting] = useState(false);
+  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const downloadButtonRef = useRef<HTMLButtonElement>(null);
+  const downloadMenuRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // Debounced auto-save: saves editor content back to the artifact JSON file
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -214,7 +223,7 @@ export function GraphWorkspace({
 
   // Close popovers on outside click
   useEffect(() => {
-    if (!themePopoverOpen && !graphsPopoverOpen) return;
+    if (!themePopoverOpen && !graphsPopoverOpen && !downloadMenuOpen) return;
     const handler = (e: MouseEvent) => {
       if (
         themePopoverOpen &&
@@ -234,10 +243,97 @@ export function GraphWorkspace({
       ) {
         setGraphsPopoverOpen(false);
       }
+      if (
+        downloadMenuOpen &&
+        downloadMenuRef.current &&
+        !downloadMenuRef.current.contains(e.target as Node) &&
+        downloadButtonRef.current &&
+        !downloadButtonRef.current.contains(e.target as Node)
+      ) {
+        setDownloadMenuOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [themePopoverOpen, graphsPopoverOpen]);
+  }, [themePopoverOpen, graphsPopoverOpen, downloadMenuOpen]);
+
+  // Capture the content area as a PNG data URL
+  const captureContent = useCallback(async (): Promise<string | null> => {
+    const el = contentRef.current;
+    if (!el) return null;
+    // Temporarily expand the container so the full content is captured (not clipped by overflow)
+    const prevOverflow = el.style.overflow;
+    const prevHeight = el.style.height;
+    el.style.overflow = "visible";
+    el.style.height = "auto";
+    try {
+      const dataUrl = await toPng(el, {
+        backgroundColor: "#ffffff",
+        pixelRatio: 2,
+        filter: (node) => {
+          // Skip the slash-command and bubble menus from capture
+          if (node instanceof HTMLElement) {
+            const cls = node.className;
+            if (typeof cls === "string" && (cls.includes("tippy") || cls.includes("bubble-menu"))) {
+              return false;
+            }
+          }
+          return true;
+        },
+      });
+      return dataUrl;
+    } finally {
+      el.style.overflow = prevOverflow;
+      el.style.height = prevHeight;
+    }
+  }, []);
+
+  const downloadAsPng = useCallback(async () => {
+    setExporting(true);
+    setDownloadMenuOpen(false);
+    try {
+      const dataUrl = await captureContent();
+      if (!dataUrl) return;
+      const link = document.createElement("a");
+      link.download = `${projectName || "dashboard"}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      console.error("PNG export failed:", err);
+    } finally {
+      setExporting(false);
+    }
+  }, [captureContent, projectName]);
+
+  const downloadAsPdf = useCallback(async () => {
+    setExporting(true);
+    setDownloadMenuOpen(false);
+    try {
+      const dataUrl = await captureContent();
+      if (!dataUrl) return;
+      // Load the image to get dimensions
+      const img = new Image();
+      img.src = dataUrl;
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+      });
+      // Create PDF sized to content (landscape A4 width, auto height)
+      const pdfWidth = 297; // A4 landscape width in mm
+      const pdfHeight = (img.height / img.width) * pdfWidth;
+      const pdf = new jsPDF({
+        orientation: pdfHeight > pdfWidth ? "portrait" : "landscape",
+        unit: "mm",
+        format: [pdfWidth, pdfHeight],
+      });
+      pdf.addImage(dataUrl, "PNG", 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`${projectName || "dashboard"}.pdf`);
+    } catch (err) {
+      console.error("PDF export failed:", err);
+    } finally {
+      setExporting(false);
+    }
+  }, [captureContent, projectName]);
 
   // Sync dashboard pages from props with local pages
   const effectivePages = useMemo((): DashboardPage[] => {
@@ -355,10 +451,43 @@ export function GraphWorkspace({
             <button className="flex size-8 items-center justify-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground">
               <ClockIcon className="size-[18px]" />
             </button>
-            <button className="flex h-8 items-center gap-1.5 rounded-xl bg-blue-500/10 px-2.5 text-xs font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-400">
-              <DownloadIcon className="size-4" />
-              Download
-            </button>
+            <div className="relative">
+              <button
+                ref={downloadButtonRef}
+                onClick={() => setDownloadMenuOpen((prev) => !prev)}
+                disabled={exporting}
+                className="flex h-8 items-center gap-1.5 rounded-xl bg-blue-500/10 px-2.5 text-xs font-medium text-blue-600 hover:bg-blue-500/20 disabled:opacity-50 dark:text-blue-400"
+              >
+                {exporting ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <DownloadIcon className="size-4" />
+                )}
+                {exporting ? "Exporting..." : "Download"}
+              </button>
+              {downloadMenuOpen && (
+                <div
+                  ref={downloadMenuRef}
+                  className="absolute right-0 z-50 mt-1.5 w-44 overflow-hidden rounded-xl border bg-popover shadow-lg"
+                >
+                  <button
+                    onClick={() => void downloadAsPng()}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                  >
+                    <FileImageIcon className="size-4 text-green-500" />
+                    Download as PNG
+                  </button>
+                  <div className="mx-3 h-px bg-border" />
+                  <button
+                    onClick={() => void downloadAsPdf()}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                  >
+                    <FileTextIcon className="size-4 text-red-500" />
+                    Download as PDF
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               onClick={() => effectivePages.length > 0 && setPresenting(true)}
               disabled={effectivePages.length === 0}
@@ -545,7 +674,7 @@ export function GraphWorkspace({
         </div>
 
         {/* Content Area */}
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div ref={contentRef} className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" && (
             <div className="mx-auto max-w-[1033px] px-6 pb-6">
               {hasContent ? (
