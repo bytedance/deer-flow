@@ -182,9 +182,9 @@ importers:
       hast:
         specifier: ^1.0.0
         version: 1.0.0
-      html2canvas:
-        specifier: ^1.4.1
-        version: 1.4.1
+      html2canvas-pro:
+        specifier: ^2.0.2
+        version: 2.0.2
       jspdf:
         specifier: ^4.2.0
         version: 4.2.0
@@ -3660,6 +3660,10 @@ packages:
 
   html-void-elements@3.0.0:
     resolution: {integrity: sha512-bEqo66MRXsUGxWHV5IP0PUiAWwoEjba4VCzg0LjFJBpchPaTfyfCKTG6bc5F8ucKec3q5y6qOdGyYTSBEvhCrg==}
+
+  html2canvas-pro@2.0.2:
+    resolution: {integrity: sha512-9G/t0XgCZWonLwL0JwI7su6NdbOPUY7Ur4Ihpp8+XMaW9ibA2nDXF181Jr6tm94k8lX6sthpaXB3XqEnsMd5Cw==}
+    engines: {node: '>=16.0.0'}
 
   html2canvas@1.4.1:
     resolution: {integrity: sha512-fPU6BHNpsyIhr8yyMpTLLxAbkaK8ArIBcmZIRiBLiDhjeqvXolaEmDGmELFuX9I4xDcaKKcJl+TKZLqruBbmWA==}
@@ -9260,10 +9264,16 @@ snapshots:
 
   html-void-elements@3.0.0: {}
 
+  html2canvas-pro@2.0.2:
+    dependencies:
+      css-line-break: 2.1.0
+      text-segmentation: 1.0.3
+
   html2canvas@1.4.1:
     dependencies:
       css-line-break: 2.1.0
       text-segmentation: 1.0.3
+    optional: true
 
   human-signals@5.0.0: {}
 
