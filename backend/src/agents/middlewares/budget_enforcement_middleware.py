@@ -77,14 +77,12 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         # Track which warnings we've already sent per thread to avoid spam
         self._warned: dict[str, set[str]] = defaultdict(set)
 
-    def _get_thread_id(self, state: AgentState) -> str:
-        thread_data = state.get("thread_data")
-        if thread_data and isinstance(thread_data, dict):
-            return thread_data.get("workspace_path", "default") or "default"
-        return "default"
+    def _get_thread_id(self, runtime: Runtime) -> str:
+        thread_id = runtime.context.get("thread_id")
+        return thread_id or "default"
 
-    def _apply(self, state: AgentState) -> dict | None:
-        thread_id = self._get_thread_id(state)
+    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+        thread_id = self._get_thread_id(runtime)
         self._call_count[thread_id] += 1
         turns_used = self._call_count[thread_id]
         effective_total = max(self.max_turns // 8, 10)
@@ -124,9 +122,9 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
 
         return None
 
-    def _apply_after_model(self, state: AgentState) -> dict | None:
+    def _apply_after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         """After model responds: if we're past force threshold, strip tool calls."""
-        thread_id = self._get_thread_id(state)
+        thread_id = self._get_thread_id(runtime)
         turns_used = self._call_count.get(thread_id, 0)
         if turns_used < self.force_at:
             return None
@@ -143,7 +141,6 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         if not tool_calls:
             return None
 
-        thread_id = self._get_thread_id(state)
         logger.warning(
             "Budget force-stop — stripping %d tool calls from AI response",
             len(tool_calls),
@@ -158,19 +155,19 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, runtime)
 
     @override
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, runtime)
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply_after_model(state)
+        return self._apply_after_model(state, runtime)
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply_after_model(state)
+        return self._apply_after_model(state, runtime)
 
     def reset(self, thread_id: str | None = None) -> None:
         if thread_id:
