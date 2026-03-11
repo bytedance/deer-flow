@@ -224,36 +224,36 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(0.9855 0.0098 87.47);
+  --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0.0098 87.47);
+  --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0.0098 87.47);
+  --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0 0 0);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.9455 0.0098 87.47);
+  --secondary: oklch(0.965 0 0);
   --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0.0098 87.47);
+  --muted: oklch(0.965 0 0);
   --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.94 0.0098 87.47);
+  --accent: oklch(0.94 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0.0098 87.47);
-  --input: oklch(0.88 0.0098 87.47);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.88 0 0);
   --ring: transparent;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.965 0.0098 87.47);
+  --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0.0098 87.47);
+  --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.925 0.0098 87.47);
+  --sidebar-accent: oklch(0.94 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0.0098 87.47);
+  --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 }
 
@@ -298,6 +298,130 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+
+  /* TipTap / ProseMirror editor typography */
+  .dashboard-editor .tiptap h1 {
+    font-size: 1.875rem;
+    line-height: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .dashboard-editor .tiptap h2 {
+    font-size: 1.5rem;
+    line-height: 2rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-top: 1.25rem;
+    margin-bottom: 0.375rem;
+  }
+  .dashboard-editor .tiptap h3 {
+    font-size: 1.25rem;
+    line-height: 1.75rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin-top: 1rem;
+    margin-bottom: 0.25rem;
+  }
+  .dashboard-editor .tiptap p {
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  .dashboard-editor .tiptap ul {
+    list-style-type: disc;
+    padding-left: 1.5rem;
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  .dashboard-editor .tiptap ol {
+    list-style-type: decimal;
+    padding-left: 1.5rem;
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  .dashboard-editor .tiptap li {
+    margin-top: 0.125rem;
+    margin-bottom: 0.125rem;
+  }
+  .dashboard-editor .tiptap blockquote {
+    border-left: 3px solid var(--border);
+    padding-left: 1rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    color: var(--muted-foreground);
+    font-style: italic;
+  }
+  .dashboard-editor .tiptap pre {
+    background: var(--muted);
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 0.875rem;
+    overflow-x: auto;
+  }
+  .dashboard-editor .tiptap code {
+    background: var(--muted);
+    border-radius: 0.25rem;
+    padding: 0.125rem 0.375rem;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 0.875em;
+  }
+  .dashboard-editor .tiptap pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+  }
+  .dashboard-editor .tiptap hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+  }
+  .dashboard-editor .tiptap mark {
+    background-color: #fef08a;
+    border-radius: 0.125rem;
+    padding: 0.0625rem 0;
+  }
+
+  /* Dashboard images */
+  .dashboard-editor .tiptap .dashboard-image {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+    border: 1px solid var(--border);
+    cursor: default;
+  }
+  .dashboard-editor .tiptap .dashboard-image.ProseMirror-selectednode {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 0.5rem;
+  }
+
+  /* Narrative node editable content */
+  .narrative-content p {
+    margin-top: 0.125rem;
+    margin-bottom: 0.125rem;
+  }
+  .narrative-content ul {
+    list-style-type: disc;
+    padding-left: 1.25rem;
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  .narrative-content ol {
+    list-style-type: decimal;
+    padding-left: 1.25rem;
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
+  }
+  .narrative-content strong {
+    font-weight: 600;
   }
 
   .container-md {

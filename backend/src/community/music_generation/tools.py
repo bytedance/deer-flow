@@ -111,3 +111,4 @@ def generate_music_tool(
     except Exception as e:
         logger.error(f"Music generation failed: {e}")
         return f"Error generating music: {str(e)}"
+ 

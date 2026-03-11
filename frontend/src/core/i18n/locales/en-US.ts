@@ -3,6 +3,7 @@ import {
   FilmIcon,
   GraduationCapIcon,
   ImageIcon,
+  LayoutDashboardIcon,
   MicroscopeIcon,
   Music2Icon,
   PenLineIcon,
@@ -155,6 +156,11 @@ export const enUS: Translations = {
         icon: Music2Icon,
       },
       {
+        suggestion: "AI Graphs",
+        prompt: "Create interactive data visualizations and graphs about [topic/dataset]",
+        icon: LayoutDashboardIcon,
+      },
+      {
         type: "separator",
       },
       {
@@ -173,6 +179,7 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    aiGraphs: "AI Graphs",
   },
 
   // Agents
