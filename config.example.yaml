@@ -201,9 +201,6 @@ sandbox:
 # sandbox:
 #   use: src.community.aio_sandbox:AioSandboxProvider
 #
-#   # Optional: Use existing sandbox at this URL (no container will be started)
-#   # base_url: http://localhost:8080
-#
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
@@ -211,9 +208,11 @@ sandbox:
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080
-#
-#   # Optional: Whether to automatically start Docker container (default: true)
-#   # auto_start: true
+
+#   # Optional: Maximum number of concurrent sandbox containers (default: 3)
+#   # When the limit is reached the least-recently-used sandbox is evicted to
+#   # make room for new ones. Use a positive integer here; omit this field to use the default.
+#   # replicas: 3
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
@@ -348,7 +347,6 @@ memory:
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
-
 # ============================================================================
 # Checkpointer Configuration
 # ============================================================================
@@ -373,9 +371,9 @@ memory:
 #   type: memory
 #
 # SQLite (file-based, single-process):
-# checkpointer:
-#   type: sqlite
-#   connection_string: checkpoints.db
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
 #
 # PostgreSQL (multi-process, production):
 # checkpointer:

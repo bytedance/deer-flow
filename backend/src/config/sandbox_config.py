@@ -18,8 +18,7 @@ class SandboxConfig(BaseModel):
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
         port: Base port for sandbox containers (default: 8080)
-        base_url: If set, uses existing sandbox instead of starting new container
-        auto_start: Whether to automatically start Docker container (default: true)
+        replicas: Maximum number of concurrent sandbox containers (default: 3). When the limit is reached the least-recently-used sandbox is evicted to make room.
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         idle_timeout: Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.
         mounts: List of volume mounts to share directories with the container
@@ -38,13 +37,9 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Base port for sandbox containers",
     )
-    base_url: str | None = Field(
+    replicas: int | None = Field(
         default=None,
-        description="If set, uses existing sandbox at this URL instead of starting new container",
-    )
-    auto_start: bool | None = Field(
-        default=None,
-        description="Whether to automatically start Docker container",
+        description="Maximum number of concurrent sandbox containers (default: 3). When the limit is reached the least-recently-used sandbox is evicted to make room.",
     )
     container_prefix: str | None = Field(
         default=None,

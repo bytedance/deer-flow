@@ -111,17 +111,24 @@ services:
     container_name: deer-flow-gateway
     command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
-      - ../backend/src:/app/backend/src
-      - ../backend/.env:/app/backend/.env
+      - ../backend/:/app/backend/
+      # Preserve the .venv built during Docker image build — mounting the full backend/
+      # directory above would otherwise shadow it with the (empty) host directory.
+      - gateway-venv:/app/backend/.venv
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      - ../backend/.deer-flow:/app/backend/.deer-flow
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
+      # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
+      - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
@@ -140,24 +147,38 @@ services:
     container_name: deer-flow-langgraph
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
-      - ../backend/src:/app/backend/src
-      - ../backend/.env:/app/backend/.env
+      - ../backend/:/app/backend/
+      # Preserve the .venv built during Docker image build — mounting the full backend/
+      # directory above would otherwise shadow it with the (empty) host directory.
+      - langgraph-venv:/app/backend/.venv
       - ../config.yaml:/app/config.yaml
+      - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
-      - ../backend/.deer-flow:/app/backend/.deer-flow
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
+      # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
+      - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     environment:
       - CI=true
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     env_file:
       - ../.env
+    extra_hosts:
+      # For Linux: map host.docker.internal to host gateway
+      - "host.docker.internal:host-gateway"
     networks:
       - deer-flow-dev
     restart: unless-stopped
 
-volumes: {}
+volumes:
+  # Persist .venv across container restarts so dependencies installed during
+  # image build are not shadowed by the host backend/ directory mount.
+  gateway-venv:
+  langgraph-venv:
 
 networks:
   deer-flow-dev:

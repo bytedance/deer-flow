@@ -39,6 +39,21 @@ class Paths:
         self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
 
     @property
+    def host_base_dir(self) -> Path:
+        """Host-visible base dir for Docker volume mount sources.
+
+        When running inside Docker with a mounted Docker socket (DooD), the Docker
+        daemon runs on the host and resolves mount paths against the host filesystem.
+        Set DEER_FLOW_HOST_BASE_DIR to the host-side path that corresponds to this
+        container's base_dir so that sandbox container volume mounts work correctly.
+
+        Falls back to base_dir when the env var is not set (native/local execution).
+        """
+        if env := os.getenv("DEER_FLOW_HOST_BASE_DIR"):
+            return Path(env)
+        return self.base_dir
+
+    @property
     def base_dir(self) -> Path:
         """Root directory for all application data."""
         if self._base_dir is not None:
@@ -124,10 +139,21 @@ class Paths:
         return self.thread_dir(thread_id) / "user-data"
 
     def ensure_thread_dirs(self, thread_id: str) -> None:
-        """Create all standard sandbox directories for a thread."""
-        self.sandbox_work_dir(thread_id).mkdir(parents=True, exist_ok=True)
-        self.sandbox_uploads_dir(thread_id).mkdir(parents=True, exist_ok=True)
-        self.sandbox_outputs_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        """Create all standard sandbox directories for a thread.
+
+        Directories are created with mode 0o777 so that sandbox containers
+        (which may run as a different UID than the host backend process) can
+        write to the volume-mounted paths without "Permission denied" errors.
+        The explicit chmod() call is necessary because Path.mkdir(mode=...) is
+        subject to the process umask and may not yield the intended permissions.
+        """
+        for d in [
+            self.sandbox_work_dir(thread_id),
+            self.sandbox_uploads_dir(thread_id),
+            self.sandbox_outputs_dir(thread_id),
+        ]:
+            d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o777)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

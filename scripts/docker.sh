@@ -125,6 +125,39 @@ start() {
         echo ""
     fi
     
+    # Ensure config.yaml exists before starting.
+    if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
+        if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
+            cp "$PROJECT_ROOT/config.example.yaml" "$PROJECT_ROOT/config.yaml"
+            echo ""
+            echo -e "${YELLOW}============================================================${NC}"
+            echo -e "${YELLOW}  config.yaml has been created from config.example.yaml.${NC}"
+            echo -e "${YELLOW}  Please edit config.yaml to set your API keys and model   ${NC}"
+            echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
+            echo -e "${YELLOW}============================================================${NC}"
+            echo ""
+            echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
+            echo -e "${YELLOW}  Then run:        make docker-start${NC}"
+            echo ""
+            exit 0
+        else
+            echo -e "${YELLOW}✗ config.yaml not found and no config.example.yaml to copy from.${NC}"
+            exit 1
+        fi
+    fi
+
+    # Ensure extensions_config.json exists as a file before mounting.
+    # Docker creates a directory when bind-mounting a non-existent host path.
+    if [ ! -f "$PROJECT_ROOT/extensions_config.json" ]; then
+        if [ -f "$PROJECT_ROOT/extensions_config.example.json" ]; then
+            cp "$PROJECT_ROOT/extensions_config.example.json" "$PROJECT_ROOT/extensions_config.json"
+            echo -e "${BLUE}Created extensions_config.json from example${NC}"
+        else
+            echo "{}" > "$PROJECT_ROOT/extensions_config.json"
+            echo -e "${BLUE}Created empty extensions_config.json${NC}"
+        fi
+    fi
+
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
@@ -177,8 +210,15 @@ logs() {
 
 # Stop Docker development environment
 stop() {
+    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
+    # running compose down to suppress "variable is not set" warnings.
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down
+    echo "Cleaning up sandbox containers..."
+    "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
     echo -e "${GREEN}✓ Docker services stopped${NC}"
 }
 
