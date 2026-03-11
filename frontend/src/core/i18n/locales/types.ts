@@ -186,6 +186,15 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    agentSwarm: string;
+    taskProgress: (completed: number, total: number) => string;
+    agentConsole: string;
+    taskPrompt: string;
+    agentTimeline: string;
+    result: string;
+    error: string;
+    running: string;
+    done: string;
   };
 
   // Settings

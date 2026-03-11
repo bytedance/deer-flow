@@ -82,26 +82,41 @@ export const MessageGroup = memo(function MessageGroup({
     () => convertToSteps(messages, resultCacheRef.current),
     [messages],
   );
-  const lastToolCallStep = useMemo(() => {
-    const filteredSteps = steps.filter((step) => step.type === "toolCall");
-    return filteredSteps[filteredSteps.length - 1];
+  const lastReasoningStepIndex = useMemo(() => {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (steps[i]?.type === "reasoning") {
+        return i;
+      }
+    }
+    return -1;
   }, [steps]);
+  const lastReasoningStep = useMemo(() => {
+    if (lastReasoningStepIndex < 0) {
+      return null;
+    }
+    const step = steps[lastReasoningStepIndex];
+    if (!step || step.type !== "reasoning") {
+      return null;
+    }
+    return step;
+  }, [lastReasoningStepIndex, steps]);
+  const primarySteps = useMemo(() => {
+    if (lastReasoningStepIndex < 0) {
+      return steps;
+    }
+    return steps.filter((_, index) => index !== lastReasoningStepIndex);
+  }, [lastReasoningStepIndex, steps]);
+  const lastToolCallStep = useMemo(() => {
+    const filteredSteps = primarySteps.filter((step) => step.type === "toolCall");
+    return filteredSteps[filteredSteps.length - 1];
+  }, [primarySteps]);
   const aboveLastToolCallSteps = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(0, index);
+      const index = primarySteps.indexOf(lastToolCallStep);
+      return primarySteps.slice(0, index);
     }
     return [];
-  }, [lastToolCallStep, steps]);
-  const lastReasoningStep = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(index + 1).find((step) => step.type === "reasoning");
-    } else {
-      const filteredSteps = steps.filter((step) => step.type === "reasoning");
-      return filteredSteps[filteredSteps.length - 1];
-    }
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, primarySteps]);
   const isThinkingStreaming = isLoading && Boolean(lastReasoningStep);
   const showThinking = isThinkingStreaming ? true : showLastThinking;
   const thinkingScrollRef = useRef<HTMLDivElement | null>(null);
@@ -127,84 +142,102 @@ export const MessageGroup = memo(function MessageGroup({
     container.scrollTop = container.scrollHeight;
   }, [isLoading, aboveLastToolCallSteps.length, lastToolCallStep?.id, showAbove]);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const showDoneStep = !isLoading && steps.length > 0;
+  const showDoneStep = !isLoading && primarySteps.length > 0;
+  const hasPrimaryContainerContent = (
+    aboveLastToolCallSteps.length > 0 ||
+    Boolean(lastToolCallStep) ||
+    showDoneStep
+  );
   return (
-    <ChainOfThought
-      className={cn(
-        "bg-background/50 w-full gap-2 rounded-lg border p-0.5",
-        className,
-      )}
-      open={true}
-    >
-      {aboveLastToolCallSteps.length > 0 && (
-        <Button
-          key="above"
-          className="w-full items-start justify-start text-left"
-          variant="ghost"
-          onClick={() => startTransition(() => setShowAbove(!showAbove))}
+    <div className={cn("w-full space-y-2", className)}>
+      {hasPrimaryContainerContent && (
+        <ChainOfThought
+          className="bg-background/50 w-full gap-2 rounded-lg border p-0.5"
+          open={true}
         >
-          <ChainOfThoughtStep
-            className="my-0"
-            label={
-              <span className="opacity-60">
-                {showAbove
-                  ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
-              </span>
-            }
-            icon={
-              <ChevronUp
-                className={cn(
-                  "size-4 opacity-60 transition-transform duration-200",
-                  showAbove ? "" : "rotate-180",
-                )}
-              />
-            }
-            showConnector={false}
-          ></ChainOfThoughtStep>
-        </Button>
-      )}
-      {lastToolCallStep && (
-        <ChainOfThoughtContent className="px-4 pb-2">
-          <div
-            ref={toolCallsScrollRef}
-            className="max-h-[36rem] overflow-y-auto pr-2"
-          >
-            {showAbove &&
-              aboveLastToolCallSteps.map((step) =>
-                step.type === "reasoning" ? (
-                  <ChainOfThoughtStep
-                    key={step.id}
-                    icon={ClockIcon}
-                    className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
-                    label={step.title ?? t.common.thinking}
-                  >
-                    <MarkdownContent
-                      content={step.body ?? ""}
+          {aboveLastToolCallSteps.length > 0 && (
+            <Button
+              key="above"
+              className="w-full items-start justify-start text-left"
+              variant="ghost"
+              onClick={() => startTransition(() => setShowAbove(!showAbove))}
+            >
+              <ChainOfThoughtStep
+                className="my-0"
+                label={
+                  <span className="opacity-60">
+                    {showAbove
+                      ? t.toolCalls.lessSteps
+                      : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  </span>
+                }
+                icon={
+                  <ChevronUp
+                    className={cn(
+                      "size-4 opacity-60 transition-transform duration-200",
+                      showAbove ? "" : "rotate-180",
+                    )}
+                  />
+                }
+                showConnector={false}
+              ></ChainOfThoughtStep>
+            </Button>
+          )}
+          {lastToolCallStep && (
+            <ChainOfThoughtContent className="px-4 pb-2">
+              <div
+                ref={toolCallsScrollRef}
+                className="max-h-[36rem] overflow-y-auto pr-2"
+              >
+                {showAbove &&
+                  aboveLastToolCallSteps.map((step) =>
+                    step.type === "reasoning" ? (
+                      <ChainOfThoughtStep
+                        key={step.id}
+                        icon={ClockIcon}
+                        className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
+                        label={step.title ?? t.common.thinking}
+                      >
+                        <MarkdownContent
+                          content={step.body ?? ""}
+                          isLoading={isLoading}
+                          rehypePlugins={rehypePlugins}
+                        />
+                      </ChainOfThoughtStep>
+                    ) : (
+                      <ToolCall key={step.id} {...step} isLoading={isLoading} />
+                    ),
+                  )}
+                {lastToolCallStep && (
+                  <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                    <ToolCall
+                      key={lastToolCallStep.id}
+                      {...lastToolCallStep}
+                      isLast={true}
                       isLoading={isLoading}
-                      rehypePlugins={rehypePlugins}
+                      hideContent={aboveLastToolCallSteps.length > 0 && !showAbove}
                     />
-                  </ChainOfThoughtStep>
-                ) : (
-                  <ToolCall key={step.id} {...step} isLoading={isLoading} />
-                ),
-              )}
-            {lastToolCallStep && (
-              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-                <ToolCall
-                  key={lastToolCallStep.id}
-                  {...lastToolCallStep}
-                  isLast={true}
-                  isLoading={isLoading}
-                  hideContent={aboveLastToolCallSteps.length > 0 && !showAbove}
-                />
-              </FlipDisplay>
-            )}
-          </div>
-        </ChainOfThoughtContent>
+                  </FlipDisplay>
+                )}
+              </div>
+            </ChainOfThoughtContent>
+          )}
+          {showDoneStep && (
+            <div className="px-4 pb-2">
+              <ChainOfThoughtStep
+                className="my-0"
+                icon={
+                  <CheckCircle2Icon className="text-emerald-500 dark:text-emerald-400 size-4" />
+                }
+                label={t.toolCalls.done}
+                showConnector={false}
+              />
+            </div>
+          )}
+        </ChainOfThought>
       )}
       {lastReasoningStep && (
-        <>
+        <div className="bg-background/50 w-full rounded-lg border p-0.5">
           <Button
             key={lastReasoningStep.id}
             className="w-full items-start justify-start text-left"
@@ -217,58 +250,54 @@ export const MessageGroup = memo(function MessageGroup({
             }}
           >
             <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="my-0 font-normal"
-                label={t.common.thinking}
-                icon={LightbulbIcon}
-                showConnector={false}
-              ></ChainOfThoughtStep>
-              <div>
-                <ChevronUp
-                  className={cn(
-                    "text-muted-foreground size-4",
-                    showThinking ? "" : "rotate-180",
-                  )}
-                />
+              <div className="text-muted-foreground flex items-center gap-2 text-sm">
+                <LightbulbIcon className="size-4" />
+                <span>{t.common.thinking}</span>
               </div>
+              <ChevronUp
+                className={cn(
+                  "text-muted-foreground size-4 transition-transform duration-200",
+                  showThinking ? "" : "rotate-180",
+                )}
+              />
             </div>
           </Button>
           {showThinking && (
-            <ChainOfThoughtContent className="px-4 pb-2">
-              <div
-                ref={thinkingScrollRef}
-                className="max-h-[36rem] overflow-y-auto pr-2"
-              >
-                <ChainOfThoughtStep
-                  key={lastReasoningStep.id}
-                  icon={ClockIcon}
-                  className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)]"
-                  label={lastReasoningStep.title ?? t.common.thinking}
-                >
+            <div
+              ref={thinkingScrollRef}
+              className="mt-3 max-h-[36rem] overflow-y-auto px-4 pb-3 pr-6"
+            >
+              <div className="text-[rgb(108,107,98)] dark:text-[rgb(175,174,163)] flex gap-2 text-sm">
+                <div className="relative mt-0.5">
+                  <ClockIcon className="size-4" />
+                  <div className="bg-border absolute top-5 -bottom-4 left-1/2 w-[2px] min-h-2 -translate-x-1/2" />
+                </div>
+                <div className="min-w-0 flex-1 overflow-hidden">
                   <MarkdownContent
-                    content={lastReasoningStep.body ?? ""}
+                    content={lastReasoningStep.body ?? lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
                     rehypePlugins={rehypePlugins}
+                    className="text-[rgb(108,107,98)] text-sm dark:text-[rgb(175,174,163)]"
                   />
-                </ChainOfThoughtStep>
+                </div>
               </div>
-            </ChainOfThoughtContent>
+            </div>
           )}
-        </>
-      )}
-      {showDoneStep && (
-        <div className="px-4 pb-2">
-          <ChainOfThoughtStep
-            className="my-0"
-            icon={
-              <CheckCircle2Icon className="text-emerald-500 dark:text-emerald-400 size-4" />
-            }
-            label={t.toolCalls.done}
-            showConnector={false}
-          />
+          {!isLoading && (
+            <div className="px-4 pb-2">
+              <ChainOfThoughtStep
+                className="my-0"
+                icon={
+                  <CheckCircle2Icon className="text-emerald-500 dark:text-emerald-400 size-4" />
+                }
+                label={t.toolCalls.done}
+                showConnector={false}
+              />
+            </div>
+          )}
         </div>
       )}
-    </ChainOfThought>
+    </div>
   );
 }, (prev, next) => {
   if (prev.isLoading !== next.isLoading) return false;
@@ -280,7 +309,7 @@ export const MessageGroup = memo(function MessageGroup({
   return prevLast === nextLast;
 });
 
-const ToolCall = memo(function ToolCall({
+export const ToolCall = memo(function ToolCall({
   id,
   messageId,
   name,
@@ -660,7 +689,7 @@ const ToolCall = memo(function ToolCall({
 
 const MAX_PREVIEW_COLUMNS = 6;
 
-const McpDataToolCall = memo(function McpDataToolCall({
+export const McpDataToolCall = memo(function McpDataToolCall({
   id,
   messageId,
   name,
@@ -797,27 +826,27 @@ const McpDataToolCall = memo(function McpDataToolCall({
     && prev.hideContent === next.hideContent;
 });
 
-interface GenericCoTStep<T extends string = string> {
+export interface GenericCoTStep<T extends string = string> {
   id?: string;
   messageId?: string;
   type: T;
 }
 
-interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
+export interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
   title: string | null;
   body: string | null;
 }
 
-interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
+export interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+export type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
-function convertToSteps(
+export function convertToSteps(
   messages: Message[],
   resultCache: Map<string, unknown>,
 ): CoTStep[] {

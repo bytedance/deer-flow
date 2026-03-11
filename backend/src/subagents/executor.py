@@ -16,6 +16,7 @@ from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphRecursionError
 
 from src.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from src.models import create_chat_model
@@ -57,12 +58,15 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    trajectory_messages: list[dict[str, Any]] | None = None
     token_usage: dict[str, int] | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+        if self.trajectory_messages is None:
+            self.trajectory_messages = []
         if self.token_usage is None:
             self.token_usage = {"input_tokens": 0, "output_tokens": 0}
 
@@ -165,6 +169,42 @@ def _filter_tools(
     return filtered
 
 
+_RUNTIME_MODEL_PROVIDERS = {
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "kimi",
+    "zai",
+    "minimax",
+    "epfl-rcp",
+}
+
+
+def _parse_runtime_model_spec(model_name: str) -> dict[str, str] | None:
+    """Parse a model_name string like 'anthropic:claude-sonnet-4-6' into a runtime model spec dict.
+
+    Returns None if the string is not a recognized runtime model spec.
+    """
+    parts = [p.strip() for p in model_name.split(":", 3)]
+    if len(parts) < 2:
+        return None
+    provider = parts[0].lower()
+    model_id = parts[1]
+    if provider not in _RUNTIME_MODEL_PROVIDERS or not model_id:
+        return None
+
+    spec: dict[str, str] = {
+        "provider": provider,
+        "model_id": model_id,
+    }
+    if len(parts) >= 3 and parts[2] and parts[2].lower() != "standard":
+        spec["tier"] = parts[2]
+    if len(parts) >= 4 and parts[3]:
+        spec["thinking_effort"] = parts[3]
+    return spec
+
+
 def _get_model_name(config: SubagentConfig, parent_model: str | None) -> str | None:
     """Resolve the model name for a subagent.
 
@@ -180,6 +220,23 @@ def _get_model_name(config: SubagentConfig, parent_model: str | None) -> str | N
     return config.model
 
 
+def _resolve_thinking_enabled(config: SubagentConfig, parent_thinking_enabled: bool) -> bool:
+    """Resolve effective thinking_enabled for a subagent."""
+    if config.thinking_enabled == "inherit":
+        return parent_thinking_enabled
+    return bool(config.thinking_enabled)
+
+
+def _resolve_thinking_effort(config: SubagentConfig, parent_thinking_effort: str | None) -> str | None:
+    """Resolve effective thinking effort for a subagent."""
+    if config.thinking_effort == "inherit":
+        return parent_thinking_effort
+    if isinstance(config.thinking_effort, str):
+        normalized = config.thinking_effort.strip().lower()
+        return normalized or None
+    return None
+
+
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -188,6 +245,9 @@ class SubagentExecutor:
         config: SubagentConfig,
         tools: list[BaseTool],
         parent_model: str | None = None,
+        parent_model_spec: dict | None = None,
+        parent_thinking_enabled: bool = False,
+        parent_thinking_effort: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
@@ -199,6 +259,10 @@ class SubagentExecutor:
             config: Subagent configuration.
             tools: List of all available tools (will be filtered).
             parent_model: The parent agent's model name for inheritance.
+            parent_model_spec: Optional runtime model spec dict (provider, model_id, etc.)
+                for provider-based models that aren't in config.yaml.
+            parent_thinking_enabled: Parent run thinking flag (used when config inherits).
+            parent_thinking_effort: Parent adaptive effort (used when config inherits).
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
@@ -206,6 +270,9 @@ class SubagentExecutor:
         """
         self.config = config
         self.parent_model = parent_model
+        self.parent_model_spec = parent_model_spec
+        self.thinking_enabled = _resolve_thinking_enabled(config, parent_thinking_enabled)
+        self.thinking_effort = _resolve_thinking_effort(config, parent_thinking_effort)
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -224,7 +291,22 @@ class SubagentExecutor:
     def _create_agent(self):
         """Create the agent instance."""
         model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False)
+
+        # Use runtime model spec if available (for provider-based models like
+        # "anthropic:claude-sonnet-4-6" that aren't in config.yaml).
+        runtime_model: dict[str, Any] | None = None
+        if self.parent_model_spec and self.config.model == "inherit":
+            runtime_model = dict(self.parent_model_spec)
+        elif model_name and ":" in model_name:
+            # Fallback: parse runtime model spec from model_name string
+            runtime_model = _parse_runtime_model_spec(model_name)
+
+        if runtime_model is not None:
+            if self.thinking_effort is not None:
+                runtime_model["thinking_effort"] = self.thinking_effort
+            model = create_chat_model(runtime_model=runtime_model, thinking_enabled=self.thinking_enabled)
+        else:
+            model = create_chat_model(name=model_name, thinking_enabled=self.thinking_enabled)
 
         # Subagents need minimal middlewares to ensure tools can access sandbox and thread_data
         # These middlewares will reuse the sandbox/thread_data from parent agent
@@ -292,9 +374,12 @@ class SubagentExecutor:
             agent = self._create_agent()
             state = self._build_initial_state(task)
 
-            # Build config with thread_id for sandbox access and recursion limit
+            # Build config with thread_id for sandbox access and recursion limit.
+            # LangGraph's recursion_limit counts graph node transitions (agent→tool→agent),
+            # not LLM calls. Each "turn" traverses ~3 nodes, so we multiply max_turns
+            # by 3 and add a buffer to avoid premature termination.
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                "recursion_limit": max(self.config.max_turns * 3, 25),
             }
             context = {}
             if self.thread_id:
@@ -306,35 +391,47 @@ class SubagentExecutor:
             # Use stream instead of invoke to get real-time updates
             # This allows us to collect AI messages as they are generated
             final_state = None
+            seen_message_count = 0
             for chunk in agent.stream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 final_state = chunk
 
-                # Extract AI messages from the current state
+                # Extract streamed messages from the current state
                 messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        is_duplicate = False
-                        if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
+                if not isinstance(messages, list) or len(messages) <= seen_message_count:
+                    continue
+
+                new_messages = messages[seen_message_count:]
+                seen_message_count = len(messages)
+
+                for streamed_message in new_messages:
+                    msg_type = getattr(streamed_message, "type", None)
+
+                    # Capture full subagent trajectory (AI + tool interactions).
+                    if msg_type in {"ai", "tool"}:
+                        if hasattr(streamed_message, "model_dump"):
+                            result.trajectory_messages.append(streamed_message.model_dump())
+                        elif hasattr(streamed_message, "dict"):
+                            result.trajectory_messages.append(streamed_message.dict())
                         else:
-                            is_duplicate = message_dict in result.ai_messages
+                            result.trajectory_messages.append(
+                                {
+                                    "type": msg_type,
+                                    "content": getattr(streamed_message, "content", None),
+                                    "id": getattr(streamed_message, "id", None),
+                                }
+                            )
 
-                        if not is_duplicate:
-                            result.ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
+                    if isinstance(streamed_message, AIMessage):
+                        # Keep backward compatibility for streaming UI updates.
+                        message_dict = streamed_message.model_dump()
+                        result.ai_messages.append(message_dict)
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
 
-                            # Accumulate token usage from this AI message
-                            msg_usage = getattr(last_message, "usage_metadata", None)
-                            if msg_usage and result.token_usage is not None:
-                                result.token_usage["input_tokens"] += msg_usage.get("input_tokens", 0)
-                                result.token_usage["output_tokens"] += msg_usage.get("output_tokens", 0)
+                        # Accumulate token usage from this AI message
+                        msg_usage = getattr(streamed_message, "usage_metadata", None)
+                        if msg_usage and result.token_usage is not None:
+                            result.token_usage["input_tokens"] += msg_usage.get("input_tokens", 0)
+                            result.token_usage["output_tokens"] += msg_usage.get("output_tokens", 0)
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed execution")
 
@@ -385,6 +482,56 @@ class SubagentExecutor:
             try:
                 from src.gateway.metrics import subagent_tasks_total
 
+                subagent_tasks_total.labels(status="completed").inc()
+            except Exception:
+                pass
+
+        except GraphRecursionError:
+            # Graceful degradation: the agent hit its step limit but may have
+            # produced useful partial work.  Instead of failing, we extract
+            # the best result we have from the trajectory collected so far.
+            logger.warning(
+                f"[trace={self.trace_id}] Subagent {self.config.name} hit recursion limit "
+                f"({max(self.config.max_turns * 3, 25)} steps). "
+                "Wrapping up with partial results."
+            )
+
+            # Try to build a result from the last AI message in the trajectory
+            partial_result: str | None = None
+            for msg_dict in reversed(result.trajectory_messages):
+                if msg_dict.get("type") == "ai":
+                    content = msg_dict.get("content")
+                    if isinstance(content, str) and content.strip():
+                        partial_result = content
+                        break
+                    elif isinstance(content, list):
+                        text_parts = [
+                            b["text"] if isinstance(b, dict) and "text" in b else str(b)
+                            for b in content
+                            if isinstance(b, str) or (isinstance(b, dict) and "text" in b)
+                        ]
+                        if text_parts:
+                            partial_result = "\n".join(text_parts)
+                            break
+
+            if partial_result:
+                result.result = (
+                    partial_result
+                    + "\n\n---\n*Note: This subagent reached its maximum step limit "
+                    "and returned partial results.*"
+                )
+                result.status = SubagentStatus.COMPLETED
+            else:
+                result.result = (
+                    "This subagent reached its maximum step limit before producing a final answer. "
+                    "The work done so far is available in the message history above."
+                )
+                result.status = SubagentStatus.COMPLETED
+
+            result.completed_at = datetime.now()
+
+            try:
+                from src.gateway.metrics import subagent_tasks_total
                 subagent_tasks_total.labels(status="completed").inc()
             except Exception:
                 pass
@@ -468,6 +615,7 @@ class SubagentExecutor:
                         _background_tasks[task_id].error = exec_result.error
                         _background_tasks[task_id].completed_at = datetime.now()
                         _background_tasks[task_id].ai_messages = exec_result.ai_messages
+                        _background_tasks[task_id].trajectory_messages = exec_result.trajectory_messages
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:

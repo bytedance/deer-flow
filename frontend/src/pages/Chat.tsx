@@ -27,6 +27,7 @@ import {
 // import { ContextPanel } from "@/components/workspace/context-panel";
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
+import { AgentDetailPanel } from "@/components/workspace/messages/agent-detail-panel";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { QuickActions } from "@/components/workspace/quick-actions";
 import { useRightPanel } from "@/components/workspace/right-panel-context";
@@ -35,6 +36,12 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { Welcome } from "@/components/workspace/welcome";
+import {
+  SubtasksProvider,
+  useSelectedSubtask,
+  useSubtaskContext,
+} from "@/core/tasks/context";
+import type { Todo } from "@/core/todos";
 import { useAuth } from "@/core/auth";
 import { authFetch } from "@/core/auth/fetch";
 import { getBackendBaseURL, useAppConfig } from "@/core/config";
@@ -247,6 +254,13 @@ function ChatInner() {
     }
     return artifactsOpen;
   }, [artifactsOpen, artifacts]);
+
+  const { selectedTaskId } = useSelectedSubtask();
+
+  const splitPanelOpen = useMemo(
+    () => artifactPanelOpen || !!selectedTaskId,
+    [artifactPanelOpen, selectedTaskId],
+  );
 
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
   const { open: todoPanelOpen, setOpen: setTodoPanelOpen } = useRightPanel();
@@ -702,8 +716,8 @@ function ChatInner() {
       <ResizablePanelGroup orientation="horizontal">
         <ResizablePanel
           className="relative"
-          defaultSize={artifactPanelOpen ? 46 : 100}
-          minSize={artifactPanelOpen ? 30 : 100}
+          defaultSize={splitPanelOpen ? 46 : 100}
+          minSize={splitPanelOpen ? 30 : 100}
         >
           <div className="bg-dot-grid relative flex size-full min-h-0">
             <header
@@ -826,94 +840,82 @@ function ChatInner() {
                   </div>
                 </div>
               </div>
-              {showTodoPanel && (
-                <aside
-                  className="relative min-h-0 shrink-0 pt-12 pr-4"
-                  style={{ width: `${rightPanelWidth}px` }}
-                >
-                  <button
-                    aria-label="Resize right panel"
-                    className="hover:after:bg-border absolute inset-y-0 -left-2 z-20 hidden w-4 cursor-col-resize transition-all ease-linear after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] md:block"
-                    onPointerDown={handleRightPanelResizeStart}
-                    tabIndex={-1}
-                    title="Resize panel"
-                    type="button"
-                  />
-                  <div className="flex flex-col gap-3">
-                    <TodoList
-                      className="mt-4 w-full max-w-[calc(100vw-2rem)]"
-                      todos={thread.values.todos ?? []}
-                      collapsed={todoListCollapsed}
-                      onToggle={() => setTodoListCollapsed(!todoListCollapsed)}
-                    />
-                    {/* <ContextPanel
-                      modelName={contextModelName}
-                      subagentEnabled={settings.context.mode === "ultra"}
-                    /> */}
-                  </div>
-                </aside>
-              )}
+              {/* Todo panel */}
+              <ChatTodoPanel
+                showTodoPanel={showTodoPanel}
+                rightPanelWidth={rightPanelWidth}
+                handleRightPanelResizeStart={handleRightPanelResizeStart}
+                todos={thread.values.todos ?? []}
+                todoListCollapsed={todoListCollapsed}
+                onToggleTodoList={() => setTodoListCollapsed(!todoListCollapsed)}
+              />
             </div>
           </div>
         </ResizablePanel>
         <ResizableHandle
           className={cn(
             "opacity-33 hover:opacity-100",
-            !artifactPanelOpen && "pointer-events-none opacity-0",
+            !splitPanelOpen && "pointer-events-none opacity-0",
           )}
         />
         <ResizablePanel
           className={cn(
             "transition-all duration-300 ease-in-out",
-            !artifactsOpen && "opacity-0",
+            !splitPanelOpen && "opacity-0",
           )}
-          defaultSize={artifactPanelOpen ? 64 : 0}
+          defaultSize={splitPanelOpen ? 64 : 0}
           minSize={0}
-          maxSize={artifactPanelOpen ? undefined : 0}
+          maxSize={splitPanelOpen ? undefined : 0}
         >
           <div
             className={cn(
-              "h-full p-4 transition-transform duration-300 ease-in-out",
-              artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+              "h-full p-2 transition-transform duration-300 ease-in-out",
+              splitPanelOpen ? "translate-x-0" : "translate-x-full",
             )}
           >
-            {selectedArtifact ? (
-              <ArtifactFileDetail
-                className="size-full"
-                filepath={selectedArtifact}
-                threadId={threadId}
-              />
+            {selectedTaskId ? (
+              <ChatAgentDetailPanel />
             ) : (
-              <div className="relative flex size-full justify-center">
-                <div className="absolute top-1 right-1 z-30">
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setArtifactsOpen(false);
-                    }}
-                  >
-                    <XIcon />
-                  </Button>
-                </div>
-                {thread.values.artifacts?.length === 0 ? (
-                  <ConversationEmptyState
-                    icon={<FilesIcon />}
-                    title="No artifact selected"
-                    description="Select an artifact to view its details"
+              <div className="size-full p-4">
+                {selectedArtifact ? (
+                  <ArtifactFileDetail
+                    className="size-full"
+                    filepath={selectedArtifact}
+                    threadId={threadId}
                   />
                 ) : (
-                  <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                    <header className="shrink-0">
-                      <h2 className="text-lg font-medium">Artifacts</h2>
-                    </header>
-                    <main className="min-h-0 grow">
-                      <ArtifactFileList
-                        className="max-w-(--container-width-sm) p-4 pt-12"
-                        files={thread.values.artifacts ?? []}
-                        threadId={threadId}
+                  <div className="relative flex size-full justify-center">
+                    <div className="absolute top-1 right-1 z-30">
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setArtifactsOpen(false);
+                        }}
+                      >
+                        <XIcon />
+                      </Button>
+                    </div>
+                    {thread.values.artifacts?.length === 0 ? (
+                      <ConversationEmptyState
+                        icon={<FilesIcon />}
+                        title="No artifact selected"
+                        description="Select an artifact to view its details"
                       />
-                    </main>
+                    ) : (
+                      <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
+                        <header className="shrink-0">
+                          <h2 className="text-lg font-medium">Artifacts</h2>
+                        </header>
+                        <main className="min-h-0 grow">
+                          <ArtifactFileList
+                            className="max-w-(--container-width-sm) p-4 pt-12"
+                            files={thread.values.artifacts ?? []}
+                            threadId={threadId}
+                          />
+                        </main>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -922,6 +924,84 @@ function ChatInner() {
         </ResizablePanel>
       </ResizablePanelGroup>
     </ThreadContext.Provider>
+  );
+}
+
+/**
+ * Inner component that renders the agent detail panel using SubtaskContext hooks.
+ * Must be rendered inside <SubtasksProvider>.
+ */
+function ChatAgentDetailPanel() {
+  const { tasks } = useSubtaskContext();
+  const { selectedTask, selectedTaskId, setSelectedTaskId } =
+    useSelectedSubtask();
+
+  const allTasks = useMemo(() => {
+    return Object.values(tasks).sort(
+      (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+    );
+  }, [tasks]);
+
+  if (!selectedTask || !selectedTaskId) {
+    return null;
+  }
+
+  return (
+    <AgentDetailPanel
+      task={selectedTask}
+      allTasks={allTasks}
+      selectedTaskId={selectedTaskId}
+      onSelectTask={setSelectedTaskId}
+      onClose={() => setSelectedTaskId(null)}
+    />
+  );
+}
+
+/**
+ * Todo panel component. Hidden when agent detail panel is open.
+ * Must be rendered inside <SubtasksProvider>.
+ */
+function ChatTodoPanel({
+  showTodoPanel,
+  rightPanelWidth,
+  handleRightPanelResizeStart,
+  todos,
+  todoListCollapsed,
+  onToggleTodoList,
+}: {
+  showTodoPanel: boolean;
+  rightPanelWidth: number;
+  handleRightPanelResizeStart: (e: React.PointerEvent) => void;
+  todos: Todo[];
+  todoListCollapsed: boolean;
+  onToggleTodoList: () => void;
+}) {
+  if (!showTodoPanel) {
+    return null;
+  }
+
+  return (
+    <aside
+      className="relative min-h-0 shrink-0 pt-12 pr-4"
+      style={{ width: `${rightPanelWidth}px` }}
+    >
+      <button
+        aria-label="Resize right panel"
+        className="hover:after:bg-border absolute inset-y-0 -left-2 z-20 hidden w-4 cursor-col-resize transition-all ease-linear after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] md:block"
+        onPointerDown={handleRightPanelResizeStart}
+        tabIndex={-1}
+        title="Resize panel"
+        type="button"
+      />
+      <div className="flex flex-col gap-3">
+        <TodoList
+          className="mt-4 w-full max-w-[calc(100vw-2rem)]"
+          todos={todos}
+          collapsed={todoListCollapsed}
+          onToggle={onToggleTodoList}
+        />
+      </div>
+    </aside>
   );
 }
 
@@ -971,7 +1051,9 @@ export function Chat() {
   return (
     <>
       <UsageResetOnThreadChange threadId={threadId} />
-      <ChatInner key={`${threadId}-${remountCounter}`} />
+      <SubtasksProvider key={`subtasks-${threadId}-${remountCounter}`}>
+        <ChatInner key={`${threadId}-${remountCounter}`} />
+      </SubtasksProvider>
     </>
   );
 }

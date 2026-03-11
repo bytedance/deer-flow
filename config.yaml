@@ -316,7 +316,8 @@ title:
   enabled: true
   max_words: 7
   max_chars: 70
-  model_name: claude-haiku-4-5-20251001 # Use default model (first model in models list)
+  model_name: claude-haiku-4-5
+  # Use default model (first model in models list)
 
 # ============================================================================
 # Summarization Configuration

@@ -39,7 +39,11 @@ export function groupMessages<T>(
     const lastGroup = groups[groups.length - 1];
     const lastProcessingGroup = [...groups]
       .reverse()
-      .find((group): group is AssistantProcessingGroup => group.type === "assistant:processing");
+      .find(
+        (group): group is AssistantProcessingGroup | AssistantSubagentGroup =>
+          group.type === "assistant:processing" ||
+          group.type === "assistant:subagent",
+      );
     if (message.type === "human") {
       groups.push({
         id: message.id,
