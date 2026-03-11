@@ -1,0 +1,33 @@
+{
+    "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+    "packages": [
+        "python312",
+        "nodejs_22",
+        "pnpm",
+        "uv",
+        "atlas",
+        "postgresql_16"
+    ],
+    "shell": {
+        "init_hook": [
+            "source .devbox/init.sh"
+        ],
+        "scripts": {
+            "deps:up": [
+                "docker compose -f docker-compose.deps.yml up -d"
+            ],
+            "deps:down": [
+                "docker compose -f docker-compose.deps.yml down"
+            ],
+            "atlas:status": [
+                "cd backend && atlas migrate status --env local --config file://atlas.hcl --var db_url=\"${MEMORY_DATABASE_URL:-postgres://chatagent:chatagent@127.0.0.1:7753/chatagent?sslmode=disable}\""
+            ],
+            "atlas:apply": [
+                "cd backend && atlas migrate apply --env local --config file://atlas.hcl --var db_url=\"${MEMORY_DATABASE_URL:-postgres://chatagent:chatagent@127.0.0.1:7753/chatagent?sslmode=disable}\""
+            ],
+            "atlas:lint": [
+                "cd backend && atlas migrate lint --env local --config file://atlas.hcl --var db_url=\"${MEMORY_DATABASE_URL:-postgres://chatagent:chatagent@127.0.0.1:7753/chatagent?sslmode=disable}\" --latest 1"
+            ]
+        }
+    }
+}

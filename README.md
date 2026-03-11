@@ -173,6 +173,29 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
 5. **Access**: http://localhost:2026
 
 ### Advanced
+
+#### Devbox (Optional)
+
+If you use [Devbox](https://www.jetify.com/devbox), this repo now includes `devbox.json`.
+
+```bash
+devbox shell
+```
+
+Behavior:
+- Uses Devbox toolchain (`python312`, `nodejs_23`, `pnpm`, `uv`, `atlas`).
+- Reuses an existing virtual environment automatically when available:
+  - `backend/.venv`
+  - `.venv`
+
+Useful commands inside Devbox:
+
+```bash
+devbox run deps:up
+devbox run atlas:status
+devbox run atlas:apply
+```
+
 #### Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
