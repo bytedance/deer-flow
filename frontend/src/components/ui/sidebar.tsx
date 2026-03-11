@@ -180,6 +180,23 @@ function Sidebar({
     );
   }
 
+  // When collapsible="icon", show icon-only sidebar on mobile (not full Sheet)
+  if (isMobile && collapsible === "icon") {
+    return (
+      <div
+        data-slot="sidebar"
+        className={cn(
+          "bg-sidebar text-sidebar-foreground fixed inset-y-0 z-10 flex w-(--sidebar-width-icon) flex-col",
+          side === "left" ? "left-0" : "right-0",
+          className,
+        )}
+        {...props}
+      >
+        {children}
+      </div>
+    );
+  }
+
   if (isMobile) {
     return (
       <Sheet open={openMobile} onOpenChange={setOpenMobile} {...props}>
