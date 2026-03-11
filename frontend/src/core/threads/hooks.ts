@@ -91,7 +91,9 @@ export function useThreadStream({
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
     reconnectOnMount: true,
-    fetchStateHistory: { limit: 1 },
+    // Only fetch history when there is a known thread ID; skip for new/uninitialized
+    // threads to avoid spurious 404/422 errors before the thread is created.
+    fetchStateHistory: onStreamThreadId ? { limit: 1 } : false,
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
       setOnStreamThreadId(meta.thread_id);
