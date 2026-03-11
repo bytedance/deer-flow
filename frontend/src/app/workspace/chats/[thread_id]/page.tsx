@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -25,6 +26,7 @@ import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const router = useRouter();
   const [settings, setSettings] = useLocalSettings();
 
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
@@ -38,7 +40,11 @@ export default function ChatPage() {
     isMock,
     onStart: () => {
       setIsNewThread(false);
-      history.replaceState(null, "", `/workspace/chats/${threadId}`);
+      // Use router.replace so Next.js Router's internal state is updated.
+      // This ensures subsequent "New Chat" clicks are treated as a real
+      // cross-route navigation (actual-id → "new") rather than a no-op
+      // same-path navigation, which was causing stale content to persist.
+      router.replace(`/workspace/chats/${threadId}`);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
