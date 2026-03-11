@@ -68,46 +68,42 @@ mkdir -p logs
 
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
-sleep 3
-if ! lsof -i :2024 -sTCP:LISTEN -t >/dev/null 2>&1; then
+./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "✗ LangGraph failed to start. Last log output:"
     tail -60 logs/langgraph.log
     cleanup_on_failure
     exit 1
-fi
+}
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
 nohup sh -c 'cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1' &
-sleep 3
-if ! lsof -i :8001 -sTCP:LISTEN -t >/dev/null 2>&1; then
+./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
     cleanup_on_failure
     exit 1
-fi
+}
 echo "✓ Gateway API started on localhost:8001"
 
 echo "Starting Frontend..."
 nohup sh -c 'cd frontend && pnpm run dev > ../logs/frontend.log 2>&1' &
-sleep 3
-if ! lsof -i :3000 -sTCP:LISTEN -t >/dev/null 2>&1; then
+./scripts/wait-for-port.sh 3000 120 "Frontend" || {
     echo "✗ Frontend failed to start. Last log output:"
     tail -60 logs/frontend.log
     cleanup_on_failure
     exit 1
-fi
+}
 echo "✓ Frontend started on localhost:3000"
 
 echo "Starting Nginx reverse proxy..."
 nohup sh -c 'nginx -g "daemon off;" -c '"$REPO_ROOT"'/docker/nginx/nginx.local.conf -p '"$REPO_ROOT"' > logs/nginx.log 2>&1' &
-sleep 2
-if ! lsof -i :2026 -sTCP:LISTEN -t >/dev/null 2>&1; then
+./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "✗ Nginx failed to start. Last log output:"
     tail -60 logs/nginx.log
     cleanup_on_failure
     exit 1
-fi
+}
 echo "✓ Nginx started on localhost:2026"
 
 # ── Ready ─────────────────────────────────────────────────────────────────────
