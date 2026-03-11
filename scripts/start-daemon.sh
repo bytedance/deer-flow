@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# start.sh - Start all DeerFlow development services
+# start-daemon.sh - Start all DeerFlow development services in daemon mode
+#
+# This script starts DeerFlow services in the background without keeping
+# the terminal connection. Logs are written to separate files.
 #
 # Must be run from the repo root directory.
 
@@ -18,7 +21,6 @@ pkill -f "next dev" 2>/dev/null || true
 nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
 sleep 1
 pkill -9 nginx 2>/dev/null || true
-killall -9 nginx 2>/dev/null || true
 ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
 sleep 1
 
@@ -26,13 +28,8 @@ sleep 1
 
 echo ""
 echo "=========================================="
-echo "  Starting DeerFlow Development Server"
+echo " Starting DeerFlow in Daemon Mode"
 echo "=========================================="
-echo ""
-echo "Services starting up..."
-echo "  → Backend: LangGraph + Gateway"
-echo "  → Frontend: Next.js"
-echo "  → Nginx: Reverse Proxy"
 echo ""
 
 # ── Config check ─────────────────────────────────────────────────────────────
@@ -52,72 +49,62 @@ if ! { \
     exit 1
 fi
 
-# ── Cleanup trap ─────────────────────────────────────────────────────────────
+# ── Cleanup on failure ───────────────────────────────────────────────────────
 
-cleanup() {
-    trap - INT TERM
-    echo ""
-    echo "Shutting down services..."
+cleanup_on_failure() {
+    echo "Failed to start services, cleaning up..."
     pkill -f "langgraph dev" 2>/dev/null || true
     pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
-    # Kill nginx using the captured PID first (most reliable),
-    # then fall back to pkill/killall for any stray nginx workers.
-    if [ -n "${NGINX_PID:-}" ] && kill -0 "$NGINX_PID" 2>/dev/null; then
-        kill -TERM "$NGINX_PID" 2>/dev/null || true
-        sleep 1
-        kill -9 "$NGINX_PID" 2>/dev/null || true
-    fi
+    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
+    sleep 1
     pkill -9 nginx 2>/dev/null || true
-    killall -9 nginx 2>/dev/null || true
-    echo "Cleaning up sandbox containers..."
-    ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
-    echo "✓ All services stopped"
-    exit 0
+    echo "✓ Cleanup complete"
 }
-trap cleanup INT TERM
+
+trap cleanup_on_failure INT TERM
 
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
 
 echo "Starting LangGraph server..."
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1) &
+nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
-    echo "  See logs/langgraph.log for details"
-    tail -20 logs/langgraph.log
-    cleanup
+    echo "✗ LangGraph failed to start. Last log output:"
+    tail -60 logs/langgraph.log
+    cleanup_on_failure
+    exit 1
 }
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-(cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1) &
+nohup sh -c 'cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1' &
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
-    echo ""
-    echo "Likely configuration errors:"
-    grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true
-    cleanup
+    cleanup_on_failure
+    exit 1
 }
 echo "✓ Gateway API started on localhost:8001"
 
 echo "Starting Frontend..."
-(cd frontend && pnpm run dev > ../logs/frontend.log 2>&1) &
+nohup sh -c 'cd frontend && pnpm run dev > ../logs/frontend.log 2>&1' &
 ./scripts/wait-for-port.sh 3000 120 "Frontend" || {
-    echo "  See logs/frontend.log for details"
-    tail -20 logs/frontend.log
-    cleanup
+    echo "✗ Frontend failed to start. Last log output:"
+    tail -60 logs/frontend.log
+    cleanup_on_failure
+    exit 1
 }
 echo "✓ Frontend started on localhost:3000"
 
 echo "Starting Nginx reverse proxy..."
-nginx -g 'daemon off;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" > logs/nginx.log 2>&1 &
-NGINX_PID=$!
+nohup sh -c 'nginx -g "daemon off;" -c "$1/docker/nginx/nginx.local.conf" -p "$1" > logs/nginx.log 2>&1' _ "$REPO_ROOT" &
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
-    echo "  See logs/nginx.log for details"
-    tail -10 logs/nginx.log
-    cleanup
+    echo "✗ Nginx failed to start. Last log output:"
+    tail -60 logs/nginx.log
+    cleanup_on_failure
+    exit 1
 }
 echo "✓ Nginx started on localhost:2026"
 
@@ -125,20 +112,18 @@ echo "✓ Nginx started on localhost:2026"
 
 echo ""
 echo "=========================================="
-echo "  DeerFlow is ready!"
+echo " DeerFlow is running in daemon mode!"
 echo "=========================================="
 echo ""
-echo "  🌐 Application: http://localhost:2026"
-echo "  📡 API Gateway: http://localhost:2026/api/*"
-echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
+echo " 🌐 Application: http://localhost:2026"
+echo " 📡 API Gateway: http://localhost:2026/api/*"
+echo " 🤖 LangGraph: http://localhost:2026/api/langgraph/*"
 echo ""
-echo "  📋 Logs:"
-echo "     - LangGraph: logs/langgraph.log"
-echo "     - Gateway:   logs/gateway.log"
-echo "     - Frontend:  logs/frontend.log"
-echo "     - Nginx:     logs/nginx.log"
+echo " 📋 Logs:"
+echo " - LangGraph: logs/langgraph.log"
+echo " - Gateway: logs/gateway.log"
+echo " - Frontend: logs/frontend.log"
+echo " - Nginx: logs/nginx.log"
 echo ""
-echo "Press Ctrl+C to stop all services"
+echo " 🛑 Stop daemon: make stop"
 echo ""
-
-wait
