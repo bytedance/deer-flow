@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.config.paths import Paths
-from src.storage.local_storage import LocalStorage
+from src.storage.thread_files import ThreadUploadItem
 
 THREAD_ID = "thread-abc123"
 
@@ -28,13 +28,6 @@ def _middleware(tmp_path: Path) -> UploadsMiddleware:
     return UploadsMiddleware(base_dir=str(tmp_path))
 
 
-def _local_storage(tmp_path: Path) -> LocalStorage:
-    """Create a LocalStorage backed by the given tmp_path."""
-    with patch("src.storage.local_storage.get_paths") as mock_paths:
-        mock_paths.return_value.base_dir = tmp_path
-        return LocalStorage()
-
-
 def _runtime(thread_id: str | None = THREAD_ID) -> MagicMock:
     rt = MagicMock()
     rt.context = {"thread_id": thread_id}
@@ -45,11 +38,6 @@ def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID) -> Path:
     d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def _write_to_storage(storage: LocalStorage, thread_id: str, filename: str, data: bytes) -> None:
-    """Write a file to storage (mirrors what upload router does)."""
-    storage.write(f"threads/{thread_id}/uploads/{filename}", data)
 
 
 def _human(content, files=None, **extra_kwargs):
@@ -101,21 +89,19 @@ class TestFilesFromKwargs:
         assert result is not None
         assert result[0]["path"] == "/mnt/user-data/uploads/report.pdf"
 
-    def test_skips_file_that_does_not_exist_in_storage(self, tmp_path):
+    def test_skips_file_that_does_not_exist_on_disk(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        # file is NOT written to storage
+        uploads_dir = _uploads_dir(tmp_path)
+        # file is NOT written to disk
         msg = _human("hi", files=[{"filename": "missing.txt", "size": 50, "path": "/mnt/user-data/uploads/missing.txt"}])
-        with patch("src.storage.get_storage", return_value=storage):
-            assert mw._files_from_kwargs(msg, THREAD_ID) is None
+        assert mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file()) is None
 
-    def test_accepts_file_that_exists_in_storage(self, tmp_path):
+    def test_accepts_file_that_exists_on_disk(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "data.csv", b"a,b,c")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_text("a,b,c")
         msg = _human("hi", files=[{"filename": "data.csv", "size": 5, "path": "/mnt/user-data/uploads/data.csv"}])
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw._files_from_kwargs(msg, THREAD_ID)
+        result = mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file())
         assert result is not None
         assert len(result) == 1
         assert result[0]["filename"] == "data.csv"
@@ -123,8 +109,8 @@ class TestFilesFromKwargs:
 
     def test_skips_nonexistent_but_accepts_existing_in_mixed_list(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "present.txt", b"here")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "present.txt").write_text("here")
         msg = _human(
             "hi",
             files=[
@@ -132,16 +118,15 @@ class TestFilesFromKwargs:
                 {"filename": "gone.txt", "size": 4, "path": "/mnt/user-data/uploads/gone.txt"},
             ],
         )
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw._files_from_kwargs(msg, THREAD_ID)
+        result = mw._files_from_kwargs(msg, lambda name: (uploads_dir / name).is_file())
         assert result is not None
         assert [f["filename"] for f in result] == ["present.txt"]
 
-    def test_no_existence_check_when_thread_id_is_none(self, tmp_path):
-        """Without a thread_id argument the existence check is skipped entirely."""
+    def test_no_existence_check_when_uploads_dir_is_none(self, tmp_path):
+        """Without an uploads_dir argument the existence check is skipped entirely."""
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": "phantom.txt", "size": 10, "path": "/mnt/user-data/uploads/phantom.txt"}])
-        result = mw._files_from_kwargs(msg, thread_id=None)
+        result = mw._files_from_kwargs(msg, None)
         assert result is not None
         assert result[0]["filename"] == "phantom.txt"
 
@@ -235,23 +220,21 @@ class TestBeforeAgent:
         state = self._state(_human("plain message"))
         assert mw.before_agent(state, _runtime()) is None
 
-    def test_returns_none_when_all_files_missing_from_storage(self, tmp_path):
+    def test_returns_none_when_all_files_missing_from_disk(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
+        _uploads_dir(tmp_path)  # directory exists but is empty
         msg = _human("hi", files=[{"filename": "ghost.txt", "size": 10, "path": "/mnt/user-data/uploads/ghost.txt"}])
         state = self._state(msg)
-        with patch("src.storage.get_storage", return_value=storage):
-            assert mw.before_agent(state, _runtime()) is None
+        assert mw.before_agent(state, _runtime()) is None
 
     def test_injects_uploaded_files_tag_into_string_content(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "report.pdf", b"pdf")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
 
         msg = _human("please analyse", files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}])
         state = self._state(msg)
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(state, _runtime())
+        result = mw.before_agent(state, _runtime())
 
         assert result is not None
         updated_msg = result["messages"][-1]
@@ -262,16 +245,15 @@ class TestBeforeAgent:
 
     def test_injects_uploaded_files_tag_into_list_content(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "data.csv", b"a,b")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b")
 
         msg = _human(
             [{"type": "text", "text": "analyse this"}],
             files=[{"filename": "data.csv", "size": 3, "path": "/mnt/user-data/uploads/data.csv"}],
         )
         state = self._state(msg)
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(state, _runtime())
+        result = mw.before_agent(state, _runtime())
 
         assert result is not None
         updated_msg = result["messages"][-1]
@@ -280,14 +262,13 @@ class TestBeforeAgent:
 
     def test_preserves_additional_kwargs_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "img.png", b"png")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "img.png").write_bytes(b"png")
 
         files_meta = [{"filename": "img.png", "size": 3, "path": "/mnt/user-data/uploads/img.png", "status": "uploaded"}]
         msg = _human("check image", files=files_meta, element="task")
         state = self._state(msg)
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(state, _runtime())
+        result = mw.before_agent(state, _runtime())
 
         assert result is not None
         updated_kwargs = result["messages"][-1].additional_kwargs
@@ -296,12 +277,11 @@ class TestBeforeAgent:
 
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "notes.txt", b"hello")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "notes.txt").write_bytes(b"hello")
 
         msg = _human("review", files=[{"filename": "notes.txt", "size": 5, "path": "/mnt/user-data/uploads/notes.txt"}])
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(self._state(msg), _runtime())
+        result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
         assert result["uploaded_files"] == [
@@ -313,15 +293,14 @@ class TestBeforeAgent:
             }
         ]
 
-    def test_historical_files_from_storage_excluding_new(self, tmp_path):
+    def test_historical_files_from_uploads_dir_excluding_new(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "old.txt", b"old")
-        _write_to_storage(storage, THREAD_ID, "new.txt", b"new")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.txt").write_bytes(b"old")
+        (uploads_dir / "new.txt").write_bytes(b"new")
 
         msg = _human("go", files=[{"filename": "new.txt", "size": 3, "path": "/mnt/user-data/uploads/new.txt"}])
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(self._state(msg), _runtime())
+        result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
         content = result["messages"][-1].content
@@ -330,14 +309,13 @@ class TestBeforeAgent:
         assert "previous messages" in content
         assert "old.txt" in content
 
-    def test_no_historical_section_when_only_new_files(self, tmp_path):
+    def test_no_historical_section_when_upload_dir_is_empty(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "only.txt", b"x")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "only.txt").write_bytes(b"x")
 
         msg = _human("go", files=[{"filename": "only.txt", "size": 1, "path": "/mnt/user-data/uploads/only.txt"}])
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(self._state(msg), _runtime())
+        result = mw.before_agent(self._state(msg), _runtime())
 
         content = result["messages"][-1].content
         assert "previous messages" not in content
@@ -354,12 +332,36 @@ class TestBeforeAgent:
 
     def test_message_id_preserved_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)
-        storage = _local_storage(tmp_path)
-        _write_to_storage(storage, THREAD_ID, "f.txt", b"x")
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "f.txt").write_bytes(b"x")
 
         msg = _human("go", files=[{"filename": "f.txt", "size": 1, "path": "/mnt/user-data/uploads/f.txt"}])
         msg.id = "original-id-42"
-        with patch("src.storage.get_storage", return_value=storage):
-            result = mw.before_agent(self._state(msg), _runtime())
+        result = mw.before_agent(self._state(msg), _runtime())
 
         assert result["messages"][-1].id == "original-id-42"
+
+    def test_non_local_mode_reads_historical_from_backend_not_local_dir(self, tmp_path):
+        mw = _middleware(tmp_path)
+
+        # Do not create local uploads files; historical visibility should come from backend list_uploads.
+        msg = _human("go", files=[{"filename": "new.txt", "size": 3, "path": "/mnt/user-data/uploads/new.txt"}])
+
+        app_config = MagicMock()
+        app_config.thread_files.backend_for_feature.return_value = "r2"
+
+        backend = MagicMock()
+        backend.exists_virtual_file.side_effect = lambda thread_id, virtual_path: virtual_path.endswith("/new.txt")
+        backend.list_uploads.return_value = [ThreadUploadItem(filename="old.txt", size=7, extension=".txt", modified=123.0), ThreadUploadItem(filename="new.txt", size=3, extension=".txt", modified=124.0)]
+
+        with (
+            patch("src.agents.middlewares.uploads_middleware.get_app_config", return_value=app_config),
+            patch("src.agents.middlewares.uploads_middleware.get_thread_file_backend", return_value=backend),
+        ):
+            result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "new.txt" in content
+        assert "old.txt" in content
+        assert "previous messages" in content

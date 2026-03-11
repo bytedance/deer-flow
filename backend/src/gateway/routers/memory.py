@@ -60,7 +60,11 @@ class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
     enabled: bool = Field(..., description="Whether memory is enabled")
+    backend: str = Field(..., description="Configured memory backend: 'file' or 'postgres'")
     storage_path: str = Field(..., description="Path to memory storage file")
+    database_configured: bool = Field(..., description="Whether a database URL is configured for the selected backend")
+    strict_scope: bool = Field(..., description="Whether workspace_type/workspace_id are required for memory operations")
+    auth_mode: str = Field(..., description="Scope trust mode used by the memory subsystem")
     debounce_seconds: int = Field(..., description="Debounce time for memory updates")
     max_facts: int = Field(..., description="Maximum number of facts to store")
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
@@ -332,7 +336,11 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     config = get_memory_config()
     return MemoryConfigResponse(
         enabled=config.enabled,
+        backend=config.backend,
         storage_path=config.storage_path,
+        database_configured=bool(config.database_url),
+        strict_scope=config.strict_scope,
+        auth_mode=config.auth_mode,
         debounce_seconds=config.debounce_seconds,
         max_facts=config.max_facts,
         fact_confidence_threshold=config.fact_confidence_threshold,
@@ -362,7 +370,11 @@ async def get_memory_status(
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
             enabled=config.enabled,
+            backend=config.backend,
             storage_path=config.storage_path,
+            database_configured=bool(config.database_url),
+            strict_scope=config.strict_scope,
+            auth_mode=config.auth_mode,
             debounce_seconds=config.debounce_seconds,
             max_facts=config.max_facts,
             fact_confidence_threshold=config.fact_confidence_threshold,

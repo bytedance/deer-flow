@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.gateway.routers import memory as memory_router
+from src.config.memory_config import MemoryConfig
 
 
 def _empty_memory() -> dict:
@@ -100,3 +101,89 @@ def test_memory_scope_validation_returns_400(monkeypatch):
     r = client.get("/api/memory")
     assert r.status_code == 400
     assert "workspace_type and workspace_id are required" in r.json()["detail"]
+
+
+def test_memory_config_reports_backend_and_scope_mode(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        memory_router,
+        "get_memory_config",
+        lambda: MemoryConfig(
+            backend="postgres",
+            database_url="postgres://memory-db",
+            strict_scope=True,
+            auth_mode="downstream_trusted_scope",
+            storage_path="",
+            debounce_seconds=5,
+            max_facts=200,
+            fact_confidence_threshold=0.7,
+            injection_enabled=True,
+            max_injection_tokens=1200,
+        ),
+    )
+
+    r = client.get("/api/memory/config")
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "enabled": True,
+        "backend": "postgres",
+        "storage_path": "",
+        "database_configured": True,
+        "strict_scope": True,
+        "auth_mode": "downstream_trusted_scope",
+        "debounce_seconds": 5,
+        "max_facts": 200,
+        "fact_confidence_threshold": 0.7,
+        "injection_enabled": True,
+        "max_injection_tokens": 1200,
+    }
+
+
+def test_memory_status_reports_backend_and_current_scope_data(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        memory_router,
+        "get_memory_config",
+        lambda: MemoryConfig(
+            backend="postgres",
+            database_url="postgres://memory-db",
+            strict_scope=True,
+            auth_mode="downstream_trusted_scope",
+            storage_path="",
+        ),
+    )
+    monkeypatch.setattr(
+        memory_router,
+        "get_memory_data",
+        lambda **kwargs: {
+            **_empty_memory(),
+            "facts": [
+                {
+                    "id": "fact_1234",
+                    "content": "User prefers terse updates.",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2026-03-11T10:22:11Z",
+                    "source": "api",
+                }
+            ],
+        },
+    )
+
+    r = client.get("/api/memory/status?workspace_type=chat&workspace_id=tenant-a")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["backend"] == "postgres"
+    assert body["config"]["database_configured"] is True
+    assert body["config"]["strict_scope"] is True
+    assert body["config"]["auth_mode"] == "downstream_trusted_scope"
+    assert body["data"]["facts"][0]["content"] == "User prefers terse updates."
+

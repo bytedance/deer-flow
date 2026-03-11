@@ -3,6 +3,21 @@
 from pydantic import BaseModel, Field
 
 
+DEPRECATED_FILE_BACKEND_ERROR = (
+    "memory.backend=file is deprecated and no longer supported. "
+    "Configure memory.backend=postgres for supported operation."
+)
+
+MEMORY_BACKEND_FILE = "file"
+MEMORY_BACKEND_POSTGRES = "postgres"
+
+
+def _normalize_memory_backend(value: str | None) -> str:
+    if value is None:
+        return MEMORY_BACKEND_FILE
+    return value.strip().lower()
+
+
 class MemoryConfig(BaseModel):
     """Configuration for global memory mechanism."""
 
@@ -24,7 +39,7 @@ class MemoryConfig(BaseModel):
         ),
     )
     backend: str = Field(
-        default="file",
+        default=MEMORY_BACKEND_POSTGRES,
         description="Memory backend to use: 'file' or 'postgres'.",
     )
     database_url: str = Field(
@@ -77,18 +92,34 @@ class MemoryConfig(BaseModel):
 _memory_config: MemoryConfig = MemoryConfig()
 
 
+def _assert_supported_memory_backend(config: MemoryConfig) -> None:
+    """Reject deprecated memory backends while preserving legacy code paths.
+
+    The file-backed implementation remains in the codebase as a placeholder for
+    potential future work, but supported runtime configuration must use
+    Postgres-backed memory.
+    """
+
+    if _normalize_memory_backend(config.backend) == MEMORY_BACKEND_FILE:
+        raise ValueError(DEPRECATED_FILE_BACKEND_ERROR)
+
+
 def get_memory_config() -> MemoryConfig:
     """Get the current memory configuration."""
+    _assert_supported_memory_backend(_memory_config)
     return _memory_config
 
 
 def set_memory_config(config: MemoryConfig) -> None:
     """Set the memory configuration."""
     global _memory_config
+    _assert_supported_memory_backend(config)
     _memory_config = config
 
 
 def load_memory_config_from_dict(config_dict: dict) -> None:
     """Load memory configuration from a dictionary."""
     global _memory_config
-    _memory_config = MemoryConfig(**config_dict)
+    config = MemoryConfig(**config_dict)
+    _assert_supported_memory_backend(config)
+    _memory_config = config
