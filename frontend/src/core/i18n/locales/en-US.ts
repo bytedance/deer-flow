@@ -180,6 +180,7 @@ export const enUS: Translations = {
     demoChats: "Demo chats",
     agents: "Agents",
     aiGraphs: "AI Graphs",
+    aiVideo: "AI Video",
   },
 
   // Agents

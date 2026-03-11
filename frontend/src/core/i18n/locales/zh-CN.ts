@@ -167,6 +167,7 @@ export const zhCN: Translations = {
     demoChats: "演示对话",
     agents: "智能体",
     aiGraphs: "AI 图表",
+    aiVideo: "AI 视频",
   },
 
   // Agents

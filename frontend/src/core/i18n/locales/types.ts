@@ -106,6 +106,7 @@ export interface Translations {
     demoChats: string;
     agents: string;
     aiGraphs: string;
+    aiVideo: string;
   };
 
   // Agents
