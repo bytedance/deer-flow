@@ -32,6 +32,25 @@ def find_project_root() -> Path:
     return current
 
 
+def validate_input(value: str, param_name: str) -> None:
+    """Validate input to prevent command injection attempts.
+    
+    Raises ValueError if suspicious patterns are detected.
+    """
+    if not value:
+        return
+    
+    # Check for shell metacharacters that could be dangerous
+    dangerous_chars = [';', '|', '&', '$', '`', '\n', '\r']
+    for char in dangerous_chars:
+        if char in value:
+            raise ValueError(f"Invalid character '{char}' in {param_name}")
+    
+    # Check for command substitution patterns
+    if '$(' in value or '${' in value:
+        raise ValueError(f"Command substitution detected in {param_name}")
+
+
 def run_single_query(
     query: str,
     skill_name: str,
@@ -48,6 +67,9 @@ def run_single_query(
     stream events (content_block_start) rather than waiting for the
     full assistant message, which only arrives after tool execution.
     """
+    # Validate inputs to prevent command injection
+    validate_input(query, "query")
+    validate_input(model, "model")
     unique_id = uuid.uuid4().hex[:8]
     clean_name = f"{skill_name}-skill-{unique_id}"
     project_commands_dir = Path(project_root) / ".claude" / "commands"
