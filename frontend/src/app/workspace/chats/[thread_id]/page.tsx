@@ -20,7 +20,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
-import { textOfMessage } from "@/core/threads/utils";
+import type { AgentThreadState } from "@/core/threads/types";
+import { notificationBodyOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +34,16 @@ export default function ChatPage() {
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
+  const notifyThreadUpdate = useCallback(
+    (state: AgentThreadState) => {
+      if (document.hidden || !document.hasFocus()) {
+        showNotification(state.title, {
+          body: notificationBodyOfThread(state),
+        });
+      }
+    },
+    [showNotification],
+  );
 
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
@@ -46,22 +57,8 @@ export default function ChatPage() {
       // same-path navigation, which was causing stale content to persist.
       router.replace(`/workspace/chats/${threadId}`);
     },
-    onFinish: (state) => {
-      if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
-        const lastMessage = state.messages.at(-1);
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
-      }
-    },
+    onFinish: notifyThreadUpdate,
+    onThreadUpdate: notifyThreadUpdate,
   });
 
   const handleSubmit = useCallback(
