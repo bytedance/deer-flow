@@ -99,7 +99,7 @@ nohup sh -c 'cd frontend && pnpm run dev > ../logs/frontend.log 2>&1' &
 echo "✓ Frontend started on localhost:3000"
 
 echo "Starting Nginx reverse proxy..."
-nohup sh -c 'nginx -g "daemon off;" -c '"$REPO_ROOT"'/docker/nginx/nginx.local.conf -p '"$REPO_ROOT"' > logs/nginx.log 2>&1' &
+nohup sh -c 'nginx -g "daemon off;" -c "$1/docker/nginx/nginx.local.conf" -p "$1" > logs/nginx.log 2>&1' _ "$REPO_ROOT" &
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "✗ Nginx failed to start. Last log output:"
     tail -60 logs/nginx.log
