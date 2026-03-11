@@ -1,6 +1,7 @@
 "use client";
 
 import type { JSONContent } from "@tiptap/react";
+import * as echarts from "echarts";
 import html2canvas from "html2canvas-pro";
 import { jsPDF } from "jspdf";
 import {
@@ -257,26 +258,54 @@ export function GraphWorkspace({
     return () => document.removeEventListener("mousedown", handler);
   }, [themePopoverOpen, graphsPopoverOpen, downloadMenuOpen]);
 
-  // Capture the content area as a canvas
+  // Capture the content area as a canvas with high-quality chart rendering
   const captureContent = useCallback(async (): Promise<HTMLCanvasElement | null> => {
     const el = contentRef.current;
     if (!el) return null;
 
-    // Find the scrollable parent to temporarily expand it
     const scrollParent = el.parentElement;
 
-    // Save original styles
+    // --- 1. Replace ECharts canvases with high-res images ---
+    const chartContainers = el.querySelectorAll<HTMLDivElement>("[data-echarts]");
+    const restoreFns: (() => void)[] = [];
+
+    for (const container of chartContainers) {
+      const instance = echarts.getInstanceByDom(container);
+      if (!instance) continue;
+
+      // Get high-res data URL from ECharts directly (3x pixel ratio)
+      const dataUrl = instance.getDataURL({
+        type: "png",
+        pixelRatio: 3,
+        backgroundColor: "#ffffff",
+      });
+
+      // Create an img element overlaying the canvas
+      const img = document.createElement("img");
+      img.src = dataUrl;
+      img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;z-index:1;";
+      container.style.position = "relative";
+      container.appendChild(img);
+
+      // Hide the original canvas so html2canvas picks up the img
+      const canvas = container.querySelector("canvas");
+      if (canvas) canvas.style.visibility = "hidden";
+
+      restoreFns.push(() => {
+        img.remove();
+        if (canvas) canvas.style.visibility = "";
+      });
+    }
+
+    // --- 2. Expand the container so all content is visible ---
     const saved = {
       elOverflow: el.style.overflow,
       elHeight: el.style.height,
       elMaxHeight: el.style.maxHeight,
-      elMaxWidth: el.style.maxWidth,
-      elPadding: el.style.padding,
       parentOverflow: scrollParent?.style.overflow ?? "",
       parentHeight: scrollParent?.style.height ?? "",
     };
 
-    // Temporarily expand so full content is visible
     el.style.overflow = "visible";
     el.style.height = "auto";
     el.style.maxHeight = "none";
@@ -293,18 +322,15 @@ export function GraphWorkspace({
         allowTaint: true,
         logging: false,
         scrollX: 0,
-        scrollY: 0,
-        width: el.scrollWidth,
-        height: el.scrollHeight,
+        scrollY: -window.scrollY,
       });
       return canvas;
     } finally {
-      // Restore original styles
+      // --- 3. Restore everything ---
+      for (const restore of restoreFns) restore();
       el.style.overflow = saved.elOverflow;
       el.style.height = saved.elHeight;
       el.style.maxHeight = saved.elMaxHeight;
-      el.style.maxWidth = saved.elMaxWidth;
-      el.style.padding = saved.elPadding;
       if (scrollParent) {
         scrollParent.style.overflow = saved.parentOverflow;
         scrollParent.style.height = saved.parentHeight;

@@ -402,7 +402,7 @@ Return ONLY the updated ECharts option JSON object.`,
         )}
 
         {/* Chart container */}
-        <div ref={containerRef} className="h-[280px] w-full px-3 pb-3 pt-1" />
+        <div ref={containerRef} data-echarts="" className="h-[280px] w-full px-3 pb-3 pt-1" />
       </div>
     </NodeViewWrapper>
   );
