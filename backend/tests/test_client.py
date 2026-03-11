@@ -1,5 +1,7 @@
 """Tests for DeerFlowClient."""
 
+import asyncio
+import concurrent.futures
 import json
 import tempfile
 import zipfile
@@ -363,6 +365,39 @@ class TestEnsureAgent:
 
         assert client._agent is mock_agent
 
+    def test_uses_default_checkpointer_when_available(self, client):
+        mock_agent = MagicMock()
+        mock_checkpointer = MagicMock()
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("src.agents.checkpointer.get_checkpointer", return_value=mock_checkpointer),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_create_agent.call_args.kwargs["checkpointer"] is mock_checkpointer
+
+    def test_skips_default_checkpointer_when_unconfigured(self, client):
+        mock_agent = MagicMock()
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("src.agents.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert "checkpointer" not in mock_create_agent.call_args.kwargs
+
     def test_reuses_agent_same_config(self, client):
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
@@ -641,6 +676,63 @@ class TestUploads:
     def test_upload_files_not_found(self, client):
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
+
+    def test_upload_files_rejects_directory_path(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(ValueError, match="Path is not a file"):
+                client.upload_files("thread-1", [tmp])
+
+    def test_upload_files_reuses_single_executor_inside_event_loop(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            first = tmp_path / "first.pdf"
+            second = tmp_path / "second.pdf"
+            first.write_bytes(b"%PDF-1.4 first")
+            second.write_bytes(b"%PDF-1.4 second")
+
+            created_executors = []
+            real_executor_cls = concurrent.futures.ThreadPoolExecutor
+
+            async def fake_convert(path: Path) -> Path:
+                md_path = path.with_suffix(".md")
+                md_path.write_text(f"converted {path.name}")
+                return md_path
+
+            class FakeExecutor:
+                def __init__(self, max_workers: int):
+                    self.max_workers = max_workers
+                    self.shutdown_calls = []
+                    self._executor = real_executor_cls(max_workers=max_workers)
+                    created_executors.append(self)
+
+                def submit(self, fn, *args, **kwargs):
+                    return self._executor.submit(fn, *args, **kwargs)
+
+                def shutdown(self, wait: bool = True):
+                    self.shutdown_calls.append(wait)
+                    self._executor.shutdown(wait=wait)
+
+            async def call_upload() -> dict:
+                return client.upload_files("thread-async", [first, second])
+
+            with (
+                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("src.gateway.routers.uploads.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("src.gateway.routers.uploads.convert_file_to_markdown", side_effect=fake_convert),
+                patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor),
+            ):
+                result = asyncio.run(call_upload())
+
+            assert result["success"] is True
+            assert len(result["files"]) == 2
+            assert len(created_executors) == 1
+            assert created_executors[0].max_workers == 1
+            assert created_executors[0].shutdown_calls == [True]
+            assert result["files"][0]["markdown_file"] == "first.md"
+            assert result["files"][1]["markdown_file"] == "second.md"
 
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
