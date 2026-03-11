@@ -60,11 +60,12 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
-    if (threadIdRef.current !== normalizedThreadId) {
-      threadIdRef.current = normalizedThreadId;
-      startedRef.current = false; // Reset for new thread
+    if (!normalizedThreadId) {
+      // Just reset for new thread creation when threadId becomes null/undefined
+      startedRef.current = false;
       setOnStreamThreadId(normalizedThreadId);
     }
+    threadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
   const _handleOnStart = useCallback((id: string) => {
@@ -77,7 +78,6 @@ export function useThreadStream({
   const handleStreamStart = useCallback(
     (_threadId: string) => {
       threadIdRef.current = _threadId;
-      setOnStreamThreadId(_threadId);
       _handleOnStart(_threadId);
     },
     [_handleOnStart],
@@ -85,6 +85,7 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
@@ -93,6 +94,7 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
+      setOnStreamThreadId(meta.thread_id);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
@@ -324,7 +326,6 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
-            streamMode: ["values", "messages-tuple", "custom"],
             config: {
               recursion_limit: 1000,
             },
@@ -371,8 +372,55 @@ export function useThreads(
   return useQuery<AgentThread[]>({
     queryKey: ["threads", "search", params],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>(params);
-      return response as AgentThread[];
+      const maxResults = params.limit;
+      const initialOffset = params.offset ?? 0;
+      const DEFAULT_PAGE_SIZE = 50;
+
+      // Preserve prior semantics: if a non-positive limit is explicitly provided,
+      // delegate to a single search call with the original parameters.
+      if (maxResults !== undefined && maxResults <= 0) {
+        const response = await apiClient.threads.search<AgentThreadState>(params);
+        return response as AgentThread[];
+      }
+
+      const pageSize =
+        typeof maxResults === "number" && maxResults > 0
+          ? Math.min(DEFAULT_PAGE_SIZE, maxResults)
+          : DEFAULT_PAGE_SIZE;
+
+      const threads: AgentThread[] = [];
+      let offset = initialOffset;
+
+      while (true) {
+        if (typeof maxResults === "number" && threads.length >= maxResults) {
+          break;
+        }
+
+        const currentLimit =
+          typeof maxResults === "number"
+            ? Math.min(pageSize, maxResults - threads.length)
+            : pageSize;
+
+        if (typeof maxResults === "number" && currentLimit <= 0) {
+          break;
+        }
+
+        const response = (await apiClient.threads.search<AgentThreadState>({
+          ...params,
+          limit: currentLimit,
+          offset,
+        })) as AgentThread[];
+
+        threads.push(...response);
+
+        if (response.length < currentLimit) {
+          break;
+        }
+
+        offset += response.length;
+      }
+
+      return threads;
     },
     refetchOnWindowFocus: false,
   });
