@@ -123,44 +123,6 @@ services:
       - deer-flow
     restart: unless-stopped
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
-  # Stores LangGraph threads, runs, assistants, and the background task queue.
-  postgres:
-    image: postgres:16-alpine
-    container_name: deer-flow-postgres
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=langgraph
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks:
-      - deer-flow
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d langgraph"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
-  # ── Redis ──────────────────────────────────────────────────────────────────
-  # Pub-sub broker for streaming real-time output from background runs.
-  redis:
-    image: redis:7-alpine
-    container_name: deer-flow-redis
-    volumes:
-      - redis-data:/data
-    networks:
-      - deer-flow
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
   provisioner:
     profiles:

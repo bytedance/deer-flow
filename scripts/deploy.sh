@@ -101,24 +101,6 @@ if [ -z "$BETTER_AUTH_SECRET" ]; then
     fi
 fi
 
-# ── POSTGRES_PASSWORD ────────────────────────────────────────────────────────
-# Generated once and persisted. Used by both the postgres service and langgraph.
-
-_pg_secret_file="$DEER_FLOW_HOME/.postgres-password"
-if [ -z "$POSTGRES_PASSWORD" ]; then
-    if [ -f "$_pg_secret_file" ]; then
-        export POSTGRES_PASSWORD
-        POSTGRES_PASSWORD="$(cat "$_pg_secret_file")"
-        echo -e "${GREEN}✓ POSTGRES_PASSWORD loaded from $_pg_secret_file${NC}"
-    else
-        export POSTGRES_PASSWORD
-        POSTGRES_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
-        echo "$POSTGRES_PASSWORD" > "$_pg_secret_file"
-        chmod 600 "$_pg_secret_file"
-        echo -e "${GREEN}✓ POSTGRES_PASSWORD generated → $_pg_secret_file${NC}"
-    fi
-fi
-
 # ── detect_sandbox_mode ───────────────────────────────────────────────────────
 
 detect_sandbox_mode() {
@@ -164,7 +146,6 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
     export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
-    export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-placeholder}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     $COMPOSE_CMD down
     exit 0
