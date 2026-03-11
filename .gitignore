@@ -48,3 +48,8 @@ sandbox_image_cache.tar
 
 # ignore the legacy `web` folder
 web/
+# Misc
+*.log
+**/data/
+compass_artifact_*
+*no-commit*

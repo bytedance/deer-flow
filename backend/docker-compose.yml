@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: chatagent
+      POSTGRES_PASSWORD: chatagent
+      POSTGRES_DB: chatagent
+    ports:
+      - "7753:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "7779:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # neo4j:
+  #   image: neo4j:5
+  #   environment:
+  #     NEO4J_AUTH: neo4j/password
+  #   ports:
+  #     - "7774:7474"
+  #     - "7787:7687"
+  #   volumes:
+  #     - neo4jdata:/data
+  #   healthcheck:
+  #     test: ["CMD", "neo4j", "status"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
+  neo4jdata:

@@ -22,6 +22,7 @@ from src.agents.memory.updater import (
     MemoryUpdater,
     get_memory_data,
     reload_memory_data,
+    save_memory_data,
     update_memory_from_conversation,
 )
 
@@ -40,5 +41,6 @@ __all__ = [
     "MemoryUpdater",
     "get_memory_data",
     "reload_memory_data",
+    "save_memory_data",
     "update_memory_from_conversation",
 ]

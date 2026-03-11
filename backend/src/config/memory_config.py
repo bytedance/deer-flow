@@ -23,6 +23,22 @@ class MemoryConfig(BaseModel):
             "migrate existing data or use an absolute path to preserve the old location."
         ),
     )
+    backend: str = Field(
+        default="file",
+        description="Memory backend to use: 'file' or 'postgres'.",
+    )
+    database_url: str = Field(
+        default="",
+        description="Postgres connection URL used when backend=postgres.",
+    )
+    strict_scope: bool = Field(
+        default=False,
+        description="Require workspace_type/workspace_id for reads and writes when true.",
+    )
+    auth_mode: str = Field(
+        default="local",
+        description="Scope trust mode; 'downstream_trusted_scope' when downstream auth provides scope.",
+    )
     debounce_seconds: int = Field(
         default=30,
         ge=1,

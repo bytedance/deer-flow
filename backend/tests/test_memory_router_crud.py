@@ -1,0 +1,102 @@
+from copy import deepcopy
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from src.gateway.routers import memory as memory_router
+
+
+def _empty_memory() -> dict:
+    return {
+        "version": "1.0",
+        "lastUpdated": "",
+        "user": {
+            "workContext": {"summary": "", "updatedAt": ""},
+            "personalContext": {"summary": "", "updatedAt": ""},
+            "topOfMind": {"summary": "", "updatedAt": ""},
+        },
+        "history": {
+            "recentMonths": {"summary": "", "updatedAt": ""},
+            "earlierContext": {"summary": "", "updatedAt": ""},
+            "longTermBackground": {"summary": "", "updatedAt": ""},
+        },
+        "facts": [],
+    }
+
+
+def _scope_key(workspace_type: str | None, workspace_id: str | None) -> tuple[str, str]:
+    return (workspace_type or "global", workspace_id or "global")
+
+
+def test_memory_facts_crud(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    state: dict[tuple[str, str], dict] = {}
+
+    def fake_get_memory_data(agent_name=None, workspace_type=None, workspace_id=None):
+        key = _scope_key(workspace_type, workspace_id)
+        return deepcopy(state.get(key, _empty_memory()))
+
+    def fake_reload_memory_data(agent_name=None, workspace_type=None, workspace_id=None):
+        return fake_get_memory_data(agent_name=agent_name, workspace_type=workspace_type, workspace_id=workspace_id)
+
+    def fake_save_memory_data(memory_data, agent_name=None, workspace_type=None, workspace_id=None):
+        key = _scope_key(workspace_type, workspace_id)
+        state[key] = deepcopy(memory_data)
+        return True
+
+    monkeypatch.setattr(memory_router, "get_memory_data", fake_get_memory_data)
+    monkeypatch.setattr(memory_router, "reload_memory_data", fake_reload_memory_data)
+    monkeypatch.setattr(memory_router, "save_memory_data", fake_save_memory_data)
+
+    scope_qs = "?workspace_type=chat&workspace_id=tenant-a"
+
+    r = client.post(f"/api/memory/facts{scope_qs}", json={"content": "User likes black coffee.", "confidence": 0.91})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["facts"]) == 1
+    fact_id = body["facts"][0]["id"]
+    assert body["facts"][0]["content"] == "User likes black coffee."
+
+    r = client.put(
+        f"/api/memory/facts/{fact_id}{scope_qs}",
+        json={"content": "User likes espresso.", "category": "preference", "confidence": 0.95},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["facts"][0]["content"] == "User likes espresso."
+    assert body["facts"][0]["category"] == "preference"
+    assert body["facts"][0]["confidence"] == 0.95
+
+    r = client.delete(f"/api/memory/facts/{fact_id}{scope_qs}")
+    assert r.status_code == 200
+    assert r.json()["facts"] == []
+
+
+def test_memory_fact_update_not_found(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    monkeypatch.setattr(memory_router, "get_memory_data", lambda **kwargs: _empty_memory())
+    monkeypatch.setattr(memory_router, "save_memory_data", lambda *args, **kwargs: True)
+
+    r = client.put("/api/memory/facts/fact_missing", json={"content": "new"})
+    assert r.status_code == 404
+
+
+def test_memory_scope_validation_returns_400(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    def _raise_scope_error(**kwargs):
+        raise ValueError("workspace_type and workspace_id are required when memory.strict_scope=true")
+
+    monkeypatch.setattr(memory_router, "get_memory_data", _raise_scope_error)
+
+    r = client.get("/api/memory")
+    assert r.status_code == 400
+    assert "workspace_type and workspace_id are required" in r.json()["detail"]

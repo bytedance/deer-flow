@@ -351,6 +351,15 @@ export function useThreadStream({
           }),
         );
 
+        const workspaceType =
+          typeof extraContext?.workspace_type === "string" && extraContext.workspace_type.trim().length > 0
+            ? extraContext.workspace_type
+            : "chat";
+        const workspaceId =
+          typeof extraContext?.workspace_id === "string" && extraContext.workspace_id.trim().length > 0
+            ? extraContext.workspace_id
+            : "local-default";
+
         await thread.submit(
           {
             messages: [
@@ -380,6 +389,8 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
+              workspace_type: workspaceType,
+              workspace_id: workspaceId,
               thread_id: threadId,
             },
           },
