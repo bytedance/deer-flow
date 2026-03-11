@@ -261,13 +261,30 @@ export function GraphWorkspace({
   const captureContent = useCallback(async (): Promise<HTMLCanvasElement | null> => {
     const el = contentRef.current;
     if (!el) return null;
-    // Temporarily expand the container so the full content is captured (not clipped by overflow)
-    const prevOverflow = el.style.overflow;
-    const prevHeight = el.style.height;
-    const prevMaxHeight = el.style.maxHeight;
+
+    // Find the scrollable parent to temporarily expand it
+    const scrollParent = el.parentElement;
+
+    // Save original styles
+    const saved = {
+      elOverflow: el.style.overflow,
+      elHeight: el.style.height,
+      elMaxHeight: el.style.maxHeight,
+      elMaxWidth: el.style.maxWidth,
+      elPadding: el.style.padding,
+      parentOverflow: scrollParent?.style.overflow ?? "",
+      parentHeight: scrollParent?.style.height ?? "",
+    };
+
+    // Temporarily expand so full content is visible
     el.style.overflow = "visible";
     el.style.height = "auto";
     el.style.maxHeight = "none";
+    if (scrollParent) {
+      scrollParent.style.overflow = "visible";
+      scrollParent.style.height = "auto";
+    }
+
     try {
       const canvas = await html2canvas(el, {
         backgroundColor: "#ffffff",
@@ -275,17 +292,23 @@ export function GraphWorkspace({
         useCORS: true,
         allowTaint: true,
         logging: false,
-        // Capture the full scrollable content
         scrollX: 0,
         scrollY: 0,
-        windowWidth: el.scrollWidth,
-        windowHeight: el.scrollHeight,
+        width: el.scrollWidth,
+        height: el.scrollHeight,
       });
       return canvas;
     } finally {
-      el.style.overflow = prevOverflow;
-      el.style.height = prevHeight;
-      el.style.maxHeight = prevMaxHeight;
+      // Restore original styles
+      el.style.overflow = saved.elOverflow;
+      el.style.height = saved.elHeight;
+      el.style.maxHeight = saved.elMaxHeight;
+      el.style.maxWidth = saved.elMaxWidth;
+      el.style.padding = saved.elPadding;
+      if (scrollParent) {
+        scrollParent.style.overflow = saved.parentOverflow;
+        scrollParent.style.height = saved.parentHeight;
+      }
     }
   }, []);
 
@@ -672,9 +695,9 @@ export function GraphWorkspace({
         </div>
 
         {/* Content Area */}
-        <div ref={contentRef} className="min-h-0 flex-1 overflow-auto">
+        <div className="min-h-0 flex-1 overflow-auto">
           {viewMode === "preview" && (
-            <div className="mx-auto max-w-[1033px] px-6 pb-6">
+            <div ref={contentRef} className="mx-auto max-w-[1033px] px-6 pb-6">
               {hasContent ? (
                 <DashboardEditorRaw
                   ref={editorRef}
