@@ -14,6 +14,10 @@ help:
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
+	@echo "Docker Production Commands:"
+	@echo "  make up              - Build and start production Docker services (localhost:2026)"
+	@echo "  make down            - Stop and remove production Docker containers"
+	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
@@ -141,3 +145,15 @@ docker-logs-frontend:
 	@./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@./scripts/docker.sh logs --gateway
+
+# ==========================================
+# Production Docker Commands
+# ==========================================
+
+# Build and start production services
+up:
+	@./scripts/deploy.sh
+
+# Stop and remove production containers
+down:
+	@./scripts/deploy.sh down

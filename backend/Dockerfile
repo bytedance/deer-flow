@@ -1,10 +1,12 @@
 # Backend Development Dockerfile
 FROM python:3.12-slim
 
-# Install system dependencies
+# Install system dependencies + Node.js LTS (provides npx for MCP servers)
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
