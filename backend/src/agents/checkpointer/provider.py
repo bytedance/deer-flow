@@ -145,7 +145,7 @@ def get_checkpointer() -> Checkpointer:
     if config is None:
         # Default to SQLite for persistence across restarts/upgrades (#1066)
         try:
-            from langgraph.checkpoint.sqlite import SqliteSaver
+            from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: F401
         except ImportError:
             from langgraph.checkpoint.memory import InMemorySaver
 

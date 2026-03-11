@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.types import Checkpointer
 
 
 class TestCheckpointerNoneFix:
