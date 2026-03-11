@@ -133,11 +133,15 @@ class ExtensionsConfig(BaseModel):
             # Return empty config if extensions config file is not found
             return cls(mcp_servers={}, skills={})
 
-        with open(resolved_path, encoding="utf-8") as f:
-            config_data = json.load(f)
-
-        cls.resolve_env_variables(config_data)
-        return cls.model_validate(config_data)
+        try:
+            with open(resolved_path, encoding="utf-8") as f:
+                config_data = json.load(f)
+            cls.resolve_env_variables(config_data)
+            return cls.model_validate(config_data)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
 
     @classmethod
     def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
@@ -156,8 +160,12 @@ class ExtensionsConfig(BaseModel):
                 if value.startswith("$"):
                     env_value = os.getenv(value[1:])
                     if env_value is None:
-                        raise ValueError(f"Environment variable {value[1:]} not found for config value {value}")
-                    config[key] = env_value
+                        # Unresolved placeholder — store empty string so downstream
+                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
+                        # token as an actual environment value.
+                        config[key] = ""
+                    else:
+                        config[key] = env_value
                 else:
                     config[key] = value
             elif isinstance(value, dict):
