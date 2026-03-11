@@ -48,6 +48,20 @@ def run_single_query(
     stream events (content_block_start) rather than waiting for the
     full assistant message, which only arrives after tool execution.
     """
+    # Input validation to prevent command injection
+    if not isinstance(query, str):
+        raise ValueError("Query must be a string")
+    if '\0' in query:
+        raise ValueError("Query contains null bytes")
+    if model is not None:
+        if not isinstance(model, str):
+            raise ValueError("Model must be a string")
+        if '\0' in model:
+            raise ValueError("Model contains null bytes")
+        # Validate model parameter to prevent injection
+        if not model.replace('-', '').replace('_', '').replace('.', '').isalnum():
+            raise ValueError("Model parameter contains invalid characters")
+    
     unique_id = uuid.uuid4().hex[:8]
     clean_name = f"{skill_name}-skill-{unique_id}"
     project_commands_dir = Path(project_root) / ".claude" / "commands"
