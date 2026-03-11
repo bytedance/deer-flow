@@ -7,6 +7,7 @@ Handles container lifecycle, port allocation, and cross-process container discov
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 
 from src.utils.network import get_free_port, release_port
@@ -104,16 +105,47 @@ class LocalContainerBackend(SandboxBackend):
             RuntimeError: If the container fails to start.
         """
         container_name = f"{self._container_prefix}-{sandbox_id}"
-        port = get_free_port(start_port=self._base_port)
-        try:
-            container_id = self._start_container(container_name, port, extra_mounts)
-        except Exception:
-            release_port(port)
-            raise
 
+        # Retry loop: if Docker rejects the port (e.g. a stale container still
+        # holds the binding after a process restart), skip that port and try the
+        # next one.  The socket-bind check in get_free_port mirrors Docker's
+        # 0.0.0.0 bind, but Docker's port-release can be slightly asynchronous,
+        # so a reactive fallback here ensures we always make progress.
+        _next_start = self._base_port
+        container_id: str | None = None
+        port: int = 0
+        for _attempt in range(10):
+            port = get_free_port(start_port=_next_start)
+            try:
+                container_id = self._start_container(container_name, port, extra_mounts)
+                break
+            except RuntimeError as exc:
+                release_port(port)
+                err = str(exc)
+                err_lower = err.lower()
+                # Port already bound: skip this port and retry with the next one.
+                if "port is already allocated" in err or "address already in use" in err_lower:
+                    logger.warning(f"Port {port} rejected by Docker (already allocated), retrying with next port")
+                    _next_start = port + 1
+                    continue
+                # Container-name conflict: another process may have already started
+                # the deterministic sandbox container for this sandbox_id. Try to
+                # discover and adopt the existing container instead of failing.
+                if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
+                    logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
+                    existing = self.discover(sandbox_id)
+                    if existing is not None:
+                        return existing
+                raise
+        else:
+            raise RuntimeError("Could not start sandbox container: all candidate ports are already allocated by Docker")
+
+        # When running inside Docker (DooD), sandbox containers are reachable via
+        # host.docker.internal rather than localhost (they run on the host daemon).
+        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
         return SandboxInfo(
             sandbox_id=sandbox_id,
-            sandbox_url=f"http://localhost:{port}",
+            sandbox_url=f"http://{sandbox_host}:{port}",
             container_name=container_name,
             container_id=container_id,
         )
@@ -159,7 +191,8 @@ class LocalContainerBackend(SandboxBackend):
         if port is None:
             return None
 
-        sandbox_url = f"http://localhost:{port}"
+        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_url = f"http://{sandbox_host}:{port}"
         if not wait_for_sandbox_ready(sandbox_url, timeout=5):
             return None
 
