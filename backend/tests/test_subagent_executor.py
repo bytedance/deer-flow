@@ -625,3 +625,151 @@ class TestThreadSafety:
         for result in results:
             assert result.status == SubagentStatus.COMPLETED
             assert "Result" in result.result
+
+
+# -----------------------------------------------------------------------------
+# Cleanup Background Task Tests
+# -----------------------------------------------------------------------------
+
+
+class TestCleanupBackgroundTask:
+    """Test cleanup_background_task function for race condition prevention."""
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        """Import the executor module with real classes."""
+        # Re-import to get the real module with cleanup_background_task
+        import importlib
+
+        from src.subagents import executor
+
+        return importlib.reload(executor)
+
+    def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
+        """Test that cleanup removes a COMPLETED task."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        # Add a completed task
+        task_id = "test-completed-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="done",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        # Cleanup should remove it
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_removes_terminal_failed_task(self, executor_module, classes):
+        """Test that cleanup removes a FAILED task."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-failed-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.FAILED,
+            error="error",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_removes_terminal_timed_out_task(self, executor_module, classes):
+        """Test that cleanup removes a TIMED_OUT task."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-timedout-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.TIMED_OUT,
+            error="timeout",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_skips_running_task(self, executor_module, classes):
+        """Test that cleanup does NOT remove a RUNNING task.
+
+        This prevents race conditions where task_tool calls cleanup
+        while the background executor is still updating the task.
+        """
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-running-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        # Should still be present because it's RUNNING
+        assert task_id in executor_module._background_tasks
+
+    def test_cleanup_skips_pending_task(self, executor_module, classes):
+        """Test that cleanup does NOT remove a PENDING task."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-pending-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.PENDING,
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id in executor_module._background_tasks
+
+    def test_cleanup_handles_unknown_task_gracefully(self, executor_module):
+        """Test that cleanup doesn't raise for unknown task IDs."""
+        # Should not raise
+        executor_module.cleanup_background_task("nonexistent-task")
+
+    def test_cleanup_removes_task_with_completed_at_even_if_running(
+        self, executor_module, classes
+    ):
+        """Test that cleanup removes task if completed_at is set, even if status is RUNNING.
+
+        This is a safety net: if completed_at is set, the task is considered done
+        regardless of status.
+        """
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-completed-at-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,  # Status not terminal
+            completed_at=datetime.now(),  # But completed_at is set
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        # Should be removed because completed_at is set
+        assert task_id not in executor_module._background_tasks

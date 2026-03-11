@@ -7,9 +7,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+# Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+
+# Install uv from a pinned versioned image (avoids curl|sh from untrusted remote)
+COPY --from=ghcr.io/astral-sh/uv:0.7.20 /uv /uvx /usr/local/bin/
 
 # Set working directory
 WORKDIR /app

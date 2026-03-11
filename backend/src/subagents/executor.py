@@ -454,46 +454,38 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
-def cancel_background_task(task_id: str) -> bool:
-    """Cancel a background task if it's still running.
+def cleanup_background_task(task_id: str) -> None:
+    """Remove a completed task from background tasks.
+
+    Should be called by task_tool after it finishes polling and returns the result.
+    This prevents memory leaks from accumulated completed tasks.
+
+    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
+    to avoid race conditions with the background executor still updating the task entry.
 
     Args:
-        task_id: The task ID to cancel.
-
-    Returns:
-        True if the task was found and marked as failed, False otherwise.
+        task_id: The task ID to remove.
     """
     with _background_tasks_lock:
         result = _background_tasks.get(task_id)
         if result is None:
-            return False
-        if result.status in (SubagentStatus.PENDING, SubagentStatus.RUNNING):
-            result.status = SubagentStatus.FAILED
-            result.error = "Cancelled: parent run was interrupted"
-            result.completed_at = datetime.now()
-            logger.info(f"[trace={result.trace_id}] Task {task_id} cancelled (parent interrupted)")
-            return True
-    return False
+            # Nothing to clean up; may have been removed already.
+            logger.debug("Requested cleanup for unknown background task %s", task_id)
+            return
 
-
-def cleanup_stale_tasks(max_age_seconds: int = 1800) -> int:
-    """Remove completed/failed tasks older than max_age_seconds.
-
-    Args:
-        max_age_seconds: Maximum age in seconds before cleanup (default: 30 minutes).
-
-    Returns:
-        Number of tasks cleaned up.
-    """
-    now = datetime.now()
-    to_remove = []
-    with _background_tasks_lock:
-        for task_id, result in _background_tasks.items():
-            if result.status in (SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
-                if result.completed_at and (now - result.completed_at).total_seconds() > max_age_seconds:
-                    to_remove.append(task_id)
-        for task_id in to_remove:
+        # Only clean up tasks that are in a terminal state to avoid races with
+        # the background executor still updating the task entry.
+        is_terminal_status = result.status in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.TIMED_OUT,
+        }
+        if is_terminal_status or result.completed_at is not None:
             del _background_tasks[task_id]
-    if to_remove:
-        logger.info(f"Cleaned up {len(to_remove)} stale background tasks")
-    return len(to_remove)
+            logger.debug("Cleaned up background task: %s", task_id)
+        else:
+            logger.debug(
+                "Skipping cleanup for non-terminal background task %s (status=%s)",
+                task_id,
+                result.status.value if hasattr(result.status, "value") else result.status,
+            )
