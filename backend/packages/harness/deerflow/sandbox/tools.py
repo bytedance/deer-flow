@@ -419,7 +419,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
 
 
 @tool("read_file", parse_docstring=True)
-def read_file_tool(
+async def read_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     path: str,
@@ -440,8 +440,10 @@ def read_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
-        content = sandbox.read_file(path)
+        #     path = resolve_local_tool_path(path, thread_data)
+        # content = sandbox.read_file(path)
+            path = replace_virtual_path(path, thread_data)
+        content =  await sandbox.read_file(path)
         if not content:
             return "(empty)"
         if start_line is not None and end_line is not None:

@@ -178,7 +178,7 @@ class DeerFlowClient:
         }
         return RunnableConfig(
             configurable=configurable,
-            recursion_limit=overrides.get("recursion_limit", 100),
+            recursion_limit=overrides.get("recursion_limit", 500),
         )
 
     def _ensure_agent(self, config: RunnableConfig):

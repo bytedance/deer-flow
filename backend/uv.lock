@@ -455,6 +455,30 @@ wheels = [
 ]
 
 [[package]]
+name = "chardet"
+version = "7.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/80/4684035f1a2a3096506bc377276a815ccf0be3c3316eab35d589e82d9f3c/chardet-7.0.1.tar.gz", hash = "sha256:6fce895c12c5495bb598e59ae3cd89306969b4464ec7b6dd609b9c86e3397fe3", size = 490240, upload-time = "2026-03-04T21:25:26.97Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/88/4c6fe7dcd5d36a2cfd7030084fbd79264083f329faaf96038c23888a8e05/chardet-7.0.1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:f661edbfa77b8683a503043ddc9b9fe9036cf28af13064200e11fa1844ded79c", size = 541828, upload-time = "2026-03-04T21:24:58.726Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/fb/3b92a2433eadef83ae131fa720a17857cfbf7687c5f188bfb2f9eee2d3dd/chardet-7.0.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:169951fa88d449e72e0c6194cec1c5e405fd36a6cfbe74c7dab5494cc35f1700", size = 533571, upload-time = "2026-03-04T21:25:00.703Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/75/37bee6900183ea08a3a0ae04b9f018f9e64c6b10716e1f7b423db0c4356c/chardet-7.0.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:dd6db7505556ae8f9e2a3bf6d689c2b86aa6b459cf39552645d2c4d3fdbf489c", size = 554182, upload-time = "2026-03-04T21:25:02.168Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/ed/2fe5ea435ae480bd3a76be1415920ce52b3ff6e188d8eab6a635d6a2a1d1/chardet-7.0.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6f907962b18df78d5ca87a7484e4034354408d2c97cec6f53634b0ea0424c594", size = 557933, upload-time = "2026-03-04T21:25:03.694Z" },
+    { url = "https://files.pythonhosted.org/packages/07/ba/7ca89301e492ac4184ba7f4736565d954ba3125acf6bf02c66a38a802bda/chardet-7.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:302798e1e62008ca34a216dd04ecc5e240993b2090628e2a35d4c0754313ea9a", size = 524256, upload-time = "2026-03-04T21:25:05.581Z" },
+    { url = "https://files.pythonhosted.org/packages/56/26/1a22b9a19b4ca167ca462eaf91d0fc31285874d80b0381c55fdc5bc5f066/chardet-7.0.1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:67fe3f453416ed9343057dcf06583b36aae6d8bdb013370b3ff46bc37b7e30ac", size = 541652, upload-time = "2026-03-04T21:25:07.041Z" },
+    { url = "https://files.pythonhosted.org/packages/24/fe/2f2425f3b0801e897653723ee827bc87e5a0feacf826ab268a9216680615/chardet-7.0.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:63bc210ce73f8a1b87430b949f84d086cb326d67eb259305862e7c8861b73374", size = 533333, upload-time = "2026-03-04T21:25:08.886Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/8c/6b5f4b49c471b396bdbddad55b569e05d686ea65d91795dae6c774b285f0/chardet-7.0.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:11f51985946b49739968b6dc2fa70e7d8f490bb15574377c5ee114f33d19ef7e", size = 553815, upload-time = "2026-03-04T21:25:10.861Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/45/860a82d618e5c3930faef0a0fe205b752323e5d10ce0c18fe5016fd4f8d2/chardet-7.0.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8714f0013c208452a98e23595d99cef53c5364565454425f431446eb586e2591", size = 557506, upload-time = "2026-03-04T21:25:14.081Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/44/7acb8f84fc7b5ad3c977ac31865b308881da1c0a6ca58be35554d2473dd7/chardet-7.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:c12abc65830068ad05bd257fb953aaaf63a551446688e03e145522086be5738c", size = 524145, upload-time = "2026-03-04T21:25:15.696Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/bd/30c131115b0b3ba72da996ba4fefe23d9ac96ff55f9e981bcf1896bff516/chardet-7.0.1-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:88793aeebb28a5296eea9bdd9b5e74ee4e3582766a6a2cb7f39e4761a96fdd55", size = 541135, upload-time = "2026-03-04T21:25:17.482Z" },
+    { url = "https://files.pythonhosted.org/packages/98/2d/5f77ea0d96cf89e8312261a435c6899e023c672a7d20287997647c0da079/chardet-7.0.1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:44011e3b4fd4a8a15bc94736717414b7ec82880066fb22d9f476c68a4ded2647", size = 533667, upload-time = "2026-03-04T21:25:18.923Z" },
+    { url = "https://files.pythonhosted.org/packages/15/03/0f3fe90b5fba51e3f79c48b299497626ff231a1a3326865cf8edb94f65f6/chardet-7.0.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:33f4132f9781302beff34713fe6c990badd009aa8ea730611aef0931b27f1541", size = 554629, upload-time = "2026-03-04T21:25:20.613Z" },
+    { url = "https://files.pythonhosted.org/packages/89/3b/a8d2a8ee1baa43f8d3b06c8fd9a86317ea4418b2c90fbe084c45665916e0/chardet-7.0.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1566d0f91990b8f33b53836391d557f779584bd48beabf90efbf7a6efa89179e", size = 557425, upload-time = "2026-03-04T21:25:22.098Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/46/71151da7b43673ef8b1bb83503e0e4ac9658d24b908f208a84d439767036/chardet-7.0.1-cp314-cp314-win_amd64.whl", hash = "sha256:9e827211249d8e3cacc1adf6950a7a8cf56920e5e303e56dcab827b71c03df33", size = 523984, upload-time = "2026-03-04T21:25:23.847Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/1f/c1a089db6333b1283409cad3714b8935e7e56722c9c60f9299726a1e57c2/chardet-7.0.1-py3-none-any.whl", hash = "sha256:e51e1ff2c51b2d622d97c9737bd5ee9d9b9038f05b7dd8f9ea10b9e2d9674c24", size = 408292, upload-time = "2026-03-04T21:25:25.214Z" },
+]
+
+[[package]]
 name = "charset-normalizer"
 version = "3.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -649,15 +673,46 @@ name = "deer-flow"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+<<<<<<< HEAD
     { name = "deerflow-harness" },
+=======
+    { name = "agent-sandbox" },
+    { name = "chardet" },
+    { name = "ddgs" },
+    { name = "dotenv" },
+    { name = "duckdb" },
+>>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "fastapi" },
     { name = "httpx" },
+<<<<<<< HEAD
     { name = "langgraph-sdk" },
     { name = "lark-oapi" },
     { name = "markdown-to-mrkdwn" },
     { name = "python-multipart" },
     { name = "python-telegram-bot" },
     { name = "slack-sdk" },
+=======
+    { name = "kubernetes" },
+    { name = "langchain" },
+    { name = "langchain-deepseek" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-mcp-adapters" },
+    { name = "langchain-openai" },
+    { name = "langgraph" },
+    { name = "langgraph-cli", extra = ["inmem"] },
+    { name = "markdownify" },
+    { name = "markitdown", extra = ["all", "xlsx"] },
+    { name = "openpyxl" },
+    { name = "pdf2image" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pypdf2" },
+    { name = "python-docx" },
+    { name = "python-multipart" },
+    { name = "python-pptx" },
+    { name = "pyyaml" },
+    { name = "readabilipy" },
+>>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -670,15 +725,46 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+<<<<<<< HEAD
     { name = "deerflow-harness", editable = "packages/harness" },
+=======
+    { name = "agent-sandbox", specifier = ">=0.0.19" },
+    { name = "chardet", specifier = ">=5.0.0" },
+    { name = "ddgs", specifier = ">=9.10.0" },
+    { name = "dotenv", specifier = ">=0.9.9" },
+    { name = "duckdb", specifier = ">=1.4.4" },
+>>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
+<<<<<<< HEAD
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
     { name = "lark-oapi", specifier = ">=1.4.0" },
     { name = "markdown-to-mrkdwn", specifier = ">=0.3.1" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "slack-sdk", specifier = ">=3.33.0" },
+=======
+    { name = "kubernetes", specifier = ">=30.0.0" },
+    { name = "langchain", specifier = ">=1.2.3" },
+    { name = "langchain-deepseek", specifier = ">=1.0.1" },
+    { name = "langchain-google-genai", specifier = ">=4.2.1" },
+    { name = "langchain-mcp-adapters", specifier = ">=0.1.0" },
+    { name = "langchain-openai", specifier = ">=1.1.7" },
+    { name = "langgraph", specifier = ">=1.0.6" },
+    { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.15" },
+    { name = "markdownify", specifier = ">=1.2.2" },
+    { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
+    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "pdf2image", specifier = ">=1.15.0" },
+    { name = "pillow", specifier = ">=11.0.0" },
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pypdf2", specifier = ">=3.0.1" },
+    { name = "python-docx", specifier = ">=1.1.0" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "python-pptx", specifier = ">=1.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "readabilipy", specifier = ">=0.3.0" },
+>>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
@@ -1667,15 +1753,23 @@ wheels = [
 
 [[package]]
 name = "langgraph-cli"
-version = "0.4.14"
+version = "0.4.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
+    { name = "httpx" },
     { name = "langgraph-sdk" },
+    { name = "python-dotenv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/6a/c9e73635933b722e4fca31fbf49dbe23eb06efde459b3aabf5a2a6d192e5/langgraph_cli-0.4.14.tar.gz", hash = "sha256:ba6bc715651d85ba94d14d6c53db87b4bf478cf45d61a28af9c8dee629f3cf1f", size = 857457, upload-time = "2026-03-02T21:27:19.189Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/0c/eecfcc44bd45860dda9cf879e459e8e61cfe48abdc066e9aaa14dcf734fc/langgraph_cli-0.4.15.tar.gz", hash = "sha256:4705f53d060e31b2fb8d70bb3663a14ff89e4cb14bf3a05222547a95356645d7", size = 866837, upload-time = "2026-03-10T01:16:12.852Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/29/25fb20e2f2f5733edd52a5c7735a397a71763bdda05a74d1398221a49a41/langgraph_cli-0.4.14-py3-none-any.whl", hash = "sha256:42ad7e56b512a3c260b205f7623d2e2cc0b245463961810fcc44482200374b4b", size = 42116, upload-time = "2026-03-02T21:27:18.042Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/ad/ba915c904b5fdbf5db9d9307c5658a01ba3fa808165961f783de1fd1007b/langgraph_cli-0.4.15-py3-none-any.whl", hash = "sha256:6525c67bdcf07d80bae2ae5d32e4db7842b8e5983988eaadd635107c181536ee", size = 49353, upload-time = "2026-03-10T01:16:11.978Z" },
+]
+
+[package.optional-dependencies]
+inmem = [
+    { name = "langgraph-api" },
+    { name = "langgraph-runtime-inmem" },
 ]
 
 [[package]]
@@ -2474,6 +2568,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pdf2image"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/d8/b280f01045555dc257b8153c00dee3bc75830f91a744cd5f84ef3a0a64b1/pdf2image-1.17.0.tar.gz", hash = "sha256:eaa959bc116b420dd7ec415fcae49b98100dda3dd18cd2fdfa86d09f112f6d57", size = 12811, upload-time = "2024-01-07T20:33:01.965Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/33/61766ae033518957f877ab246f87ca30a85b778ebaad65b7f74fa7e52988/pdf2image-1.17.0-py3-none-any.whl", hash = "sha256:ecdd58d7afb810dffe21ef2b1bbc057ef434dabbac6c33778a38a3f7744a27e2", size = 11618, upload-time = "2024-01-07T20:32:59.957Z" },
+]
+
+[[package]]
 name = "pdfminer-six"
 version = "20251230"
 source = { registry = "https://pypi.org/simple" }
@@ -2886,6 +2992,15 @@ crypto = [
 ]
 
 [[package]]
+name = "pypdf2"
+version = "3.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/bb/18dc3062d37db6c491392007dfd1a7f524bb95886eb956569ac38a23a784/PyPDF2-3.0.1.tar.gz", hash = "sha256:a74408f69ba6271f71b9352ef4ed03dc53a31aa404d29b5d31f53bfecfee1440", size = 227419, upload-time = "2022-12-31T10:36:13.13Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8e/5e/c86a5643653825d3c913719e788e41386bee415c2b87b4f955432f2de6b2/pypdf2-3.0.1-py3-none-any.whl", hash = "sha256:d16e4205cfee272fbdc0568b68d82be796540b1537508cef59388f839c191928", size = 232572, upload-time = "2022-12-31T10:36:10.327Z" },
+]
+
+[[package]]
 name = "pypdfium2"
 version = "5.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2949,6 +3064,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
+name = "python-docx"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lxml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce", size = 5723256, upload-time = "2025-06-16T20:46:27.921Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7", size = 252987, upload-time = "2025-06-16T20:46:22.506Z" },
 ]
 
 [[package]]
