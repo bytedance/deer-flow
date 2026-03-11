@@ -350,6 +350,26 @@ class TestExtractResponseText:
         }
         assert _extract_response_text(result) == "Could you clarify?"
 
+    def test_does_not_leak_previous_turn_text(self):
+        """When current turn AI has no text (only tool calls), do not return previous turn's text."""
+        from src.channels.manager import _extract_response_text
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "hello"},
+                {"type": "ai", "content": "Hi there!"},
+                {"type": "human", "content": "export data"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/data.csv"]}}],
+                },
+                {"type": "tool", "name": "present_files", "content": "ok"},
+            ]
+        }
+        # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
+        assert _extract_response_text(result) == ""
+
 
 # ---------------------------------------------------------------------------
 # ChannelManager tests
@@ -421,6 +441,112 @@ class TestChannelManager:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_chat_uses_channel_session_overrides(self):
+        from src.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                channel_sessions={
+                    "telegram": {
+                        "assistant_id": "mobile_agent",
+                        "config": {"recursion_limit": 55},
+                        "context": {
+                            "thinking_enabled": False,
+                            "subagent_enabled": True,
+                        },
+                    }
+                },
+            )
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[0][1] == "mobile_agent"
+            assert call_args[1]["config"]["recursion_limit"] == 55
+            assert call_args[1]["context"]["thinking_enabled"] is False
+            assert call_args[1]["context"]["subagent_enabled"] is True
+
+        _run(go())
+
+    def test_handle_chat_uses_user_session_overrides(self):
+        from src.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                default_session={"context": {"is_plan_mode": True}},
+                channel_sessions={
+                    "telegram": {
+                        "assistant_id": "mobile_agent",
+                        "config": {"recursion_limit": 55},
+                        "context": {
+                            "thinking_enabled": False,
+                            "subagent_enabled": False,
+                        },
+                        "users": {
+                            "vip-user": {
+                                "assistant_id": "vip_agent",
+                                "config": {"recursion_limit": 77},
+                                "context": {
+                                    "thinking_enabled": True,
+                                    "subagent_enabled": True,
+                                },
+                            }
+                        },
+                    }
+                },
+            )
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="vip-user", text="hi")
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[0][1] == "vip_agent"
+            assert call_args[1]["config"]["recursion_limit"] == 77
+            assert call_args[1]["context"]["thinking_enabled"] is True
+            assert call_args[1]["context"]["subagent_enabled"] is True
+            assert call_args[1]["context"]["is_plan_mode"] is True
 
         _run(go())
 
@@ -953,6 +1079,30 @@ class TestChannelService:
             await service.stop()
 
         _run(go())
+
+    def test_session_config_is_forwarded_to_manager(self):
+        from src.channels.service import ChannelService
+
+        service = ChannelService(
+            channels_config={
+                "session": {"context": {"thinking_enabled": False}},
+                "telegram": {
+                    "enabled": False,
+                    "session": {
+                        "assistant_id": "mobile_agent",
+                        "users": {
+                            "vip": {
+                                "assistant_id": "vip_agent",
+                            }
+                        },
+                    },
+                },
+            }
+        )
+
+        assert service.manager._default_session["context"]["thinking_enabled"] is False
+        assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
+        assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
 
 # ---------------------------------------------------------------------------

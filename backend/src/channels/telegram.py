@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 from src.channels.base import Channel
-from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from src.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,10 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._application and self._tg_loop:
+        if self._tg_loop and self._tg_loop.is_running():
             self._tg_loop.call_soon_threadsafe(self._tg_loop.stop)
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=10)
             self._thread = None
         self._application = None
         logger.info("Telegram channel stopped")
@@ -127,6 +127,48 @@ class TelegramChannel(Channel):
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
 
+    async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
+        if not self._application:
+            return False
+
+        try:
+            chat_id = int(msg.chat_id)
+        except (ValueError, TypeError):
+            logger.error("[Telegram] Invalid chat_id: %s", msg.chat_id)
+            return False
+
+        # Telegram limits: 10MB for photos, 50MB for documents
+        if attachment.size > 50 * 1024 * 1024:
+            logger.warning("[Telegram] file too large (%d bytes), skipping: %s", attachment.size, attachment.filename)
+            return False
+
+        bot = self._application.bot
+        reply_to = self._last_bot_message.get(msg.chat_id)
+
+        try:
+            if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
+                with open(attachment.actual_path, "rb") as f:
+                    kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
+                    if reply_to:
+                        kwargs["reply_to_message_id"] = reply_to
+                    sent = await bot.send_photo(**kwargs)
+            else:
+                from telegram import InputFile
+
+                with open(attachment.actual_path, "rb") as f:
+                    input_file = InputFile(f, filename=attachment.filename)
+                    kwargs = {"chat_id": chat_id, "document": input_file}
+                    if reply_to:
+                        kwargs["reply_to_message_id"] = reply_to
+                    sent = await bot.send_document(**kwargs)
+
+            self._last_bot_message[msg.chat_id] = sent.message_id
+            logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
+            return True
+        except Exception:
+            logger.exception("[Telegram] failed to send file: %s", attachment.filename)
+            return False
+
     # -- helpers -----------------------------------------------------------
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
@@ -151,10 +193,25 @@ class TelegramChannel(Channel):
         self._tg_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._tg_loop)
         try:
-            self._tg_loop.run_until_complete(self._application.run_polling(close_loop=False))
+            # Cannot use run_polling() because it calls add_signal_handler(),
+            # which only works in the main thread.  Instead, manually
+            # initialize the application and start the updater.
+            self._tg_loop.run_until_complete(self._application.initialize())
+            self._tg_loop.run_until_complete(self._application.start())
+            self._tg_loop.run_until_complete(self._application.updater.start_polling())
+            self._tg_loop.run_forever()
         except Exception:
             if self._running:
                 logger.exception("Telegram polling error")
+        finally:
+            # Graceful shutdown
+            try:
+                if self._application.updater.running:
+                    self._tg_loop.run_until_complete(self._application.updater.stop())
+                self._tg_loop.run_until_complete(self._application.stop())
+                self._tg_loop.run_until_complete(self._application.shutdown())
+            except Exception:
+                logger.exception("Error during Telegram shutdown")
 
     def _check_user(self, user_id: int) -> bool:
         if not self._allowed_users:
