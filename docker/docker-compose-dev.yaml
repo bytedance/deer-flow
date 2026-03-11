@@ -146,6 +146,7 @@ services:
       - ../skills:/app/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
+      - ../backend/.langgraph_api:/app/backend/.langgraph_api
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
