@@ -36,8 +36,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
 from src.agents.lead_agent.agent import _build_middlewares
-from src.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from src.config import get_app_config
+from src.sandbox.middleware import SandboxMiddleware
+
+from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 
 HANDSHAKE_ERROR = "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)"
 logging.getLogger("src.agents.middlewares.tool_error_handling_middleware").setLevel(logging.CRITICAL)
@@ -146,12 +148,37 @@ def _validate_outputs(label, outputs):
     print(f"[INFO] {label}: no crash, outputs preserved (error + success).")
 
 
-def _assert_has_tool_error_mw(label, middlewares):
-    names = [m.__class__.__name__ for m in middlewares]
-    if "ToolErrorHandlingMiddleware" not in names:
-        print(f"[FAIL] {label}: ToolErrorHandlingMiddleware not found. Chain={names}")
-        raise SystemExit(8)
-    print(f"[INFO] {label}: ToolErrorHandlingMiddleware detected.")
+def _build_sub_middlewares():
+    try:
+        from src.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+    except Exception:
+        return [
+            ThreadDataMiddleware(lazy_init=True),
+            SandboxMiddleware(lazy_init=True),
+        ]
+    return build_subagent_runtime_middlewares()
+
+
+def _run_sync_sequence(executor):
+    outputs = []
+    try:
+        for call in TOOL_CALLS:
+            req = SimpleNamespace(tool_call=call)
+            outputs.append(executor(req))
+    except Exception as exc:
+        return outputs, exc
+    return outputs, None
+
+
+async def _run_async_sequence(executor):
+    outputs = []
+    try:
+        for call in TOOL_CALLS:
+            req = SimpleNamespace(tool_call=call)
+            outputs.append(await executor(req))
+    except Exception as exc:
+        return outputs, exc
+    return outputs, None
 
 
 print("[STEP 2] Load current branch middleware chains.")
@@ -159,34 +186,33 @@ app_cfg = get_app_config()
 model_name = app_cfg.models[0].name if app_cfg.models else None
 if not model_name:
     print("[FAIL] No model configured; cannot evaluate lead middleware chain.")
-    raise SystemExit(9)
+    raise SystemExit(8)
 
 lead_middlewares = _build_middlewares({"configurable": {}}, model_name=model_name)
-sub_middlewares = build_subagent_runtime_middlewares()
+sub_middlewares = _build_sub_middlewares()
 
-_assert_has_tool_error_mw("lead", lead_middlewares)
-_assert_has_tool_error_mw("subagent", sub_middlewares)
-
-print("[STEP 3] Validate current branch behavior (should not crash).")
+print("[STEP 3] Simulate two sequential tool calls and check whether conversation flow aborts.")
+any_crash = False
 for label, middlewares in [("lead", lead_middlewares), ("subagent", sub_middlewares)]:
     sync_exec = _compose_sync(_collect_sync_wrappers(middlewares))
-    sync_outputs = []
-    for call in TOOL_CALLS:
-        req = SimpleNamespace(tool_call=call)
-        sync_outputs.append(sync_exec(req))
-    _validate_outputs(f"{label}/sync", sync_outputs)
+    sync_outputs, sync_exc = _run_sync_sequence(sync_exec)
+    if sync_exc is not None:
+        any_crash = True
+        print(f"[INFO] {label}/sync: conversation aborted after tool error ({sync_exc.__class__.__name__}: {sync_exc}).")
+    else:
+        _validate_outputs(f"{label}/sync", sync_outputs)
 
     async_exec = _compose_async(_collect_async_wrappers(middlewares))
+    async_outputs, async_exc = asyncio.run(_run_async_sequence(async_exec))
+    if async_exc is not None:
+        any_crash = True
+        print(f"[INFO] {label}/async: conversation aborted after tool error ({async_exc.__class__.__name__}: {async_exc}).")
+    else:
+        _validate_outputs(f"{label}/async", async_outputs)
 
-    async def _run_async_sequence():
-        outs = []
-        for call in TOOL_CALLS:
-            req = SimpleNamespace(tool_call=call)
-            outs.append(await async_exec(req))
-        return outs
+if any_crash:
+    print("[FAIL] Tool exception caused conversation flow to abort (no effective downgrade).")
+    raise SystemExit(9)
 
-    async_outputs = asyncio.run(_run_async_sequence())
-    _validate_outputs(f"{label}/async", async_outputs)
-
-print("[PASS] Current branch passes: tool exceptions are downgraded and do not abort conversation flow.")
+print("[PASS] Tool exceptions were downgraded; conversation flow continued with remaining tool results.")
 PY
