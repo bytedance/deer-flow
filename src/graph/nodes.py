@@ -512,8 +512,6 @@ def human_feedback_node(
         
         # parse the plan
         new_plan = json.loads(repair_json_output(current_plan_content))
-        # Validate and fix plan to ensure web search requirements are met
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
 
         # Some models may return only a raw steps list instead of a full plan object.
         # Normalize to Plan schema to avoid ValidationError in Plan.model_validate().
@@ -537,6 +535,14 @@ def human_feedback_node(
             new_plan["title"] = state.get("research_topic") or "Research Plan"
         if "steps" not in new_plan or new_plan.get("steps") is None:
             new_plan["steps"] = []
+
+        # Validate and fix plan to ensure web search requirements are met
+        # after normalization so list-shaped plans are also enforced.
+        new_plan = validate_and_fix_plan(
+            new_plan,
+            configurable.enforce_web_search,
+            configurable.enable_web_search,
+        )
 
         validated_plan = Plan.model_validate(new_plan)
 
