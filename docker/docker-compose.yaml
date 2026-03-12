@@ -151,10 +151,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-      start_period: 15s
-
-volumes:
-
 networks:
   deer-flow:
     driver: bridge
