@@ -7,6 +7,7 @@ import os
 import re
 from functools import partial
 from typing import Annotated, Any, Literal
+from pydantic import ValidationError
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -496,8 +497,9 @@ def human_feedback_node(
             )
 
     # if the plan is accepted, run the following node
-    plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
+    plan_iterations = (state.get("plan_iterations") or 0) + 1
     goto = "research_team"
+    configurable = Configuration.from_runnable_config(config)
     try:
         # Safely extract plan content from different types (string, AIMessage, dict)
         original_plan = current_plan
@@ -508,18 +510,55 @@ def human_feedback_node(
         current_plan = json.loads(current_plan)
         current_plan_content = extract_plan_content(current_plan)
         
-        # increment the plan iterations
-        plan_iterations += 1
         # parse the plan
         new_plan = json.loads(repair_json_output(current_plan_content))
+
+        # Some models may return only a raw steps list instead of a full plan object.
+        # Normalize to Plan schema to avoid ValidationError in Plan.model_validate().
+        if isinstance(new_plan, list):
+            logger.warning("Planner returned plan as list; normalizing to dict with inferred metadata")
+            new_plan = {
+                "locale": state.get("locale", "en-US"),
+                "has_enough_context": False,
+                "thought": "",
+                "title": state.get("research_topic") or "Research Plan",
+                "steps": new_plan,
+            }
+        elif not isinstance(new_plan, dict):
+            raise ValueError(f"Unsupported plan type after parsing: {type(new_plan).__name__}")
+
+        # Fill required fields if partially missing.
+        new_plan.setdefault("locale", state.get("locale", "en-US"))
+        new_plan.setdefault("has_enough_context", False)
+        new_plan.setdefault("thought", "")
+        if not new_plan.get("title"):
+            new_plan["title"] = state.get("research_topic") or "Research Plan"
+        if "steps" not in new_plan or new_plan.get("steps") is None:
+            new_plan["steps"] = []
+
         # Validate and fix plan to ensure web search requirements are met
-        configurable = Configuration.from_runnable_config(config)
-        new_plan = validate_and_fix_plan(new_plan, configurable.enforce_web_search, configurable.enable_web_search)
-    except (json.JSONDecodeError, AttributeError, ValueError) as e:
+        # after normalization so list-shaped plans are also enforced.
+        new_plan = validate_and_fix_plan(
+            new_plan,
+            configurable.enforce_web_search,
+            configurable.enable_web_search,
+        )
+
+        validated_plan = Plan.model_validate(new_plan)
+
+    except (json.JSONDecodeError, AttributeError, ValueError, ValidationError) as e:
         logger.warning(f"Failed to parse plan: {str(e)}. Plan data type: {type(current_plan).__name__}")
         if isinstance(current_plan, dict) and "content" in original_plan:
             logger.warning(f"Plan appears to be an AIMessage object with content field")
-        if plan_iterations > 1:  # the plan_iterations is increased before this check
+        if plan_iterations < configurable.max_plan_iterations:
+            return Command(
+                update={
+                    "plan_iterations": plan_iterations,
+                    **preserve_state_meta_fields(state),
+                },
+                goto="planner"
+            )
+        if plan_iterations > 1:
             return Command(
                 update=preserve_state_meta_fields(state),
                 goto="reporter"
@@ -532,7 +571,7 @@ def human_feedback_node(
 
     # Build update dict with safe locale handling
     update_dict = {
-        "current_plan": Plan.model_validate(new_plan),
+        "current_plan": validated_plan,
         "plan_iterations": plan_iterations,
         **preserve_state_meta_fields(state),
     }
@@ -907,7 +946,7 @@ def reporter_node(state: State, config: RunnableConfig):
         response_content = re.sub(
             r"<think>[\s\S]*?</think>", "", response_content
         ).strip()
-    logger.info(f"reporter response: {response_content}")
+    logger.debug(f"reporter response length: {len(response_content)}")
 
     return {
         "final_report": response_content,

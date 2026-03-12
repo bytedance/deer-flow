@@ -2,6 +2,7 @@ import json
 from collections import namedtuple
 from unittest.mock import MagicMock, patch
 
+from pydantic import ValidationError
 import pytest
 
 from src.graph.nodes import (
@@ -825,12 +826,102 @@ def test_human_feedback_node_json_decode_error_first_iteration(
     state = dict(mock_state_base)
     state["auto_accepted_plan"] = True
     state["plan_iterations"] = 0
-    with patch(
-        "src.graph.nodes.json.loads", side_effect=json.JSONDecodeError("err", "doc", 0)
+    mock_configurable = MagicMock()
+    mock_configurable.max_plan_iterations = 3
+    with (
+        patch(
+            "src.graph.nodes.Configuration.from_runnable_config",
+            return_value=mock_configurable,
+        ),
+        patch(
+            "src.graph.nodes.json.loads",
+            side_effect=json.JSONDecodeError("err", "doc", 0),
+        ),
     ):
         result = human_feedback_node(state, mock_config)
         assert isinstance(result, Command)
-        assert result.goto == "__end__"
+        assert result.goto == "planner"
+        assert result.update["plan_iterations"] == 1
+
+def test_human_feedback_node_model_validate_error(mock_state_base, mock_config):
+    # Plan.model_validate raises ValidationError, should enter error handling path
+    from pydantic import BaseModel
+
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = True
+    state["plan_iterations"] = 0
+
+    # Build a real ValidationError instance from pydantic
+    class DummyModel(BaseModel):
+        value: int
+
+    try:
+        DummyModel.model_validate({"value": "not_an_int"})
+    except ValidationError as validation_error:
+        raised_validation_error = validation_error
+
+    mock_configurable = MagicMock()
+    mock_configurable.max_plan_iterations = 3
+    mock_configurable.enforce_web_search = False
+    mock_configurable.enable_web_search = True
+
+    with (
+        patch(
+            "src.graph.nodes.Configuration.from_runnable_config",
+            return_value=mock_configurable,
+        ),
+        patch(
+            "src.graph.nodes.Plan.model_validate",
+            side_effect=raised_validation_error,
+        ),
+    ):
+        result = human_feedback_node(state, mock_config)
+        assert isinstance(result, Command)
+        assert result.goto == "planner"
+        assert result.update["plan_iterations"] == 1
+
+def test_human_feedback_node_list_plan_runs_enforcement_after_normalization(
+    mock_state_base, mock_config
+):
+    # Regression: when plan content is a list, normalization happens first,
+    # then validate_and_fix_plan must still run on the normalized dict.
+    raw_list_plan = [
+        {
+            "need_search": False,
+            "title": "Only Step",
+            "description": "Collect baseline info",
+            # intentionally missing step_type
+        }
+    ]
+
+    state = dict(mock_state_base)
+    state["auto_accepted_plan"] = True
+    state["plan_iterations"] = 0
+    state["current_plan"] = json.dumps({"content": [json.dumps(raw_list_plan)]})
+
+    mock_configurable = MagicMock()
+    mock_configurable.max_plan_iterations = 3
+    mock_configurable.enforce_web_search = True
+    mock_configurable.enable_web_search = True
+
+    with patch(
+        "src.graph.nodes.Configuration.from_runnable_config",
+        return_value=mock_configurable,
+    ):
+        result = human_feedback_node(state, mock_config)
+
+    assert isinstance(result, Command)
+    assert result.goto == "research_team"
+    assert result.update["plan_iterations"] == 1
+
+    normalized_plan = result.update["current_plan"]
+    assert isinstance(normalized_plan, dict)
+    assert isinstance(normalized_plan.get("steps"), list)
+    assert len(normalized_plan["steps"]) == 1
+
+    # validate_and_fix_plan effects should be visible after normalization
+    assert normalized_plan["steps"][0]["step_type"] == "research"
+    assert normalized_plan["steps"][0]["need_search"] is True
 
 
 def test_human_feedback_node_json_decode_error_second_iteration(
