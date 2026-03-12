@@ -7,6 +7,7 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -44,6 +45,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         try:
             return handler(request)
+        except GraphBubbleUp:
+            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            raise
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
@@ -56,6 +60,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         try:
             return await handler(request)
+        except GraphBubbleUp:
+            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            raise
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
@@ -106,4 +113,3 @@ def build_subagent_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentM
         include_dangling_tool_call_patch=False,
         lazy_init=lazy_init,
     )
-

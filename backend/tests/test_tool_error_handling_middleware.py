@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphInterrupt
 
 from src.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 
@@ -55,6 +56,17 @@ def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
     assert result.status == "error"
 
 
+def test_wrap_tool_call_reraises_graph_interrupt():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="ask_clarification", tool_call_id="tc-int")
+
+    def _interrupt(_req):
+        raise GraphInterrupt(())
+
+    with pytest.raises(GraphInterrupt):
+        middleware.wrap_tool_call(req, _interrupt)
+
+
 @pytest.mark.anyio
 async def test_awrap_tool_call_returns_error_tool_message_on_exception():
     middleware = ToolErrorHandlingMiddleware()
@@ -70,3 +82,15 @@ async def test_awrap_tool_call_returns_error_tool_message_on_exception():
     assert result.name == "mcp_tool"
     assert result.status == "error"
     assert "request timed out" in result.text
+
+
+@pytest.mark.anyio
+async def test_awrap_tool_call_reraises_graph_interrupt():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="ask_clarification", tool_call_id="tc-int-async")
+
+    async def _interrupt(_req):
+        raise GraphInterrupt(())
+
+    with pytest.raises(GraphInterrupt):
+        await middleware.awrap_tool_call(req, _interrupt)
