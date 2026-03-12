@@ -140,6 +140,16 @@ class Paths:
             if idx >= 0:
                 tail = stripped[idx + len(ud_marker):]
                 stripped = prefix + "/" + tail if tail else prefix
+            # Handle /tmp/outputs/*, /tmp/workspace/*, /tmp/uploads/* mis-paths.
+            # Agents sometimes use /tmp/ instead of /mnt/user-data/.
+            elif stripped.startswith("tmp/"):
+                tail = stripped[len("tmp/"):]
+                # Only allow known subdirectories (outputs, workspace, uploads)
+                first_segment = tail.split("/", 1)[0] if tail else ""
+                if first_segment in ("outputs", "workspace", "uploads"):
+                    stripped = prefix + "/" + tail
+                else:
+                    raise ValueError(f"Path must start with /{prefix}")
             else:
                 raise ValueError(f"Path must start with /{prefix}")
 

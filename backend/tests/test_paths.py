@@ -154,6 +154,49 @@ class TestResolveVirtualPath:
             p.resolve_virtual_path("t1", "/mnt/user-dataX/evil")
 
 
+class TestResolveVirtualPathTmpFallback:
+    """Test /tmp/ path normalization in resolve_virtual_path."""
+
+    def test_tmp_outputs_resolved(self, tmp_path):
+        p = Paths(tmp_path)
+        p.ensure_thread_dirs("t1")
+        result = p.resolve_virtual_path("t1", "/tmp/outputs/chart.png")
+        expected = tmp_path.resolve() / "threads/t1/user-data/outputs/chart.png"
+        assert result == expected
+
+    def test_tmp_workspace_resolved(self, tmp_path):
+        p = Paths(tmp_path)
+        p.ensure_thread_dirs("t1")
+        result = p.resolve_virtual_path("t1", "/tmp/workspace/script.py")
+        expected = tmp_path.resolve() / "threads/t1/user-data/workspace/script.py"
+        assert result == expected
+
+    def test_tmp_uploads_resolved(self, tmp_path):
+        p = Paths(tmp_path)
+        p.ensure_thread_dirs("t1")
+        result = p.resolve_virtual_path("t1", "/tmp/uploads/data.csv")
+        expected = tmp_path.resolve() / "threads/t1/user-data/uploads/data.csv"
+        assert result == expected
+
+    def test_tmp_unknown_subdir_rejected(self, tmp_path):
+        p = Paths(tmp_path)
+        with pytest.raises(ValueError, match="must start with"):
+            p.resolve_virtual_path("t1", "/tmp/etc/passwd")
+
+    def test_tmp_bare_rejected(self, tmp_path):
+        p = Paths(tmp_path)
+        with pytest.raises(ValueError, match="must start with"):
+            p.resolve_virtual_path("t1", "/tmp/somefile.txt")
+
+    def test_tmp_no_leading_slash(self, tmp_path):
+        """Path without leading slash (as seen from URL path param)."""
+        p = Paths(tmp_path)
+        p.ensure_thread_dirs("t1")
+        result = p.resolve_virtual_path("t1", "tmp/outputs/chart.png")
+        expected = tmp_path.resolve() / "threads/t1/user-data/outputs/chart.png"
+        assert result == expected
+
+
 class TestVirtualPathPrefix:
     """Test the module-level constant."""
 

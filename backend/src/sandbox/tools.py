@@ -64,8 +64,26 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
     return actual_base
 
 
+def _normalize_tmp_paths(command: str) -> str:
+    """Normalize /tmp/{outputs,workspace,uploads}/... to /mnt/user-data/... paths.
+
+    Agents sometimes write code that uses /tmp/outputs/ instead of the correct
+    /mnt/user-data/outputs/ virtual path. This normalizes those paths before
+    the standard virtual-path replacement so that files end up in the shared
+    thread directory rather than an ephemeral /tmp/ location.
+    """
+    _TMP_SUBDIRS = ("outputs", "workspace", "uploads")
+    for subdir in _TMP_SUBDIRS:
+        command = command.replace(f"/tmp/{subdir}/", f"{VIRTUAL_PATH_PREFIX}/{subdir}/")
+        command = command.replace(f"/tmp/{subdir}", f"{VIRTUAL_PATH_PREFIX}/{subdir}")
+    return command
+
+
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
     """Replace all virtual /mnt/user-data paths in a command string.
+
+    Also normalizes common mis-paths like /tmp/outputs/ to /mnt/user-data/outputs/
+    before applying the standard virtual-path replacement.
 
     Args:
         command: The command string that may contain virtual paths.
@@ -74,10 +92,13 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     Returns:
         The command with all virtual paths replaced.
     """
-    if VIRTUAL_PATH_PREFIX not in command:
+    if thread_data is None:
         return command
 
-    if thread_data is None:
+    # Normalize /tmp/outputs etc. to /mnt/user-data/outputs before replacement
+    command = _normalize_tmp_paths(command)
+
+    if VIRTUAL_PATH_PREFIX not in command:
         return command
 
     # Pattern to match /mnt/user-data followed by path characters

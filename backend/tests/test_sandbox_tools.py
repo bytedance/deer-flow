@@ -11,6 +11,7 @@ import pytest
 from src.config.paths import VIRTUAL_PATH_PREFIX
 from src.sandbox.exceptions import SandboxNotFoundError, SandboxRuntimeError
 from src.sandbox.tools import (
+    _normalize_tmp_paths,
     ensure_sandbox_initialized,
     ensure_thread_directories_exist,
     get_thread_data,
@@ -125,6 +126,50 @@ class TestReplaceVirtualPathsInCommand:
     def test_command_without_prefix_passthrough(self) -> None:
         cmd = "echo hello"
         assert replace_virtual_paths_in_command(cmd, {}) == cmd
+
+    def test_tmp_outputs_normalized_and_replaced(self, tmp_path: Path) -> None:
+        td = self._thread_data(tmp_path)
+        cmd = "python -c \"plt.savefig('/tmp/outputs/chart.png')\""
+        result = replace_virtual_paths_in_command(cmd, td)
+        assert f"{tmp_path}/out/chart.png" in result
+        assert "/tmp/outputs" not in result
+
+    def test_tmp_workspace_normalized_and_replaced(self, tmp_path: Path) -> None:
+        td = self._thread_data(tmp_path)
+        cmd = "cat /tmp/workspace/script.py"
+        result = replace_virtual_paths_in_command(cmd, td)
+        assert f"{tmp_path}/ws/script.py" in result
+
+    def test_tmp_unrelated_not_normalized(self, tmp_path: Path) -> None:
+        td = self._thread_data(tmp_path)
+        cmd = "cat /tmp/somefile.txt"
+        result = replace_virtual_paths_in_command(cmd, td)
+        assert "/tmp/somefile.txt" in result
+
+
+# ---------------------------------------------------------------------------
+# _normalize_tmp_paths
+# ---------------------------------------------------------------------------
+class TestNormalizeTmpPaths:
+    """Tests for _normalize_tmp_paths()."""
+
+    def test_outputs(self) -> None:
+        assert _normalize_tmp_paths("/tmp/outputs/chart.png") == f"{VIRTUAL_PATH_PREFIX}/outputs/chart.png"
+
+    def test_workspace(self) -> None:
+        assert _normalize_tmp_paths("/tmp/workspace/file.py") == f"{VIRTUAL_PATH_PREFIX}/workspace/file.py"
+
+    def test_uploads(self) -> None:
+        assert _normalize_tmp_paths("/tmp/uploads/data.csv") == f"{VIRTUAL_PATH_PREFIX}/uploads/data.csv"
+
+    def test_bare_subdir(self) -> None:
+        assert _normalize_tmp_paths("/tmp/outputs") == f"{VIRTUAL_PATH_PREFIX}/outputs"
+
+    def test_unrelated_tmp_path(self) -> None:
+        assert _normalize_tmp_paths("/tmp/somefile.txt") == "/tmp/somefile.txt"
+
+    def test_no_tmp(self) -> None:
+        assert _normalize_tmp_paths("echo hello") == "echo hello"
 
 
 # ---------------------------------------------------------------------------

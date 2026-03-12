@@ -7,6 +7,24 @@ from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadState
 
+# Common mis-path prefixes that agents use instead of /mnt/user-data/
+_TMP_PATH_MAPPINGS = {
+    "/tmp/outputs/": "/mnt/user-data/outputs/",
+    "/tmp/workspace/": "/mnt/user-data/workspace/",
+    "/tmp/uploads/": "/mnt/user-data/uploads/",
+    "/tmp/outputs": "/mnt/user-data/outputs",
+    "/tmp/workspace": "/mnt/user-data/workspace",
+    "/tmp/uploads": "/mnt/user-data/uploads",
+}
+
+
+def _normalize_artifact_path(filepath: str) -> str:
+    """Normalize common mis-paths (e.g. /tmp/outputs/) to /mnt/user-data/ paths."""
+    for wrong, correct in _TMP_PATH_MAPPINGS.items():
+        if filepath.startswith(wrong):
+            return correct + filepath[len(wrong):]
+    return filepath
+
 
 @tool("present_files", parse_docstring=True)
 def present_file_tool(
@@ -37,7 +55,10 @@ def present_file_tool(
     Args:
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
     """
+    # Normalize common mis-paths (e.g. /tmp/outputs/) to /mnt/user-data/outputs/
+    normalized = [_normalize_artifact_path(fp) for fp in filepaths]
+
     # The merge_artifacts reducer will handle merging and deduplication
     return Command(
-        update={"artifacts": filepaths, "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)]},
+        update={"artifacts": normalized, "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)]},
     )
