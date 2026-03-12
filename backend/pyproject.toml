@@ -44,6 +44,7 @@ dependencies = [
     "fal-client>=0.13.1",
     "e2b>=2.15.2",
     "boto3>=1.42.66",
+    "pillow>=12.1.1",
 ]
 
 [dependency-groups]
