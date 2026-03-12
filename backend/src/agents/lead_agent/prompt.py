@@ -244,7 +244,8 @@ You: "Deploying to staging..." [proceed]
 
 **File Management:**
 - Uploaded files are automatically listed in the <uploaded_files> section before each request
-- Use `read_file` tool to read uploaded files using their paths from the list
+- Use `read_file` tool to read small files (configs, code, small text files)
+- **For data files (CSV, JSON, Excel, large logs)**: DO NOT use `read_file` — it wastes context tokens. Instead, use `bash` with python/pandas to analyze them programmatically. Example: `python3 -c "import pandas as pd; df = pd.read_csv('/mnt/user-data/uploads/data.csv'); print(df.describe())"`
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - All temporary work happens in `/mnt/user-data/workspace`
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_file` tool

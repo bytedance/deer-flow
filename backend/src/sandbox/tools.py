@@ -286,6 +286,11 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
 
 
+# Maximum characters to return from read_file before truncation.
+# Large files (CSV, logs, JSON) should be processed with python/bash, not read into LLM context.
+MAX_READ_FILE_CHARS = 10_000
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -295,6 +300,9 @@ def read_file_tool(
     end_line: int | None = None,
 ) -> str:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+
+    **Important**: For large data files (CSV, JSON, logs, etc.), use `bash` with python/pandas
+    instead of reading the entire file. This tool truncates files larger than 10,000 characters.
 
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -313,6 +321,19 @@ def read_file_tool(
             return "(empty)"
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+
+        # Truncate large files to avoid blowing up LLM context
+        if len(content) > MAX_READ_FILE_CHARS:
+            total_lines = len(content.splitlines())
+            truncated = content[:MAX_READ_FILE_CHARS]
+            return (
+                f"{truncated}\n\n"
+                f"... [TRUNCATED — file is {len(content):,} chars, {total_lines:,} lines. "
+                f"Only first {MAX_READ_FILE_CHARS:,} chars shown.] ...\n\n"
+                f"TIP: This file is too large to read fully. Use `bash` with python/pandas to "
+                f"analyze it programmatically instead of reading it into context."
+            )
+
         return content
     except SandboxError as e:
         return f"Error: {e}"
