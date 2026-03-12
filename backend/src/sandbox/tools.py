@@ -286,9 +286,64 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
 
 
-# Maximum characters to return from read_file before truncation.
-# Large files (CSV, logs, JSON) should be processed with python/bash, not read into LLM context.
-MAX_READ_FILE_CHARS = 10_000
+# File extensions that should be analyzed with code, not read into LLM context.
+# These are data files where reading raw content is useless — the model needs
+# pandas/python to aggregate, filter, and compute stats.
+DATA_FILE_EXTENSIONS = {
+    ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
+    ".xlsx", ".xls", ".parquet", ".feather", ".arrow",
+    ".sqlite", ".db", ".sql",
+    ".xml", ".yaml", ".yml",
+}
+
+# For non-data files, truncate at this limit to prevent context blowup.
+MAX_READ_FILE_CHARS = 8_000
+
+# Number of preview lines to show for data files.
+DATA_FILE_PREVIEW_LINES = 5
+
+
+def _get_file_extension(path: str) -> str:
+    """Extract lowercase file extension from path."""
+    dot_idx = path.rfind(".")
+    if dot_idx == -1:
+        return ""
+    return path[dot_idx:].lower()
+
+
+def _build_data_file_preview(content: str, path: str) -> str:
+    """Build a compact preview for data files: metadata + first few rows.
+
+    Returns only ~500 chars instead of the full file, saving thousands of tokens.
+    The model should use python/pandas for actual analysis.
+    """
+    lines = content.splitlines()
+    total_lines = len(lines)
+    total_chars = len(content)
+    ext = _get_file_extension(path)
+
+    preview_lines = lines[:DATA_FILE_PREVIEW_LINES + 1]  # header + N data rows
+    preview = "\n".join(preview_lines)
+
+    # For CSV/TSV, extract column info
+    columns_hint = ""
+    if ext in (".csv", ".tsv"):
+        sep = "\t" if ext == ".tsv" else ","
+        header = lines[0] if lines else ""
+        cols = [c.strip().strip('"').strip("'") for c in header.split(sep)]
+        columns_hint = f"\nColumns ({len(cols)}): {', '.join(cols)}"
+
+    return (
+        f"[DATA FILE PREVIEW — not full content]\n"
+        f"File: {path}\n"
+        f"Size: {total_chars:,} chars, {total_lines:,} lines{columns_hint}\n"
+        f"\n--- First {min(DATA_FILE_PREVIEW_LINES + 1, total_lines)} lines ---\n"
+        f"{preview}\n"
+        f"--- End preview ---\n\n"
+        f"⚠ This is a data file. Do NOT re-read it with read_file.\n"
+        f"Use `bash` with python to analyze it. Example:\n"
+        f"  python3 -c \"import pandas as pd; df = pd.read_csv('{path}'); print(df.shape); print(df.describe())\"\n"
+    )
 
 
 @tool("read_file", parse_docstring=True)
@@ -299,10 +354,10 @@ def read_file_tool(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+    """Read the contents of a text file. Use this to examine source code, configuration files, or small text files.
 
-    **Important**: For large data files (CSV, JSON, logs, etc.), use `bash` with python/pandas
-    instead of reading the entire file. This tool truncates files larger than 10,000 characters.
+    **Important**: For data files (CSV, JSON, Excel, Parquet, etc.), this tool returns only
+    a preview (first few rows + metadata). Use `bash` with python/pandas to analyze data files.
 
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -319,19 +374,26 @@ def read_file_tool(
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
+
+        # Data files: return preview only (metadata + first few rows)
+        ext = _get_file_extension(path)
+        if ext in DATA_FILE_EXTENSIONS and start_line is None:
+            return _build_data_file_preview(content, path)
+
+        # Apply line range if specified
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
 
-        # Truncate large files to avoid blowing up LLM context
+        # Truncate large non-data files (code, logs, etc.)
         if len(content) > MAX_READ_FILE_CHARS:
             total_lines = len(content.splitlines())
             truncated = content[:MAX_READ_FILE_CHARS]
             return (
                 f"{truncated}\n\n"
-                f"... [TRUNCATED — file is {len(content):,} chars, {total_lines:,} lines. "
-                f"Only first {MAX_READ_FILE_CHARS:,} chars shown.] ...\n\n"
-                f"TIP: This file is too large to read fully. Use `bash` with python/pandas to "
-                f"analyze it programmatically instead of reading it into context."
+                f"... [TRUNCATED — {len(content):,} chars, {total_lines:,} lines. "
+                f"Only first {MAX_READ_FILE_CHARS:,} chars shown.] ...\n"
+                f"Use start_line/end_line to read specific sections, "
+                f"or `bash` with grep/awk to search."
             )
 
         return content
