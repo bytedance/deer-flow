@@ -1,6 +1,7 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -14,6 +15,8 @@ from src.agents.memory.prompt import (
 from src.config.memory_config import get_memory_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -132,7 +135,7 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
             data = json.load(f)
         return data
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to load memory file: {e}")
+        logger.error("Failed to load memory file: %s", e)
         return _create_empty_memory()
 
 
@@ -208,10 +211,10 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
 
         _memory_cache[agent_name] = (memory_data, mtime)
 
-        print(f"Memory saved to {file_path}")
+        logger.info("Memory saved to %s", file_path)
         return True
     except OSError as e:
-        print(f"Failed to save memory file: {e}")
+        logger.error("Failed to save memory file: %s", e)
         return False
 
 
@@ -292,10 +295,10 @@ class MemoryUpdater:
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            logger.error("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.error("Memory update failed: %s", e)
             return False
 
     def _apply_updates(
