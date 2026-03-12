@@ -1216,6 +1216,115 @@ class TestTelegramSendRetry:
 
 
 # ---------------------------------------------------------------------------
+# Telegram private-chat thread context tests
+# ---------------------------------------------------------------------------
+
+
+def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+    """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
+    update = MagicMock()
+    update.effective_chat.type = chat_type
+    update.effective_chat.id = 100
+    update.effective_user.id = 42
+    update.message.text = text
+    update.message.message_id = message_id
+    if reply_to_message_id is not None:
+        reply_msg = MagicMock()
+        reply_msg.message_id = reply_to_message_id
+        update.message.reply_to_message = reply_msg
+    else:
+        update.message.reply_to_message = None
+    return update
+
+
+class TestTelegramPrivateChatThread:
+    """Verify that private chats use topic_id=None (single thread per chat)."""
+
+    def test_private_chat_no_reply_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=10)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_private_chat_with_reply_still_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_group_chat_no_reply_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=20)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+
+        _run(go())
+
+    def test_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "15"
+
+        _run(go())
+
+    def test_cmd_generic_private_chat_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=30, text="/new")
+            await ch._cmd_generic(update, None)
+
+            # _cmd_generic publishes via run_coroutine_threadsafe, so we need
+            # to give the event loop a moment to process it.
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
 # Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn library)
 # ---------------------------------------------------------------------------
 
