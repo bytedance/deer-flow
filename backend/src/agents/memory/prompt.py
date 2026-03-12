@@ -5,10 +5,16 @@ from typing import Any
 
 try:
     import tiktoken
-
     TIKTOKEN_AVAILABLE = True
 except ImportError:
     TIKTOKEN_AVAILABLE = False
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
 
 # Prompt template for updating memory based on conversation
 MEMORY_UPDATE_PROMPT = """You are a memory management system. Your task is to analyze a conversation and update the user's memory profile.
@@ -145,33 +151,64 @@ Return ONLY valid JSON."""
 
 
 def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
-    """Count tokens in text using tiktoken.
-
-    Args:
-        text: The text to count tokens for.
-        encoding_name: The encoding to use (default: cl100k_base for GPT-4/3.5).
-
-    Returns:
-        The number of tokens in the text.
-    """
+    """Count tokens in text using tiktoken."""
     if not TIKTOKEN_AVAILABLE:
-        # Fallback to character-based estimation if tiktoken is not available
         return len(text) // 4
-
     try:
         encoding = tiktoken.get_encoding(encoding_name)
         return len(encoding.encode(text))
     except Exception:
-        # Fallback to character-based estimation on error
         return len(text) // 4
 
 
-def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
+def _rank_facts_by_relevance(
+    facts: list[dict[str, Any]],
+    current_context: str | None,
+    similarity_weight: float = 0.6,
+    confidence_weight: float = 0.4,
+) -> list[dict[str, Any]]:
+    """Rank facts using TF-IDF similarity to context and confidence score."""
+    if not facts:
+        return []
+
+    if not current_context or not SKLEARN_AVAILABLE:
+        # Fallback to confidence-only ranking if context or sklearn is unavailable
+        return sorted(facts, key=lambda x: x.get("confidence", 0.0), reverse=True)
+
+    try:
+        fact_contents = [f.get("content", "") for f in facts]
+        
+        # Combine fact contents and current context for TF-IDF
+        vectorizer = TfidfVectorizer().fit(fact_contents + [current_context])
+        fact_vectors = vectorizer.transform(fact_contents)
+        context_vector = vectorizer.transform([current_context])
+        
+        # Calculate cosine similarities
+        similarities = cosine_similarity(fact_vectors, context_vector).flatten()
+        
+        # Calculate final scores
+        for i, fact in enumerate(facts):
+            similarity = float(similarities[i])
+            confidence = float(fact.get("confidence", 0.0))
+            fact["_final_score"] = (similarity * similarity_weight) + (confidence * confidence_weight)
+            
+        return sorted(facts, key=lambda x: x.get("_final_score", 0.0), reverse=True)
+    except Exception:
+        # Graceful fallback to confidence-only
+        return sorted(facts, key=lambda x: x.get("confidence", 0.0), reverse=True)
+
+
+def format_memory_for_injection(
+    memory_data: dict[str, Any],
+    max_tokens: int = 2000,
+    current_context: str | None = None,
+) -> str:
     """Format memory data for injection into system prompt.
 
     Args:
         memory_data: The memory data dictionary.
         max_tokens: Maximum tokens to use (counted via tiktoken for accuracy).
+        current_context: Optional current conversation context for fact ranking.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -180,58 +217,81 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
         return ""
 
     sections = []
+    total_tokens = 0
 
-    # Format user context
+    # Format user context (high priority)
     user_data = memory_data.get("user", {})
     if user_data:
         user_sections = []
-
-        work_ctx = user_data.get("workContext", {})
-        if work_ctx.get("summary"):
-            user_sections.append(f"Work: {work_ctx['summary']}")
-
-        personal_ctx = user_data.get("personalContext", {})
-        if personal_ctx.get("summary"):
-            user_sections.append(f"Personal: {personal_ctx['summary']}")
-
-        top_of_mind = user_data.get("topOfMind", {})
-        if top_of_mind.get("summary"):
-            user_sections.append(f"Current Focus: {top_of_mind['summary']}")
+        for key, label in [("workContext", "Work"), ("personalContext", "Personal"), ("topOfMind", "Current Focus")]:
+            ctx = user_data.get(key, {})
+            if ctx.get("summary"):
+                user_sections.append(f"{label}: {ctx['summary']}")
 
         if user_sections:
-            sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
+            section_content = "User Context:\n" + "\n".join(f"- {s}" for s in user_sections)
+            section_tokens = _count_tokens(section_content)
+            if total_tokens + section_tokens <= max_tokens:
+                sections.append(section_content)
+                total_tokens += section_tokens
 
-    # Format history
+    # Format facts (dynamic priority based on relevance)
+    facts = memory_data.get("facts", [])
+    if facts:
+        ranked_facts = _rank_facts_by_relevance(facts, current_context)
+        fact_list = []
+        fact_header = "Relevant Facts:\n"
+        fact_header_tokens = _count_tokens(fact_header)
+        
+        if total_tokens + fact_header_tokens <= max_tokens:
+            current_fact_tokens = fact_header_tokens
+            for fact in ranked_facts:
+                content = fact.get("content", "")
+                if not content:
+                    continue
+                
+                fact_line = f"- {content}\n"
+                fact_tokens = _count_tokens(fact_line)
+                
+                if total_tokens + current_fact_tokens + fact_tokens <= max_tokens:
+                    fact_list.append(fact_line)
+                    current_fact_tokens += fact_tokens
+                else:
+                    break
+            
+            if fact_list:
+                sections.append(fact_header + "".join(fact_list).strip())
+                total_tokens += current_fact_tokens
+
+    # Format history (lower priority, fills remaining budget)
     history_data = memory_data.get("history", {})
     if history_data:
         history_sections = []
-
-        recent = history_data.get("recentMonths", {})
-        if recent.get("summary"):
-            history_sections.append(f"Recent: {recent['summary']}")
-
-        earlier = history_data.get("earlierContext", {})
-        if earlier.get("summary"):
-            history_sections.append(f"Earlier: {earlier['summary']}")
+        for key, label in [("recentMonths", "Recent"), ("earlierContext", "Earlier")]:
+            ctx = history_data.get(key, {})
+            if ctx.get("summary"):
+                history_sections.append(f"{label}: {ctx['summary']}")
 
         if history_sections:
-            sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
+            section_content = "History:\n" + "\n".join(f"- {s}" for s in history_sections)
+            section_tokens = _count_tokens(section_content)
+            if total_tokens + section_tokens <= max_tokens:
+                sections.append(section_content)
+                total_tokens += section_tokens
+            else:
+                # Try to fit at least the "Recent" part if full history doesn't fit
+                recent_ctx = history_data.get("recentMonths", {})
+                if recent_ctx.get("summary"):
+                    recent_content = f"History (Recent):\n- {recent_ctx['summary']}"
+                    recent_tokens = _count_tokens(recent_content)
+                    if total_tokens + recent_tokens <= max_tokens:
+                        sections.append(recent_content)
+                        total_tokens += recent_tokens
 
     if not sections:
         return ""
 
-    result = "\n\n".join(sections)
-
-    # Use accurate token counting with tiktoken
-    token_count = _count_tokens(result)
-    if token_count > max_tokens:
-        # Truncate to fit within token limit
-        # Estimate characters to remove based on token ratio
-        char_per_token = len(result) / token_count
-        target_chars = int(max_tokens * char_per_token * 0.95)  # 95% to leave margin
-        result = result[:target_chars] + "\n..."
-
-    return result
+    return "\n\n".join(sections)
 
 
 def format_conversation_for_update(messages: list[Any]) -> str:

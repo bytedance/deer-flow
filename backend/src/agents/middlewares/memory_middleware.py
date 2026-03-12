@@ -3,11 +3,14 @@
 import re
 from typing import Any, override
 
+from langchain_core.messages import SystemMessage
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from src.agents.memory.prompt import format_memory_for_injection
 from src.agents.memory.queue import get_memory_queue
+from src.agents.memory.updater import get_memory_data
 from src.config.memory_config import get_memory_config
 
 
@@ -15,6 +18,36 @@ class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     pass
+
+
+def _extract_conversation_context(messages: list[Any], max_turns: int = 3) -> str:
+    """Extract recent conversation context for similarity calculation.
+
+    Args:
+        messages: List of messages.
+        max_turns: Maximum number of user turns to include.
+
+    Returns:
+        Concatenated text of recent turns.
+    """
+    context_parts = []
+    user_turns = 0
+
+    for msg in reversed(messages):
+        msg_type = getattr(msg, "type", None)
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+
+        if msg_type == "human":
+            context_parts.append(str(content))
+            user_turns += 1
+            if user_turns >= max_turns:
+                break
+        elif msg_type == "ai" and not getattr(msg, "tool_calls", None):
+            context_parts.append(str(content))
+
+    return " ".join(reversed(context_parts))
 
 
 def _filter_messages_for_memory(messages: list[Any]) -> list[Any]:
@@ -87,10 +120,11 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
     """Middleware that queues conversation for memory update after agent execution.
 
     This middleware:
-    1. After each agent execution, queues the conversation for memory update
-    2. Only includes user inputs and final assistant responses (ignores tool calls)
-    3. The queue uses debouncing to batch multiple updates together
-    4. Memory is updated asynchronously via LLM summarization
+    1. Before agent execution, injects relevant memory context into the system prompt.
+    2. After each agent execution, queues the conversation for memory update.
+    3. Only includes user inputs and final assistant responses (ignores tool calls).
+    4. The queue uses debouncing to batch multiple updates together.
+    5. Memory is updated asynchronously via LLM summarization.
     """
 
     state_schema = MemoryMiddlewareState
@@ -103,6 +137,61 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         """
         super().__init__()
         self._agent_name = agent_name
+
+    @override
+    def before_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Inject memory context into system prompt before agent execution.
+
+        Args:
+            state: The current agent state.
+            runtime: The runtime context.
+
+        Returns:
+            Updated state with memory message injected.
+        """
+        config = get_memory_config()
+        if not config.enabled or not config.inject_memory:
+            return None
+
+        # Get messages from state
+        messages = state.get("messages", [])
+        
+        # Extract recent context for similarity-based fact retrieval
+        current_context = _extract_conversation_context(messages)
+
+        # Load memory data (global or per-agent)
+        memory_data = get_memory_data(self._agent_name)
+        
+        # Format memory for injection
+        memory_content = format_memory_for_injection(
+            memory_data,
+            max_tokens=config.max_injection_tokens,
+            current_context=current_context,
+        )
+
+        if not memory_content:
+            return None
+
+        # Create system message for memory injection
+        memory_message = SystemMessage(
+            content=f"<memory>\n{memory_content}\n</memory>",
+            additional_kwargs={"name": "memory_context"},
+        )
+
+        # Inject at the beginning of messages (after existing system messages if any)
+        new_messages = list(messages)
+        
+        # Find position to insert (after system messages but before others)
+        insert_idx = 0
+        for i, msg in enumerate(new_messages):
+            if getattr(msg, "type", None) == "system":
+                insert_idx = i + 1
+            else:
+                break
+                
+        new_messages.insert(insert_idx, memory_message)
+
+        return {"messages": new_messages}
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
