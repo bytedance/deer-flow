@@ -10,6 +10,23 @@ from src.config.title_config import get_title_config
 from src.models import create_chat_model
 
 
+def _extract_text(content) -> str:
+    """Extract plain text from message content (string or list-of-dicts)."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return " ".join(parts)
+    return str(content)
+
+
 class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
@@ -52,9 +69,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg_content = next((m.content for m in messages if m.type == "human"), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
-        # Ensure content is string (LangChain messages can have list content)
-        user_msg = str(user_msg_content) if user_msg_content else ""
-        assistant_msg = str(assistant_msg_content) if assistant_msg_content else ""
+        # Extract text from content (handles both string and list-of-dicts formats)
+        user_msg = _extract_text(user_msg_content)
+        assistant_msg = _extract_text(assistant_msg_content)
 
         # Use the configured model (cheap model for title generation)
         model = create_chat_model(name=config.model_name, thinking_enabled=False)
@@ -67,8 +84,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         try:
             response = await model.ainvoke(prompt)
-            # Ensure response content is string
-            title_content = str(response.content) if response.content else ""
+            title_content = _extract_text(response.content)
             title = title_content.strip().strip('"').strip("'")
             # Limit to max characters
             return title[: config.max_chars] if len(title) > config.max_chars else title
