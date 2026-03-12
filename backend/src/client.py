@@ -9,8 +9,6 @@ Usage:
     client = DeerFlowClient()
     response = client.chat("Analyze this paper for me", thread_id="my-thread")
     print(response)
-                # Reuse one worker when already inside an event loop to avoid
-                # creating a new ThreadPoolExecutor per converted file.
 
     # Streaming
     for event in client.stream("hello"):
@@ -20,8 +18,7 @@ Usage:
 import asyncio
 import json
 import logging
-                uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
-import os
+import mimetypes
 import re
 import shutil
 import tempfile
@@ -48,7 +45,6 @@ from src.storage import build_upload_metadata, extract_file_from_skill_archive_b
 logger = logging.getLogger(__name__)
 
 
-                        sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
 @dataclass
 class StreamEvent:
     """A single event from the streaming agent response.
@@ -71,10 +67,28 @@ class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
     Provides direct programmatic access to DeerFlow's agent capabilities
+    without requiring LangGraph Server or Gateway API processes.
+
+    Note:
         Multi-turn conversations require a ``checkpointer``. Without one,
+        each ``stream()`` / ``chat()`` call is stateless — ``thread_id``
+        is only used for file isolation (uploads / artifacts).
+
         The system prompt (including date, memory, and skills context) is
-        uploads_backend = get_thread_file_backend("uploads")
-        files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
+        generated when the internal agent is first created and cached until
+        the configuration key changes. Call :meth:`reset_agent` to force
+        a refresh in long-running processes.
+
+    Example::
+
+        from src.client import DeerFlowClient
+
+        client = DeerFlowClient()
+
+        # Simple one-shot
+        print(client.chat("hello"))
+
+        # Streaming
         for event in client.stream("hello"):
             print(event.type, event.data)
 
@@ -663,9 +677,20 @@ class DeerFlowClient:
         from src.config.memory_config import get_memory_config
 
         config = get_memory_config()
+        backend = config.backend if isinstance(getattr(config, "backend", None), str) else "file"
+        database_url = getattr(config, "database_url", "")
+        database_url = database_url if isinstance(database_url, str) else ""
+        strict_scope = getattr(config, "strict_scope", False)
+        strict_scope = strict_scope if isinstance(strict_scope, bool) else False
+        auth_mode = config.auth_mode if isinstance(getattr(config, "auth_mode", None), str) else "trusted"
+
         return {
             "enabled": config.enabled,
+            "backend": backend,
             "storage_path": config.storage_path,
+            "database_configured": bool(database_url) if backend == "postgres" else True,
+            "strict_scope": strict_scope,
+            "auth_mode": auth_mode,
             "debounce_seconds": config.debounce_seconds,
             "max_facts": config.max_facts,
             "fact_confidence_threshold": config.fact_confidence_threshold,
@@ -710,7 +735,6 @@ class DeerFlowClient:
 
         Raises:
             FileNotFoundError: If any file does not exist.
-            ValueError: If any supplied path exists but is not a regular file.
         """
         from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -733,7 +757,6 @@ class DeerFlowClient:
         sidecar_backend = get_thread_file_backend("upload_markdown_sidecars")
         uploaded_files: list[dict] = []
 
-<<<<<<< HEAD
         conversion_pool = None
         if has_convertible_file:
             try:
@@ -742,15 +765,8 @@ class DeerFlowClient:
                 conversion_pool = None
             else:
                 import concurrent.futures
-=======
-        for src_path in resolved_files:
-            dest = uploads_dir / src_path.name
-            shutil.copy2(src_path, dest)
-            uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
->>>>>>> 31ec7c3 (Blob user uploads)
 
-                # Reuse one worker when already inside an event loop to avoid
-                # creating a new ThreadPoolExecutor per converted file.
+                # Reuse one worker when already inside an event loop.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
         def _convert_in_thread(path: Path):
@@ -760,6 +776,7 @@ class DeerFlowClient:
             for src_path in resolved_files:
                 dest = uploads_dir / src_path.name
                 shutil.copy2(src_path, dest)
+                uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
 
                 info: dict[str, Any] = {
                     "filename": src_path.name,
@@ -776,32 +793,19 @@ class DeerFlowClient:
                         else:
                             md_path = asyncio.run(convert_file_to_markdown(dest))
                     except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
+                        logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
                         md_path = None
 
                     if md_path is not None:
+                        sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
                         info["markdown_file"] = md_path.name
                         info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
                         info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
-<<<<<<< HEAD
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
-=======
-                if md_path is not None:
-                    sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
-                    info["markdown_file"] = md_path.name
-                    info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
-                    info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
-
-            uploaded_files.append(info)
->>>>>>> 31ec7c3 (Blob user uploads)
 
         return {
             "success": True,
@@ -819,33 +823,8 @@ class DeerFlowClient:
             Dict with "files" and "count" keys, matching the Gateway API
             ``list_uploaded_files`` response.
         """
-<<<<<<< HEAD
-        uploads_dir = self._get_uploads_dir(thread_id)
-        if not uploads_dir.exists():
-            return {"files": [], "count": 0}
-
-        files = []
-        with os.scandir(uploads_dir) as entries:
-            file_entries = [entry for entry in entries if entry.is_file()]
-
-        for entry in sorted(file_entries, key=lambda item: item.name):
-            stat = entry.stat()
-            filename = entry.name
-            files.append(
-                {
-                    "filename": filename,
-                    "size": str(stat.st_size),
-                    "path": str(Path(entry.path)),
-                    "virtual_path": f"/mnt/user-data/uploads/{filename}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                    "modified": stat.st_mtime,
-                }
-            )
-=======
         uploads_backend = get_thread_file_backend("uploads")
         files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
->>>>>>> 31ec7c3 (Blob user uploads)
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
