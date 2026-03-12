@@ -293,7 +293,22 @@ DATA_FILE_EXTENSIONS = {
     ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
     ".xlsx", ".xls", ".parquet", ".feather", ".arrow",
     ".sqlite", ".db", ".sql",
-    ".xml", ".yaml", ".yml",
+}
+
+# Binary/media files — cannot be read as text. Agent should use appropriate tools.
+BINARY_FILE_EXTENSIONS = {
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".ico", ".tiff",
+    # Video
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv",
+    # Audio
+    ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a",
+    # Documents (binary)
+    ".pdf", ".docx", ".pptx",
+    # Archives
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    # Other binary
+    ".exe", ".dll", ".so", ".dylib", ".wasm", ".pyc",
 }
 
 # For non-data files, truncate at this limit to prevent context blowup.
@@ -311,11 +326,12 @@ def _get_file_extension(path: str) -> str:
     return path[dot_idx:].lower()
 
 
-def _build_data_file_preview(content: str, path: str) -> str:
-    """Build a compact preview for data files: metadata + first few rows.
+def _build_data_file_preview(sandbox: Sandbox, content: str, path: str) -> str:
+    """Build a schema-aware preview for data files.
 
-    Returns only ~500 chars instead of the full file, saving thousands of tokens.
-    The model should use python/pandas for actual analysis.
+    For CSV/TSV files, runs a quick python command in the sandbox to extract
+    schema info (dtypes, null counts, shape) — just like ChatGPT Code Interpreter.
+    Returns ~800 chars instead of the full file, saving thousands of tokens.
     """
     lines = content.splitlines()
     total_lines = len(lines)
@@ -325,25 +341,91 @@ def _build_data_file_preview(content: str, path: str) -> str:
     preview_lines = lines[:DATA_FILE_PREVIEW_LINES + 1]  # header + N data rows
     preview = "\n".join(preview_lines)
 
-    # For CSV/TSV, extract column info
-    columns_hint = ""
+    # For CSV/TSV, run quick schema analysis in sandbox
+    schema_info = ""
     if ext in (".csv", ".tsv"):
-        sep = "\t" if ext == ".tsv" else ","
-        header = lines[0] if lines else ""
-        cols = [c.strip().strip('"').strip("'") for c in header.split(sep)]
-        columns_hint = f"\nColumns ({len(cols)}): {', '.join(cols)}"
+        try:
+            schema_script = (
+                "import pandas as pd\n"
+                f"df = pd.read_csv('{path}'\n"
+            )
+            if ext == ".tsv":
+                schema_script = (
+                    "import pandas as pd\n"
+                    f"df = pd.read_csv('{path}', sep='\\t'\n"
+                )
+            schema_script += (
+                ", nrows=1000)\n"  # Read only first 1000 rows for speed
+                "print(f'Shape: {df.shape[0]} rows x {df.shape[1]} columns')\n"
+                "print()\n"
+                "print('Column types:')\n"
+                "for col in df.columns:\n"
+                "    null_pct = df[col].isnull().mean() * 100\n"
+                "    n_unique = df[col].nunique()\n"
+                "    print(f'  {col}: {df[col].dtype} ({n_unique} unique, {null_pct:.0f}% null)')\n"
+            )
+            result = sandbox.execute_command(f"python3 -c \"{schema_script}\"")
+            if result and "Error" not in result:
+                schema_info = f"\n--- Schema (from first 1000 rows) ---\n{result}\n"
+        except Exception:
+            # Schema analysis failed — fall back to basic preview
+            sep = "\t" if ext == ".tsv" else ","
+            header = lines[0] if lines else ""
+            cols = [c.strip().strip('"').strip("'") for c in header.split(sep)]
+            schema_info = f"\nColumns ({len(cols)}): {', '.join(cols)}\n"
 
     return (
         f"[DATA FILE PREVIEW — not full content]\n"
         f"File: {path}\n"
-        f"Size: {total_chars:,} chars, {total_lines:,} lines{columns_hint}\n"
+        f"Size: {total_chars:,} chars, {total_lines:,} lines\n"
+        f"{schema_info}"
         f"\n--- First {min(DATA_FILE_PREVIEW_LINES + 1, total_lines)} lines ---\n"
         f"{preview}\n"
         f"--- End preview ---\n\n"
-        f"⚠ This is a data file. Do NOT re-read it with read_file.\n"
-        f"Use `bash` with python to analyze it. Example:\n"
-        f"  python3 -c \"import pandas as pd; df = pd.read_csv('{path}'); print(df.shape); print(df.describe())\"\n"
+        f"⚠ Do NOT re-read this file with read_file — use `bash` with python/pandas to analyze it.\n"
     )
+
+
+def _build_binary_file_response(path: str) -> str:
+    """Return guidance for binary files instead of trying to read them."""
+    ext = _get_file_extension(path)
+
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".svg"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (image)\n\n"
+            f"To view this image, use the `view_image` tool.\n"
+            f"To edit/process it, use `bash` with python:\n"
+            f"  python3 -c \"from PIL import Image; img = Image.open('{path}'); print(img.size, img.mode)\"\n"
+        )
+    elif ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (video)\n\n"
+            f"To get video info, use `bash`:\n"
+            f"  python3 -c \"import subprocess; print(subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '{path}'], capture_output=True, text=True).stdout)\"\n"
+        )
+    elif ext in (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (audio)\n\n"
+            f"To get audio info, use `bash` with ffprobe or python.\n"
+        )
+    elif ext == ".pdf":
+        # PDFs should have a .md conversion alongside
+        md_path = path.rsplit(".", 1)[0] + ".md"
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (PDF)\n\n"
+            f"A Markdown conversion should be available at: {md_path}\n"
+            f"Try: read_file {md_path}\n"
+        )
+    else:
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path}\n\n"
+            f"This is a binary file. Use `bash` with appropriate tools to inspect it.\n"
+        )
 
 
 @tool("read_file", parse_docstring=True)
@@ -356,8 +438,10 @@ def read_file_tool(
 ) -> str:
     """Read the contents of a text file. Use this to examine source code, configuration files, or small text files.
 
-    **Important**: For data files (CSV, JSON, Excel, Parquet, etc.), this tool returns only
-    a preview (first few rows + metadata). Use `bash` with python/pandas to analyze data files.
+    **Important**:
+    - For data files (CSV, JSON, Parquet, etc.): Returns a schema preview + first rows. Use `bash` with python/pandas for analysis.
+    - For images: Use `view_image` tool to see them, or `bash` with python/PIL to process them.
+    - For video/audio: Use `bash` with ffprobe or python to get metadata.
 
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -371,14 +455,19 @@ def read_file_tool(
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
+
+        # Binary files: return guidance instead of garbage
+        ext = _get_file_extension(path)
+        if ext in BINARY_FILE_EXTENSIONS:
+            return _build_binary_file_response(path)
+
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
 
-        # Data files: return preview only (metadata + first few rows)
-        ext = _get_file_extension(path)
+        # Data files: return schema preview (auto-analyzed in sandbox)
         if ext in DATA_FILE_EXTENSIONS and start_line is None:
-            return _build_data_file_preview(content, path)
+            return _build_data_file_preview(sandbox, content, path)
 
         # Apply line range if specified
         if start_line is not None and end_line is not None:
