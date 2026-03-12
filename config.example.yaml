@@ -240,10 +240,16 @@ sandbox:
 # sandbox:
 #   use: src.community.e2b_sandbox:E2bSandboxProvider
 #
+#   # Optional: Lifecycle mode (default: session)
+#   # "session" — sandbox persists for the thread (idle_timeout=300s)
+#   # "task" — short-lived sandboxes with grace period (idle_timeout=60s),
+#   #          outputs synced to storage after each turn. Cuts costs ~3-4x.
+#   # mode: task
+#
 #   # Optional: E2B template ID (default: base template)
 #   # template: my-custom-template
 #
-#   # Optional: Sandbox idle timeout in seconds (default: 300 = 5 minutes)
+#   # Optional: Sandbox idle timeout in seconds (default depends on mode)
 #   # idle_timeout: 300
 #
 #   # Optional: Environment variables to inject into the sandbox

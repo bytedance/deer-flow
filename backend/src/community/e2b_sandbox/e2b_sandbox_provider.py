@@ -3,13 +3,21 @@
 E2B provides secure, isolated cloud sandboxes. Each thread gets its own
 sandbox instance with a full Linux environment.
 
+Supports two lifecycle modes (configured via sandbox.mode in config.yaml):
+  - "session" (default): Sandbox persists for the thread's lifetime (idle_timeout=300s).
+  - "task": Short-lived sandboxes with a grace period (idle_timeout=60s).
+    Outputs are synced to persistent storage (R2/local) after each agent turn,
+    so files survive sandbox teardown. Can cut cloud costs by 3-4x.
+
 Configuration in config.yaml:
     sandbox:
       use: src.community.e2b_sandbox:E2bSandboxProvider
+      # Optional: Lifecycle mode (default: session)
+      # mode: task
       # Optional: E2B template ID (default: base)
       # template: my-custom-template
-      # Optional: Sandbox timeout in seconds (default: 300 = 5 minutes)
-      # timeout: 300
+      # Optional: Sandbox timeout in seconds (default depends on mode)
+      # idle_timeout: 300
       # Optional: Environment variables to inject into the sandbox
       # environment:
       #   NODE_ENV: production
@@ -33,7 +41,8 @@ from .e2b_sandbox import E2bSandbox
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 300  # 5 minutes
+DEFAULT_SESSION_TIMEOUT = 300  # 5 minutes
+DEFAULT_TASK_TIMEOUT = 60  # 60 second grace period
 IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
 
 
@@ -42,6 +51,13 @@ class E2bSandboxProvider(SandboxProvider):
 
     Each thread gets a dedicated E2B sandbox. Sandboxes are cached in-process
     and reused across multiple turns within the same thread.
+
+    Supports two modes:
+    - Session mode (default): Sandbox persists for the thread, idle timeout 5 min.
+    - Task mode: Short-lived sandboxes with 60s grace period. Outputs are synced
+      to persistent storage after each turn so they survive sandbox teardown.
+      Re-acquisition is automatic — if sandbox was killed, a new one is created
+      and files are synced from storage.
 
     Idle sandboxes are automatically killed after the configured timeout.
     """
@@ -61,7 +77,7 @@ class E2bSandboxProvider(SandboxProvider):
         atexit.register(self.shutdown)
 
         # Start idle checker
-        idle_timeout = self._config.get("timeout", DEFAULT_TIMEOUT)
+        idle_timeout = self._config.get("timeout", DEFAULT_SESSION_TIMEOUT)
         if idle_timeout > 0:
             self._start_idle_checker()
 
@@ -72,10 +88,14 @@ class E2bSandboxProvider(SandboxProvider):
 
         env_vars = self._resolve_env_vars(sandbox_config.environment or {})
 
+        mode = getattr(sandbox_config, "mode", "session")
+        default_timeout = DEFAULT_TASK_TIMEOUT if mode == "task" else DEFAULT_SESSION_TIMEOUT
+
         return {
             "template": getattr(sandbox_config, "template", None),
-            "timeout": sandbox_config.idle_timeout or DEFAULT_TIMEOUT,
+            "timeout": sandbox_config.idle_timeout or default_timeout,
             "environment": env_vars,
+            "mode": mode,
         }
 
     @staticmethod
@@ -100,7 +120,7 @@ class E2bSandboxProvider(SandboxProvider):
         self._idle_checker_thread.start()
 
     def _idle_checker_loop(self) -> None:
-        timeout = self._config.get("timeout", DEFAULT_TIMEOUT)
+        timeout = self._config.get("timeout", DEFAULT_SESSION_TIMEOUT)
         while not self._idle_checker_stop.wait(timeout=IDLE_CHECK_INTERVAL):
             try:
                 self._cleanup_idle_sandboxes(timeout)
@@ -204,7 +224,7 @@ class E2bSandboxProvider(SandboxProvider):
         template = self._config.get("template")
         if template:
             create_kwargs["template"] = template
-        timeout = self._config.get("timeout", DEFAULT_TIMEOUT)
+        timeout = self._config.get("timeout", DEFAULT_SESSION_TIMEOUT)
         if timeout:
             create_kwargs["timeout"] = timeout
         env_vars = self._config.get("environment", {})
@@ -292,6 +312,47 @@ class E2bSandboxProvider(SandboxProvider):
                 logger.info(f"Killed E2B sandbox {sandbox_id}")
             except Exception as e:
                 logger.error(f"Failed to kill E2B sandbox {sandbox_id}: {e}")
+
+    def sync_outputs_to_storage(self, sandbox_id: str, thread_id: str) -> None:
+        """Sync output files from E2B sandbox back to persistent storage.
+
+        Called after each agent turn in task mode. Copies files from the sandbox's
+        /mnt/user-data/outputs and /mnt/user-data/workspace directories to R2/local
+        storage so they survive sandbox teardown.
+        """
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+        if sandbox is None:
+            return
+
+        try:
+            from src.storage import get_storage
+
+            storage = get_storage()
+
+            for category in ("outputs", "workspace"):
+                sandbox_dir = f"{VIRTUAL_PATH_PREFIX}/{category}"
+                try:
+                    entries = sandbox.client.files.list(path=sandbox_dir)
+                    for entry in entries:
+                        if entry.type == "file":
+                            try:
+                                data = sandbox.client.files.read(path=entry.path, format="bytes")
+                                storage_key = f"threads/{thread_id}/{category}/{entry.name}"
+                                storage.write(storage_key, data)
+                                logger.debug(f"Synced {entry.name} from E2B sandbox to storage")
+                            except Exception as e:
+                                logger.warning(f"Failed to sync {entry.name} to storage: {e}")
+                except Exception as e:
+                    logger.debug(f"Could not list {category} in sandbox {sandbox_id}: {e}")
+
+            logger.info(f"Synced outputs from E2B sandbox {sandbox_id} to storage")
+        except Exception as e:
+            logger.warning(f"Failed to sync outputs to storage: {e}")
+
+    def is_task_mode(self) -> bool:
+        """Check if this provider is running in task-scoped mode."""
+        return self._config.get("mode") == "task"
 
     def shutdown(self) -> None:
         """Shutdown all E2B sandboxes. Thread-safe and idempotent."""

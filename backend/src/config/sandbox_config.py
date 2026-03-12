@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -14,6 +16,10 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
+        mode: Sandbox lifecycle mode — "session" (default) keeps sandbox alive for the
+              thread's lifetime; "task" uses short-lived sandboxes with a grace period
+              (default 60s), syncing outputs to persistent storage after each agent turn.
+              Task mode can cut cloud sandbox costs by 3-4x.
 
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
@@ -28,6 +34,11 @@ class SandboxConfig(BaseModel):
     use: str = Field(
         ...,
         description="Class path of the sandbox provider (e.g. src.sandbox.local:LocalSandboxProvider)",
+    )
+    mode: Literal["session", "task"] = Field(
+        default="session",
+        description="Sandbox lifecycle mode. 'session' keeps sandbox alive for the thread. "
+        "'task' uses short-lived sandboxes with a grace period, syncing outputs to storage after each turn.",
     )
     image: str | None = Field(
         default=None,

@@ -316,3 +316,130 @@ class TestE2bSandboxProvider:
         """Test that missing env vars resolve to empty string."""
         result = E2bSandboxProvider._resolve_env_vars({"MISSING": "$NONEXISTENT_VAR_XYZ"})
         assert result == {"MISSING": ""}
+
+
+class TestTaskMode:
+    """Tests for task-scoped sandbox mode."""
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_task_mode_default_timeout(self, mock_config):
+        """Task mode should default to 60s timeout."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = None
+        sandbox_cfg.environment = {}
+        sandbox_cfg.template = None
+        sandbox_cfg.mode = "task"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        with patch.object(E2bSandboxProvider, "_start_idle_checker"):
+            provider = E2bSandboxProvider()
+
+        assert provider._config["timeout"] == 60  # DEFAULT_TASK_TIMEOUT
+        assert provider._config["mode"] == "task"
+        assert provider.is_task_mode() is True
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_session_mode_default_timeout(self, mock_config):
+        """Session mode should default to 300s timeout."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = None
+        sandbox_cfg.environment = {}
+        sandbox_cfg.template = None
+        sandbox_cfg.mode = "session"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        with patch.object(E2bSandboxProvider, "_start_idle_checker"):
+            provider = E2bSandboxProvider()
+
+        assert provider._config["timeout"] == 300  # DEFAULT_SESSION_TIMEOUT
+        assert provider._config["mode"] == "session"
+        assert provider.is_task_mode() is False
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_custom_timeout_overrides_mode_default(self, mock_config):
+        """Explicit idle_timeout should override mode default."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = 120
+        sandbox_cfg.environment = {}
+        sandbox_cfg.template = None
+        sandbox_cfg.mode = "task"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        with patch.object(E2bSandboxProvider, "_start_idle_checker"):
+            provider = E2bSandboxProvider()
+
+        assert provider._config["timeout"] == 120
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_sync_outputs_to_storage(self, mock_config):
+        """Test that sync_outputs_to_storage copies files from sandbox to storage."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = 0
+        sandbox_cfg.environment = {}
+        sandbox_cfg.mode = "task"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        provider = E2bSandboxProvider()
+
+        # Set up mock sandbox
+        mock_client = MagicMock()
+        sandbox = E2bSandbox(id="sbx-123", client=mock_client)
+        provider._sandboxes["sbx-123"] = sandbox
+
+        # Mock file listing — one output file
+        output_entry = MagicMock()
+        output_entry.type = "file"
+        output_entry.name = "chart.png"
+        output_entry.path = "/mnt/user-data/outputs/chart.png"
+        mock_client.files.list.return_value = [output_entry]
+        mock_client.files.read.return_value = b"\x89PNG"
+
+        mock_storage = MagicMock()
+        with patch("src.storage.get_storage", return_value=mock_storage):
+            provider.sync_outputs_to_storage("sbx-123", "thread-abc")
+
+        # Should have written to storage
+        mock_storage.write.assert_called()
+        write_calls = mock_storage.write.call_args_list
+        keys = [call[0][0] for call in write_calls]
+        assert any("outputs/chart.png" in k for k in keys)
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_sync_outputs_skips_missing_sandbox(self, mock_config):
+        """sync_outputs should be a no-op if sandbox doesn't exist."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = 0
+        sandbox_cfg.environment = {}
+        sandbox_cfg.mode = "task"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        provider = E2bSandboxProvider()
+        # Should not raise
+        provider.sync_outputs_to_storage("nonexistent-id", "thread-1")
+
+    @patch("src.community.e2b_sandbox.e2b_sandbox_provider.get_app_config")
+    def test_reacquire_after_idle_kill(self, mock_config):
+        """After idle kill, acquire should create a new sandbox and sync files."""
+        sandbox_cfg = MagicMock()
+        sandbox_cfg.idle_timeout = 0
+        sandbox_cfg.environment = {}
+        sandbox_cfg.template = None
+        sandbox_cfg.mode = "task"
+        mock_config.return_value.sandbox = sandbox_cfg
+
+        mock_client = MagicMock()
+        mock_client.sandbox_id = "sbx-new"
+        mock_client.is_running.return_value = True
+
+        provider = E2bSandboxProvider()
+        # Simulate: thread had a sandbox that was killed
+        # No entry in _sandboxes or _thread_sandboxes
+
+        with patch("e2b.Sandbox.create", return_value=mock_client):
+            with patch.object(provider, "_sync_storage_to_sandbox") as mock_sync:
+                with patch.object(provider, "_sync_skills_to_sandbox"):
+                    sandbox_id = provider.acquire(thread_id="thread-1")
+
+        assert sandbox_id == "sbx-new"
+        # Should have synced uploads and workspace from storage
+        assert mock_sync.call_count == 2
