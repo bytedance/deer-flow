@@ -44,3 +44,6 @@ yarn-error.log*
 
 # idea files
 .idea
+
+# video inspiration assets (symlinked from external directory)
+/public/video/

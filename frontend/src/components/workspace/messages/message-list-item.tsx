@@ -145,7 +145,17 @@ function MessageContent_({
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
-      return rawContent ? stripUploadedFilesTag(rawContent) : "";
+      let text = rawContent ? stripUploadedFilesTag(rawContent) : "";
+      // Strip system instruction prefixes injected by graphs/video mode pages.
+      // These start with "[SYSTEM INSTRUCTION" and end with "User request: ".
+      const marker = "User request: ";
+      if (text.startsWith("[SYSTEM INSTRUCTION")) {
+        const idx = text.indexOf(marker);
+        if (idx !== -1) {
+          text = text.slice(idx + marker.length);
+        }
+      }
+      return text;
     }
     return rawContent ?? "";
   }, [rawContent, isHuman]);

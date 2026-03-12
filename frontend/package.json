@@ -74,6 +74,7 @@
     "gsap": "^3.13.0",
     "hast": "^1.0.0",
     "html2canvas-pro": "^2.0.2",
+    "js-tiktoken": "^1.0.21",
     "jspdf": "^4.2.0",
     "katex": "^0.16.28",
     "lucide-react": "^0.562.0",

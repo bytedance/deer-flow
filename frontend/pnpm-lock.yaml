@@ -185,6 +185,9 @@ importers:
       html2canvas-pro:
         specifier: ^2.0.2
         version: 2.0.2
+      js-tiktoken:
+        specifier: ^1.0.21
+        version: 1.0.21
       jspdf:
         specifier: ^4.2.0
         version: 4.2.0
