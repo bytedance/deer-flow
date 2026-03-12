@@ -942,7 +942,7 @@ def reporter_node(state: State, config: RunnableConfig):
         response_content = re.sub(
             r"<think>[\s\S]*?</think>", "", response_content
         ).strip()
-    logger.info(f"reporter response: {response_content}")
+    logger.debug(f"reporter response length: {len(response_content)}")
 
     return {
         "final_report": response_content,
