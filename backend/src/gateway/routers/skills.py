@@ -60,6 +60,19 @@ class SkillInstallResponse(BaseModel):
 ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata"}
 
 
+def _should_ignore_archive_entry(path: Path) -> bool:
+    return path.name.startswith(".") or path.name == "__MACOSX"
+
+
+def _resolve_skill_dir_from_archive_root(temp_path: Path) -> Path:
+    extracted_items = [item for item in temp_path.iterdir() if not _should_ignore_archive_entry(item)]
+    if len(extracted_items) == 0:
+        raise HTTPException(status_code=400, detail="Skill archive is empty")
+    if len(extracted_items) == 1 and extracted_items[0].is_dir():
+        return extracted_items[0]
+    return temp_path
+
+
 def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
     """Validate a skill directory's SKILL.md frontmatter.
 
@@ -404,17 +417,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
             with zipfile.ZipFile(skill_file_path, "r") as zip_ref:
                 zip_ref.extractall(temp_path)
 
-            # Find the skill directory (should be the only top-level directory)
-            extracted_items = list(temp_path.iterdir())
-            if len(extracted_items) == 0:
-                raise HTTPException(status_code=400, detail="Skill archive is empty")
-
-            # Handle both cases: single directory or files directly in root
-            if len(extracted_items) == 1 and extracted_items[0].is_dir():
-                skill_dir = extracted_items[0]
-            else:
-                # Files are directly in the archive root
-                skill_dir = temp_path
+            skill_dir = _resolve_skill_dir_from_archive_root(temp_path)
 
             # Validate the skill
             is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
