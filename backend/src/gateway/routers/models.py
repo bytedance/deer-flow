@@ -67,6 +67,7 @@ async def list_models() -> ModelsListResponse:
             supports_reasoning_effort=model.supports_reasoning_effort,
         )
         for model in config.models
+        if not model.internal
     ]
     return ModelsListResponse(models=models)
 

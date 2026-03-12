@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 
 // Claude Sonnet 4.6 pricing (per million tokens)
 const INPUT_COST_PER_MILLION = 3;
+const CACHED_INPUT_COST_PER_MILLION = 0.3; // 90% discount for cached input
 const OUTPUT_COST_PER_MILLION = 12;
 
 interface UsageMetadata {
@@ -30,6 +31,7 @@ interface TurnUsage {
   turnIndex: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   cost: number;
   label: string;
 }
@@ -47,6 +49,19 @@ function getUsageFromMessage(message: Message): UsageMetadata | null {
   if (respMeta?.token_usage) return respMeta.token_usage as UsageMetadata;
 
   return null;
+}
+
+function calculateCost(
+  inputTokens: number,
+  outputTokens: number,
+  cachedTokens: number,
+): number {
+  const uncachedInput = inputTokens - cachedTokens;
+  return (
+    (uncachedInput / 1_000_000) * INPUT_COST_PER_MILLION +
+    (cachedTokens / 1_000_000) * CACHED_INPUT_COST_PER_MILLION +
+    (outputTokens / 1_000_000) * OUTPUT_COST_PER_MILLION
+  );
 }
 
 function formatTokenCount(count: number): string {
@@ -77,10 +92,11 @@ export function TokenUsage({
 }) {
   const [open, setOpen] = useState(false);
 
-  const { inputTokens, outputTokens, totalTokens, cost, turns } =
+  const { inputTokens, outputTokens, cachedTokens, totalTokens, cost, turns } =
     useMemo(() => {
       let input = 0;
       let output = 0;
+      let cached = 0;
       const turns: TurnUsage[] = [];
       let turnIndex = 0;
 
@@ -89,36 +105,38 @@ export function TokenUsage({
         if (usage) {
           const msgInput = usage.input_tokens ?? 0;
           const msgOutput = usage.output_tokens ?? 0;
+          const msgCached = usage.input_token_details?.cache_read ?? 0;
           input += msgInput;
           output += msgOutput;
+          cached += msgCached;
           turnIndex++;
           turns.push({
             turnIndex,
             inputTokens: msgInput,
             outputTokens: msgOutput,
-            cost:
-              (msgInput / 1_000_000) * INPUT_COST_PER_MILLION +
-              (msgOutput / 1_000_000) * OUTPUT_COST_PER_MILLION,
+            cachedTokens: msgCached,
+            cost: calculateCost(msgInput, msgOutput, msgCached),
             label: getMessagePreview(message),
           });
         }
       }
 
       const total = input + output;
-      const estimatedCost =
-        (input / 1_000_000) * INPUT_COST_PER_MILLION +
-        (output / 1_000_000) * OUTPUT_COST_PER_MILLION;
 
       return {
         inputTokens: input,
         outputTokens: output,
+        cachedTokens: cached,
         totalTokens: total,
-        cost: estimatedCost,
+        cost: calculateCost(input, output, cached),
         turns,
       };
     }, [messages]);
 
   if (totalTokens === 0) return null;
+
+  const cacheHitRate =
+    inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -133,14 +151,15 @@ export function TokenUsage({
           <span>{formatTokenCount(totalTokens)} tokens</span>
           <span className="opacity-40">|</span>
           <span>{formatCost(cost)}</span>
+          {cachedTokens > 0 && (
+            <span className="text-green-500 opacity-80">
+              {cacheHitRate}% cached
+            </span>
+          )}
           <ChevronDownIcon className="size-3 opacity-40" />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        className="w-80 p-0"
-        align="end"
-        sideOffset={8}
-      >
+      <PopoverContent className="w-80 p-0" align="end" sideOffset={8}>
         <div className="space-y-3 p-3">
           {/* Summary */}
           <div className="space-y-1.5">
@@ -153,9 +172,16 @@ export function TokenUsage({
                   {formatTokenCount(inputTokens)}
                 </div>
                 <div>Input</div>
+                {cachedTokens > 0 && (
+                  <div className="text-green-500">
+                    {formatTokenCount(cachedTokens)} cached
+                  </div>
+                )}
                 <div className="opacity-60">
                   {formatCost(
-                    (inputTokens / 1_000_000) * INPUT_COST_PER_MILLION,
+                    ((inputTokens - cachedTokens) / 1_000_000) *
+                      INPUT_COST_PER_MILLION +
+                      (cachedTokens / 1_000_000) * CACHED_INPUT_COST_PER_MILLION,
                   )}
                 </div>
               </div>
@@ -203,7 +229,17 @@ export function TokenUsage({
                       </span>
                     </div>
                     <div className="text-muted-foreground ml-2 flex shrink-0 items-center gap-2 tabular-nums">
-                      <span title={`In: ${turn.inputTokens.toLocaleString()}, Out: ${turn.outputTokens.toLocaleString()}`}>
+                      {turn.cachedTokens > 0 && (
+                        <span className="text-green-500 text-[10px]">
+                          {Math.round(
+                            (turn.cachedTokens / turn.inputTokens) * 100,
+                          )}
+                          %
+                        </span>
+                      )}
+                      <span
+                        title={`In: ${turn.inputTokens.toLocaleString()}${turn.cachedTokens > 0 ? ` (${turn.cachedTokens.toLocaleString()} cached)` : ""}, Out: ${turn.outputTokens.toLocaleString()}`}
+                      >
                         {formatTokenCount(turn.inputTokens + turn.outputTokens)}
                       </span>
                       <span className="w-12 text-right opacity-70">
@@ -218,8 +254,7 @@ export function TokenUsage({
 
           {/* Pricing note */}
           <div className="text-muted-foreground/50 border-t pt-2 text-[10px]">
-            Estimated cost based on Claude Sonnet 4.6 pricing ($3/1M in,
-            $12/1M out)
+            Claude Sonnet 4.6: $3/1M in, $0.30/1M cached, $12/1M out
           </div>
         </div>
       </PopoverContent>

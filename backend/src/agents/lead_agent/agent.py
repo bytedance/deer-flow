@@ -4,6 +4,8 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
@@ -57,13 +59,8 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     # Prepare keep parameter
     keep = config.keep.to_tuple()
 
-    # Prepare model parameter
-    if config.model_name:
-        model = config.model_name
-    else:
-        # Use a lightweight model for summarization to save costs
-        # Falls back to default model if not explicitly specified
-        model = create_chat_model(thinking_enabled=False)
+    # Prepare model parameter — always use create_chat_model to resolve from config.yaml
+    model = create_chat_model(name=config.model_name, thinking_enabled=False)
 
     # Prepare kwargs
     kwargs = {
@@ -249,6 +246,11 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+
+    # Prompt caching — caches system prompt + conversation prefix for Anthropic models.
+    # Uses 1h TTL to maximize cache hits across turns. Safe no-op for non-Anthropic models.
+    middlewares.append(AnthropicPromptCachingMiddleware(ttl="1h", unsupported_model_behavior="ignore"))
+
     return middlewares
 
 
