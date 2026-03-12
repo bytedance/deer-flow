@@ -6,7 +6,6 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
-from pydantic import BaseModel
 
 from src.gateway.path_utils import resolve_thread_virtual_path
 
@@ -145,7 +144,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> FileRespo
 
     # if `download` query parameter is true, return the file as a download
     if request.query_params.get("download"):
-        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
+        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type)
 
     if mime_type and mime_type == "text/html":
         return HTMLResponse(content=actual_path.read_text())
@@ -157,44 +156,3 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> FileRespo
         return PlainTextResponse(content=actual_path.read_text(), media_type=mime_type)
 
     return Response(content=actual_path.read_bytes(), media_type=mime_type, headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"})
-
-
-class SaveArtifactRequest(BaseModel):
-    content: str
-
-
-@router.post(
-    "/threads/{thread_id}/save-artifact/{path:path}",
-    summary="Save Artifact File",
-    description="Write content to an artifact file. Only allows writing to /mnt/user-data/outputs/.",
-)
-async def save_artifact(thread_id: str, path: str, body: SaveArtifactRequest):
-    """Save content to an artifact file.
-
-    Only allows writing to files under /mnt/user-data/outputs/ for safety.
-
-    Args:
-        thread_id: The thread ID.
-        path: The artifact path (e.g., mnt/user-data/outputs/dashboard.json).
-        body: The content to write.
-
-    Returns:
-        Success status.
-    """
-    # Only allow writes to /outputs/ directory
-    normalized = path.lstrip("/")
-    if not normalized.startswith("mnt/user-data/outputs/"):
-        raise HTTPException(status_code=403, detail="Can only write to /mnt/user-data/outputs/")
-
-    actual_path = resolve_thread_virtual_path(thread_id, path)
-
-    # Ensure parent directory exists
-    actual_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        actual_path.write_text(body.content, encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed to write artifact: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to write artifact: {e}")
-
-    return {"success": True, "path": f"/{normalized}"}

@@ -146,7 +146,17 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS is handled by nginx - no need for FastAPI middleware
+    # Add CORS middleware for direct dev access (without nginx)
+    from fastapi.middleware.cors import CORSMiddleware
+    config = get_gateway_config()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
+    )
 
     # Include routers
     # Models API is mounted at /api/models
