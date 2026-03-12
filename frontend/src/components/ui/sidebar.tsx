@@ -181,6 +181,35 @@ function Sidebar({
   }
 
   if (isMobile) {
+    // When collapsed to icon mode on mobile, show a slim icon bar for navigation
+    if (state === "collapsed" && collapsible === "icon") {
+      return (
+        <div
+          className="fixed left-0 top-0 z-40 flex h-svh w-[--sidebar-width-icon] flex-col items-center border-r bg-sidebar py-4"
+          style={
+            {
+              "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+            } as React.CSSProperties
+          }
+          data-sidebar="sidebar"
+          data-slot="sidebar"
+          data-mobile="true"
+          data-collapsible="icon"
+        >
+          <SidebarTrigger
+            className="h-9 w-9"
+            onClick={(e) => {
+              e.preventDefault();
+              setOpenMobile(true);
+            }}
+          />
+          <div className="mt-4 flex flex-1 flex-col items-center gap-4 overflow-hidden">
+            {children}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <Sheet open={openMobile} onOpenChange={setOpenMobile} {...props}>
         <SheetContent
