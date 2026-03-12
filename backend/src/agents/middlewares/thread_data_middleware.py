@@ -6,6 +6,7 @@ from langgraph.runtime import Runtime
 
 from src.agents.thread_state import ThreadDataState
 from src.config.paths import Paths, get_paths
+from src.utils.runtime import get_thread_id
 
 
 class ThreadDataMiddlewareState(AgentState):
@@ -71,7 +72,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        thread_id = get_thread_id(runtime)
         if thread_id is None:
             raise ValueError("Thread ID is required in the context")
 

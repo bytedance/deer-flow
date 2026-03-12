@@ -5,6 +5,7 @@ from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadDataState, ThreadState
 from src.config.paths import VIRTUAL_PATH_PREFIX
+from src.utils.runtime import get_thread_id
 from src.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -176,7 +177,7 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    thread_id = get_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 

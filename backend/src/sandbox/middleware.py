@@ -7,6 +7,7 @@ from langgraph.runtime import Runtime
 
 from src.agents.thread_state import SandboxState, ThreadDataState
 from src.sandbox import get_sandbox_provider
+from src.utils.runtime import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         # Eager initialization (original behavior)
         if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = runtime.context["thread_id"]
+            thread_id = get_thread_id(runtime)
             sandbox_id = self._acquire_sandbox(thread_id)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}

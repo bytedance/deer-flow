@@ -17,6 +17,19 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def get_existing(self, thread_id: str) -> str | None:
+        """Get the sandbox ID for a thread if one already exists.
+
+        Unlike acquire(), this does NOT create a new sandbox.
+
+        Args:
+            thread_id: The thread ID to look up.
+
+        Returns:
+            The sandbox ID if one exists, None otherwise.
+        """
+        return None
+
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox environment by ID.

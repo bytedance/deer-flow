@@ -1,0 +1,15 @@
+# This is a config for E2B sandbox template.
+# You can use template ID (ut86rg9t3uzziip1pp66) or template name (deerflow-sandbox) to create a sandbox:
+
+# Python SDK
+# from e2b import Sandbox, AsyncSandbox
+# sandbox = Sandbox.create("deerflow-sandbox") # Sync sandbox
+# sandbox = await AsyncSandbox.create("deerflow-sandbox") # Async sandbox
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create('deerflow-sandbox')
+
+dockerfile = "e2b.Dockerfile"
+template_name = "deerflow-sandbox"
+template_id = "ut86rg9t3uzziip1pp66"
