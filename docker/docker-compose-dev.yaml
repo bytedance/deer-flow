@@ -145,7 +145,7 @@ services:
       dockerfile: backend/Dockerfile
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
     container_name: deer-flow-langgraph
-    command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
+    command: sh -c "rm -rf /app/backend/.langgraph_api && export LANGGRAPH_DISABLE_FILE_PERSISTENCE=true && cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
       # Preserve the .venv built during Docker image build — mounting the full backend/

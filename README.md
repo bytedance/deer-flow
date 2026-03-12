@@ -170,6 +170,8 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
    make dev
    ```
 
+   Local startup now clears `backend/.langgraph_api` and disables LangGraph's file-backed in-memory persistence before launching the LangGraph server. This applies to both `make dev` and `make start`, avoiding stale run state after a crash or forced restart. Thread/run history managed inside LangGraph dev mode is therefore not preserved across local restarts.
+
 5. **Access**: http://localhost:2026
 
 ### Advanced
