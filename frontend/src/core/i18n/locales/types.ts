@@ -268,6 +268,9 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      loadingTools: string;
+      loadToolsError: string;
+      noTools: string;
     };
     skills: {
       title: string;
@@ -276,6 +279,8 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
+      refreshSuccess: (count: number) => string;
+      refreshError: string;
     };
     notification: {
       title: string;

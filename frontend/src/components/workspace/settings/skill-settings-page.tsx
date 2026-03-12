@@ -1,8 +1,10 @@
 "use client";
 
-import { SparklesIcon } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { RefreshCwIcon, SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import { loadSkills } from "@/core/skills";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
@@ -57,16 +60,36 @@ function SkillSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<string>("public");
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const { mutate: enableSkill } = useEnableSkill();
+
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
   );
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      // Fetch fresh data directly, bypassing cache
+      const freshSkills = await loadSkills();
+      // Write directly into the query cache so UI updates immediately
+      queryClient.setQueryData(["skills"], freshSkills);
+      toast.success(t.settings.skills.refreshSuccess(freshSkills.length));
+    } catch {
+      toast.error(t.settings.skills.refreshError);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const handleCreateSkill = () => {
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");
   };
+
   return (
     <div className="flex w-full flex-col gap-4">
       <header className="flex justify-between">
@@ -78,7 +101,17 @@ function SkillSettingsList({
             </TabsList>
           </Tabs>
         </div>
-        <div>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isRefreshing}
+            onClick={() => void handleRefresh()}
+            aria-label="Refresh skills"
+            title="Refresh skills"
+          >
+            <RefreshCwIcon className={isRefreshing ? "animate-spin" : ""} />
+          </Button>
           <Button size="sm" onClick={handleCreateSkill}>
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}

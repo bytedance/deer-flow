@@ -60,9 +60,36 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         if not category_path.exists() or not category_path.is_dir():
             continue
 
-        for current_root, dir_names, file_names in os.walk(category_path):
+        # Track visited directories by device/inode to avoid symlink cycles.
+        visited_inodes: set[tuple[int, int]] = set()
+        try:
+            root_stat = os.stat(category_path, follow_symlinks=True)
+            visited_inodes.add((root_stat.st_dev, root_stat.st_ino))
+        except OSError:
+            # If we can't stat the root, continue without seeding visited_inodes.
+            pass
+
+        for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
             # Keep traversal deterministic and skip hidden directories.
-            dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+            # Also filter out already visited directories to avoid symlink cycles.
+            next_dir_names = []
+            for name in sorted(dir_names):
+                if name.startswith("."):
+                    continue
+                
+                path = os.path.join(current_root, name)
+                try:
+                    st = os.stat(path, follow_symlinks=True)
+                    key = (st.st_dev, st.st_ino)
+                    if key in visited_inodes:
+                        continue
+                    visited_inodes.add(key)
+                    next_dir_names.append(name)
+                except OSError:
+                    continue
+            
+            # Update dir_names in-place to control os.walk traversal
+            dir_names[:] = next_dir_names
             if "SKILL.md" not in file_names:
                 continue
 
