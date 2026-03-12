@@ -14,7 +14,7 @@ from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from src.agents.thread_state import ThreadState
+from src.agents.thread_state import AgentContext, ThreadState
 from src.config.agents_config import load_agent_config
 from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
@@ -320,6 +320,7 @@ def make_lead_agent(config: RunnableConfig):
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=system_prompt,
             state_schema=ThreadState,
+            context_schema=AgentContext,
         )
 
     # Default lead agent (unchanged behavior)
@@ -329,4 +330,5 @@ def make_lead_agent(config: RunnableConfig):
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
+        context_schema=AgentContext,
     )

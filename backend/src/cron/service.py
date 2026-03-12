@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from .types import CronJob, CronPayload, CronSchedule, _generate_id, _now_ms
 
@@ -300,9 +301,8 @@ class CronService:
         logger.info(f"Cron: executing job '{job.name}' ({job.id})")
 
         try:
-            result = None
             if self.on_job:
-                result = await self.on_job(job)
+                await self.on_job(job)
             job.state.last_status = "ok"
             job.state.last_error = None
         except Exception as e:

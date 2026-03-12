@@ -1,6 +1,8 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, NotRequired
 
 from langchain.agents import AgentState
+from pydantic import ConfigDict
+from typing_extensions import TypedDict
 
 
 class SandboxState(TypedDict):
@@ -16,6 +18,27 @@ class ThreadDataState(TypedDict):
 class ViewedImageData(TypedDict):
     base64: str
     mime_type: str
+
+
+class AgentContext(TypedDict, total=False):
+    """Runtime context passed to the LangGraph assistant."""
+
+    __pydantic_config__ = ConfigDict(extra="allow")
+
+    thread_id: str
+    sandbox_id: NotRequired[str | None]
+    agent_name: NotRequired[str | None]
+    channel_name: NotRequired[str | None]
+    chat_id: NotRequired[str | None]
+    user_id: NotRequired[str | None]
+    thread_ts: NotRequired[str | None]
+    topic_id: NotRequired[str | None]
+    is_cron: NotRequired[bool]
+    cron_job_id: NotRequired[str]
+    cron_job_name: NotRequired[str]
+    is_plan_mode: NotRequired[bool]
+    thinking_enabled: NotRequired[bool]
+    subagent_enabled: NotRequired[bool]
 
 
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:

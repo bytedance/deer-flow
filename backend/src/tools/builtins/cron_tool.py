@@ -1,8 +1,7 @@
 """Cron tool for scheduling reminders and recurring tasks."""
 
-import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -11,8 +10,6 @@ from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadState
 from src.cron.types import CronPayload, CronSchedule
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 
@@ -39,6 +36,19 @@ def _parse_time_to_ms(time_str: str) -> int | None:
     import re
 
     now_ms = int(datetime.now().timestamp() * 1000)
+    match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", time_str)
+    if match:
+        now = datetime.now().astimezone()
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3) or 0)
+        if hour > 23 or minute > 59 or second > 59:
+            return None
+        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return int(target.timestamp() * 1000)
+
     match = re.match(r"in\s+(\d+)\s+(minute|hour|day|week)s?", time_str, re.I)
     if match:
         amount = int(match.group(1))
@@ -247,7 +257,7 @@ def cron_tool(
         action: The action to perform. Supported values are add, list, remove, enable, and disable.
         name: Human-readable name for the task (used with "add")
         message: The reminder message or task description (used with "add")
-        at: When to run a one-time task. Supports ISO datetime, relative time like "in 5 minutes", or Unix timestamp
+        at: When to run a one-time task. Supports ISO datetime, local time like "00:08", relative time like "in 5 minutes", or Unix timestamp
         every: Interval for recurring tasks. Supports "5 minutes", "1 hour", "2 days", or short form like "5m"
         cron_expr: Cron expression for complex schedules (e.g., "0 9 * * 1-5" for weekdays at 9am)
         timezone: Timezone for cron expressions (e.g., "Asia/Shanghai", "America/New_York")
