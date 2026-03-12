@@ -497,7 +497,7 @@ def human_feedback_node(
             )
 
     # if the plan is accepted, run the following node
-    plan_iterations = state["plan_iterations"] if state.get("plan_iterations", 0) else 0
+    plan_iterations = (state.get("plan_iterations") or 0) + 1
     goto = "research_team"
     configurable = Configuration.from_runnable_config(config)
     try:
@@ -510,8 +510,6 @@ def human_feedback_node(
         current_plan = json.loads(current_plan)
         current_plan_content = extract_plan_content(current_plan)
         
-        # increment the plan iterations
-        plan_iterations += 1
         # parse the plan
         new_plan = json.loads(repair_json_output(current_plan_content))
         # Validate and fix plan to ensure web search requirements are met
@@ -554,7 +552,7 @@ def human_feedback_node(
                 },
                 goto="planner"
             )
-        if plan_iterations > 1:  # the plan_iterations is increased before this check
+        if plan_iterations > 1:
             return Command(
                 update=preserve_state_meta_fields(state),
                 goto="reporter"

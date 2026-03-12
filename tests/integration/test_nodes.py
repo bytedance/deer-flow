@@ -841,6 +841,7 @@ def test_human_feedback_node_json_decode_error_first_iteration(
         result = human_feedback_node(state, mock_config)
         assert isinstance(result, Command)
         assert result.goto == "planner"
+        assert result.update["plan_iterations"] == 1
 
 def test_human_feedback_node_model_validate_error(mock_state_base, mock_config):
     # Plan.model_validate raises ValidationError, should enter error handling path
@@ -877,6 +878,7 @@ def test_human_feedback_node_model_validate_error(mock_state_base, mock_config):
         result = human_feedback_node(state, mock_config)
         assert isinstance(result, Command)
         assert result.goto == "planner"
+        assert result.update["plan_iterations"] == 1
 
 def test_human_feedback_node_json_decode_error_second_iteration(
     monkeypatch, mock_state_base, mock_config
