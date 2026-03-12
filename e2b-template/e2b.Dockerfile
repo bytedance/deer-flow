@@ -13,6 +13,7 @@ RUN pip3 install --no-cache-dir \
     openpyxl \
     pandas \
     numpy \
+    scikit-learn \
     # Visualization
     matplotlib \
     seaborn \
