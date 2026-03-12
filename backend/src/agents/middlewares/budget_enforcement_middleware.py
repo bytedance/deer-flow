@@ -47,8 +47,9 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
     """Injects budget warnings and forces output before recursion limit.
 
     Counts before_model invocations directly (not messages in state, which
-    can decrease due to summarization).  Each model call ≈ 2 graph steps
-    (agent node + tools node), so thresholds are applied against max_turns/2.
+    can decrease due to summarization).  Each model call ≈ 8 graph steps
+    (model node + tools node + middleware nodes), so thresholds are applied
+    against max_turns // 8.
 
     Args:
         max_turns: The recursion limit for this agent.
@@ -86,7 +87,7 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         self._call_count[thread_id] += 1
         turns_used = self._call_count[thread_id]
         effective_total = max(self.max_turns // 8, 10)
-        logger.info(f"Budget check: {turns_used}/{effective_total} model calls (warn={self.warn_at}, urgent={self.urgent_at}, force={self.force_at})")
+        logger.debug(f"Budget check: {turns_used}/{effective_total} model calls (warn={self.warn_at}, urgent={self.urgent_at}, force={self.force_at})")
         warned = self._warned[thread_id]
 
         if turns_used >= self.force_at and "force" not in warned:
@@ -147,9 +148,17 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
             extra={"thread_id": thread_id, "turns_used": turns_used},
         )
         effective_total = max(self.max_turns // 8, 10)
+        # Safely handle content that may be a list (multimodal) or a string
+        existing_content = last_msg.content
+        if isinstance(existing_content, list):
+            existing_content = " ".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in existing_content
+            )
+        existing_content = existing_content or ""
         stripped_msg = last_msg.model_copy(update={
             "tool_calls": [],
-            "content": (last_msg.content or "") + f"\n\n{_FORCE_MSG.format(used=turns_used, total=effective_total)}",
+            "content": existing_content + f"\n\n{_FORCE_MSG.format(used=turns_used, total=effective_total)}",
         })
         return {"messages": [stripped_msg]}
 
@@ -168,6 +177,16 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply_after_model(state, runtime)
+
+    def _on_run_start(self, runtime: Runtime) -> None:
+        """Reset per-thread counters at the start of a new run.
+
+        This ensures that cached middleware instances don't carry stale
+        _call_count / _warned state across independent agent invocations.
+        """
+        thread_id = self._get_thread_id(runtime)
+        self._call_count.pop(thread_id, None)
+        self._warned.pop(thread_id, None)
 
     def reset(self, thread_id: str | None = None) -> None:
         if thread_id:
