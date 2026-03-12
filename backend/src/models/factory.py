@@ -61,6 +61,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]
 
+    # Add default timeout to prevent hanging requests (PeakInfer reliability fix)
+    # Only set if not already configured
+    if "request_timeout" not in model_settings_from_config and "request_timeout" not in kwargs:
+        kwargs["request_timeout"] = 60.0
+
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
     if is_tracing_enabled():
