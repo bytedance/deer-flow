@@ -14,7 +14,10 @@ def get_max_content_chars(tool_name: str = "web_fetch") -> int:
 
     config = get_app_config().get_tool_config(tool_name)
     if config is not None and "max_content_chars" in config.model_extra:
-        return int(config.model_extra["max_content_chars"])
+        try:
+            return int(config.model_extra["max_content_chars"])
+        except (ValueError, TypeError):
+            return _DEFAULT_MAX_CONTENT_CHARS
     return _DEFAULT_MAX_CONTENT_CHARS
 
 
