@@ -1,8 +1,10 @@
 import {
   CompassIcon,
+  FilmIcon,
   GraduationCapIcon,
   ImageIcon,
   MicroscopeIcon,
+  Music2Icon,
   PenLineIcon,
   ShapesIcon,
   SparklesIcon,
@@ -136,6 +138,16 @@ export const zhCN: Translations = {
         icon: VideoIcon,
       },
       {
+        suggestion: "动态视频",
+        prompt: "使用 Remotion 创建一个关于[主题]的动态视频，包含动画和转场效果",
+        icon: FilmIcon,
+      },
+      {
+        suggestion: "音乐",
+        prompt: "生成一首[风格]风格的关于[主题/氛围]的音乐",
+        icon: Music2Icon,
+      },
+      {
         type: "separator",
       },
       {
@@ -154,6 +166,8 @@ export const zhCN: Translations = {
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
+    aiGraphs: "AI 图表",
+    aiVideo: "AI 视频",
   },
 
   // Agents
@@ -240,6 +254,8 @@ export const zhCN: Translations = {
     writeFile: "写入文件",
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
+    renderVideo: "渲染视频",
+    generateMusic: "生成音乐",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
   },
 

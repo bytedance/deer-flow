@@ -105,6 +105,8 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    aiGraphs: string;
+    aiVideo: string;
   };
 
   // Agents
@@ -189,6 +191,8 @@ export interface Translations {
     writeFile: string;
     clickToViewContent: string;
     writeTodos: string;
+    renderVideo: string;
+    generateMusic: string;
     skillInstallTooltip: string;
   };
 

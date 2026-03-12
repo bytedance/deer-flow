@@ -1,8 +1,11 @@
 import {
   CompassIcon,
+  FilmIcon,
   GraduationCapIcon,
   ImageIcon,
+  LayoutDashboardIcon,
   MicroscopeIcon,
+  Music2Icon,
   PenLineIcon,
   ShapesIcon,
   SparklesIcon,
@@ -142,6 +145,22 @@ export const enUS: Translations = {
         icon: VideoIcon,
       },
       {
+        suggestion: "Motion Video",
+        prompt:
+          "Create a motion video about [topic] with animations and transitions using Remotion",
+        icon: FilmIcon,
+      },
+      {
+        suggestion: "Music",
+        prompt: "Generate a [genre] music track about [topic/mood]",
+        icon: Music2Icon,
+      },
+      {
+        suggestion: "AI Graphs",
+        prompt: "Create interactive data visualizations and graphs about [topic/dataset]",
+        icon: LayoutDashboardIcon,
+      },
+      {
         type: "separator",
       },
       {
@@ -160,6 +179,8 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    aiGraphs: "AI Graphs",
+    aiVideo: "AI Video",
   },
 
   // Agents
@@ -252,6 +273,8 @@ export const enUS: Translations = {
     writeFile: "Write file",
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
+    renderVideo: "Render video",
+    generateMusic: "Generate music",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
   },
 

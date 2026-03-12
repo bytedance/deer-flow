@@ -60,6 +60,12 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  calculateCost,
+  formatCost,
+  formatTokenCount,
+  useTokenUsage,
+} from "@/hooks/use-token-count";
 import { cn } from "@/lib/utils";
 
 import {
@@ -109,6 +115,7 @@ export function InputBox({
   threadId,
   initialValue,
   onContextChange,
+  leadingFooterContent,
   onSubmit,
   onStop,
   ...props
@@ -136,6 +143,7 @@ export function InputBox({
       reasoning_effort?: "minimal" | "low" | "medium" | "high";
     },
   ) => void;
+  leadingFooterContent?: React.ReactNode;
   onSubmit?: (message: PromptInputMessage) => void;
   onStop?: () => void;
 }) {
@@ -145,6 +153,7 @@ export function InputBox({
   const { models } = useModels();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
+  const tokenUsage = useTokenUsage(thread.messages);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
@@ -404,6 +413,7 @@ export function InputBox({
           />
         </PromptInputBody>
         <PromptInputFooter className="flex">
+          {leadingFooterContent}
           <PromptInputTools>
           {/* TODO: Add more connectors here
           <PromptInputActionMenu>
@@ -695,6 +705,17 @@ export function InputBox({
             </PromptInputActionMenu>
           )}
         </PromptInputTools>
+        {!isNewThread && tokenUsage.totalTokens > 0 && (
+          <div className="text-muted-foreground/50 flex items-center gap-1 px-1 text-[10px] tabular-nums">
+            <span>{formatTokenCount(tokenUsage.totalTokens)} tokens</span>
+            {(() => {
+              const cost = calculateCost(tokenUsage, context.model_name as string | undefined);
+              return cost !== null ? (
+                <span>· {formatCost(cost)}</span>
+              ) : null;
+            })()}
+          </div>
+        )}
         <PromptInputTools>
           <ModelSelector
             open={modelDialogOpen}

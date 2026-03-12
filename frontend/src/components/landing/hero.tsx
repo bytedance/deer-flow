@@ -49,6 +49,7 @@ export function Hero({ className }: { className?: string }) {
               "Generate Podcasts",
               "Generate Videos",
               "Generate Songs",
+              "AI Graphs",
               "Organize Emails",
               "Do Anything",
               "Learn Anything",
