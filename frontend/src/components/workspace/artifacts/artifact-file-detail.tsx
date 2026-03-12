@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useArtifactContent, useMcpDataContent } from "@/core/artifacts/hooks";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import { downloadArtifact, urlOfArtifact } from "@/core/artifacts/utils";
 import { authFetch } from "@/core/auth/fetch";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
@@ -259,16 +259,16 @@ function FileArtifactDetail({
               />
             )}
             {!isWriteFile && (
-              <a
-                href={urlOfArtifact({ filepath, threadId, download: true })}
-                target="_blank" rel="noreferrer"
-              >
-                <ArtifactAction
-                  icon={DownloadIcon}
-                  label={t.common.download}
-                  tooltip={t.common.download}
-                />
-              </a>
+              <ArtifactAction
+                icon={DownloadIcon}
+                label={t.common.download}
+                tooltip={t.common.download}
+                onClick={() => {
+                  downloadArtifact({ filepath, threadId }).catch(() =>
+                    toast.error("Failed to download file"),
+                  );
+                }}
+              />
             )}
             <ArtifactAction
               icon={XIcon}

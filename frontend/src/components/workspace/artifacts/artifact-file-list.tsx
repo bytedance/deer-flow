@@ -10,7 +10,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { urlOfArtifact } from "@/core/artifacts/utils";
+import { downloadArtifact } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
 import {
@@ -104,20 +104,18 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <a
-                href={urlOfArtifact({
-                  filepath: file,
-                  threadId: threadId,
-                  download: true,
-                })}
-                target="_blank"
-                onClick={(e) => e.stopPropagation()} rel="noreferrer"
+              <Button
+                variant="ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  downloadArtifact({ filepath: file, threadId }).catch(() =>
+                    toast.error("Failed to download file"),
+                  );
+                }}
               >
-                <Button variant="ghost">
-                  <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </Button>
-              </a>
+                <DownloadIcon className="size-4" />
+                {t.common.download}
+              </Button>
             </CardAction>
           </CardHeader>
         </Card>
