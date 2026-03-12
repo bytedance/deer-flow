@@ -1,27 +1,13 @@
-FROM langchain/langgraph-api:3.12
-
-
-
-# -- Adding local package . --
-ADD . /deps/backend
-# -- End of local package . --
-
-# -- Installing all local dependencies --
-RUN for dep in /deps/*; do             echo "Installing $dep";             if [ -d "$dep" ]; then                 echo "Installing $dep";                 (cd "$dep" && PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e .);             fi;         done
-# -- End of local dependencies install --
-ENV LANGGRAPH_CHECKPOINTER='{"path": "/deps/backend/src/agents/checkpointer/async_provider.py:make_checkpointer"}'
-ENV LANGSERVE_GRAPHS='{"lead_agent": "src.agents:make_lead_agent"}'
-
-
-
-# -- Ensure user deps didn't inadvertently overwrite langgraph-api
-RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && touch /api/langgraph_api/__init__.py /api/langgraph_runtime/__init__.py /api/langgraph_license/__init__.py
-RUN PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir --no-deps -e /api
-# -- End of ensuring user deps didn't inadvertently overwrite langgraph-api --
-# -- Removing build deps from the final image ~<:===~~~ --
-RUN pip uninstall -y pip setuptools wheel
-RUN rm -rf /usr/local/lib/python*/site-packages/pip* /usr/local/lib/python*/site-packages/setuptools* /usr/local/lib/python*/site-packages/wheel* && find /usr/local/bin -name "pip*" -delete || true
-RUN rm -rf /usr/lib/python*/site-packages/pip* /usr/lib/python*/site-packages/setuptools* /usr/lib/python*/site-packages/wheel* && find /usr/bin -name "pip*" -delete || true
-RUN uv pip uninstall --system pip setuptools wheel && rm /usr/bin/uv /usr/bin/uvx
-
-WORKDIR /deps/backend
+# NOTE: Deprecated / unused Dockerfile for LangGraph backend
+#
+# This file was originally a generated Dockerfile (`Dockerfile.langgraph`)
+# and is not referenced by the current Docker or Compose workflows.
+#
+# The authoritative Dockerfile for the LangGraph service is:
+#   backend/Dockerfile
+#
+# This stub is kept only to avoid confusion if older references mention
+# `backend/Dockerfile.langgraph`. It is safe to delete this file from the
+# repository once all such references have been cleaned up.
+#
+# There is intentionally no buildable image definition here.

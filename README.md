@@ -138,7 +138,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
-**Production** (pre-built images, no source mounts):
+**Production** (builds images locally, mounts runtime config and data):
 
 ```bash
 make up     # Build images and start all production services

@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DOCKER_DIR="$REPO_ROOT/docker"
-COMPOSE_CMD="docker compose -p deer-flow -f $DOCKER_DIR/docker-compose.yaml"
+COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -45,13 +45,12 @@ if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then
 fi
 
 if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    # Try to seed from repo
-    if [ -f "$REPO_ROOT/config.yaml" ]; then
-        cp "$REPO_ROOT/config.yaml" "$DEER_FLOW_CONFIG_PATH"
-        echo -e "${GREEN}✓ Seeded config.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
-    elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-        cp "$REPO_ROOT/backend/config.yaml" "$DEER_FLOW_CONFIG_PATH"
-        echo -e "${GREEN}✓ Seeded backend/config.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
+    # Try to seed from repo (config.example.yaml is the canonical template)
+    if [ -f "$REPO_ROOT/config.example.yaml" ]; then
+        cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
+        echo -e "${GREEN}✓ Seeded config.example.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
+        echo -e "${YELLOW}⚠ config.yaml was seeded from the example template.${NC}"
+        echo "  Edit $DEER_FLOW_CONFIG_PATH and set your model API keys before use."
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
         echo "  Run 'make config' from the repo root to generate one,"
@@ -147,7 +146,7 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
-    $COMPOSE_CMD down
+    "${COMPOSE_CMD[@]}" down
     exit 0
 fi
 
@@ -196,7 +195,7 @@ echo "Building images and starting containers..."
 echo ""
 
 # shellcheck disable=SC2086
-$COMPOSE_CMD $extra_args up --build -d --remove-orphans $services
+"${COMPOSE_CMD[@]}" $extra_args up --build -d --remove-orphans $services
 
 echo ""
 echo "=========================================="

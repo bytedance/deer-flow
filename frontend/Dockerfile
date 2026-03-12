@@ -1,7 +1,7 @@
 # Frontend Dockerfile
 # Supports two targets:
-#   --target dev   (default) — install deps only, run `pnpm dev` at container start
-#   --target prod  — full build baked in, run `pnpm start` at container start
+#   --target dev   — install deps only, run `pnpm dev` at container start
+#   --target prod  — full build baked in, run `pnpm start` at container start (default if no --target is specified)
 
 ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
 
