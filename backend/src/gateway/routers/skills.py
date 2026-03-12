@@ -4,7 +4,9 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -57,7 +59,20 @@ class SkillInstallResponse(BaseModel):
 
 
 # Allowed properties in SKILL.md frontmatter
-ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata"}
+ALLOWED_FRONTMATTER_PROPERTIES = {
+    "name",
+    "description",
+    "license",
+    "allowed-tools",
+    "metadata",
+    "compatibility",
+    "version",
+    "author",
+}
+
+
+def _safe_load_frontmatter(frontmatter_text: str) -> object:
+    return cast(object, yaml.safe_load(frontmatter_text))
 
 
 def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
@@ -86,9 +101,11 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
 
     # Parse YAML frontmatter
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-        if not isinstance(frontmatter, dict):
+        parsed_frontmatter = _safe_load_frontmatter(frontmatter_text)
+        if not isinstance(parsed_frontmatter, Mapping):
             return False, "Frontmatter must be a YAML dictionary", None
+        parsed_frontmatter = cast(Mapping[object, object], parsed_frontmatter)
+        frontmatter: dict[str, object] = {str(key): value for key, value in parsed_frontmatter.items()}
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}", None
 
@@ -307,7 +324,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         logger.info(f"Skills configuration updated and saved to: {config_path}")
 
         # Reload the extensions config to update the global cache
-        reload_extensions_config()
+        _ = reload_extensions_config()
 
         # Reload the skills to get the updated status (for API response)
         skills = load_skills(enabled_only=False)
@@ -430,7 +447,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
                 raise HTTPException(status_code=409, detail=f"Skill '{skill_name}' already exists. Please remove it first or use a different name.")
 
             # Move the skill directory to the custom skills directory
-            shutil.copytree(skill_dir, target_dir)
+            _ = shutil.copytree(skill_dir, target_dir)
 
         logger.info(f"Skill '{skill_name}' installed successfully to {target_dir}")
         return SkillInstallResponse(success=True, skill_name=skill_name, message=f"Skill '{skill_name}' installed successfully")
