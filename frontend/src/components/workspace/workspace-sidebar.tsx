@@ -6,7 +6,6 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarRail,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -18,7 +17,6 @@ import { WorkspaceNavMenu } from "./workspace-nav-menu";
 export function WorkspaceSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
-  const { open: isSidebarOpen } = useSidebar();
   return (
     <>
       <Sidebar
@@ -34,7 +32,7 @@ export function WorkspaceSidebar({
           <WorkspaceHeader />
         </SidebarHeader>
         <SidebarContent>
-          {isSidebarOpen && <SidebarThreadList />}
+          <SidebarThreadList />
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />
