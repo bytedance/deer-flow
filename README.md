@@ -42,7 +42,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
-    - [IM Channels](#im-channels)
+      - [IM Channels](#im-channels)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -129,17 +129,26 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 #### Option 1: Docker (Recommended)
 
-The fastest way to get started with a consistent environment:
+**Development** (hot-reload, source mounts):
 
-1. **Initialize and start**:
-   ```bash
-   make docker-init    # Pull sandbox image (Only once or when image updates)
-   make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
-   ```
+```bash
+make docker-init    # Pull sandbox image (only once or when image updates)
+make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
+```
 
-   `make docker-start` now starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
-2. **Access**: http://localhost:2026
+**Production** (builds images locally, mounts runtime config and data):
+
+```bash
+make up     # Build images and start all production services
+make down   # Stop and remove containers
+```
+
+> [!NOTE]
+> The LangGraph agent server currently runs via `langgraph dev` (the open-source CLI server).
+
+Access: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -321,7 +330,11 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
+When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
+
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+
+Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 ```
 # Paths inside the sandbox container
