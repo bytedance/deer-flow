@@ -40,37 +40,97 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
-  const [_threadId, setThreadId] = useState<string | null>(threadId ?? null);
+  // Track the thread ID that is currently streaming to handle thread changes during streaming
+  const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
+  // Ref to track current thread ID across async callbacks without causing re-renders,
+  // and to allow access to the current thread id in onUpdateEvent
+  const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
 
+  const listeners = useRef({
+    onStart,
+    onFinish,
+    onToolEnd,
+  });
+
+  // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    if (_threadId && _threadId !== threadId) {
-      setThreadId(threadId ?? null);
-      startedRef.current = false; // Reset for new thread
+    listeners.current = { onStart, onFinish, onToolEnd };
+  }, [onStart, onFinish, onToolEnd]);
+
+  useEffect(() => {
+    const normalizedThreadId = threadId ?? null;
+    if (!normalizedThreadId) {
+      // Just reset for new thread creation when threadId becomes null/undefined
+      startedRef.current = false;
+      setOnStreamThreadId(normalizedThreadId);
     }
-  }, [threadId, _threadId]);
+    threadIdRef.current = normalizedThreadId;
+  }, [threadId]);
+
+  const _handleOnStart = useCallback((id: string) => {
+    if (!startedRef.current) {
+      listeners.current.onStart?.(id);
+      startedRef.current = true;
+    }
+  }, []);
+
+  const handleStreamStart = useCallback(
+    (_threadId: string) => {
+      threadIdRef.current = _threadId;
+      _handleOnStart(_threadId);
+    },
+    [_handleOnStart],
+  );
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
-    threadId: _threadId,
+    threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
-      setThreadId(meta.thread_id);
-      if (!startedRef.current) {
-        onStart?.(meta.thread_id);
-        startedRef.current = true;
-      }
+      handleStreamStart(meta.thread_id);
+      setOnStreamThreadId(meta.thread_id);
     },
     onLangChainEvent(event) {
       if (event.event === "on_tool_end") {
-        onToolEnd?.({
+        listeners.current.onToolEnd?.({
           name: event.name,
           data: event.data,
         });
+      }
+    },
+    onUpdateEvent(data) {
+      const updates: Array<Partial<AgentThreadState> | null> = Object.values(
+        data || {},
+      );
+      for (const update of updates) {
+        if (update && "title" in update && update.title) {
+          void queryClient.setQueriesData(
+            {
+              queryKey: ["threads", "search"],
+              exact: false,
+            },
+            (oldData: Array<AgentThread> | undefined) => {
+              return oldData?.map((t) => {
+                if (t.thread_id === threadIdRef.current) {
+                  return {
+                    ...t,
+                    values: {
+                      ...t.values,
+                      title: update.title,
+                    },
+                  };
+                }
+                return t;
+              });
+            },
+          );
+        }
       }
     },
     onCustomEvent(event: unknown) {
@@ -89,7 +149,7 @@ export function useThreadStream({
       }
     },
     onFinish(state) {
-      onFinish?.(state.values);
+      listeners.current.onFinish?.(state.values);
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
@@ -150,10 +210,7 @@ export function useThreadStream({
       }
       setOptimisticMessages(newOptimistic);
 
-      if (!startedRef.current) {
-        onStart?.(threadId);
-        startedRef.current = true;
-      }
+      _handleOnStart(threadId);
 
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
@@ -269,7 +326,6 @@ export function useThreadStream({
             threadId: threadId,
             streamSubgraphs: true,
             streamResumable: true,
-            streamMode: ["values", "messages-tuple", "custom"],
             config: {
               recursion_limit: 1000,
             },
@@ -289,7 +345,7 @@ export function useThreadStream({
         throw error;
       }
     },
-    [thread, t.uploads.uploadingFiles, onStart, context, queryClient],
+    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
   // Merge thread with optimistic messages for display
@@ -316,8 +372,55 @@ export function useThreads(
   return useQuery<AgentThread[]>({
     queryKey: ["threads", "search", params],
     queryFn: async () => {
-      const response = await apiClient.threads.search<AgentThreadState>(params);
-      return response as AgentThread[];
+      const maxResults = params.limit;
+      const initialOffset = params.offset ?? 0;
+      const DEFAULT_PAGE_SIZE = 50;
+
+      // Preserve prior semantics: if a non-positive limit is explicitly provided,
+      // delegate to a single search call with the original parameters.
+      if (maxResults !== undefined && maxResults <= 0) {
+        const response = await apiClient.threads.search<AgentThreadState>(params);
+        return response as AgentThread[];
+      }
+
+      const pageSize =
+        typeof maxResults === "number" && maxResults > 0
+          ? Math.min(DEFAULT_PAGE_SIZE, maxResults)
+          : DEFAULT_PAGE_SIZE;
+
+      const threads: AgentThread[] = [];
+      let offset = initialOffset;
+
+      while (true) {
+        if (typeof maxResults === "number" && threads.length >= maxResults) {
+          break;
+        }
+
+        const currentLimit =
+          typeof maxResults === "number"
+            ? Math.min(pageSize, maxResults - threads.length)
+            : pageSize;
+
+        if (typeof maxResults === "number" && currentLimit <= 0) {
+          break;
+        }
+
+        const response = (await apiClient.threads.search<AgentThreadState>({
+          ...params,
+          limit: currentLimit,
+          offset,
+        })) as AgentThread[];
+
+        threads.push(...response);
+
+        if (response.length < currentLimit) {
+          break;
+        }
+
+        offset += response.length;
+      }
+
+      return threads;
     },
     refetchOnWindowFocus: false,
   });

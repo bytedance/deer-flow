@@ -166,15 +166,10 @@ class SubagentExecutor:
         model_name = _get_model_name(self.config, self.parent_model)
         model = create_chat_model(name=model_name, thinking_enabled=False)
 
-        # Subagents need minimal middlewares to ensure tools can access sandbox and thread_data
-        # These middlewares will reuse the sandbox/thread_data from parent agent
-        from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-        from src.sandbox.middleware import SandboxMiddleware
+        from src.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        middlewares = [
-            ThreadDataMiddleware(lazy_init=True),  # Compute thread paths
-            SandboxMiddleware(lazy_init=True),  # Reuse parent's sandbox (no re-acquisition)
-        ]
+        # Reuse shared middleware composition with lead agent.
+        middlewares = build_subagent_runtime_middlewares(lazy_init=True)
 
         return create_agent(
             model=model,
@@ -452,3 +447,40 @@ def list_background_tasks() -> list[SubagentResult]:
     """
     with _background_tasks_lock:
         return list(_background_tasks.values())
+
+
+def cleanup_background_task(task_id: str) -> None:
+    """Remove a completed task from background tasks.
+
+    Should be called by task_tool after it finishes polling and returns the result.
+    This prevents memory leaks from accumulated completed tasks.
+
+    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
+    to avoid race conditions with the background executor still updating the task entry.
+
+    Args:
+        task_id: The task ID to remove.
+    """
+    with _background_tasks_lock:
+        result = _background_tasks.get(task_id)
+        if result is None:
+            # Nothing to clean up; may have been removed already.
+            logger.debug("Requested cleanup for unknown background task %s", task_id)
+            return
+
+        # Only clean up tasks that are in a terminal state to avoid races with
+        # the background executor still updating the task entry.
+        is_terminal_status = result.status in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.TIMED_OUT,
+        }
+        if is_terminal_status or result.completed_at is not None:
+            del _background_tasks[task_id]
+            logger.debug("Cleaned up background task: %s", task_id)
+        else:
+            logger.debug(
+                "Skipping cleanup for non-terminal background task %s (status=%s)",
+                task_id,
+                result.status.value if hasattr(result.status, "value") else result.status,
+            )

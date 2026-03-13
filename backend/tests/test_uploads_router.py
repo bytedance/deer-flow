@@ -21,7 +21,6 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
     ):
-
         file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
@@ -52,7 +51,6 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
     ):
-
         file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
         result = asyncio.run(uploads.upload_files("thread-aio", files=[file]))
 

@@ -44,9 +44,13 @@ class PortAllocator:
         if port in self._reserved_ports:
             return False
 
+        # Bind to 0.0.0.0 (wildcard) rather than localhost so that the check
+        # mirrors exactly what Docker does.  Docker binds to 0.0.0.0:PORT;
+        # checking only 127.0.0.1 can falsely report a port as available even
+        # when Docker already occupies it on the wildcard address.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("localhost", port))
+                s.bind(("0.0.0.0", port))
                 return True
             except OSError:
                 return False
