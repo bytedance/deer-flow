@@ -8,21 +8,11 @@ from pydantic import BaseModel
 
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.sandbox.sandbox_provider import get_sandbox_provider
+from src.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
-
-# File extensions that should be converted to markdown
-CONVERTIBLE_EXTENSIONS = {
-    ".pdf",
-    ".ppt",
-    ".pptx",
-    ".xls",
-    ".xlsx",
-    ".doc",
-    ".docx",
-}
 
 
 class UploadResponse(BaseModel):
@@ -45,32 +35,6 @@ def get_uploads_dir(thread_id: str) -> Path:
     base_dir = get_paths().sandbox_uploads_dir(thread_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
-
-
-async def convert_file_to_markdown(file_path: Path) -> Path | None:
-    """Convert a file to markdown using markitdown.
-
-    Args:
-        file_path: Path to the file to convert.
-
-    Returns:
-        Path to the markdown file if conversion was successful, None otherwise.
-    """
-    try:
-        from markitdown import MarkItDown
-
-        md = MarkItDown()
-        result = md.convert(str(file_path))
-
-        # Save as .md file with same name
-        md_path = file_path.with_suffix(".md")
-        md_path.write_text(result.text_content, encoding="utf-8")
-
-        logger.info(f"Converted {file_path.name} to markdown: {md_path.name}")
-        return md_path
-    except Exception as e:
-        logger.error(f"Failed to convert {file_path.name} to markdown: {e}")
-        return None
 
 
 @router.post("", response_model=UploadResponse)

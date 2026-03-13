@@ -603,7 +603,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        from src.gateway.routers.skills import _validate_skill_frontmatter
+        from src.skills.validation import _validate_skill_frontmatter
         from src.skills.loader import get_skills_root_path
 
         path = Path(skill_path)
@@ -726,7 +726,7 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
-        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from src.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
