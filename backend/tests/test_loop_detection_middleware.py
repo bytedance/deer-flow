@@ -5,10 +5,9 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, SystemMessage
 
 from src.agents.middlewares.loop_detection_middleware import (
+    _HARD_STOP_MSG,
     LoopDetectionMiddleware,
     _hash_tool_calls,
-    _HARD_STOP_MSG,
-    _WARNING_MSG,
 )
 
 
