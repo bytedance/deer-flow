@@ -12,7 +12,7 @@ VALIDATE_SKILL_FRONTMATTER = cast(
 
 def _write_skill(skill_dir: Path, frontmatter: str) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
-    _ = (skill_dir / "SKILL.md").write_text(frontmatter, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(frontmatter, encoding="utf-8")
 
 
 def test_validate_skill_frontmatter_allows_standard_optional_metadata(tmp_path: Path) -> None:

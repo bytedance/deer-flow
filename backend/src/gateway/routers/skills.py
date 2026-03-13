@@ -324,7 +324,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         logger.info(f"Skills configuration updated and saved to: {config_path}")
 
         # Reload the extensions config to update the global cache
-        _ = reload_extensions_config()
+        reload_extensions_config()
 
         # Reload the skills to get the updated status (for API response)
         skills = load_skills(enabled_only=False)
@@ -447,7 +447,7 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
                 raise HTTPException(status_code=409, detail=f"Skill '{skill_name}' already exists. Please remove it first or use a different name.")
 
             # Move the skill directory to the custom skills directory
-            _ = shutil.copytree(skill_dir, target_dir)
+            shutil.copytree(skill_dir, target_dir)
 
         logger.info(f"Skill '{skill_name}' installed successfully to {target_dir}")
         return SkillInstallResponse(success=True, skill_name=skill_name, message=f"Skill '{skill_name}' installed successfully")
