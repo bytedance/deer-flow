@@ -158,15 +158,15 @@ class TestBudgetEnforcementMiddleware:
         result = mw._apply(state, runtime)
         assert result is None
 
-    def test_on_run_start_resets_thread(self):
-        """_on_run_start clears counters for the thread so cached instances work."""
+    def test_before_agent_resets_thread(self):
+        """before_agent clears counters for the thread so cached instances work."""
         mw = BudgetEnforcementMiddleware(max_turns=500)
         state = _make_state()
         runtime = _make_runtime()
         for _ in range(mw.warn_at):
             mw._apply(state, runtime)
-        # Simulate a new run starting
-        mw._on_run_start(runtime)
+        # Simulate a new agent run starting
+        mw.before_agent(state, runtime)
         # After reset, counter is 0 — next call should not warn
         result = mw._apply(state, runtime)
         assert result is None

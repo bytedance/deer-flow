@@ -163,6 +163,23 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         return {"messages": [stripped_msg]}
 
     @override
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Reset per-thread counters at the start of a new agent run.
+
+        This ensures that cached middleware instances don't carry stale
+        _call_count / _warned state across independent agent invocations
+        (e.g. when DeerFlowClient caches the agent instance).
+        """
+        self._reset_thread(runtime)
+        return None
+
+    @override
+    async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Async version of before_agent — reset counters for new run."""
+        self._reset_thread(runtime)
+        return None
+
+    @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
@@ -178,12 +195,8 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply_after_model(state, runtime)
 
-    def _on_run_start(self, runtime: Runtime) -> None:
-        """Reset per-thread counters at the start of a new run.
-
-        This ensures that cached middleware instances don't carry stale
-        _call_count / _warned state across independent agent invocations.
-        """
+    def _reset_thread(self, runtime: Runtime) -> None:
+        """Clear counters and warnings for the current thread."""
         thread_id = self._get_thread_id(runtime)
         self._call_count.pop(thread_id, None)
         self._warned.pop(thread_id, None)
