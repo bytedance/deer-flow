@@ -71,6 +71,31 @@ export function ArtifactFileList({
     [threadId, installingFile],
   );
 
+  const handleDownload = useCallback(
+    async (e: React.MouseEvent, filepath: string) => {
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        const url = urlOfArtifact({ filepath, threadId, download: true });
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Network response was not ok");
+        const blob = await response.blob();
+        const objectUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = getFileName(filepath);
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(objectUrl);
+        document.body.removeChild(a);
+      } catch (err) {
+        console.error("Download failed:", err);
+        toast.error("Failed to download file");
+      }
+    },
+    [threadId],
+  );
+
   return (
     <ul className={cn("flex w-full flex-col gap-4", className)}>
       {files.map((file) => (
@@ -104,20 +129,10 @@ export function ArtifactFileList({
                   {t.common.install}
                 </Button>
               )}
-              <a
-                href={urlOfArtifact({
-                  filepath: file,
-                  threadId: threadId,
-                  download: true,
-                })}
-                target="_blank"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Button variant="ghost">
-                  <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </Button>
-              </a>
+              <Button variant="ghost" onClick={(e) => handleDownload(e, file)}>
+                <DownloadIcon className="size-4" />
+                {t.common.download}
+              </Button>
             </CardAction>
           </CardHeader>
         </Card>

@@ -7,7 +7,6 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
-from pydantic import BaseModel
 
 from src.gateway.path_utils import resolve_thread_virtual_path
 from src.storage import get_storage
@@ -140,7 +139,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
     encoded_filename = quote(actual_path.name)
 
     if request.query_params.get("download"):
-        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
+        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type)
 
     if mime_type and mime_type == "text/html":
         return HTMLResponse(content=actual_path.read_text())

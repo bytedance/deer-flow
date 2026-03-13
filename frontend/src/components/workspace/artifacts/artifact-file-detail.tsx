@@ -128,6 +128,32 @@ export function ArtifactFileDetail({
       setIsInstalling(false);
     }
   }, [threadId, filepath, isInstalling]);
+
+  const handleDownload = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        const url = urlOfArtifact({ filepath, threadId, download: true });
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Network response was not ok");
+        const blob = await response.blob();
+        const objectUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = getFileName(filepath);
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(objectUrl);
+        document.body.removeChild(a);
+      } catch (err) {
+        console.error("Download failed:", err);
+        toast.error("Failed to download file");
+      }
+    },
+    [threadId, filepath],
+  );
+
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
@@ -219,16 +245,12 @@ export function ArtifactFileDetail({
               />
             )}
             {!isWriteFile && (
-              <a
-                href={urlOfArtifact({ filepath, threadId, download: true })}
-                target="_blank"
-              >
-                <ArtifactAction
-                  icon={DownloadIcon}
-                  label={t.common.download}
-                  tooltip={t.common.download}
-                />
-              </a>
+              <ArtifactAction
+                icon={DownloadIcon}
+                label={t.common.download}
+                tooltip={t.common.download}
+                onClick={handleDownload}
+              />
             )}
             <ArtifactAction
               icon={XIcon}
