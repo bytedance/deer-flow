@@ -106,6 +106,31 @@ models:
   #       thinking:
   #         type: enabled
 
+  # Example: MiniMax (OpenAI-compatible)
+  # MiniMax provides high-performance LLMs with competitive pricing
+  # See: https://platform.minimax.io
+  # - name: minimax-m2.5
+  #   display_name: MiniMax M2.5
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.5
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimax.chat/v1
+  #   max_tokens: 204800  # 200K context window
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+
+  # Example: MiniMax Flash (highspeed, cost-effective)
+  # - name: minimax-m2.5-flash
+  #   display_name: MiniMax M2.5 Flash
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-Text-01
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimax.chat/v1
+  #   max_tokens: 204800
+  #   temperature: 0.7
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
