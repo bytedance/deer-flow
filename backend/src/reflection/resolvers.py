@@ -1,4 +1,7 @@
 from importlib import import_module
+from typing import TypeVar
+
+T = TypeVar("T")
 
 MODULE_TO_PACKAGE_HINTS = {
     "langchain_google_genai": "langchain-google-genai",
@@ -22,7 +25,7 @@ def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
     return f"Missing dependency '{missing_module}'. Install it with `uv add {package_name}` (or `pip install {package_name}`), then restart DeerFlow."
 
 
-def resolve_variable[T](
+def resolve_variable(
     variable_path: str,
     expected_type: type[T] | tuple[type, ...] | None = None,
 ) -> T:
@@ -70,7 +73,7 @@ def resolve_variable[T](
     return variable
 
 
-def resolve_class[T](class_path: str, base_class: type[T] | None = None) -> type[T]:
+def resolve_class(class_path: str, base_class: type[T] | None = None) -> type[T]:
     """Resolve a class from a module path and class name.
 
     Args:
