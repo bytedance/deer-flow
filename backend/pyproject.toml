@@ -45,6 +45,9 @@ dependencies = [
     "e2b>=2.15.2",
     "boto3>=1.42.66",
     "pillow>=12.1.1",
+    "langgraph-checkpoint-postgres>=3.0.4",
+    "psycopg[binary]>=3.3.3",
+    "psycopg-pool>=3.3.0",
 ]
 
 [dependency-groups]
