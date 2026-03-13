@@ -333,6 +333,7 @@ export const zhCN: Translations = {
       emptyButton: "创建你的第一个技能",
       refreshSuccess: (count: number) => `已刷新，共 ${count} 个技能`,
       refreshError: "刷新失败",
+      allowExternalSkills: "允许加载外部技能",
     },
     notification: {
       title: "通知",

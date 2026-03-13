@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from src.skills.loader import load_skills

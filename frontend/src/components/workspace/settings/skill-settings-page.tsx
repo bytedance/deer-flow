@@ -25,7 +25,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import { useEnableSkill, useSkills, useSkillsConfig, useUpdateSkillsConfig } from "@/core/skills/hooks";
 import { loadSkills } from "@/core/skills";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
@@ -64,6 +64,8 @@ function SkillSettingsList({
   const [filter, setFilter] = useState<string>("public");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const { mutate: enableSkill } = useEnableSkill();
+  const { data: config } = useSkillsConfig();
+  const { mutate: updateConfig } = useUpdateSkillsConfig();
 
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
@@ -101,7 +103,16 @@ function SkillSettingsList({
             </TabsList>
           </Tabs>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mr-4">
+            <span className="text-sm text-muted-foreground whitespace-nowrap">
+              {t.settings.skills.allowExternalSkills || "Allow External Skills"}
+            </span>
+            <Switch
+              checked={config?.allowExternalSkills ?? false}
+              onCheckedChange={(checked) => updateConfig(checked)}
+            />
+          </div>
           <Button
             size="sm"
             variant="ghost"

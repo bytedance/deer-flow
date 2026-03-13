@@ -20,6 +20,12 @@ _config_mtime: float | None = None  # Track config file modification time
 # Maximum time (seconds) to wait for ALL enabled MCP servers to load their tools.
 MCP_INIT_TIMEOUT = 30
 
+# Shared executor for MCP initialization to avoid blocking timeout behavior
+# and prevent thread leakage if multiple initializations are triggered.
+_mcp_init_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="mcp-init-"
+)
+
 
 def _get_config_mtime() -> float | None:
     """Get the modification time of the extensions config file."""
@@ -100,16 +106,18 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             if loop.is_running():
                 # Already inside a running event loop (e.g. LangGraph server).
                 # Run initialization in a dedicated thread with its own event loop.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-init-") as executor:
-                    future = executor.submit(asyncio.run, initialize_mcp_tools())
-                    try:
-                        future.result(timeout=MCP_INIT_TIMEOUT)
-                    except concurrent.futures.TimeoutError:
-                        logger.error(
-                            f"MCP tools initialization timed out after {MCP_INIT_TIMEOUT}s. "
-                            "Check that all configured MCP servers are reachable."
-                        )
-                        return []
+                future = _mcp_init_executor.submit(asyncio.run, initialize_mcp_tools())
+                try:
+                    future.result(timeout=MCP_INIT_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    logger.error(
+                        f"MCP tools initialization timed out after {MCP_INIT_TIMEOUT}s. "
+                        "Check that all configured MCP servers are reachable."
+                    )
+                    # We don't shutdown the shared executor, but we do return early.
+                    # The worker thread will continue in the background and eventually 
+                    # update the cache when it finishes.
+                    return []
             else:
                 loop.run_until_complete(initialize_mcp_tools())
         except RuntimeError:

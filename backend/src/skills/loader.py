@@ -1,8 +1,11 @@
+import logging
 import os
 from pathlib import Path
 
 from .parser import parse_skill_file
 from .types import Skill
+
+logger = logging.getLogger(__name__)
 
 
 def get_skills_root_path() -> Path:
@@ -52,7 +55,24 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
     if not skills_path.exists():
         return []
 
+    # Load skills state configuration early to get enable states and external skills flag
+    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+    # to always read the latest configuration from disk. This ensures that changes
+    # made through the Gateway API (which runs in a separate process) are immediately
+    # reflected in the LangGraph Server when loading skills.
+    try:
+        from src.config.extensions_config import ExtensionsConfig
+
+        extensions_config = ExtensionsConfig.from_file()
+    except Exception as e:
+        # If config loading fails, default to all enabled and no external skills
+        logger.warning(f"Failed to load extensions config: {e}")
+        extensions_config = None
+
     skills = []
+    # Resolve skills_path to absolute to ensure containment check works correctly
+    abs_skills_root = skills_path.resolve()
+    allow_external = extensions_config.allow_external_skills if extensions_config else False
 
     # Scan public and custom directories
     for category in ["public", "custom"]:
@@ -79,6 +99,16 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
                 
                 path = os.path.join(current_root, name)
                 try:
+                    # Guard against symlinks pointing outside the skills directory
+                    # unless allow_external_skills is enabled.
+                    if not allow_external:
+                        real_path = Path(path).resolve()
+                        try:
+                            real_path.relative_to(abs_skills_root)
+                        except ValueError:
+                            logger.warning(f"Skipping path pointing outside skills root: {path} -> {real_path}")
+                            continue
+
                     st = os.stat(path, follow_symlinks=True)
                     key = (st.st_dev, st.st_ino)
                     if key in visited_inodes:
@@ -100,20 +130,10 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
             if skill:
                 skills.append(skill)
 
-    # Load skills state configuration and update enabled status
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected in the LangGraph Server when loading skills.
-    try:
-        from src.config.extensions_config import ExtensionsConfig
-
-        extensions_config = ExtensionsConfig.from_file()
+    # Update enabled status using the already loaded extensions_config
+    if extensions_config:
         for skill in skills:
             skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
-    except Exception as e:
-        # If config loading fails, default to all enabled
-        print(f"Warning: Failed to load extensions config: {e}")
 
     # Filter by enabled status if requested
     if enabled_only:

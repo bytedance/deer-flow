@@ -65,6 +65,11 @@ class ExtensionsConfig(BaseModel):
         default_factory=dict,
         description="Map of skill name to state configuration",
     )
+    allow_external_skills: bool = Field(
+        default=False,
+        description="Whether to allow loading skills from symlinks pointing outside the skills root",
+        alias="allowExternalSkills",
+    )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     @classmethod

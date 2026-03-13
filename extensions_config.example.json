@@ -38,5 +38,6 @@
       "description": "PostgreSQL database access"
     }
   },
-  "skills": {}
+  "skills": {},
+  "allowExternalSkills": false
 }
