@@ -296,10 +296,20 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         from src.config.memory_config import get_memory_config
 
         config = get_memory_config()
-        if not config.enabled or not config.injection_enabled:
+        if not config.enabled:
             return ""
 
         memory_data = get_memory_data(agent_name)
+
+        # Read injection_enabled from the shared file so that changes made via
+        # the gateway API (a separate process) are picked up here immediately.
+        # Falls back to the in-process config value when not set in the file.
+        injection_enabled = memory_data.get("settings", {}).get(
+            "injection_enabled", config.injection_enabled
+        )
+        if not injection_enabled:
+            return ""
+
         memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():

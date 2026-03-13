@@ -645,6 +645,31 @@ class TestMemoryManagement:
         assert "config" in result
         assert "data" in result
 
+    def test_update_memory_config(self, client):
+        from src.config.memory_config import MemoryConfig
+
+        original = MemoryConfig()
+        with (
+            patch("src.config.memory_config.get_memory_config", return_value=original),
+            patch("src.config.memory_config.set_memory_config") as mock_set,
+        ):
+            result = client.update_memory_config({"injection_enabled": False})
+
+        mock_set.assert_called_once()
+        assert result["injection_enabled"] is False
+        assert result["enabled"] is True  # unchanged
+
+    def test_delete_memory_fact_found(self, client):
+        with patch("src.agents.memory.updater.delete_memory_fact", return_value=True) as mock_del:
+            result = client.delete_memory_fact("fact_abc123")
+        mock_del.assert_called_once_with("fact_abc123")
+        assert result is True
+
+    def test_delete_memory_fact_not_found(self, client):
+        with patch("src.agents.memory.updater.delete_memory_fact", return_value=False):
+            result = client.delete_memory_fact("fact_nonexistent")
+        assert result is False
+
 
 # ---------------------------------------------------------------------------
 # Uploads
@@ -1697,3 +1722,16 @@ class TestGatewayConformance:
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
         assert parsed.data.version == "1.0"
+
+    def test_update_memory_config(self, client):
+        from src.config.memory_config import MemoryConfig
+
+        original = MemoryConfig()
+        with (
+            patch("src.config.memory_config.get_memory_config", return_value=original),
+            patch("src.config.memory_config.set_memory_config"),
+        ):
+            result = client.update_memory_config({"injection_enabled": False})
+
+        parsed = MemoryConfigResponse(**result)
+        assert parsed.injection_enabled is False

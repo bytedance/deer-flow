@@ -1,3 +1,13 @@
+export interface MemoryConfig {
+  enabled: boolean;
+  storage_path: string;
+  injection_enabled: boolean;
+  max_injection_tokens: number;
+  debounce_seconds: number;
+  max_facts: number;
+  fact_confidence_threshold: number;
+}
+
 export interface UserMemory {
   version: string;
   lastUpdated: string;
