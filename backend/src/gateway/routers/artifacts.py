@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from pydantic import BaseModel
 
 from src.gateway.path_utils import resolve_thread_virtual_path
 from src.storage import get_storage
