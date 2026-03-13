@@ -80,6 +80,7 @@ services:
     build:
       context: ../
       dockerfile: frontend/Dockerfile
+      target: dev
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
     container_name: deer-flow-frontend
