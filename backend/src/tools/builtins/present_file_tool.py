@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -8,6 +9,10 @@ from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadState
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from src.sandbox.sandbox_provider import get_sandbox_provider
+from src.utils.runtime import get_thread_id
+
+logger = logging.getLogger(__name__)
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 
@@ -33,7 +38,7 @@ def _normalize_presented_filepath(
     if runtime.state is None:
         raise ValueError("Thread runtime state is not available")
 
-    thread_id = runtime.context.get("thread_id")
+    thread_id = get_thread_id(runtime)
     if not thread_id:
         raise ValueError("Thread ID is not available in runtime context")
 
@@ -57,6 +62,59 @@ def _normalize_presented_filepath(
         raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
 
     return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
+
+
+def _sync_artifact_to_storage(thread_id: str, virtual_path: str) -> None:
+    """Sync an artifact file from the sandbox to persistent storage (R2/local).
+
+    For non-local sandboxes (E2B, Docker), this reads the file from the sandbox
+    and writes it to persistent storage so the artifacts router can serve it.
+    """
+    try:
+        sandbox_state = None
+        provider = get_sandbox_provider()
+
+        # Get sandbox for this thread
+        # We need to find the sandbox_id — check common patterns
+        sandbox = None
+        # Try to get sandbox from the provider's thread mapping
+        if hasattr(provider, "_thread_sandboxes"):
+            sandbox_id = provider._thread_sandboxes.get(thread_id)
+            if sandbox_id:
+                sandbox = provider.get(sandbox_id)
+
+        if sandbox is None:
+            return
+
+        # Only sync for non-local sandboxes
+        if sandbox.id == "local":
+            return
+
+        # Read file from sandbox
+        data = sandbox.read_file(virtual_path)
+        if not data or data.startswith("Error:"):
+            logger.warning(f"Could not read artifact from sandbox: {virtual_path}")
+            return
+
+        # Extract relative path from virtual path
+        # /mnt/user-data/outputs/report.md → outputs/report.md
+        prefix = VIRTUAL_PATH_PREFIX.lstrip("/") + "/"
+        stripped = virtual_path.lstrip("/")
+        if stripped.startswith(prefix):
+            relative = stripped[len(prefix):]  # e.g., "outputs/report.md"
+        else:
+            return
+
+        # Write to persistent storage
+        from src.storage import get_storage
+
+        storage = get_storage()
+        storage_key = f"threads/{thread_id}/{relative}"
+        storage.write(storage_key, data.encode("utf-8") if isinstance(data, str) else data)
+        logger.info(f"Synced artifact to storage: {storage_key}")
+
+    except Exception as e:
+        logger.warning(f"Failed to sync artifact to storage: {e}")
 
 
 @tool("present_files", parse_docstring=True)
@@ -90,6 +148,12 @@ def present_file_tool(
         return Command(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
+
+    # Sync artifacts from sandbox to persistent storage
+    thread_id = get_thread_id(runtime) if runtime else None
+    if thread_id:
+        for vpath in normalized_paths:
+            _sync_artifact_to_storage(thread_id, vpath)
 
     # The merge_artifacts reducer will handle merging and deduplication
     return Command(

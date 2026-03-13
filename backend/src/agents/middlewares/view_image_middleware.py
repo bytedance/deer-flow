@@ -1,4 +1,10 @@
-"""Middleware for injecting image details into conversation before LLM call."""
+"""Middleware for injecting image details into conversation before LLM call.
+
+Key behaviors:
+1. Only injects images from the MOST RECENT view_image call (not accumulated history)
+2. Clears viewed_images from state after injection to prevent re-injection on next turn
+3. This means each LLM call only sees the images it just viewed, not every image ever viewed
+"""
 
 import json
 from typing import NotRequired, override
@@ -18,43 +24,50 @@ class ViewImageMiddlewareState(AgentState):
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
-    """Injects image details as a human message before LLM calls when view_image tools have completed.
+    """Injects viewed images into LLM context, then clears them.
 
-    This middleware:
-    1. Runs before each LLM call
-    2. Checks if the last assistant message contains view_image tool calls
-    3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
-    4. Extracts image data from ToolMessage content (JSON with __view_image__ flag)
-       and also merges it into the viewed_images state
-    5. Creates a human message with all viewed image details (including base64 data)
-    6. Adds the message to state so the LLM can see and analyze the images
+    Flow:
+    1. Agent calls view_image → image stored in state.viewed_images
+    2. Before next LLM call, this middleware injects the image as a HumanMessage
+    3. Clears viewed_images so it's NOT re-injected on subsequent turns
+    4. LLM sees only the images from THIS turn, not accumulated history
+
+    This prevents context bloat: without clearing, 5 iterations would mean
+    5 images injected on every subsequent LLM call.
     """
 
     state_schema = ViewImageMiddlewareState
 
     def _get_last_assistant_message(self, messages: list) -> AIMessage | None:
+        """Get the last assistant message from the message list."""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 return msg
         return None
 
     def _has_view_image_tool(self, message: AIMessage) -> bool:
+        """Check if the assistant message contains view_image tool calls."""
         if not hasattr(message, "tool_calls") or not message.tool_calls:
             return False
         return any(tool_call.get("name") == "view_image" for tool_call in message.tool_calls)
 
     def _all_tools_completed(self, messages: list, assistant_msg: AIMessage) -> bool:
+        """Check if all tool calls in the assistant message have been completed."""
         if not hasattr(assistant_msg, "tool_calls") or not assistant_msg.tool_calls:
             return False
+
         tool_call_ids = {tool_call.get("id") for tool_call in assistant_msg.tool_calls if tool_call.get("id")}
+
         try:
             assistant_idx = messages.index(assistant_msg)
         except ValueError:
             return False
+
         completed_tool_ids = set()
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, ToolMessage) and msg.tool_call_id:
                 completed_tool_ids.add(msg.tool_call_id)
+
         return tool_call_ids.issubset(completed_tool_ids)
 
     def _extract_images_from_tool_messages(self, messages: list, assistant_msg: AIMessage) -> dict[str, ViewedImageData]:
@@ -87,7 +100,33 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     pass
         return images
 
+    def _should_inject_image_message(self, state: ViewImageMiddlewareState) -> bool:
+        """Determine if we should inject an image details message."""
+        messages = state.get("messages", [])
+        if not messages:
+            return False
+
+        last_assistant_msg = self._get_last_assistant_message(messages)
+        if not last_assistant_msg:
+            return False
+
+        if not self._has_view_image_tool(last_assistant_msg):
+            return False
+
+        if not self._all_tools_completed(messages, last_assistant_msg):
+            return False
+
+        # Check if we've already added an image details message for this turn
+        assistant_idx = messages.index(last_assistant_msg)
+        for msg in messages[assistant_idx + 1 :]:
+            if isinstance(msg, HumanMessage):
+                content_str = str(msg.content)
+                if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
+                    return False
+        return True
+
     def _create_image_details_message(self, images: dict[str, ViewedImageData]) -> list[str | dict]:
+        """Create a formatted message with viewed image details."""
         if not images:
             return ["No images have been viewed."]
 
@@ -96,7 +135,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         for image_path, image_data in images.items():
             mime_type = image_data.get("mime_type", "unknown")
             base64_data = image_data.get("base64", "")
+
             content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
+
             if base64_data:
                 content_blocks.append(
                     {
@@ -107,26 +148,6 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
         return content_blocks
 
-    def _should_inject_image_message(self, state: ViewImageMiddlewareState) -> bool:
-        messages = state.get("messages", [])
-        if not messages:
-            return False
-        last_assistant_msg = self._get_last_assistant_message(messages)
-        if not last_assistant_msg:
-            return False
-        if not self._has_view_image_tool(last_assistant_msg):
-            return False
-        if not self._all_tools_completed(messages, last_assistant_msg):
-            return False
-        # Check if we've already added an image details message
-        assistant_idx = messages.index(last_assistant_msg)
-        for msg in messages[assistant_idx + 1 :]:
-            if isinstance(msg, HumanMessage):
-                content_str = str(msg.content)
-                if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
-                    return False
-        return True
-
     def _strip_old_image_injections(self, messages: list) -> None:
         """Remove base64 image data from previously injected HumanMessages.
 
@@ -136,7 +157,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         for msg in messages:
             if isinstance(msg, HumanMessage) and isinstance(msg.content, list):
                 has_image_marker = any(
-                    isinstance(block, dict) and block.get("type") == "text" and "Here are the images you've viewed" in block.get("text", "")
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and "Here are the images you've viewed" in block.get("text", "")
                     for block in msg.content
                 )
                 if has_image_marker:
@@ -160,7 +183,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         except ValueError:
             return
 
-        for msg in messages[assistant_idx + 1:]:
+        for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, ToolMessage) and isinstance(msg.content, str):
                 try:
                     data = json.loads(msg.content)
@@ -171,6 +194,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     pass
 
     def _inject_image_message(self, state: ViewImageMiddlewareState) -> dict | None:
+        """Inject image details and clear viewed_images to prevent re-injection."""
         if not self._should_inject_image_message(state):
             return None
 
@@ -231,10 +255,12 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
     @override
     def before_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
+        """Inject image details before LLM call, then clear them (sync version)."""
         self._cleanup_stale_images(state)
         return self._inject_image_message(state)
 
     @override
     async def abefore_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
+        """Inject image details before LLM call, then clear them (async version)."""
         self._cleanup_stale_images(state)
         return self._inject_image_message(state)

@@ -5,6 +5,7 @@ from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadDataState, ThreadState
 from src.config.paths import VIRTUAL_PATH_PREFIX
+from src.utils.runtime import get_thread_id
 from src.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -176,7 +177,7 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    thread_id = get_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
@@ -285,6 +286,148 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
 
 
+# File extensions that should be analyzed with code, not read into LLM context.
+# These are data files where reading raw content is useless — the model needs
+# pandas/python to aggregate, filter, and compute stats.
+DATA_FILE_EXTENSIONS = {
+    ".csv", ".tsv", ".json", ".jsonl", ".ndjson",
+    ".xlsx", ".xls", ".parquet", ".feather", ".arrow",
+    ".sqlite", ".db", ".sql",
+}
+
+# Binary/media files — cannot be read as text. Agent should use appropriate tools.
+BINARY_FILE_EXTENSIONS = {
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".ico", ".tiff",
+    # Video
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv",
+    # Audio
+    ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a",
+    # Documents (binary)
+    ".pdf", ".docx", ".pptx",
+    # Archives
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    # Other binary
+    ".exe", ".dll", ".so", ".dylib", ".wasm", ".pyc",
+}
+
+# For non-data files, truncate at this limit to prevent context blowup.
+MAX_READ_FILE_CHARS = 8_000
+
+# Number of preview lines to show for data files.
+DATA_FILE_PREVIEW_LINES = 5
+
+
+def _get_file_extension(path: str) -> str:
+    """Extract lowercase file extension from path."""
+    dot_idx = path.rfind(".")
+    if dot_idx == -1:
+        return ""
+    return path[dot_idx:].lower()
+
+
+def _build_data_file_preview(sandbox: Sandbox, content: str, path: str) -> str:
+    """Build a schema-aware preview for data files.
+
+    For CSV/TSV files, runs a quick python command in the sandbox to extract
+    schema info (dtypes, null counts, shape) — just like ChatGPT Code Interpreter.
+    Returns ~800 chars instead of the full file, saving thousands of tokens.
+    """
+    lines = content.splitlines()
+    total_lines = len(lines)
+    total_chars = len(content)
+    ext = _get_file_extension(path)
+
+    preview_lines = lines[:DATA_FILE_PREVIEW_LINES + 1]  # header + N data rows
+    preview = "\n".join(preview_lines)
+
+    # For CSV/TSV, run quick schema analysis in sandbox
+    schema_info = ""
+    if ext in (".csv", ".tsv"):
+        try:
+            schema_script = (
+                "import pandas as pd\n"
+                f"df = pd.read_csv('{path}'\n"
+            )
+            if ext == ".tsv":
+                schema_script = (
+                    "import pandas as pd\n"
+                    f"df = pd.read_csv('{path}', sep='\\t'\n"
+                )
+            schema_script += (
+                ", nrows=1000)\n"  # Read only first 1000 rows for speed
+                "print(f'Shape: {df.shape[0]} rows x {df.shape[1]} columns')\n"
+                "print()\n"
+                "print('Column types:')\n"
+                "for col in df.columns:\n"
+                "    null_pct = df[col].isnull().mean() * 100\n"
+                "    n_unique = df[col].nunique()\n"
+                "    print(f'  {col}: {df[col].dtype} ({n_unique} unique, {null_pct:.0f}% null)')\n"
+            )
+            result = sandbox.execute_command(f"python3 -c \"{schema_script}\"")
+            if result and "Error" not in result:
+                schema_info = f"\n--- Schema (from first 1000 rows) ---\n{result}\n"
+        except Exception:
+            # Schema analysis failed — fall back to basic preview
+            sep = "\t" if ext == ".tsv" else ","
+            header = lines[0] if lines else ""
+            cols = [c.strip().strip('"').strip("'") for c in header.split(sep)]
+            schema_info = f"\nColumns ({len(cols)}): {', '.join(cols)}\n"
+
+    return (
+        f"[DATA FILE PREVIEW — not full content]\n"
+        f"File: {path}\n"
+        f"Size: {total_chars:,} chars, {total_lines:,} lines\n"
+        f"{schema_info}"
+        f"\n--- First {min(DATA_FILE_PREVIEW_LINES + 1, total_lines)} lines ---\n"
+        f"{preview}\n"
+        f"--- End preview ---\n\n"
+        f"⚠ Do NOT re-read this file with read_file — use `bash` with python/pandas to analyze it.\n"
+    )
+
+
+def _build_binary_file_response(path: str) -> str:
+    """Return guidance for binary files instead of trying to read them."""
+    ext = _get_file_extension(path)
+
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".svg"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (image)\n\n"
+            f"To view this image, use the `view_image` tool.\n"
+            f"To edit/process it, use `bash` with python:\n"
+            f"  python3 -c \"from PIL import Image; img = Image.open('{path}'); print(img.size, img.mode)\"\n"
+        )
+    elif ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (video)\n\n"
+            f"To get video info, use `bash`:\n"
+            f"  python3 -c \"import subprocess; print(subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', '{path}'], capture_output=True, text=True).stdout)\"\n"
+        )
+    elif ext in (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a"):
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (audio)\n\n"
+            f"To get audio info, use `bash` with ffprobe or python.\n"
+        )
+    elif ext == ".pdf":
+        # PDFs should have a .md conversion alongside
+        md_path = path.rsplit(".", 1)[0] + ".md"
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path} (PDF)\n\n"
+            f"A Markdown conversion should be available at: {md_path}\n"
+            f"Try: read_file {md_path}\n"
+        )
+    else:
+        return (
+            f"[BINARY FILE — cannot read as text]\n"
+            f"File: {path}\n\n"
+            f"This is a binary file. Use `bash` with appropriate tools to inspect it.\n"
+        )
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -293,7 +436,12 @@ def read_file_tool(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+    """Read the contents of a text file. Use this to examine source code, configuration files, or small text files.
+
+    **Important**:
+    - For data files (CSV, JSON, Parquet, etc.): Returns a schema preview + first rows. Use `bash` with python/pandas for analysis.
+    - For images: Use `view_image` tool to see them, or `bash` with python/PIL to process them.
+    - For video/audio: Use `bash` with ffprobe or python to get metadata.
 
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -307,11 +455,36 @@ def read_file_tool(
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             path = replace_virtual_path(path, thread_data)
+
+        # Binary files: return guidance instead of garbage
+        ext = _get_file_extension(path)
+        if ext in BINARY_FILE_EXTENSIONS:
+            return _build_binary_file_response(path)
+
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
+
+        # Data files: return schema preview (auto-analyzed in sandbox)
+        if ext in DATA_FILE_EXTENSIONS and start_line is None:
+            return _build_data_file_preview(sandbox, content, path)
+
+        # Apply line range if specified
         if start_line is not None and end_line is not None:
             content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+
+        # Truncate large non-data files (code, logs, etc.)
+        if len(content) > MAX_READ_FILE_CHARS:
+            total_lines = len(content.splitlines())
+            truncated = content[:MAX_READ_FILE_CHARS]
+            return (
+                f"{truncated}\n\n"
+                f"... [TRUNCATED — {len(content):,} chars, {total_lines:,} lines. "
+                f"Only first {MAX_READ_FILE_CHARS:,} chars shown.] ...\n"
+                f"Use start_line/end_line to read specific sections, "
+                f"or `bash` with grep/awk to search."
+            )
+
         return content
     except SandboxError as e:
         return f"Error: {e}"

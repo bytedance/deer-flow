@@ -13,7 +13,8 @@ from langgraph.typing import ContextT
 from src.agents.lead_agent.prompt import get_skills_prompt_section
 from src.agents.thread_state import ThreadState
 from src.subagents import SubagentExecutor, get_subagent_config
-from src.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from src.utils.runtime import get_thread_id
+from src.subagents.executor import SubagentStatus, get_background_task_result
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def task_tool(
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id")
+        thread_id = get_thread_id(runtime)
 
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})

@@ -7,6 +7,7 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from src.config.paths import get_paths
+from src.utils.runtime import get_context_value
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def setup_agent(
         description: One-line description of what the agent does.
     """
 
-    agent_name: str | None = runtime.context.get("agent_name")
+    agent_name: str | None = get_context_value(runtime, "agent_name")
 
     try:
         paths = get_paths()

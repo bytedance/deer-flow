@@ -1476,7 +1476,7 @@ class TestScenarioEdgeCases:
             with (
                 patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
                 patch("src.gateway.routers.uploads.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("src.gateway.routers.uploads.convert_file_to_markdown", side_effect=Exception("conversion failed")),
+                patch("src.gateway.routers.uploads._convert_file_to_markdown_sync", side_effect=Exception("conversion failed")),
             ):
                 result = client.upload_files("t-pdf-fail", [pdf_file])
 
