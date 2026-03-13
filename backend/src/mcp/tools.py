@@ -64,7 +64,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         # slow/unreachable server from blocking agent initialization indefinitely.
         try:
             tools = await asyncio.wait_for(client.get_tools(), timeout=MCP_SERVER_CONNECT_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 f"MCP get_tools() timed out after {MCP_SERVER_CONNECT_TIMEOUT}s. "
                 "One or more configured MCP servers may be unreachable. Returning empty tool list."

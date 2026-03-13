@@ -225,7 +225,7 @@ async def _fetch_server_tools(
         return server_name, McpServerToolsResult(
             tools=[McpToolInfo(name=t.name, description=t.description or "") for t in tools],
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(f"Timeout while fetching tools from MCP server '{server_name}'")
         return server_name, McpServerToolsResult(error=f"Connection timed out after {MCP_SERVER_CONNECT_TIMEOUT}s")
     except Exception as e:
