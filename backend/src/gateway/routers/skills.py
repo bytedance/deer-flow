@@ -4,7 +4,9 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -57,7 +59,20 @@ class SkillInstallResponse(BaseModel):
 
 
 # Allowed properties in SKILL.md frontmatter
-ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata"}
+ALLOWED_FRONTMATTER_PROPERTIES = {
+    "name",
+    "description",
+    "license",
+    "allowed-tools",
+    "metadata",
+    "compatibility",
+    "version",
+    "author",
+}
+
+
+def _safe_load_frontmatter(frontmatter_text: str) -> object:
+    return cast(object, yaml.safe_load(frontmatter_text))
 
 
 def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
@@ -86,9 +101,11 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
 
     # Parse YAML frontmatter
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-        if not isinstance(frontmatter, dict):
+        parsed_frontmatter = _safe_load_frontmatter(frontmatter_text)
+        if not isinstance(parsed_frontmatter, Mapping):
             return False, "Frontmatter must be a YAML dictionary", None
+        parsed_frontmatter = cast(Mapping[object, object], parsed_frontmatter)
+        frontmatter: dict[str, object] = {str(key): value for key, value in parsed_frontmatter.items()}
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}", None
 
