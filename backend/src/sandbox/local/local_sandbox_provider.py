@@ -38,6 +38,9 @@ class LocalSandboxProvider(SandboxProvider):
 
         return mappings
 
+    def get_existing(self, thread_id: str) -> str | None:
+        return "local" if _singleton is not None else None
+
     def acquire(self, thread_id: str | None = None) -> str:
         global _singleton
         if _singleton is None:

@@ -726,7 +726,7 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
-        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, _convert_file_to_markdown_sync
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -745,26 +745,9 @@ class DeerFlowClient:
         uploads_dir = self._get_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
 
-        conversion_pool = None
-        if has_convertible_file:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                conversion_pool = None
-            else:
-                import concurrent.futures
-
-                # Reuse one worker when already inside an event loop to avoid
-                # creating a new ThreadPoolExecutor per converted file.
-                conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-        def _convert_in_thread(path: Path):
-            return asyncio.run(convert_file_to_markdown(path))
-
-        try:
-            for src_path in resolved_files:
-                dest = uploads_dir / src_path.name
-                shutil.copy2(src_path, dest)
+        for src_path in resolved_files:
+            dest = uploads_dir / src_path.name
+            shutil.copy2(src_path, dest)
 
                 info: dict[str, Any] = {
                     "filename": src_path.name,
@@ -774,19 +757,12 @@ class DeerFlowClient:
                     "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
                 }
 
-                if src_path.suffix.lower() in convertible_extensions:
-                    try:
-                        if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
-                        else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest))
-                    except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
-                        md_path = None
+            if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                try:
+                    md_path = _convert_file_to_markdown_sync(dest)
+                except Exception:
+                    logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
+                    md_path = None
 
                     if md_path is not None:
                         info["markdown_file"] = md_path.name

@@ -17,6 +17,19 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def get_existing(self, thread_id: str) -> str | None:
+        """Get the sandbox ID for a thread if one already exists.
+
+        Unlike acquire(), this does NOT create a new sandbox.
+
+        Args:
+            thread_id: The thread ID to look up.
+
+        Returns:
+            The sandbox ID if one exists, None otherwise.
+        """
+        return None
+
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox environment by ID.
@@ -34,6 +47,22 @@ class SandboxProvider(ABC):
             sandbox_id: The ID of the sandbox environment to destroy.
         """
         pass
+
+    def sync_outputs_to_storage(self, sandbox_id: str, thread_id: str) -> None:
+        """Sync output files from sandbox to persistent storage.
+
+        Called after each agent turn in task mode to ensure outputs survive
+        sandbox teardown. No-op by default — cloud providers override this.
+
+        Args:
+            sandbox_id: The sandbox to sync from.
+            thread_id: The thread that owns the outputs.
+        """
+        pass
+
+    def is_task_mode(self) -> bool:
+        """Check if this provider is running in task-scoped mode."""
+        return False
 
 
 _default_sandbox_provider: SandboxProvider | None = None

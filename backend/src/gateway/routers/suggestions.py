@@ -102,7 +102,8 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
     )
 
     try:
-        model = create_chat_model(name=request.model_name, thinking_enabled=False)
+        model_name = request.model_name or "gemini-3.1-flash-lite"
+        model = create_chat_model(name=model_name, thinking_enabled=False)
         response = model.invoke(prompt)
         raw = str(response.content or "")
         suggestions = _parse_json_string_list(raw) or []

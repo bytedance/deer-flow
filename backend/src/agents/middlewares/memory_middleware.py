@@ -8,6 +8,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from src.agents.memory.queue import get_memory_queue
+from src.utils.runtime import get_thread_id
 from src.config.memory_config import get_memory_config
 
 
@@ -120,7 +121,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
 
         # Get thread ID from runtime context
-        thread_id = runtime.context.get("thread_id")
+        thread_id = get_thread_id(runtime)
         if not thread_id:
             print("MemoryMiddleware: No thread_id in context, skipping memory update")
             return None

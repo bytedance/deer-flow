@@ -261,18 +261,16 @@ export function useThreadStream({
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
       try {
-        // Upload files first if any
+        // Upload files first if any — must complete before submitting message
+        // so the agent can access files in storage/sandbox
         if (message.files && message.files.length > 0) {
           try {
             // Convert FileUIPart to File objects by fetching blob URLs
             const filePromises = message.files.map(async (fileUIPart) => {
               if (fileUIPart.url && fileUIPart.filename) {
                 try {
-                  // Fetch the blob URL to get the file data
                   const response = await fetch(fileUIPart.url);
                   const blob = await response.blob();
-
-                  // Create a File object from the blob
                   return new File([blob], fileUIPart.filename, {
                     type: fileUIPart.mediaType || blob.type,
                   });
@@ -304,6 +302,7 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
+              // Uses presigned URLs (direct browser→R2) with multipart fallback
               const uploadResponse = await uploadFiles(threadId, files);
               uploadedFileInfo = uploadResponse.files;
 

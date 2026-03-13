@@ -1,6 +1,6 @@
 import base64
 import io
-import json
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Annotated
@@ -9,56 +9,75 @@ from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
-from PIL import Image
 
 from src.agents.thread_state import ThreadState
-from src.sandbox.tools import get_thread_data, is_local_sandbox, replace_virtual_path
+from src.sandbox.tools import get_thread_data, replace_virtual_path
 
-# Max dimension for resizing images before sending to the LLM.
-# 1024px is sufficient for vision models to understand content while keeping tokens low.
+logger = logging.getLogger(__name__)
+
+# Max dimension (width or height) for images sent to LLM.
+# GPT-4o and Claude both downscale internally — sending 4K is pure waste.
+# 1024px is enough for the model to see composition, details, and quality.
 MAX_IMAGE_DIMENSION = 1024
 
+# JPEG quality for compressed images sent to LLM context.
+# 85 is visually lossless while being ~5-10x smaller than PNG.
+JPEG_QUALITY = 85
 
-def _resize_image_bytes(image_data: bytes, mime_type: str) -> tuple[bytes, str]:
-    """Resize image to fit within MAX_IMAGE_DIMENSION, preserving aspect ratio.
 
-    Returns the (possibly resized) image bytes and the output mime type.
-    If the image is already small enough, returns the original data unchanged.
+def _resize_and_compress(image_data: bytes, max_dim: int = MAX_IMAGE_DIMENSION) -> tuple[bytes, str]:
+    """Resize image to fit within max_dim and compress as JPEG.
+
+    A 4K PNG (10-20MB) becomes a 1024px JPEG (~50-150KB).
+    This saves ~99% of tokens vs sending the raw image.
+
+    Args:
+        image_data: Raw image bytes.
+        max_dim: Maximum dimension (width or height).
+
+    Returns:
+        Tuple of (compressed_bytes, mime_type).
     """
     try:
+        from PIL import Image
+
         img = Image.open(io.BytesIO(image_data))
-        w, h = img.size
 
-        if w <= MAX_IMAGE_DIMENSION and h <= MAX_IMAGE_DIMENSION:
-            return image_data, mime_type
+        # Log original size
+        orig_size = len(image_data)
+        orig_w, orig_h = img.size
 
-        # Calculate new dimensions preserving aspect ratio
-        ratio = min(MAX_IMAGE_DIMENSION / w, MAX_IMAGE_DIMENSION / h)
-        new_w = int(w * ratio)
-        new_h = int(h * ratio)
+        # Resize if larger than max_dim
+        if max(orig_w, orig_h) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.LANCZOS)
 
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-
-        # Re-encode to the same format (default JPEG for smaller size)
-        buf = io.BytesIO()
-        out_format = "JPEG"
-        out_mime = "image/jpeg"
-        if mime_type == "image/png":
-            out_format = "PNG"
-            out_mime = "image/png"
-        elif mime_type == "image/webp":
-            out_format = "WEBP"
-            out_mime = "image/webp"
-
-        # Convert RGBA to RGB for JPEG
-        if out_format == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+        # Convert to RGB if needed (PNG with alpha, palette mode, etc.)
+        if img.mode in ("RGBA", "P", "LA"):
+            # Preserve transparency info in a white background
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if "A" in img.mode else None)
+            img = background
+        elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        img.save(buf, format=out_format, quality=85)
-        return buf.getvalue(), out_mime
-    except Exception:
-        # If resizing fails, return original data
-        return image_data, mime_type
+        # Compress as JPEG
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+        compressed = buffer.getvalue()
+
+        new_w, new_h = img.size
+        logger.info(
+            f"Image resized for LLM: {orig_w}x{orig_h} ({orig_size:,}B) → "
+            f"{new_w}x{new_h} ({len(compressed):,}B) — "
+            f"{orig_size / max(len(compressed), 1):.0f}x smaller"
+        )
+
+        return compressed, "image/jpeg"
+    except Exception as e:
+        logger.warning(f"Image resize failed, using original: {e}")
+        return image_data, "image/png"
 
 
 @tool("view_image", parse_docstring=True)
@@ -120,25 +139,15 @@ def view_image_tool(
             update={"messages": [ToolMessage(f"Error: Unsupported image format: {path.suffix}. Supported formats: {', '.join(valid_extensions)}", tool_call_id=tool_call_id)]},
         )
 
-    # Detect MIME type from file extension
-    mime_type, _ = mimetypes.guess_type(actual_path)
-    if mime_type is None:
-        extension_to_mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-        }
-        mime_type = extension_to_mime.get(path.suffix.lower(), "application/octet-stream")
-
-    # Read image file, resize to save tokens, and convert to base64
+    # Read image file, resize for LLM, and convert to base64
     try:
         with open(actual_path, "rb") as f:
-            image_data = f.read()
+            raw_data = f.read()
 
-        # Resize to max 1024px to keep token usage reasonable
-        image_data, mime_type = _resize_image_bytes(image_data, mime_type)
-        image_base64 = base64.b64encode(image_data).decode("utf-8")
+        # Resize and compress before sending to LLM
+        # 4K PNG (10-20MB) → 1024px JPEG (~50-150KB) — 99% smaller
+        compressed_data, mime_type = _resize_and_compress(raw_data)
+        image_base64 = base64.b64encode(compressed_data).decode("utf-8")
     except Exception as e:
         return Command(
             update={"messages": [ToolMessage(f"Error reading image file: {str(e)}", tool_call_id=tool_call_id)]},
