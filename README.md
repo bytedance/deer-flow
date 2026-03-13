@@ -94,9 +94,17 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
        max_tokens: 4096                  # Maximum tokens per request
        temperature: 0.7                  # Sampling temperature
+
+     - name: openrouter-gemini-2.5-flash
+       display_name: Gemini 2.5 Flash (OpenRouter)
+       use: langchain_openai:ChatOpenAI
+       model: google/gemini-2.5-flash-preview
+       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       base_url: https://openrouter.ai/api/v1
    ```
 
-  
+   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -107,6 +115,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```bash
    TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
+   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
    # Add other provider keys as needed
    INFOQUEST_API_KEY=your-infoquest-api-key
    ```
