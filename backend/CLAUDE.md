@@ -97,9 +97,38 @@ Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
 
+Boundary check (harness → app import firewall):
+- `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
+
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
 ## Architecture
+
+### Harness / App Split
+
+The backend is split into two layers with a strict dependency direction:
+
+- **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
+- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram).
+
+**Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
+
+**Import conventions**:
+```python
+# Harness internal
+from deerflow.agents import make_lead_agent
+from deerflow.models import create_chat_model
+
+# App internal
+from app.gateway.app import app
+from app.channels.service import start_channel_service
+
+# App → Harness (allowed)
+from deerflow.config import get_app_config
+
+# Harness → App (FORBIDDEN — enforced by test_harness_boundary.py)
+# from app.gateway.routers.uploads import ...  # ← will fail CI
+```
 
 ### Agent System
 
