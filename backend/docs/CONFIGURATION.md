@@ -75,7 +75,7 @@ Configure specific tools available to the agent:
 tools:
   - name: web_search
     group: web
-    use: src.community.tavily.tools:web_search_tool
+    use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Optional
 ```
@@ -96,13 +96,13 @@ DeerFlow supports multiple sandbox execution modes. Configure your preferred mod
 **Local Execution** (runs sandbox code directly on the host machine):
 ```yaml
 sandbox:
-   use: src.sandbox.local:LocalSandboxProvider # Local execution
+   use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
 ```yaml
 sandbox:
-   use: src.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
 
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
@@ -111,7 +111,7 @@ This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine
 
 ```yaml
 sandbox:
-   use: src.community.aio_sandbox:AioSandboxProvider
+   use: deerflow.community.aio_sandbox:AioSandboxProvider
    provisioner_url: http://provisioner:8002
 ```
 
@@ -124,13 +124,13 @@ Choose between local execution or Docker-based isolation:
 **Option 1: Local Sandbox** (default, simpler setup):
 ```yaml
 sandbox:
-  use: src.sandbox.local:LocalSandboxProvider
+  use: deerflow.sandbox.local:LocalSandboxProvider
 ```
 
 **Option 2: Docker Sandbox** (isolated, more secure):
 ```yaml
 sandbox:
-  use: src.community.aio_sandbox:AioSandboxProvider
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
   port: 8080
   auto_start: true
   container_prefix: deer-flow-sandbox

@@ -125,7 +125,7 @@ The function remains **100% backward compatible**:
 Memory is **dynamically injected** via `MemoryMiddleware.before_model()`:
 
 ```python
-# src/agents/middlewares/memory_middleware.py
+# packages/harness/deerflow/agents/middlewares/memory_middleware.py
 
 def _extract_conversation_context(messages: list, max_turns: int = 3) -> str:
     """Extract recent conversation (user input + final responses only)."""

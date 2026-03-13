@@ -88,7 +88,7 @@ text = "This is a test string to count tokens accurately."
 使用 `before_model` 钩子在**每次 LLM 调用前**注入 memory：
 
 ```python
-# src/agents/middlewares/memory_middleware.py
+# packages/harness/deerflow/agents/middlewares/memory_middleware.py
 
 def _extract_conversation_context(messages: list, max_turns: int = 3) -> str:
     """提取最近 3 轮对话（只包含用户输入和最终回复）"""
@@ -216,9 +216,9 @@ uv sync
 ## 文件变更清单
 
 1. **核心功能**
-   - `src/agents/memory/prompt.py` - 添加 TF-IDF 召回和精确 token 计数
-   - `src/agents/lead_agent/prompt.py` - 动态系统提示
-   - `src/agents/lead_agent/agent.py` - 传入函数而非字符串
+   - `packages/harness/deerflow/agents/memory/prompt.py` - 添加 TF-IDF 召回和精确 token 计数
+   - `packages/harness/deerflow/agents/lead_agent/prompt.py` - 动态系统提示
+   - `packages/harness/deerflow/agents/lead_agent/agent.py` - 传入函数而非字符串
 
 2. **依赖**
    - `pyproject.toml` - 添加 tiktoken 和 scikit-learn

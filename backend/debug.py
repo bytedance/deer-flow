@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Load environment variables
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-
 from src.agents import make_lead_agent
 
 load_dotenv()

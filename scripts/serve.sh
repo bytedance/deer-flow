@@ -30,7 +30,7 @@ fi
 
 echo "Stopping existing services if any..."
 pkill -f "langgraph dev" 2>/dev/null || true
-pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
+pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
 pkill -f "next-server" 2>/dev/null || true
 nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
@@ -85,7 +85,7 @@ cleanup() {
     echo ""
     echo "Shutting down services..."
     pkill -f "langgraph dev" 2>/dev/null || true
-    pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
+    pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
     # Kill nginx using the captured PID first (most reliable),
@@ -126,7 +126,7 @@ echo "Starting LangGraph server..."
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-(cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
+(cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log

@@ -50,7 +50,7 @@ checkpointer = PostgresSaver.from_conn_string(
 ```json
 {
   "graphs": {
-    "lead_agent": "src.agents:lead_agent"
+    "lead_agent": "deerflow.agents:lead_agent"
   },
   "checkpointer": "checkpointer:checkpointer"
 }
@@ -71,7 +71,7 @@ title:
 或在代码中配置：
 
 ```python
-from src.config.title_config import TitleConfig, set_title_config
+from deerflow.config.title_config import TitleConfig, set_title_config
 
 set_title_config(TitleConfig(
     enabled=True,
@@ -185,7 +185,7 @@ sequenceDiagram
 ```python
 # 测试 title 生成
 import pytest
-from src.agents.title_middleware import TitleMiddleware
+from deerflow.agents.title_middleware import TitleMiddleware
 
 def test_title_generation():
     # TODO: 添加单元测试
@@ -243,11 +243,11 @@ def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | N
 
 ## 相关文件
 
-- [`src/agents/thread_state.py`](../src/agents/thread_state.py) - ThreadState 定义
-- [`src/agents/title_middleware.py`](../src/agents/title_middleware.py) - TitleMiddleware 实现
-- [`src/config/title_config.py`](../src/config/title_config.py) - 配置管理
+- [`packages/harness/deerflow/agents/thread_state.py`](../packages/harness/deerflow/agents/thread_state.py) - ThreadState 定义
+- [`packages/harness/deerflow/agents/title_middleware.py`](../packages/harness/deerflow/agents/title_middleware.py) - TitleMiddleware 实现
+- [`packages/harness/deerflow/config/title_config.py`](../packages/harness/deerflow/config/title_config.py) - 配置管理
 - [`config.yaml`](../config.yaml) - 配置文件
-- [`src/agents/lead_agent/agent.py`](../src/agents/lead_agent/agent.py) - Middleware 注册
+- [`packages/harness/deerflow/agents/lead_agent/agent.py`](../packages/harness/deerflow/agents/lead_agent/agent.py) - Middleware 注册
 
 ## 参考资料
 
