@@ -7,8 +7,6 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
-logger = logging.getLogger(__name__)
-
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.memory_config import load_memory_config_from_dict
@@ -21,6 +19,8 @@ from deerflow.config.title_config import load_title_config_from_dict
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class AppConfig(BaseModel):
