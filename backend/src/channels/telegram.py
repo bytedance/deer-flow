@@ -239,7 +239,11 @@ class TelegramChannel(Channel):
         if update.effective_chat.type == "private":
             topic_id = None
         else:
-            topic_id = msg_id
+            reply_to = update.message.reply_to_message
+            if reply_to:
+                topic_id = str(reply_to.message_id)
+            else:
+                topic_id = msg_id
 
         inbound = self._make_inbound(
             chat_id=chat_id,

@@ -1399,6 +1399,23 @@ class TestTelegramPrivateChatThread:
 
         _run(go())
 
+    def test_cmd_generic_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn library)
