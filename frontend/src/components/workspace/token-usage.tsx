@@ -12,9 +12,42 @@ import {
 import { extractContentFromMessage } from "@/core/messages/utils";
 import { cn } from "@/lib/utils";
 
-// Claude Sonnet 4.6 pricing (per million tokens)
-const INPUT_COST_PER_MILLION = 3;
-const OUTPUT_COST_PER_MILLION = 12;
+// Pricing per million tokens: [input, cached_input, output]
+const MODEL_PRICING: Record<string, [number, number, number]> = {
+  // Anthropic
+  "claude-sonnet-4-20250514": [3, 0.3, 12],
+  "claude-sonnet-4": [3, 0.3, 12],
+  // OpenAI
+  "gpt-4o": [2.5, 1.25, 10],
+  // Google Gemini
+  "gemini-2.5-flash": [0.15, 0.0375, 0.6],
+  "gemini-2.5-flash-preview-05-20": [0.15, 0.0375, 0.6],
+  "gemini-3.1-flash-lite-preview": [0.25, 0.025, 1.5],
+  "gemini-3.1-pro-preview": [2, 0.2, 12],
+};
+
+const DEFAULT_PRICING: [number, number, number] = [3, 0.3, 12];
+
+function getPricing(modelName: string | undefined): [number, number, number] {
+  if (!modelName) return DEFAULT_PRICING;
+  // Exact match first
+  if (MODEL_PRICING[modelName]) return MODEL_PRICING[modelName];
+  // Prefix match (e.g. "claude-sonnet-4-20250514" matches "claude-sonnet-4")
+  for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
+    if (modelName.startsWith(key) || key.startsWith(modelName)) return pricing;
+  }
+  return DEFAULT_PRICING;
+}
+
+function getModelDisplayName(modelName: string | undefined): string {
+  if (!modelName) return "Unknown";
+  if (modelName.includes("claude-sonnet-4")) return "Claude Sonnet 4.6";
+  if (modelName.includes("gpt-4o")) return "GPT-4o";
+  if (modelName.includes("gemini-3.1-flash")) return "Gemini 3.1 Flash Lite";
+  if (modelName.includes("gemini-3.1-pro")) return "Gemini 3.1 Pro";
+  if (modelName.includes("gemini-2.5-flash")) return "Gemini 2.5 Flash";
+  return modelName;
+}
 
 interface UsageMetadata {
   input_tokens?: number;
@@ -30,6 +63,7 @@ interface TurnUsage {
   turnIndex: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   cost: number;
   label: string;
 }
@@ -47,6 +81,28 @@ function getUsageFromMessage(message: Message): UsageMetadata | null {
   if (respMeta?.token_usage) return respMeta.token_usage as UsageMetadata;
 
   return null;
+}
+
+function getModelNameFromMessage(message: Message): string | undefined {
+  const respMeta = (
+    message as Message & { response_metadata?: Record<string, unknown> }
+  ).response_metadata;
+  return respMeta?.model_name as string | undefined;
+}
+
+function calculateCost(
+  inputTokens: number,
+  outputTokens: number,
+  cachedTokens: number,
+  pricing: [number, number, number],
+): number {
+  const [inRate, cachedRate, outRate] = pricing;
+  const uncachedInput = inputTokens - cachedTokens;
+  return (
+    (uncachedInput / 1_000_000) * inRate +
+    (cachedTokens / 1_000_000) * cachedRate +
+    (outputTokens / 1_000_000) * outRate
+  );
 }
 
 function formatTokenCount(count: number): string {
@@ -77,48 +133,69 @@ export function TokenUsage({
 }) {
   const [open, setOpen] = useState(false);
 
-  const { inputTokens, outputTokens, totalTokens, cost, turns } =
-    useMemo(() => {
-      let input = 0;
-      let output = 0;
-      const turns: TurnUsage[] = [];
-      let turnIndex = 0;
+  const {
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+    totalTokens,
+    cost,
+    turns,
+    modelName,
+    pricing,
+  } = useMemo(() => {
+    let input = 0;
+    let output = 0;
+    let cached = 0;
+    const turns: TurnUsage[] = [];
+    let turnIndex = 0;
+    let detectedModel: string | undefined;
 
-      for (const message of messages) {
-        const usage = getUsageFromMessage(message);
-        if (usage) {
-          const msgInput = usage.input_tokens ?? 0;
-          const msgOutput = usage.output_tokens ?? 0;
-          input += msgInput;
-          output += msgOutput;
-          turnIndex++;
-          turns.push({
-            turnIndex,
-            inputTokens: msgInput,
-            outputTokens: msgOutput,
-            cost:
-              (msgInput / 1_000_000) * INPUT_COST_PER_MILLION +
-              (msgOutput / 1_000_000) * OUTPUT_COST_PER_MILLION,
-            label: getMessagePreview(message),
-          });
+    for (const message of messages) {
+      const usage = getUsageFromMessage(message);
+      if (usage) {
+        const msgInput = usage.input_tokens ?? 0;
+        const msgOutput = usage.output_tokens ?? 0;
+        const msgCached = usage.input_token_details?.cache_read ?? 0;
+        if (!detectedModel) {
+          detectedModel = getModelNameFromMessage(message);
         }
+        const msgPricing = getPricing(detectedModel);
+        input += msgInput;
+        output += msgOutput;
+        cached += msgCached;
+        turnIndex++;
+        turns.push({
+          turnIndex,
+          inputTokens: msgInput,
+          outputTokens: msgOutput,
+          cachedTokens: msgCached,
+          cost: calculateCost(msgInput, msgOutput, msgCached, msgPricing),
+          label: getMessagePreview(message),
+        });
       }
+    }
 
-      const total = input + output;
-      const estimatedCost =
-        (input / 1_000_000) * INPUT_COST_PER_MILLION +
-        (output / 1_000_000) * OUTPUT_COST_PER_MILLION;
+    const total = input + output;
+    const pricing = getPricing(detectedModel);
 
-      return {
-        inputTokens: input,
-        outputTokens: output,
-        totalTokens: total,
-        cost: estimatedCost,
-        turns,
-      };
-    }, [messages]);
+    return {
+      inputTokens: input,
+      outputTokens: output,
+      cachedTokens: cached,
+      totalTokens: total,
+      cost: calculateCost(input, output, cached, pricing),
+      turns,
+      modelName: detectedModel,
+      pricing,
+    };
+  }, [messages]);
 
   if (totalTokens === 0) return null;
+
+  const [inRate, cachedRate, outRate] = pricing;
+  const cacheHitRate =
+    inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
+  const displayName = getModelDisplayName(modelName);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -133,14 +210,15 @@ export function TokenUsage({
           <span>{formatTokenCount(totalTokens)} tokens</span>
           <span className="opacity-40">|</span>
           <span>{formatCost(cost)}</span>
+          {cachedTokens > 0 && (
+            <span className="text-green-500 opacity-80">
+              {cacheHitRate}% cached
+            </span>
+          )}
           <ChevronDownIcon className="size-3 opacity-40" />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        className="w-80 p-0"
-        align="end"
-        sideOffset={8}
-      >
+      <PopoverContent className="w-80 p-0" align="end" sideOffset={8}>
         <div className="space-y-3 p-3">
           {/* Summary */}
           <div className="space-y-1.5">
@@ -153,9 +231,15 @@ export function TokenUsage({
                   {formatTokenCount(inputTokens)}
                 </div>
                 <div>Input</div>
+                {cachedTokens > 0 && (
+                  <div className="text-green-500">
+                    {formatTokenCount(cachedTokens)} cached
+                  </div>
+                )}
                 <div className="opacity-60">
                   {formatCost(
-                    (inputTokens / 1_000_000) * INPUT_COST_PER_MILLION,
+                    ((inputTokens - cachedTokens) / 1_000_000) * inRate +
+                      (cachedTokens / 1_000_000) * cachedRate,
                   )}
                 </div>
               </div>
@@ -165,9 +249,7 @@ export function TokenUsage({
                 </div>
                 <div>Output</div>
                 <div className="opacity-60">
-                  {formatCost(
-                    (outputTokens / 1_000_000) * OUTPUT_COST_PER_MILLION,
-                  )}
+                  {formatCost((outputTokens / 1_000_000) * outRate)}
                 </div>
               </div>
               <div className="space-y-0.5">
@@ -203,7 +285,17 @@ export function TokenUsage({
                       </span>
                     </div>
                     <div className="text-muted-foreground ml-2 flex shrink-0 items-center gap-2 tabular-nums">
-                      <span title={`In: ${turn.inputTokens.toLocaleString()}, Out: ${turn.outputTokens.toLocaleString()}`}>
+                      {turn.cachedTokens > 0 && (
+                        <span className="text-green-500 text-[10px]">
+                          {Math.round(
+                            (turn.cachedTokens / turn.inputTokens) * 100,
+                          )}
+                          %
+                        </span>
+                      )}
+                      <span
+                        title={`In: ${turn.inputTokens.toLocaleString()}${turn.cachedTokens > 0 ? ` (${turn.cachedTokens.toLocaleString()} cached)` : ""}, Out: ${turn.outputTokens.toLocaleString()}`}
+                      >
                         {formatTokenCount(turn.inputTokens + turn.outputTokens)}
                       </span>
                       <span className="w-12 text-right opacity-70">
@@ -218,8 +310,9 @@ export function TokenUsage({
 
           {/* Pricing note */}
           <div className="text-muted-foreground/50 border-t pt-2 text-[10px]">
-            Estimated cost based on Claude Sonnet 4.6 pricing ($3/1M in,
-            $12/1M out)
+            {displayName}: ${inRate}/1M in
+            {cachedRate > 0 ? `, $${cachedRate}/1M cached` : ""}, ${outRate}/1M
+            out
           </div>
         </div>
       </PopoverContent>

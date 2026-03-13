@@ -125,38 +125,44 @@ export function groupMessages<T>(
     .filter((result) => result !== undefined && result !== null) as T[];
 }
 
+function stripThinkingTags(text: string): string {
+  return text.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim();
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return message.content.trim();
+    return stripThinkingTags(message.content);
   }
   if (Array.isArray(message.content)) {
-    return message.content
-      .map((content) => (content.type === "text" ? content.text : ""))
-      .join("\n")
-      .trim();
+    return stripThinkingTags(
+      message.content
+        .map((content) => (content.type === "text" ? content.text : ""))
+        .join("\n"),
+    );
   }
   return "";
 }
 
 export function extractContentFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return message.content.trim();
+    return stripThinkingTags(message.content);
   }
   if (Array.isArray(message.content)) {
-    return message.content
-      .map((content) => {
-        switch (content.type) {
-          case "text":
-            return content.text;
-          case "image_url":
-            const imageURL = extractURLFromImageURLContent(content.image_url);
-            return `![image](${imageURL})`;
-          default:
-            return "";
-        }
-      })
-      .join("\n")
-      .trim();
+    return stripThinkingTags(
+      message.content
+        .map((content) => {
+          switch (content.type) {
+            case "text":
+              return content.text;
+            case "image_url":
+              const imageURL = extractURLFromImageURLContent(content.image_url);
+              return `![image](${imageURL})`;
+            default:
+              return "";
+          }
+        })
+        .join("\n"),
+    );
   }
   return "";
 }
