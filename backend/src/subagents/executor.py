@@ -166,15 +166,10 @@ class SubagentExecutor:
         model_name = _get_model_name(self.config, self.parent_model)
         model = create_chat_model(name=model_name, thinking_enabled=False)
 
-        # Subagents need minimal middlewares to ensure tools can access sandbox and thread_data
-        # These middlewares will reuse the sandbox/thread_data from parent agent
-        from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-        from src.sandbox.middleware import SandboxMiddleware
+        from src.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        middlewares = [
-            ThreadDataMiddleware(lazy_init=True),  # Compute thread paths
-            SandboxMiddleware(lazy_init=True),  # Reuse parent's sandbox (no re-acquisition)
-        ]
+        # Reuse shared middleware composition with lead agent.
+        middlewares = build_subagent_runtime_middlewares(lazy_init=True)
 
         return create_agent(
             model=model,
