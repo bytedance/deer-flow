@@ -91,6 +91,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
     2. Only includes user inputs and final assistant responses (ignores tool calls)
     3. The queue uses debouncing to batch multiple updates together
     4. Memory is updated asynchronously via LLM summarization
+    5. In multi-tenant mode, memory is stored per-user
     """
 
     state_schema = MemoryMiddlewareState
@@ -99,7 +100,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         """Initialize the MemoryMiddleware.
 
         Args:
-            agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            agent_name: If provided, memory is stored per-agent. If None, uses user/global memory.
         """
         super().__init__()
         self._agent_name = agent_name
@@ -125,6 +126,9 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             print("MemoryMiddleware: No thread_id in context, skipping memory update")
             return None
 
+        # Get user_id from runtime context for multi-tenant support
+        user_id = runtime.context.get("user_id")
+
         # Get messages from state
         messages = state.get("messages", [])
         if not messages:
@@ -144,6 +148,6 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Queue the filtered conversation for memory update
         queue = get_memory_queue()
-        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name, user_id=user_id)
 
         return None

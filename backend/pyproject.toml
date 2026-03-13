@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-sandbox>=0.0.19",
     "dotenv>=0.9.9",
+    "email-validator>=2.0.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
@@ -22,6 +23,7 @@ dependencies = [
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
     "pydantic>=2.12.5",
+    "pyjwt>=2.8.0",
     "python-multipart>=0.0.20",
     "pyyaml>=6.0.3",
     "readabilipy>=0.3.0",
@@ -43,3 +45,4 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
+redis = ["redis>=5.0.0"]

@@ -14,20 +14,26 @@ from src.agents.memory.prompt import (
 from src.config.memory_config import get_memory_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
+from src.utils.file_helpers import atomic_write_json
 
 
-def _get_memory_file_path(agent_name: str | None = None) -> Path:
+def _get_memory_file_path(agent_name: str | None = None, user_id: str | None = None) -> Path:
     """Get the path to the memory file.
 
     Args:
+        user_id: Optional user ID for multi-tenant mode. If provided, returns per-user memory.
         agent_name: If provided, returns the per-agent memory file path.
-                    If None, returns the global memory file path.
+                    If None, returns the global/user memory file path.
 
     Returns:
         Path to the memory file.
     """
     if agent_name is not None:
         return get_paths().agent_memory_file(agent_name)
+
+    # Per-user memory takes precedence over global memory
+    if user_id is not None:
+        return get_paths().user_memory_file(user_id)
 
     config = get_memory_config()
     if config.storage_path:
@@ -56,24 +62,26 @@ def _create_empty_memory() -> dict[str, Any]:
     }
 
 
-# Per-agent memory cache: keyed by agent_name (None = global)
+# Per-user/per-agent memory cache: keyed by (user_id, agent_name)
 # Value: (memory_data, file_mtime)
-_memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+# user_id=None means global memory, agent_name=None means non-agent memory
+_memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], float | None]] = {}
 
 
-def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+def get_memory_data(user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data (cached with file modification time check).
 
     The cache is automatically invalidated if the memory file has been modified
     since the last load, ensuring fresh data is always returned.
 
     Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        user_id: Optional user ID for multi-tenant mode.
+        agent_name: If provided, loads per-agent memory. If None, loads user/global memory.
 
     Returns:
         The memory data dictionary.
     """
-    file_path = _get_memory_file_path(agent_name)
+    file_path = _get_memory_file_path(agent_name, user_id)
 
     # Get current file modification time
     try:
@@ -81,48 +89,52 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     except OSError:
         current_mtime = None
 
-    cached = _memory_cache.get(agent_name)
+    cache_key = (user_id, agent_name)
+    cached = _memory_cache.get(cache_key)
 
     # Invalidate cache if file has been modified or doesn't exist
     if cached is None or cached[1] != current_mtime:
-        memory_data = _load_memory_from_file(agent_name)
-        _memory_cache[agent_name] = (memory_data, current_mtime)
+        memory_data = _load_memory_from_file(user_id, agent_name)
+        _memory_cache[cache_key] = (memory_data, current_mtime)
         return memory_data
 
     return cached[0]
 
 
-def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+def reload_memory_data(user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
     """Reload memory data from file, forcing cache invalidation.
 
     Args:
-        agent_name: If provided, reloads per-agent memory. If None, reloads global memory.
+        user_id: Optional user ID for multi-tenant mode.
+        agent_name: If provided, reloads per-agent memory. If None, reloads user/global memory.
 
     Returns:
         The reloaded memory data dictionary.
     """
-    file_path = _get_memory_file_path(agent_name)
-    memory_data = _load_memory_from_file(agent_name)
+    file_path = _get_memory_file_path(agent_name, user_id)
+    memory_data = _load_memory_from_file(user_id, agent_name)
 
     try:
         mtime = file_path.stat().st_mtime if file_path.exists() else None
     except OSError:
         mtime = None
 
-    _memory_cache[agent_name] = (memory_data, mtime)
+    cache_key = (user_id, agent_name)
+    _memory_cache[cache_key] = (memory_data, mtime)
     return memory_data
 
 
-def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
+def _load_memory_from_file(user_id: str | None = None, agent_name: str | None = None) -> dict[str, Any]:
     """Load memory data from file.
 
     Args:
-        agent_name: If provided, loads per-agent memory file. If None, loads global.
+        user_id: Optional user ID for multi-tenant mode.
+        agent_name: If provided, loads per-agent memory file. If None, loads user/global.
 
     Returns:
         The memory data dictionary.
     """
-    file_path = _get_memory_file_path(agent_name)
+    file_path = _get_memory_file_path(agent_name, user_id)
 
     if not file_path.exists():
         return _create_empty_memory()
@@ -173,17 +185,18 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
     return memory_data
 
 
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+def _save_memory_to_file(memory_data: dict[str, Any], user_id: str | None = None, agent_name: str | None = None) -> bool:
     """Save memory data to file and update cache.
 
     Args:
         memory_data: The memory data to save.
-        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
+        user_id: Optional user ID for multi-tenant mode.
+        agent_name: If provided, saves to per-agent memory file. If None, saves to user/global.
 
     Returns:
         True if successful, False otherwise.
     """
-    file_path = _get_memory_file_path(agent_name)
+    file_path = _get_memory_file_path(agent_name, user_id)
 
     try:
         # Ensure directory exists
@@ -192,13 +205,8 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         # Update lastUpdated timestamp
         memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
 
-        # Write atomically using temp file
-        temp_path = file_path.with_suffix(".tmp")
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(memory_data, f, indent=2, ensure_ascii=False)
-
-        # Rename temp file to actual file (atomic on most systems)
-        temp_path.replace(file_path)
+        # Write atomically using shared utility
+        atomic_write_json(file_path, memory_data, indent=2)
 
         # Update cache and file modification time
         try:
@@ -206,7 +214,8 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         except OSError:
             mtime = None
 
-        _memory_cache[agent_name] = (memory_data, mtime)
+        cache_key = (user_id, agent_name)
+        _memory_cache[cache_key] = (memory_data, mtime)
 
         print(f"Memory saved to {file_path}")
         return True
@@ -218,13 +227,15 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(self, model_name: str | None = None, user_id: str | None = None):
         """Initialize the memory updater.
 
         Args:
             model_name: Optional model name to use. If None, uses config or default.
+            user_id: Optional user ID for multi-tenant mode.
         """
         self._model_name = model_name
+        self._user_id = user_id
 
     def _get_model(self):
         """Get the model for memory updates."""
@@ -238,7 +249,7 @@ class MemoryUpdater:
         Args:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
-            agent_name: If provided, updates per-agent memory. If None, updates global memory.
+            agent_name: If provided, updates per-agent memory. If None, updates user/global memory.
 
         Returns:
             True if update was successful, False otherwise.
@@ -252,7 +263,7 @@ class MemoryUpdater:
 
         try:
             # Get current memory
-            current_memory = get_memory_data(agent_name)
+            current_memory = get_memory_data(self._user_id, agent_name)
 
             # Format conversation for prompt
             conversation_text = format_conversation_for_update(messages)
@@ -289,7 +300,7 @@ class MemoryUpdater:
             updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
             # Save
-            return _save_memory_to_file(updated_memory, agent_name)
+            return _save_memory_to_file(updated_memory, self._user_id, agent_name)
 
         except json.JSONDecodeError as e:
             print(f"Failed to parse LLM response for memory update: {e}")
@@ -369,16 +380,17 @@ class MemoryUpdater:
         return current_memory
 
 
-def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, user_id: str | None = None, agent_name: str | None = None) -> bool:
     """Convenience function to update memory from a conversation.
 
     Args:
         messages: List of conversation messages.
         thread_id: Optional thread ID.
-        agent_name: If provided, updates per-agent memory. If None, updates global memory.
+        user_id: Optional user ID for multi-tenant mode.
+        agent_name: If provided, updates per-agent memory. If None, updates user/global memory.
 
     Returns:
         True if successful, False otherwise.
     """
-    updater = MemoryUpdater()
+    updater = MemoryUpdater(user_id=user_id)
     return updater.update_memory(messages, thread_id, agent_name)

@@ -9,6 +9,7 @@ from src.gateway.config import get_gateway_config
 from src.gateway.routers import (
     agents,
     artifacts,
+    auth,
     channels,
     mcp,
     memory,
@@ -143,12 +144,19 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
+            {
+                "name": "authentication",
+                "description": "User authentication and token management",
+            },
         ],
     )
 
     # CORS is handled by nginx - no need for FastAPI middleware
 
     # Include routers
+    # Authentication API (no auth required for these endpoints)
+    app.include_router(auth.router)
+
     # Models API is mounted at /api/models
     app.include_router(models.router)
 
