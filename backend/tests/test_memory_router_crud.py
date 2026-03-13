@@ -52,7 +52,7 @@ def test_memory_facts_crud(monkeypatch):
     monkeypatch.setattr(memory_router, "reload_memory_data", fake_reload_memory_data)
     monkeypatch.setattr(memory_router, "save_memory_data", fake_save_memory_data)
 
-    scope_qs = "?namespace_type=chat&namespace_id=tenant-a"
+    scope_qs = "?namespace_type=org_user&namespace_id=tenant-a"
 
     r = client.post(f"/api/memory/facts{scope_qs}", json={"content": "User likes black coffee.", "confidence": 0.91})
     assert r.status_code == 200
@@ -101,6 +101,21 @@ def test_memory_scope_validation_returns_400(monkeypatch):
     r = client.get("/api/memory")
     assert r.status_code == 400
     assert "namespace_type and namespace_id are required" in r.json()["detail"]
+
+
+def test_memory_namespace_type_validation_returns_400(monkeypatch):
+    app = FastAPI()
+    app.include_router(memory_router.router)
+    client = TestClient(app)
+
+    def _raise_namespace_error(**kwargs):
+        raise ValueError("namespace_type must be one of: org_user")
+
+    monkeypatch.setattr(memory_router, "get_memory_data", _raise_namespace_error)
+
+    r = client.get("/api/memory?namespace_type=chat&namespace_id=tenant-a")
+    assert r.status_code == 400
+    assert "namespace_type must be one of: org_user" in r.json()["detail"]
 
 
 def test_memory_config_reports_backend_and_scope_mode(monkeypatch):
@@ -177,7 +192,7 @@ def test_memory_status_reports_backend_and_current_scope_data(monkeypatch):
         },
     )
 
-    r = client.get("/api/memory/status?namespace_type=chat&namespace_id=tenant-a")
+    r = client.get("/api/memory/status?namespace_type=org_user&namespace_id=tenant-a")
 
     assert r.status_code == 200
     body = r.json()

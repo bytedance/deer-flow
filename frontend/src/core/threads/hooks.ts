@@ -354,7 +354,7 @@ export function useThreadStream({
         const namespaceType =
           typeof extraContext?.namespace_type === "string" && extraContext.namespace_type.trim().length > 0
             ? extraContext.namespace_type
-            : "chat";
+            : "org_user";
         const namespaceId =
           typeof extraContext?.namespace_id === "string" && extraContext.namespace_id.trim().length > 0
             ? extraContext.namespace_id
@@ -408,9 +408,9 @@ export function useThreadStream({
   const mergedThread =
     displayMessages !== thread.messages || optimisticMessages.length > 0
       ? ({
-          ...thread,
-          messages: [...displayMessages, ...optimisticMessages],
-        } as typeof thread)
+        ...thread,
+        messages: [...displayMessages, ...optimisticMessages],
+      } as typeof thread)
       : thread;
 
   return [mergedThread, sendMessage] as const;

@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 
 
+ALLOWED_NAMESPACE_TYPES = frozenset({"org_user"})
+_INTERNAL_NAMESPACE_TYPES = frozenset({"global"})
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryScope:
     """Canonical memory scope identity.
@@ -20,6 +24,10 @@ class MemoryScope:
 
         if strict and (not normalized_type or not normalized_id):
             raise ValueError("namespace_type and namespace_id are required when memory.strict_scope=true")
+
+        if normalized_type and normalized_type not in ALLOWED_NAMESPACE_TYPES and normalized_type not in _INTERNAL_NAMESPACE_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_NAMESPACE_TYPES))
+            raise ValueError(f"namespace_type must be one of: {allowed}")
 
         return cls(
             namespace_type=normalized_type or "global",

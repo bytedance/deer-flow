@@ -10,6 +10,7 @@ from typing import Any
 
 from src.agents.memory.constants import is_postgres_backend
 from src.agents.memory.prompt import MEMORY_UPDATE_PROMPT, format_conversation_for_update
+from src.agents.memory.scope import MemoryScope
 from src.config.memory_config import get_memory_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
@@ -21,13 +22,8 @@ def _scope_values(namespace_type: str | None = None, namespace_id: str | None = 
     When strict_scope is disabled, missing scope falls back to global/global.
     """
     config = get_memory_config()
-    wt = namespace_type or ""
-    wid = namespace_id or ""
-
-    if config.strict_scope and (not wt or not wid):
-        raise ValueError("namespace_type and namespace_id are required when memory.strict_scope=true")
-
-    return (wt or "global", wid or "global")
+    scope = MemoryScope.from_values(namespace_type, namespace_id, strict=config.strict_scope)
+    return (scope.namespace_type, scope.namespace_id)
 
 
 def _create_empty_memory() -> dict[str, Any]:

@@ -11,6 +11,7 @@ CREATE TABLE memory_profiles (
   last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT ck_memory_profiles_namespace_type CHECK (namespace_type IN ('org_user', 'global')),
   CONSTRAINT uq_memory_profiles_scope UNIQUE (namespace_type, namespace_id)
 );
 

@@ -1,3 +1,5 @@
+import pytest
+
 from src.agents.memory.scope import MemoryScope
 from src.agents.memory.store import PostgresMemoryStore
 
@@ -45,7 +47,7 @@ def test_save_memory_persists_single_profile_document(monkeypatch):
     store = PostgresMemoryStore("postgres://unused")
     monkeypatch.setattr(store, "_connect", lambda: conn)
 
-    scope = MemoryScope.from_values("chat", "ws-1", strict=True)
+    scope = MemoryScope.from_values("org_user", "ws-1", strict=True)
     payload = {
         "version": "1.0",
         "user": {},
@@ -74,7 +76,7 @@ def test_get_memory_reads_profile_document_only(monkeypatch):
     store = PostgresMemoryStore("postgres://unused")
     monkeypatch.setattr(store, "_connect", lambda: conn)
 
-    scope = MemoryScope.from_values("chat", "ws-r", strict=True)
+    scope = MemoryScope.from_values("org_user", "ws-r", strict=True)
     cursor.fetchone_result = ({"version": "1.0", "user": {}, "history": {}, "facts": [{"id": "fact_a"}]},)
 
     result = store.get_memory(scope)
@@ -84,3 +86,8 @@ def test_get_memory_reads_profile_document_only(monkeypatch):
     sql_text = "\n".join(call[0] for call in cursor.calls)
     assert "SELECT profile_json" in sql_text
     assert "memory_facts" not in sql_text
+
+
+def test_scope_rejects_invalid_namespace_type():
+    with pytest.raises(ValueError, match="namespace_type must be one of: org_user"):
+        MemoryScope.from_values("chat", "ws-r", strict=True)
