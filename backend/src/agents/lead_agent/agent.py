@@ -6,20 +6,17 @@ from langchain_core.runnables import RunnableConfig
 
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
-from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.todo_middleware import TodoMiddleware
-from src.agents.middlewares.uploads_middleware import UploadsMiddleware
+from src.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
 from src.config.agents_config import load_agent_config
 from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
 from src.models import create_chat_model
-from src.sandbox.middleware import SandboxMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +201,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # TitleMiddleware generates title after first exchange
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
+# ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
 def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
     """Build middleware chain based on runtime configuration.
@@ -215,7 +213,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     Returns:
         List of middleware instances.
     """
-    middlewares = [ThreadDataMiddleware(), UploadsMiddleware(), SandboxMiddleware(), DanglingToolCallMiddleware()]
+    middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
