@@ -332,6 +332,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 
+Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
+
 ```
 # Paths inside the sandbox container
 /mnt/skills/public

@@ -60,6 +60,24 @@ def _parse_json_string_list(text: str) -> list[str] | None:
     return out
 
 
+def _extract_response_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts) if parts else ""
+    if content is None:
+        return ""
+    return str(content)
+
+
 def _format_conversation(messages: list[SuggestionMessage]) -> str:
     parts: list[str] = []
     for m in messages:
@@ -104,7 +122,7 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
     try:
         model = create_chat_model(name=request.model_name, thinking_enabled=False)
         response = model.invoke(prompt)
-        raw = str(response.content or "")
+        raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]
         cleaned = cleaned[:n]
