@@ -106,6 +106,17 @@ models:
   #       thinking:
   #         type: enabled
 
+  # Example: OpenRouter (OpenAI-compatible)
+  # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
+  # - name: openrouter-gemini-2.5-flash
+  #   display_name: Gemini 2.5 Flash (OpenRouter)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: google/gemini-2.5-flash-preview
+  #   api_key: $OPENAI_API_KEY
+  #   base_url: https://openrouter.ai/api/v1
+  #   max_tokens: 8192
+  #   temperature: 0.7
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
