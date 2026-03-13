@@ -15,17 +15,17 @@ from src.config.paths import get_paths
 from src.models import create_chat_model
 
 
-def _scope_values(workspace_type: str | None = None, workspace_id: str | None = None) -> tuple[str, str]:
+def _scope_values(namespace_type: str | None = None, namespace_id: str | None = None) -> tuple[str, str]:
     """Resolve effective memory scope values.
 
     When strict_scope is disabled, missing scope falls back to global/global.
     """
     config = get_memory_config()
-    wt = workspace_type or ""
-    wid = workspace_id or ""
+    wt = namespace_type or ""
+    wid = namespace_id or ""
 
     if config.strict_scope and (not wt or not wid):
-        raise ValueError("workspace_type and workspace_id are required when memory.strict_scope=true")
+        raise ValueError("namespace_type and namespace_id are required when memory.strict_scope=true")
 
     return (wt or "global", wid or "global")
 
@@ -52,8 +52,8 @@ def _create_empty_memory() -> dict[str, Any]:
 _memory_cache: dict[tuple[str, str, str | None], tuple[dict[str, Any], float | None]] = {}
 
 
-def _get_memory_file_path(agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> Path:
-    scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+def _get_memory_file_path(agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> Path:
+    scope_type, scope_id = _scope_values(namespace_type, namespace_id)
 
     # For explicit non-global scope, use scoped path tree.
     if scope_type != "global" or scope_id != "global":
@@ -74,8 +74,8 @@ def _get_memory_file_path(agent_name: str | None = None, workspace_type: str | N
     return get_paths().memory_file
 
 
-def _load_memory_from_file(agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
-    file_path = _get_memory_file_path(agent_name, workspace_type, workspace_id)
+def _load_memory_from_file(agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> dict[str, Any]:
+    file_path = _get_memory_file_path(agent_name, namespace_type, namespace_id)
     if not file_path.exists():
         return _create_empty_memory()
 
@@ -87,8 +87,8 @@ def _load_memory_from_file(agent_name: str | None = None, workspace_type: str | 
         return _create_empty_memory()
 
 
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> bool:
-    file_path = _get_memory_file_path(agent_name, workspace_type, workspace_id)
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> bool:
+    file_path = _get_memory_file_path(agent_name, namespace_type, namespace_id)
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         memory_data["lastUpdated"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -104,7 +104,7 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         except OSError:
             mtime = None
 
-        scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+        scope_type, scope_id = _scope_values(namespace_type, namespace_id)
         _memory_cache[(scope_type, scope_id, agent_name)] = (memory_data, mtime)
         return True
     except OSError as e:
@@ -120,7 +120,7 @@ def _pg_connect(database_url: str):
     return psycopg.connect(database_url)
 
 
-def _load_memory_from_postgres(workspace_type: str, workspace_id: str) -> dict[str, Any]:
+def _load_memory_from_postgres(namespace_type: str, namespace_id: str) -> dict[str, Any]:
     config = get_memory_config()
     if not config.database_url:
         raise ValueError("memory.database_url is required when memory.backend=postgres")
@@ -131,9 +131,9 @@ def _load_memory_from_postgres(workspace_type: str, workspace_id: str) -> dict[s
                 """
                 SELECT profile_json
                 FROM memory_profiles
-                WHERE workspace_type = %s AND workspace_id = %s
+                WHERE namespace_type = %s AND namespace_id = %s
                 """,
-                (workspace_type, workspace_id),
+                (namespace_type, namespace_id),
             )
             row = cur.fetchone()
             return dict(row[0]) if row else _create_empty_memory()
@@ -142,7 +142,7 @@ def _load_memory_from_postgres(workspace_type: str, workspace_id: str) -> dict[s
         return _create_empty_memory()
 
 
-def _save_memory_to_postgres(memory_data: dict[str, Any], workspace_type: str, workspace_id: str) -> bool:
+def _save_memory_to_postgres(memory_data: dict[str, Any], namespace_type: str, namespace_id: str) -> bool:
     config = get_memory_config()
     if not config.database_url:
         raise ValueError("memory.database_url is required when memory.backend=postgres")
@@ -154,16 +154,16 @@ def _save_memory_to_postgres(memory_data: dict[str, Any], workspace_type: str, w
         with _pg_connect(config.database_url) as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO memory_profiles (workspace_type, workspace_id, version, profile_json, last_updated, updated_at)
+                INSERT INTO memory_profiles (namespace_type, namespace_id, version, profile_json, last_updated, updated_at)
                 VALUES (%s, %s, %s, %s::jsonb, NOW(), NOW())
-                ON CONFLICT (workspace_type, workspace_id)
+                ON CONFLICT (namespace_type, namespace_id)
                 DO UPDATE SET
                   version = EXCLUDED.version,
                   profile_json = EXCLUDED.profile_json,
                   last_updated = NOW(),
                   updated_at = NOW()
                 """,
-                (workspace_type, workspace_id, profile_json.get("version", "1.0"), json.dumps(profile_json)),
+                (namespace_type, namespace_id, profile_json.get("version", "1.0"), json.dumps(profile_json)),
             )
             conn.commit()
         return True
@@ -172,9 +172,9 @@ def _save_memory_to_postgres(memory_data: dict[str, Any], workspace_type: str, w
         return False
 
 
-def get_memory_data(agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+def get_memory_data(agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> dict[str, Any]:
     config = get_memory_config()
-    scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+    scope_type, scope_id = _scope_values(namespace_type, namespace_id)
 
     if is_postgres_backend(config.backend):
         # Keep reads fresh for DB backend; avoid stale in-process cache.
@@ -196,9 +196,9 @@ def get_memory_data(agent_name: str | None = None, workspace_type: str | None = 
     return cached[0]
 
 
-def reload_memory_data(agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+def reload_memory_data(agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> dict[str, Any]:
     config = get_memory_config()
-    scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+    scope_type, scope_id = _scope_values(namespace_type, namespace_id)
 
     if is_postgres_backend(config.backend):
         return _load_memory_from_postgres(scope_type, scope_id)
@@ -215,10 +215,10 @@ def reload_memory_data(agent_name: str | None = None, workspace_type: str | None
     return memory_data
 
 
-def save_memory_data(memory_data: dict[str, Any], agent_name: str | None = None, workspace_type: str | None = None, workspace_id: str | None = None) -> bool:
+def save_memory_data(memory_data: dict[str, Any], agent_name: str | None = None, namespace_type: str | None = None, namespace_id: str | None = None) -> bool:
     """Persist memory data to the configured backend for the given scope."""
     config = get_memory_config()
-    scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+    scope_type, scope_id = _scope_values(namespace_type, namespace_id)
 
     if is_postgres_backend(config.backend):
         return _save_memory_to_postgres(memory_data, scope_type, scope_id)
@@ -269,15 +269,15 @@ class MemoryUpdater:
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        workspace_type: str | None = None,
-        workspace_id: str | None = None,
+        namespace_type: str | None = None,
+        namespace_id: str | None = None,
     ) -> bool:
         config = get_memory_config()
         if not config.enabled or not messages:
             return False
 
         try:
-            scope_type, scope_id = _scope_values(workspace_type, workspace_id)
+            scope_type, scope_id = _scope_values(namespace_type, namespace_id)
             current_memory = get_memory_data(agent_name, scope_type, scope_id)
 
             conversation_text = format_conversation_for_update(messages)
@@ -363,8 +363,8 @@ def update_memory_from_conversation(
     messages: list[Any],
     thread_id: str | None = None,
     agent_name: str | None = None,
-    workspace_type: str | None = None,
-    workspace_id: str | None = None,
+    namespace_type: str | None = None,
+    namespace_id: str | None = None,
 ) -> bool:
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, workspace_type, workspace_id)
+    return updater.update_memory(messages, thread_id, agent_name, namespace_type, namespace_id)

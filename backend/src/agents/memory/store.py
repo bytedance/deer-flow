@@ -59,7 +59,7 @@ class FileMemoryStore:
                 return p if p.is_absolute() else get_paths().base_dir / p
             return get_paths().memory_file
 
-        scope_dir = get_paths().base_dir / "memory" / scope.workspace_type / scope.workspace_id
+        scope_dir = get_paths().base_dir / "memory" / scope.namespace_type / scope.namespace_id
         if agent_name is None:
             return scope_dir / "memory.json"
 
@@ -161,9 +161,9 @@ class PostgresMemoryStore:
                     """
                     SELECT profile_json
                     FROM memory_profiles
-                    WHERE workspace_type = %s AND workspace_id = %s
+                    WHERE namespace_type = %s AND namespace_id = %s
                     """,
-                    (scope.workspace_type, scope.workspace_id),
+                    (scope.namespace_type, scope.namespace_id),
                 )
                 row = cur.fetchone()
                 return dict(row[0]) if row else empty
@@ -183,16 +183,16 @@ class PostgresMemoryStore:
             with self._connect() as conn, conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO memory_profiles (workspace_type, workspace_id, version, profile_json, last_updated, updated_at)
+                    INSERT INTO memory_profiles (namespace_type, namespace_id, version, profile_json, last_updated, updated_at)
                     VALUES (%s, %s, %s, %s::jsonb, NOW(), NOW())
-                    ON CONFLICT (workspace_type, workspace_id)
+                    ON CONFLICT (namespace_type, namespace_id)
                     DO UPDATE SET
                       version = EXCLUDED.version,
                       profile_json = EXCLUDED.profile_json,
                       last_updated = NOW(),
                       updated_at = NOW()
                     """,
-                    (scope.workspace_type, scope.workspace_id, profile_json.get("version", "1.0"), json.dumps(profile_json)),
+                    (scope.namespace_type, scope.namespace_id, profile_json.get("version", "1.0"), json.dumps(profile_json)),
                 )
 
                 conn.commit()

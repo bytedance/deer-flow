@@ -17,8 +17,8 @@ class ConversationContext:
     messages: list[Any]
     timestamp: datetime = field(default_factory=datetime.utcnow)
     agent_name: str | None = None
-    workspace_type: str | None = None
-    workspace_id: str | None = None
+    namespace_type: str | None = None
+    namespace_id: str | None = None
 
 
 class MemoryUpdateQueue:
@@ -41,8 +41,8 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None = None,
-        workspace_type: str | None = None,
-        workspace_id: str | None = None,
+        namespace_type: str | None = None,
+        namespace_id: str | None = None,
     ) -> None:
         """Add a conversation to the update queue.
 
@@ -59,8 +59,8 @@ class MemoryUpdateQueue:
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
-            workspace_type=workspace_type,
-            workspace_id=workspace_id,
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
         )
 
         with self._lock:
@@ -123,8 +123,8 @@ class MemoryUpdateQueue:
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
-                        workspace_type=context.workspace_type,
-                        workspace_id=context.workspace_id,
+                        namespace_type=context.namespace_type,
+                        namespace_id=context.namespace_id,
                     )
                     if success:
                         print(f"Memory updated successfully for thread {context.thread_id}")

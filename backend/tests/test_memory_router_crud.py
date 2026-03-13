@@ -25,8 +25,8 @@ def _empty_memory() -> dict:
     }
 
 
-def _scope_key(workspace_type: str | None, workspace_id: str | None) -> tuple[str, str]:
-    return (workspace_type or "global", workspace_id or "global")
+def _scope_key(namespace_type: str | None, namespace_id: str | None) -> tuple[str, str]:
+    return (namespace_type or "global", namespace_id or "global")
 
 
 def test_memory_facts_crud(monkeypatch):
@@ -36,15 +36,15 @@ def test_memory_facts_crud(monkeypatch):
 
     state: dict[tuple[str, str], dict] = {}
 
-    def fake_get_memory_data(agent_name=None, workspace_type=None, workspace_id=None):
-        key = _scope_key(workspace_type, workspace_id)
+    def fake_get_memory_data(agent_name=None, namespace_type=None, namespace_id=None):
+        key = _scope_key(namespace_type, namespace_id)
         return deepcopy(state.get(key, _empty_memory()))
 
-    def fake_reload_memory_data(agent_name=None, workspace_type=None, workspace_id=None):
-        return fake_get_memory_data(agent_name=agent_name, workspace_type=workspace_type, workspace_id=workspace_id)
+    def fake_reload_memory_data(agent_name=None, namespace_type=None, namespace_id=None):
+        return fake_get_memory_data(agent_name=agent_name, namespace_type=namespace_type, namespace_id=namespace_id)
 
-    def fake_save_memory_data(memory_data, agent_name=None, workspace_type=None, workspace_id=None):
-        key = _scope_key(workspace_type, workspace_id)
+    def fake_save_memory_data(memory_data, agent_name=None, namespace_type=None, namespace_id=None):
+        key = _scope_key(namespace_type, namespace_id)
         state[key] = deepcopy(memory_data)
         return True
 
@@ -52,7 +52,7 @@ def test_memory_facts_crud(monkeypatch):
     monkeypatch.setattr(memory_router, "reload_memory_data", fake_reload_memory_data)
     monkeypatch.setattr(memory_router, "save_memory_data", fake_save_memory_data)
 
-    scope_qs = "?workspace_type=chat&workspace_id=tenant-a"
+    scope_qs = "?namespace_type=chat&namespace_id=tenant-a"
 
     r = client.post(f"/api/memory/facts{scope_qs}", json={"content": "User likes black coffee.", "confidence": 0.91})
     assert r.status_code == 200
@@ -94,13 +94,13 @@ def test_memory_scope_validation_returns_400(monkeypatch):
     client = TestClient(app)
 
     def _raise_scope_error(**kwargs):
-        raise ValueError("workspace_type and workspace_id are required when memory.strict_scope=true")
+        raise ValueError("namespace_type and namespace_id are required when memory.strict_scope=true")
 
     monkeypatch.setattr(memory_router, "get_memory_data", _raise_scope_error)
 
     r = client.get("/api/memory")
     assert r.status_code == 400
-    assert "workspace_type and workspace_id are required" in r.json()["detail"]
+    assert "namespace_type and namespace_id are required" in r.json()["detail"]
 
 
 def test_memory_config_reports_backend_and_scope_mode(monkeypatch):
@@ -177,7 +177,7 @@ def test_memory_status_reports_backend_and_current_scope_data(monkeypatch):
         },
     )
 
-    r = client.get("/api/memory/status?workspace_type=chat&workspace_id=tenant-a")
+    r = client.get("/api/memory/status?namespace_type=chat&namespace_id=tenant-a")
 
     assert r.status_code == 200
     body = r.json()

@@ -63,7 +63,7 @@ def test_save_memory_persists_single_profile_document(monkeypatch):
 
     sql_text = "\n".join(call[0] for call in cursor.calls)
     assert "INSERT INTO memory_profiles" in sql_text
-    assert "ON CONFLICT (workspace_type, workspace_id)" in sql_text
+    assert "ON CONFLICT (namespace_type, namespace_id)" in sql_text
     assert "memory_facts" not in sql_text
 
 

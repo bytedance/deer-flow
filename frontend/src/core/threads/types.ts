@@ -24,8 +24,8 @@ export interface AgentThread extends Thread<AgentThreadState> { }
 
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
-  workspace_type?: string;
-  workspace_id?: string;
+  namespace_type?: string;
+  namespace_id?: string;
   model_name: string | undefined;
   thinking_enabled: boolean;
   is_plan_mode: boolean;

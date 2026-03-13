@@ -48,7 +48,7 @@ class MemoryConfig(BaseModel):
     )
     strict_scope: bool = Field(
         default=False,
-        description="Require workspace_type/workspace_id for reads and writes when true.",
+        description="Require namespace_type/namespace_id for reads and writes when true.",
     )
     auth_mode: str = Field(
         default="local",

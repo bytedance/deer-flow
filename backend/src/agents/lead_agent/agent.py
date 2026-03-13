@@ -276,8 +276,8 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
-    workspace_type = cfg.get("workspace_type")
-    workspace_id = cfg.get("workspace_id")
+    namespace_type = cfg.get("namespace_type")
+    namespace_id = cfg.get("namespace_id")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
@@ -327,8 +327,8 @@ def make_lead_agent(config: RunnableConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             available_skills=set(["bootstrap"]),
-            workspace_type=workspace_type,
-            workspace_id=workspace_id,
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
         )
 
         return create_agent(
@@ -348,8 +348,8 @@ def make_lead_agent(config: RunnableConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            workspace_type=workspace_type,
-            workspace_id=workspace_id,
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
         ),
         state_schema=ThreadState,
     )

@@ -63,7 +63,7 @@ class MemoryConfigResponse(BaseModel):
     backend: str = Field(..., description="Configured memory backend: 'file' or 'postgres'")
     storage_path: str = Field(..., description="Path to memory storage file")
     database_configured: bool = Field(..., description="Whether a database URL is configured for the selected backend")
-    strict_scope: bool = Field(..., description="Whether workspace_type/workspace_id are required for memory operations")
+    strict_scope: bool = Field(..., description="Whether namespace_type/namespace_id are required for memory operations")
     auth_mode: str = Field(..., description="Scope trust mode used by the memory subsystem")
     debounce_seconds: int = Field(..., description="Debounce time for memory updates")
     max_facts: int = Field(..., description="Maximum number of facts to store")
@@ -97,24 +97,24 @@ class FactUpdateRequest(BaseModel):
     source: str | None = Field(default=None, description="Fact source")
 
 
-def _normalize_scope(workspace_type: str | None, workspace_id: str | None) -> tuple[str | None, str | None]:
-    wt = workspace_type.strip() if isinstance(workspace_type, str) and workspace_type.strip() else None
-    wid = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
+def _normalize_scope(namespace_type: str | None, namespace_id: str | None) -> tuple[str | None, str | None]:
+    wt = namespace_type.strip() if isinstance(namespace_type, str) and namespace_type.strip() else None
+    wid = namespace_id.strip() if isinstance(namespace_id, str) and namespace_id.strip() else None
     return wt, wid
 
 
-def _load_memory_with_scope(workspace_type: str | None, workspace_id: str | None) -> dict:
-    wt, wid = _normalize_scope(workspace_type, workspace_id)
+def _load_memory_with_scope(namespace_type: str | None, namespace_id: str | None) -> dict:
+    wt, wid = _normalize_scope(namespace_type, namespace_id)
     try:
-        return get_memory_data(workspace_type=wt, workspace_id=wid)
+        return get_memory_data(namespace_type=wt, namespace_id=wid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-def _save_memory_with_scope(memory_data: dict, workspace_type: str | None, workspace_id: str | None) -> None:
-    wt, wid = _normalize_scope(workspace_type, workspace_id)
+def _save_memory_with_scope(memory_data: dict, namespace_type: str | None, namespace_id: str | None) -> None:
+    wt, wid = _normalize_scope(namespace_type, namespace_id)
     try:
-        ok = save_memory_data(memory_data, workspace_type=wt, workspace_id=wid)
+        ok = save_memory_data(memory_data, namespace_type=wt, namespace_id=wid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -137,8 +137,8 @@ def _enforce_max_facts(memory_data: dict) -> None:
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
 async def get_memory(
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
     """Get the current global memory data.
 
@@ -173,7 +173,7 @@ async def get_memory(
         }
         ```
     """
-    memory_data = _load_memory_with_scope(workspace_type, workspace_id)
+    memory_data = _load_memory_with_scope(namespace_type, namespace_id)
     return MemoryResponse(**memory_data)
 
 
@@ -184,8 +184,8 @@ async def get_memory(
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
 async def reload_memory(
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
     """Reload memory data from file.
 
@@ -195,9 +195,9 @@ async def reload_memory(
     Returns:
         The reloaded memory data.
     """
-    wt, wid = _normalize_scope(workspace_type, workspace_id)
+    wt, wid = _normalize_scope(namespace_type, namespace_id)
     try:
-        memory_data = reload_memory_data(workspace_type=wt, workspace_id=wid)
+        memory_data = reload_memory_data(namespace_type=wt, namespace_id=wid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return MemoryResponse(**memory_data)
@@ -211,13 +211,13 @@ async def reload_memory(
 )
 async def put_memory(
     payload: MemoryResponse,
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
     memory_data = payload.model_dump()
     _enforce_max_facts(memory_data)
-    _save_memory_with_scope(memory_data, workspace_type, workspace_id)
-    return MemoryResponse(**_load_memory_with_scope(workspace_type, workspace_id))
+    _save_memory_with_scope(memory_data, namespace_type, namespace_id)
+    return MemoryResponse(**_load_memory_with_scope(namespace_type, namespace_id))
 
 
 @router.post(
@@ -228,10 +228,10 @@ async def put_memory(
 )
 async def create_memory_fact(
     payload: FactCreateRequest,
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
-    memory_data = _load_memory_with_scope(workspace_type, workspace_id)
+    memory_data = _load_memory_with_scope(namespace_type, namespace_id)
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     memory_data.setdefault("facts", []).append(
         {
@@ -244,8 +244,8 @@ async def create_memory_fact(
         }
     )
     _enforce_max_facts(memory_data)
-    _save_memory_with_scope(memory_data, workspace_type, workspace_id)
-    return MemoryResponse(**_load_memory_with_scope(workspace_type, workspace_id))
+    _save_memory_with_scope(memory_data, namespace_type, namespace_id)
+    return MemoryResponse(**_load_memory_with_scope(namespace_type, namespace_id))
 
 
 @router.put(
@@ -257,10 +257,10 @@ async def create_memory_fact(
 async def update_memory_fact(
     fact_id: str,
     payload: FactUpdateRequest,
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
-    memory_data = _load_memory_with_scope(workspace_type, workspace_id)
+    memory_data = _load_memory_with_scope(namespace_type, namespace_id)
     facts = memory_data.get("facts", [])
 
     updated = False
@@ -282,8 +282,8 @@ async def update_memory_fact(
         raise HTTPException(status_code=404, detail=f"Fact '{fact_id}' not found")
 
     _enforce_max_facts(memory_data)
-    _save_memory_with_scope(memory_data, workspace_type, workspace_id)
-    return MemoryResponse(**_load_memory_with_scope(workspace_type, workspace_id))
+    _save_memory_with_scope(memory_data, namespace_type, namespace_id)
+    return MemoryResponse(**_load_memory_with_scope(namespace_type, namespace_id))
 
 
 @router.delete(
@@ -294,18 +294,18 @@ async def update_memory_fact(
 )
 async def delete_memory_fact(
     fact_id: str,
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryResponse:
-    memory_data = _load_memory_with_scope(workspace_type, workspace_id)
+    memory_data = _load_memory_with_scope(namespace_type, namespace_id)
     facts = memory_data.get("facts", [])
     remaining = [f for f in facts if f.get("id") != fact_id]
     if len(remaining) == len(facts):
         raise HTTPException(status_code=404, detail=f"Fact '{fact_id}' not found")
 
     memory_data["facts"] = remaining
-    _save_memory_with_scope(memory_data, workspace_type, workspace_id)
-    return MemoryResponse(**_load_memory_with_scope(workspace_type, workspace_id))
+    _save_memory_with_scope(memory_data, namespace_type, namespace_id)
+    return MemoryResponse(**_load_memory_with_scope(namespace_type, namespace_id))
 
 
 @router.get(
@@ -356,8 +356,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     description="Retrieve both memory configuration and current data in a single request.",
 )
 async def get_memory_status(
-    workspace_type: str | None = Query(default=None, description="Workspace type scope key"),
-    workspace_id: str | None = Query(default=None, description="Workspace ID scope key"),
+    namespace_type: str | None = Query(default=None, description="Namespace type scope key"),
+    namespace_id: str | None = Query(default=None, description="Namespace ID scope key"),
 ) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
@@ -365,7 +365,7 @@ async def get_memory_status(
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = _load_memory_with_scope(workspace_type, workspace_id)
+    memory_data = _load_memory_with_scope(namespace_type, namespace_id)
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

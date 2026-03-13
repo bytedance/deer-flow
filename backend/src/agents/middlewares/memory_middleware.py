@@ -149,8 +149,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             thread_id=thread_id,
             messages=filtered_messages,
             agent_name=self._agent_name,
-            workspace_type=runtime.context.get("workspace_type"),
-            workspace_id=runtime.context.get("workspace_id"),
+            namespace_type=runtime.context.get("namespace_type"),
+            namespace_id=runtime.context.get("namespace_id"),
         )
 
         return None

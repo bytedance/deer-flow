@@ -228,7 +228,7 @@ Recent breakthroughs in language models have also accelerated progress
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, workspace_type: str | None = None, workspace_id: str | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, *, namespace_type: str | None = None, namespace_id: str | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
@@ -245,7 +245,7 @@ def _get_memory_context(agent_name: str | None = None, *, workspace_type: str | 
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data(agent_name, workspace_type=workspace_type, workspace_id=workspace_id)
+        memory_data = get_memory_data(agent_name, namespace_type=namespace_type, namespace_id=namespace_id)
         memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():
@@ -332,11 +332,11 @@ def apply_prompt_template(
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
-    workspace_type: str | None = None,
-    workspace_id: str | None = None,
+    namespace_type: str | None = None,
+    namespace_id: str | None = None,
 ) -> str:
     # Get memory context
-    memory_context = _get_memory_context(agent_name, workspace_type=workspace_type, workspace_id=workspace_id)
+    memory_context = _get_memory_context(agent_name, namespace_type=namespace_type, namespace_id=namespace_id)
 
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
