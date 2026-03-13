@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import shutil
+import stat
 import tempfile
 import zipfile
 from pathlib import Path
@@ -16,6 +17,76 @@ from src.skills import Skill, load_skills
 from src.skills.loader import get_skills_root_path
 
 logger = logging.getLogger(__name__)
+
+
+def _is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
+    """Return True if the zip member path is absolute or attempts directory traversal."""
+    name = info.filename
+    if not name:
+        return False
+    path = Path(name)
+    if path.is_absolute():
+        return True
+    if ".." in path.parts:
+        return True
+    return False
+
+
+def _is_symlink_member(info: zipfile.ZipInfo) -> bool:
+    """Detect symlinks based on the external attributes stored in the ZipInfo."""
+    # Upper 16 bits of external_attr contain the Unix file mode when created on Unix.
+    mode = info.external_attr >> 16
+    return stat.S_ISLNK(mode)
+
+
+def _safe_extract_skill_archive(
+    zip_ref: zipfile.ZipFile,
+    dest_path: Path,
+    max_total_size: int = 512 * 1024 * 1024,
+) -> None:
+    """Safely extract a skill archive into dest_path with basic protections.
+
+    Protections:
+    - Reject absolute paths and directory traversal (..).
+    - Skip symlink entries instead of materialising them.
+    - Enforce a hard limit on total uncompressed size to mitigate zip bombs.
+    """
+    dest_root = Path(dest_path).resolve()
+    total_size = 0
+
+    for info in zip_ref.infolist():
+        # Reject absolute paths or any path that attempts directory traversal.
+        if _is_unsafe_zip_member(info):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Archive contains unsafe member path: {info.filename!r}",
+            )
+
+        # Skip any symlink entries instead of materialising them on disk.
+        if _is_symlink_member(info):
+            logger.warning("Skipping symlink entry in skill archive: %s", info.filename)
+            continue
+
+        # Basic unzip-bomb defence: bound the total uncompressed size we will write.
+        total_size += max(info.file_size, 0)
+        if total_size > max_total_size:
+            raise HTTPException(
+                status_code=400,
+                detail="Skill archive is too large or appears highly compressed.",
+            )
+
+        member_path = dest_root / info.filename
+        member_path_parent = member_path.parent
+        member_path_parent.mkdir(parents=True, exist_ok=True)
+
+        if info.is_dir():
+            member_path.mkdir(parents=True, exist_ok=True)
+            continue
+
+        with zip_ref.open(info) as src, open(member_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
 router = APIRouter(prefix="/api", tags=["skills"])
 
 
@@ -413,9 +484,9 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
-            # Extract the .skill file
+            # Extract the .skill file with validation and protections.
             with zipfile.ZipFile(skill_file_path, "r") as zip_ref:
-                zip_ref.extractall(temp_path)
+                _safe_extract_skill_archive(zip_ref, temp_path)
 
             skill_dir = _resolve_skill_dir_from_archive_root(temp_path)
 
