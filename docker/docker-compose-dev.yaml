@@ -61,6 +61,8 @@ services:
   # - nginx.local.conf (default): no provisioner route (local/aio modes)
   # - nginx.conf: includes provisioner route (provisioner mode)
   nginx:
+    profiles:
+      - nginx
     image: nginx:alpine
     container_name: deer-flow-nginx
     ports:
@@ -83,6 +85,8 @@ services:
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
     container_name: deer-flow-frontend
+    ports:
+      - "3000:3000"
     command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
     volumes:
       - ../frontend/src:/app/frontend/src
@@ -109,6 +113,8 @@ services:
       dockerfile: backend/Dockerfile
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
     container_name: deer-flow-gateway
+    ports:
+      - "8001:8001"
     command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
@@ -145,6 +151,8 @@ services:
       dockerfile: backend/Dockerfile
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
     container_name: deer-flow-langgraph
+    ports:
+      - "2024:2024"
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
     volumes:
       - ../backend/:/app/backend/

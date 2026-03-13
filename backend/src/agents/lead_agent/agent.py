@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
 from src.agents.lead_agent.prompt import apply_prompt_template
+from src.agents.middlewares.attachments_resolver_middleware import AttachmentsResolverMiddleware
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -195,6 +196,8 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 
 
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
+# AttachmentsResolverMiddleware should run before UploadsMiddleware so
+# one-go attachment descriptors become normalized files metadata.
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
 # SummarizationMiddleware should be early to reduce context before other processing
@@ -213,7 +216,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     Returns:
         List of middleware instances.
     """
-    middlewares = [ThreadDataMiddleware(), UploadsMiddleware(), SandboxMiddleware(), DanglingToolCallMiddleware()]
+    middlewares = [ThreadDataMiddleware(), AttachmentsResolverMiddleware(), UploadsMiddleware(), SandboxMiddleware(), DanglingToolCallMiddleware()]
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
