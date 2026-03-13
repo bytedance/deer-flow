@@ -73,7 +73,9 @@ def _extract_response_text(content: object) -> str:
                 if isinstance(text, str):
                     parts.append(text)
         return "\n".join(parts) if parts else ""
-    return str(content or "")
+    if content is None:
+        return ""
+    return str(content)
 
 
 def _format_conversation(messages: list[SuggestionMessage]) -> str:
