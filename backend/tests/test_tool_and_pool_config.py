@@ -9,9 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict, get_subagents_app_config
-from src.config.tool_config import ToolConfig, _DEFAULT_MAX_CONTENT_CHARS, get_max_content_chars
-
+from src.config.subagents_config import SubagentsAppConfig, get_subagents_app_config, load_subagents_config_from_dict
+from src.config.tool_config import _DEFAULT_MAX_CONTENT_CHARS, ToolConfig, get_max_content_chars
 
 # ---------------------------------------------------------------------------
 # get_max_content_chars()
