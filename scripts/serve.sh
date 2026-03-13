@@ -108,8 +108,7 @@ trap cleanup INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
-reset_langgraph_dev_state "$REPO_ROOT"
-prepare_langgraph_dev_env
+prepare_langgraph_dev_runtime "$REPO_ROOT"
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS=""

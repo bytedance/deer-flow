@@ -2,7 +2,7 @@ install:
 	uv sync
 
 dev:
-	bash -c 'source ../scripts/langgraph-dev-state.sh && reset_langgraph_dev_state "$$(cd .. && pwd)" && prepare_langgraph_dev_env && uv run langgraph dev --no-browser --allow-blocking --no-reload'
+	bash -c 'source ../scripts/langgraph-dev-state.sh && prepare_langgraph_dev_runtime "$$(cd .. && pwd)" && uv run langgraph dev --no-browser --allow-blocking --no-reload'
 
 gateway:
 	uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001

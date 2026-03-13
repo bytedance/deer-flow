@@ -74,15 +74,15 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
-make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight; resets backend/.langgraph_api for a fresh LangGraph runtime
-make start      # Start all services without hot reloading; also resets backend/.langgraph_api for a fresh LangGraph runtime
+make dev        # Start all services (LangGraph + Gateway + Frontend + Nginx), with config.yaml preflight; resets LangGraph dev runtime only when no persistent checkpointer is configured
+make start      # Start all services without hot reloading; applies the same LangGraph runtime policy as make dev
 make stop       # Stop all services
 ```
 
 **Backend directory** (for backend development only):
 ```bash
 make install    # Install backend dependencies
-make dev        # Run LangGraph server only (port 2024); resets backend/.langgraph_api and disables LangGraph dev file persistence
+make dev        # Run LangGraph server only (port 2024); resets in-memory LangGraph dev state, but preserves metadata when sqlite/postgres checkpointers are configured
 make gateway    # Run Gateway API only (port 8001)
 make test       # Run all backend tests
 make lint       # Lint with ruff

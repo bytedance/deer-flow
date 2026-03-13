@@ -68,8 +68,7 @@ trap cleanup_on_failure INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
-reset_langgraph_dev_state "$REPO_ROOT"
-prepare_langgraph_dev_env
+prepare_langgraph_dev_runtime "$REPO_ROOT"
 
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &

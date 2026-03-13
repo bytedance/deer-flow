@@ -179,7 +179,7 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
    make dev
    ```
 
-   Local startup now clears `backend/.langgraph_api` and disables LangGraph's file-backed in-memory persistence before launching the LangGraph server. This applies to both `make dev` and `make start`, avoiding stale run state after a crash or forced restart. Thread/run history managed inside LangGraph dev mode is therefore not preserved across local restarts.
+   Local startup now resets LangGraph's dev runtime only when no persistent LangGraph checkpointer is configured. For in-memory dev mode, `make dev` and `make start` clear `backend/.langgraph_api` and disable LangGraph's file-backed persistence to avoid stale run state after a crash or forced restart. If sqlite/postgres checkpointers are configured, DeerFlow preserves LangGraph metadata so existing threads remain restorable across restarts.
 
 5. **Access**: http://localhost:2026
 
