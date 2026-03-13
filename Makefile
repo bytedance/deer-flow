@@ -2,6 +2,8 @@
 
 .PHONY: help config check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
+PYTHON ?= python
+
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
@@ -27,17 +29,11 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
-		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
-		exit 1; \
-	fi
-	@cp config.example.yaml config.yaml
-	@test -f .env || cp .env.example .env
-	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@$(PYTHON) ./scripts/configure.py
 
 # Check required tools
 check:
-	@./scripts/check.sh
+	@$(PYTHON) ./scripts/check.py
 
 # Install all dependencies
 install:
