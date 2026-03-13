@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import Any, Self
@@ -5,6 +6,8 @@ from typing import Any, Self
 import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
 
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -76,6 +79,10 @@ class AppConfig(BaseModel):
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
             config_data = yaml.safe_load(f)
+
+        # Check config version before processing
+        cls._check_config_version(config_data, resolved_path)
+
         config_data = cls.resolve_env_variables(config_data)
 
         # Load title config if present
@@ -104,6 +111,35 @@ class AppConfig(BaseModel):
 
         result = cls.model_validate(config_data)
         return result
+
+    @classmethod
+    def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
+        """Check if the user's config.yaml is outdated compared to config.example.yaml.
+
+        Emits a warning if the user's config_version is lower than the example's.
+        Missing config_version is treated as version 0 (pre-versioning).
+        """
+        user_version = config_data.get("config_version", 0)
+
+        # Find config.example.yaml relative to config.yaml location
+        example_path = config_path.parent / "config.example.yaml"
+        if not example_path.exists():
+            return
+
+        try:
+            with open(example_path, encoding="utf-8") as f:
+                example_data = yaml.safe_load(f)
+            example_version = example_data.get("config_version", 0) if example_data else 0
+        except Exception:
+            return
+
+        if user_version < example_version:
+            logger.warning(
+                "Your config.yaml (version %d) is outdated — the latest version is %d. "
+                "Run `make config-upgrade` to merge new fields into your config.",
+                user_version,
+                example_version,
+            )
 
     @classmethod
     def resolve_env_variables(cls, config: Any) -> Any:

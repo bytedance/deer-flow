@@ -2,6 +2,19 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Config Versioning
+
+`config.example.yaml` contains a `config_version` field that tracks schema changes. When the example version is higher than your local `config.yaml`, the application emits a startup warning:
+
+```
+WARNING - Your config.yaml (version 0) is outdated — the latest version is 1.
+Run `make config-upgrade` to merge new fields into your config.
+```
+
+- **Missing `config_version`** in your config is treated as version 0.
+- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
+- When changing the config schema, bump `config_version` in `config.example.yaml`.
+
 ## Configuration Sections
 
 ### Models

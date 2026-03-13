@@ -49,6 +49,10 @@ if ! { \
     exit 1
 fi
 
+# ── Auto-upgrade config ──────────────────────────────────────────────────
+
+"$REPO_ROOT/scripts/config-upgrade.sh"
+
 # ── Cleanup on failure ───────────────────────────────────────────────────────
 
 cleanup_on_failure() {
@@ -73,6 +77,10 @@ nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "✗ LangGraph failed to start. Last log output:"
     tail -60 logs/langgraph.log
+    if grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\.yaml" logs/langgraph.log 2>/dev/null; then
+        echo ""
+        echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
+    fi
     cleanup_on_failure
     exit 1
 }
@@ -83,6 +91,8 @@ nohup sh -c 'cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --hos
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
+    echo ""
+    echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
     cleanup_on_failure
     exit 1
 }

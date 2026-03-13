@@ -8,6 +8,13 @@
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
 # ============================================================================
+# Config Version (used to detect outdated config files)
+# ============================================================================
+# Bump this number when the config schema changes.
+# Run `make config-upgrade` to merge new fields into your local config.yaml.
+config_version: 1
+
+# ============================================================================
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use

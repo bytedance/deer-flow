@@ -170,6 +170,8 @@ Middlewares execute in strict order in `packages/harness/deerflow/agents/lead_ag
 
 Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
 
+**Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
+
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_CONFIG_PATH` environment variable

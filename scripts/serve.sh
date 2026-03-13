@@ -78,6 +78,10 @@ if ! { \
     exit 1
 fi
 
+# ── Auto-upgrade config ──────────────────────────────────────────────────
+
+"$REPO_ROOT/scripts/config-upgrade.sh"
+
 # ── Cleanup trap ─────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -121,6 +125,10 @@ echo "Starting LangGraph server..."
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "  See logs/langgraph.log for details"
     tail -20 logs/langgraph.log
+    if grep -qE "config_version|outdated|Environment variable .* not found|KeyError|ValidationError|config\.yaml" logs/langgraph.log 2>/dev/null; then
+        echo ""
+        echo "  Hint: This may be a configuration issue. Try running 'make config-upgrade' to update your config.yaml."
+    fi
     cleanup
 }
 echo "✓ LangGraph server started on localhost:2024"
@@ -133,6 +141,8 @@ echo "Starting Gateway API..."
     echo ""
     echo "Likely configuration errors:"
     grep -E "Failed to load configuration|Environment variable .* not found|config\.yaml.*not found" logs/gateway.log | tail -5 || true
+    echo ""
+    echo "  Hint: Try running 'make config-upgrade' to update your config.yaml with the latest fields."
     cleanup
 }
 echo "✓ Gateway API started on localhost:8001"
