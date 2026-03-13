@@ -71,9 +71,9 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        thread_id = runtime.context.get("thread_id") if runtime.context is not None else None
         if thread_id is None:
-            raise ValueError("Thread ID is required in the context")
+            raise ValueError("Thread ID is required in the runtime context (context was None or missing thread_id)")
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories

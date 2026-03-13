@@ -111,14 +111,77 @@ class TestTitleMiddlewareCoreLogic:
         assert title.endswith("...")
         assert title.startswith("这是一个非常长的问题描述")
 
-    def test_after_agent_returns_title_only_when_needed(self, monkeypatch):
+    def test_aafter_model_returns_none_and_schedules_background_task(self, monkeypatch):
+        """aafter_model must return None immediately and launch a background task for title generation.
+
+        The title is no longer returned inline; instead it is patched into the thread
+        state asynchronously via _generate_and_patch_title so that the run stream can
+        end without waiting 5-10 s for the LLM title call (issue #887).
+        """
         middleware = TitleMiddleware()
         monkeypatch.setattr(middleware, "_should_generate_title", lambda state: True)
-        monkeypatch.setattr(middleware, "_generate_title", AsyncMock(return_value="核心逻辑回归"))
 
-        result = asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock()))
+        patched_calls: list[str] = []
 
-        assert result == {"title": "核心逻辑回归"}
+        async def mock_patch(state, thread_id):
+            patched_calls.append(thread_id)
 
+        monkeypatch.setattr(middleware, "_generate_and_patch_title", mock_patch)
+
+        mock_runtime = MagicMock()
+        mock_runtime.context = {"thread_id": "thread-abc"}
+
+        async def run():
+            result = await middleware.aafter_model({"messages": []}, runtime=mock_runtime)
+            assert result is None, "aafter_model must return None to avoid blocking the run stream"
+            # Yield control so the background task can execute
+            await asyncio.sleep(0)
+            assert patched_calls == ["thread-abc"], "background task must call _generate_and_patch_title"
+
+        asyncio.run(run())
+
+    def test_aafter_model_skips_task_when_not_needed(self, monkeypatch):
+        """No background task is created when _should_generate_title returns False."""
+        middleware = TitleMiddleware()
         monkeypatch.setattr(middleware, "_should_generate_title", lambda state: False)
-        assert asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock())) is None
+
+        patched_calls: list[str] = []
+
+        async def mock_patch(state, thread_id):
+            patched_calls.append(thread_id)
+
+        monkeypatch.setattr(middleware, "_generate_and_patch_title", mock_patch)
+
+        mock_runtime = MagicMock()
+        mock_runtime.context = {"thread_id": "thread-abc"}
+
+        async def run():
+            result = await middleware.aafter_model({"messages": []}, runtime=mock_runtime)
+            assert result is None
+            await asyncio.sleep(0)
+            assert patched_calls == [], "no background task should be created when title is not needed"
+
+        asyncio.run(run())
+
+    def test_aafter_model_skips_task_when_context_is_none(self, monkeypatch):
+        """No background task is created when runtime.context is None (defensive guard)."""
+        middleware = TitleMiddleware()
+        monkeypatch.setattr(middleware, "_should_generate_title", lambda state: True)
+
+        patched_calls: list[str] = []
+
+        async def mock_patch(state, thread_id):
+            patched_calls.append(thread_id)
+
+        monkeypatch.setattr(middleware, "_generate_and_patch_title", mock_patch)
+
+        mock_runtime = MagicMock()
+        mock_runtime.context = None
+
+        async def run():
+            result = await middleware.aafter_model({"messages": []}, runtime=mock_runtime)
+            assert result is None
+            await asyncio.sleep(0)
+            assert patched_calls == [], "no background task when context is None"
+
+        asyncio.run(run())
