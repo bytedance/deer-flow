@@ -69,10 +69,14 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         self.max_turns = max_turns
         # Each model call consumes ~8 graph steps (model node + tools node +
         # middleware nodes).  Estimate effective model calls from recursion_limit.
-        effective_calls = max(max_turns // 8, 10)
-        self.warn_at = int(effective_calls * warn_fraction)
-        self.urgent_at = int(effective_calls * urgent_fraction)
-        self.force_at = int(effective_calls * force_fraction)
+        # Derive effective_calls directly from max_turns // 8 without inflating
+        # the budget, but ensure at least 1 to avoid zero thresholds.
+        effective_calls = max(max_turns // 8, 1)
+        # Compute thresholds from fractions, then clamp them into [1, effective_calls]
+        # so they fire within the actual budget without overstating it.
+        self.warn_at = max(1, min(int(effective_calls * warn_fraction), effective_calls))
+        self.urgent_at = max(1, min(int(effective_calls * urgent_fraction), effective_calls))
+        self.force_at = max(1, min(int(effective_calls * force_fraction), effective_calls))
         # Direct invocation counter per thread (immune to summarization)
         self._call_count: dict[str, int] = defaultdict(int)
         # Track which warnings we've already sent per thread to avoid spam
