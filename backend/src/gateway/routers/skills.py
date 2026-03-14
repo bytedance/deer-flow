@@ -129,6 +129,18 @@ class SkillInstallResponse(BaseModel):
     message: str = Field(..., description="Installation result message")
 
 
+class SkillsConfigResponse(BaseModel):
+    """Response model for global skills configuration."""
+
+    allow_external_skills: bool = Field(..., alias="allowExternalSkills")
+
+
+class SkillsConfigUpdateRequest(BaseModel):
+    """Request model for updating global skills configuration."""
+
+    allow_external_skills: bool = Field(..., alias="allowExternalSkills")
+
+
 # Allowed properties in SKILL.md frontmatter
 ALLOWED_FRONTMATTER_PROPERTIES = {
     "name",
@@ -291,6 +303,46 @@ async def list_skills() -> SkillsListResponse:
 
 
 @router.get(
+    "/skills/config",
+    response_model=SkillsConfigResponse,
+    summary="Get Skills Config",
+    description="Retrieve global skills configuration settings.",
+)
+async def get_skills_config() -> SkillsConfigResponse:
+    """Get global skills configuration."""
+    config = get_extensions_config()
+    return SkillsConfigResponse(allowExternalSkills=config.allow_external_skills)
+
+
+@router.put(
+    "/skills/config",
+    response_model=SkillsConfigResponse,
+    summary="Update Skills Config",
+    description="Update global skills configuration settings.",
+)
+async def update_skills_config(request: SkillsConfigUpdateRequest) -> SkillsConfigResponse:
+    """Update global skills configuration."""
+    try:
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None:
+            config_path = Path.cwd().parent / "extensions_config.json"
+
+        config = get_extensions_config()
+        config.allow_external_skills = request.allow_external_skills
+
+        # Save the updated config
+        config_data = config.model_dump(by_alias=True, exclude_none=True)
+        with open(config_path, "w") as f:
+            json.dump(config_data, f, indent=2)
+
+        reload_extensions_config()
+        return SkillsConfigResponse(allowExternalSkills=config.allow_external_skills)
+    except Exception as e:
+        logger.error(f"Failed to update skills config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update skills config: {str(e)}")
+
+
+@router.get(
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Get Skill Details",
@@ -395,11 +447,8 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
         # Update the skill's enabled status
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
 
-        # Convert to JSON format (preserve MCP servers config)
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
+        # Write the configuration to file using all fields
+        config_data = extensions_config.model_dump(by_alias=True, exclude_none=True)
 
         # Write the configuration to file
         with open(config_path, "w") as f:

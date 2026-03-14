@@ -1,5 +1,3 @@
-"""Tests for recursive skills loading."""
-
 from pathlib import Path
 
 from src.skills.loader import load_skills
@@ -55,3 +53,27 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
 
     assert "ok-skill" in names
     assert "secret-skill" not in names
+
+
+def test_load_skills_prevents_infinite_recursion_from_symlink_cycles(tmp_path: Path):
+    """Circular symlinks should not cause infinite recursion."""
+    skills_root = tmp_path / "skills"
+    public_root = skills_root / "public"
+    public_root.mkdir(parents=True)
+
+    # Create a skill
+    skill_dir = public_root / "real-skill"
+    _write_skill(skill_dir, "real-skill", "Real skill")
+
+    # Create a symlink cycle: parent -> child (pointing back to parent)
+    parent_dir = public_root / "parent"
+    parent_dir.mkdir()
+    child_symlink = parent_dir / "child"
+    child_symlink.symlink_to(parent_dir, target_is_directory=True)
+
+    # load_skills should finish without hanging
+    skills = load_skills(skills_path=skills_root, use_config=False, enabled_only=False)
+
+    names = {skill.name for skill in skills}
+    assert "real-skill" in names
+    # If it didn't hang, it passed the infinite recursion check

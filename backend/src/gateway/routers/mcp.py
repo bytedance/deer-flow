@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -6,7 +7,15 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from src.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from src.config.extensions_config import (
+    ExtensionsConfig,
+    McpServerConfig,
+    get_extensions_config,
+    reload_extensions_config,
+)
+from src.mcp.client import build_server_params
+from src.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+from src.mcp.tools import MCP_SERVER_CONNECT_TIMEOUT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -43,6 +52,7 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    disabled_tools: list[str] = Field(default_factory=list, description="List of tool names that are disabled for this server")
 
 
 class McpConfigResponse(BaseModel):
@@ -167,3 +177,104 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+
+
+class McpToolInfo(BaseModel):
+    """Information about a single MCP tool."""
+
+    name: str = Field(description="Tool name")
+    description: str = Field(default="", description="Tool description")
+
+
+class McpServerToolsResult(BaseModel):
+    """Tools result for a single MCP server."""
+
+    tools: list[McpToolInfo] = Field(default_factory=list, description="List of available tools")
+    error: str | None = Field(default=None, description="Error message if the server failed to load")
+
+
+class McpToolsResponse(BaseModel):
+    """Response model for MCP tools listing."""
+
+    servers: dict[str, McpServerToolsResult] = Field(default_factory=dict, description="Map of server name to tools result")
+
+
+async def _fetch_server_tools(
+    server_name: str,
+    server_config: McpServerConfig,
+    initial_auth_header: str | None = None,
+    tool_interceptors: list | None = None,
+) -> tuple[str, McpServerToolsResult]:
+    """Fetch tools from a single MCP server."""
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        server_params = build_server_params(server_name, server_config)
+
+        # Inject initial OAuth header if provided (at connection/discovery time)
+        if initial_auth_header and server_params.get("transport") in ("sse", "http"):
+            existing_headers = dict(server_params.get("headers", {}))
+            existing_headers["Authorization"] = initial_auth_header
+            server_params["headers"] = existing_headers
+
+        client = MultiServerMCPClient({server_name: server_params}, tool_interceptors=tool_interceptors)
+
+        # Get tools with a bounded timeout to prevent hanging the API request
+        tools = await asyncio.wait_for(client.get_tools(), timeout=MCP_SERVER_CONNECT_TIMEOUT)
+
+        return server_name, McpServerToolsResult(
+            tools=[McpToolInfo(name=t.name, description=t.description or "") for t in tools],
+        )
+    except TimeoutError:
+        logger.warning(f"Timeout while fetching tools from MCP server '{server_name}'")
+        return server_name, McpServerToolsResult(error=f"Connection timed out after {MCP_SERVER_CONNECT_TIMEOUT}s")
+    except Exception as e:
+        logger.warning(f"Failed to load tools from MCP server '{server_name}': {e}")
+        return server_name, McpServerToolsResult(error=str(e))
+
+
+@router.get(
+    "/mcp/tools",
+    response_model=McpToolsResponse,
+    summary="Get MCP Server Tools",
+    description="Retrieve available tools from each configured MCP server.",
+)
+async def get_mcp_server_tools() -> McpToolsResponse:
+    """Get tools available from each MCP server.
+
+    Returns:
+        Tools grouped by server name. Disabled servers return an empty tools list.
+        Servers that fail to connect return an error message.
+    """
+    config = get_extensions_config()
+    servers: dict[str, McpServerToolsResult] = {}
+
+    # Separate enabled and disabled servers
+    enabled_servers = [(name, cfg) for name, cfg in config.mcp_servers.items() if cfg.enabled]
+    disabled_servers = [name for name, cfg in config.mcp_servers.items() if not cfg.enabled]
+
+    # Mark disabled servers with empty tools and no error
+    for name in disabled_servers:
+        servers[name] = McpServerToolsResult()
+
+    if enabled_servers:
+        # Prepare OAuth components once for all server requests
+        initial_oauth_headers = await get_initial_oauth_headers(config)
+        oauth_interceptor = build_oauth_tool_interceptor(config)
+        tool_interceptors = [oauth_interceptor] if oauth_interceptor else []
+
+        # Fetch tools from all enabled servers in parallel
+        tasks = [
+            _fetch_server_tools(
+                name,
+                cfg,
+                initial_auth_header=initial_oauth_headers.get(name),
+                tool_interceptors=tool_interceptors,
+            )
+            for name, cfg in enabled_servers
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        for server_name, result in results:
+            servers[server_name] = result
+
+    return McpToolsResponse(servers=servers)
