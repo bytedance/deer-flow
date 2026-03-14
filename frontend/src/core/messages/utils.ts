@@ -36,6 +36,12 @@ export function groupMessages<T>(
   const groups: MessageGroup[] = [];
 
   for (const message of messages) {
+    // Skip todo_reminder messages injected by TodoMiddleware — they are
+    // internal context-loss reminders and should not appear in the chat UI.
+    if (message.type === "human" && (message as any).name === "todo_reminder") {
+      continue;
+    }
+
     const lastGroup = groups[groups.length - 1];
     const lastProcessingGroup = [...groups]
       .reverse()
