@@ -34,13 +34,29 @@ _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
-    """Deterministic hash of a set of tool calls (name + args)."""
-    normalized = []
-    for tc in sorted(tool_calls, key=lambda t: (t.get("name", ""), json.dumps(t.get("args", {}), sort_keys=True, default=str))):
-        normalized.append({
-            "name": tc.get("name", ""),
-            "args": tc.get("args", {}),
-        })
+    """Deterministic hash of a set of tool calls (name + args).
+
+    This is intended to be order-independent: the same multiset of tool calls
+    should always produce the same hash, regardless of their input order.
+    """
+    # First normalize each tool call to a minimal (name, args) structure.
+    normalized: list[dict] = []
+    for tc in tool_calls:
+        normalized.append(
+            {
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+            }
+        )
+
+    # Sort by both name and a deterministic serialization of args so that
+    # permutations of the same multiset of calls yield the same ordering.
+    normalized.sort(
+        key=lambda tc: (
+            tc["name"],
+            json.dumps(tc["args"], sort_keys=True, default=str),
+        )
+    )
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
