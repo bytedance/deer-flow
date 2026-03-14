@@ -128,8 +128,8 @@ function FileArtifactDetail({
     return checkCodeFile(filepath);
   }, [filepath, isWriteFile, isSkillFile]);
   const previewable = useMemo(() => {
-    return (language === "html" && !isWriteFile) || language === "markdown";
-  }, [isWriteFile, language]);
+    return language === "html" || language === "markdown";
+  }, [language]);
   const { content } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
@@ -284,8 +284,6 @@ function FileArtifactDetail({
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
-              filepath={filepath}
-              threadId={threadId}
               content={displayContent}
               language={language ?? "text"}
             />
@@ -317,13 +315,9 @@ function FileArtifactDetail({
 }
 
 export function ArtifactFilePreview({
-  filepath,
-  threadId,
   content,
   language,
 }: {
-  filepath: string;
-  threadId: string;
   content: string;
   language: string;
 }) {
@@ -344,7 +338,9 @@ export function ArtifactFilePreview({
     return (
       <iframe
         className="size-full"
-        src={urlOfArtifact({ filepath, threadId })}
+        title="Artifact preview"
+        srcDoc={content}
+        sandbox="allow-scripts allow-forms"
       />
     );
   }
