@@ -9,8 +9,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.config.paths import VIRTUAL_PATH_PREFIX
-from src.sandbox.exceptions import SandboxNotFoundError, SandboxRuntimeError
+from src.sandbox.exceptions import SandboxError, SandboxNotFoundError, SandboxRuntimeError
 from src.sandbox.tools import (
+    MAX_BASH_OUTPUT_LENGTH,
     _normalize_tmp_paths,
     ensure_sandbox_initialized,
     ensure_thread_directories_exist,
@@ -18,7 +19,9 @@ from src.sandbox.tools import (
     is_local_sandbox,
     replace_virtual_path,
     replace_virtual_paths_in_command,
+    sandbox_context,
     sandbox_from_runtime,
+    truncate_output,
 )
 
 
@@ -371,3 +374,208 @@ class TestEnsureThreadDirectoriesExist:
 
         ensure_thread_directories_exist(runtime)
         assert not (tmp_path / "ws").exists()
+
+
+# ---------------------------------------------------------------------------
+# truncate_output (Fix 5)
+# ---------------------------------------------------------------------------
+class TestTruncateOutput:
+    """Tests for truncate_output() head+tail truncation utility."""
+
+    def test_short_output_passthrough(self) -> None:
+        assert truncate_output("hello", 100) == "hello"
+
+    def test_exact_limit_passthrough(self) -> None:
+        output = "x" * 4096
+        assert truncate_output(output, 4096) == output
+
+    def test_empty_output(self) -> None:
+        assert truncate_output("", 4096) == ""
+
+    def test_long_output_truncated(self) -> None:
+        output = "H" * 3000 + "T" * 3000  # 6000 chars
+        result = truncate_output(output, 4096)
+        assert len(result) < len(output)
+        assert result.startswith("HH")
+        assert result.endswith("TT")
+        assert "[..." in result
+
+    def test_truncation_preserves_head_and_tail(self) -> None:
+        output = "HEAD_MARKER" + "x" * 10000 + "TAIL_MARKER"
+        result = truncate_output(output, 4096)
+        assert "HEAD_MARKER" in result
+        assert "TAIL_MARKER" in result
+
+    def test_truncation_shows_omitted_count(self) -> None:
+        output = "x" * 10000
+        result = truncate_output(output, 4096)
+        assert "omitted" in result
+
+    def test_custom_head_ratio(self) -> None:
+        output = "x" * 10000
+        result = truncate_output(output, 4096, head_ratio=0.5)
+        # Head and tail should be approximately equal
+        parts = result.split("[...")
+        assert len(parts) == 2
+        head_len = len(parts[0])
+        tail_part = parts[1].split("]\n\n", 1)[-1] if "]\n\n" in parts[1] else ""
+        # With ratio 0.5, head ≈ 2048, tail ≈ 2048
+        assert abs(head_len - len(tail_part)) < 200
+
+    def test_one_char_over_limit(self) -> None:
+        output = "x" * 4097
+        result = truncate_output(output, 4096)
+        assert "[..." in result
+
+
+# ---------------------------------------------------------------------------
+# sandbox_context (Fix 6)
+# ---------------------------------------------------------------------------
+class TestSandboxContext:
+    """Tests for sandbox_context() context manager."""
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_yields_sandbox_and_thread_data_for_local(self, mock_provider_fn, tmp_path: Path) -> None:
+        fake_sandbox = MagicMock()
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {
+                "workspace_path": str(tmp_path / "ws"),
+                "uploads_path": str(tmp_path / "up"),
+                "outputs_path": str(tmp_path / "out"),
+            },
+            "thread_directories_created": True,
+        }
+        runtime = _make_runtime(state=state)
+
+        with sandbox_context(runtime) as (sandbox, td):
+            assert sandbox is fake_sandbox
+            assert td is not None
+            assert "workspace_path" in td
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_yields_none_thread_data_for_non_local(self, mock_provider_fn) -> None:
+        fake_sandbox = MagicMock()
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {"sandbox": {"sandbox_id": "aio-123"}}
+        runtime = _make_runtime(state=state)
+
+        with sandbox_context(runtime) as (sandbox, td):
+            assert sandbox is fake_sandbox
+            assert td is None
+
+    @patch("src.sandbox.tools.ensure_thread_directories_exist")
+    @patch("src.sandbox.tools.ensure_sandbox_initialized")
+    def test_calls_ensure_initialized(self, mock_init, mock_dirs) -> None:
+        mock_init.return_value = MagicMock()
+        runtime = _make_runtime(state={})
+
+        with sandbox_context(runtime) as (sandbox, td):
+            pass
+
+        mock_init.assert_called_once_with(runtime)
+        mock_dirs.assert_called_once_with(runtime)
+
+    @patch("src.sandbox.tools.ensure_sandbox_initialized")
+    def test_propagates_sandbox_error(self, mock_init) -> None:
+        mock_init.side_effect = SandboxError("test error")
+        runtime = _make_runtime(state={})
+
+        with pytest.raises(SandboxError, match="test error"):
+            with sandbox_context(runtime) as (sandbox, td):
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Bash tool truncation (Fix 4)
+# ---------------------------------------------------------------------------
+class TestBashToolTruncation:
+    """Tests for bash_tool output truncation."""
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_short_output_passthrough(self, mock_provider_fn) -> None:
+        from src.sandbox.tools import bash_tool
+
+        fake_sandbox = MagicMock()
+        fake_sandbox.execute_command.return_value = "hello"
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {"sandbox": {"sandbox_id": "aio-1"}}
+        runtime = _make_runtime(state=state)
+        result = bash_tool.func(runtime, "test", "echo hello")
+        assert result == "hello"
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_long_output_truncated(self, mock_provider_fn) -> None:
+        from src.sandbox.tools import bash_tool
+
+        fake_sandbox = MagicMock()
+        fake_sandbox.execute_command.return_value = "x" * 20000
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {"sandbox": {"sandbox_id": "aio-1"}}
+        runtime = _make_runtime(state=state)
+        result = bash_tool.func(runtime, "test", "cat bigfile")
+        assert len(result) < 20000
+        assert "[..." in result
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_output_at_limit_passthrough(self, mock_provider_fn) -> None:
+        from src.sandbox.tools import bash_tool
+
+        fake_sandbox = MagicMock()
+        fake_sandbox.execute_command.return_value = "x" * MAX_BASH_OUTPUT_LENGTH
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {"sandbox": {"sandbox_id": "aio-1"}}
+        runtime = _make_runtime(state=state)
+        result = bash_tool.func(runtime, "test", "cmd")
+        assert result == "x" * MAX_BASH_OUTPUT_LENGTH
+
+    @patch("src.sandbox.tools.get_sandbox_provider")
+    def test_error_not_truncated(self, mock_provider_fn) -> None:
+        from src.sandbox.tools import bash_tool
+
+        fake_sandbox = MagicMock()
+        fake_sandbox.execute_command.side_effect = SandboxError("fail")
+        mock_provider = MagicMock()
+        mock_provider.get.return_value = fake_sandbox
+        mock_provider_fn.return_value = mock_provider
+
+        state = {"sandbox": {"sandbox_id": "aio-1"}}
+        runtime = _make_runtime(state=state)
+        result = bash_tool.func(runtime, "test", "cmd")
+        assert result == "Error: fail"
+
+
+# ---------------------------------------------------------------------------
+# Cached regex pattern (Fix 1)
+# ---------------------------------------------------------------------------
+class TestCachedRegexPattern:
+    """Tests for module-level regex pattern caching."""
+
+    def test_cached_pattern_is_reused(self, tmp_path: Path) -> None:
+        """Verify that replace_virtual_paths_in_command uses the cached module-level pattern."""
+        td = {
+            "workspace_path": str(tmp_path / "ws"),
+            "uploads_path": str(tmp_path / "up"),
+            "outputs_path": str(tmp_path / "out"),
+        }
+        # Call twice — the pattern should not be recompiled
+        result1 = replace_virtual_paths_in_command(f"cat {VIRTUAL_PATH_PREFIX}/workspace/a.py", td)
+        result2 = replace_virtual_paths_in_command(f"cat {VIRTUAL_PATH_PREFIX}/workspace/b.py", td)
+        assert f"{tmp_path}/ws/a.py" in result1
+        assert f"{tmp_path}/ws/b.py" in result2

@@ -1,5 +1,6 @@
 import logging
 import re
+from contextlib import contextmanager
 
 from langchain.tools import ToolRuntime, tool
 from langgraph.typing import ContextT
@@ -15,6 +16,38 @@ from src.sandbox.sandbox import Sandbox
 from src.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
+
+# Pre-compiled pattern for matching virtual paths in commands.
+# VIRTUAL_PATH_PREFIX is a module-level constant, so this pattern never changes.
+_VIRTUAL_PATH_PATTERN = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+
+# Maximum characters to return from bash tool output (saves context tokens).
+MAX_BASH_OUTPUT_LENGTH = 8192
+
+
+def truncate_output(output: str, max_length: int, head_ratio: float = 2 / 3) -> str:
+    """Truncate long output preserving both head and tail.
+
+    Errors, return values, and final results are usually at the tail of output.
+    Head-only truncation loses this critical information. This function keeps
+    both the beginning (setup, imports) and the end (results, errors).
+
+    Args:
+        output: The output string to potentially truncate.
+        max_length: Maximum allowed length before truncation.
+        head_ratio: Fraction of max_length allocated to the head (default 2/3).
+
+    Returns:
+        Original output if within limit, otherwise head + marker + tail.
+    """
+    if not output or len(output) <= max_length:
+        return output
+
+    head_size = int(max_length * head_ratio)
+    tail_size = max_length - head_size
+    omitted = len(output) - head_size - tail_size
+
+    return output[:head_size] + f"\n\n[... {omitted} chars omitted ...]\n\n" + output[-tail_size:]
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -101,8 +134,8 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     if VIRTUAL_PATH_PREFIX not in command:
         return command
 
-    # Pattern to match /mnt/user-data followed by path characters
-    pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+    # Use pre-compiled module-level pattern (avoids re-compilation per call)
+    pattern = _VIRTUAL_PATH_PATTERN
 
     def replace_match(match: re.Match) -> str:
         full_path = match.group(0)
@@ -254,6 +287,28 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
     runtime.state["thread_directories_created"] = True
 
 
+@contextmanager
+def sandbox_context(runtime: ToolRuntime[ContextT, ThreadState] | None):
+    """Context manager that handles sandbox initialization and path context.
+
+    Yields (sandbox, thread_data) where thread_data is non-None only for
+    local sandboxes (where path translation is needed). This eliminates
+    the repeated boilerplate of ensure_sandbox_initialized + ensure_thread_directories_exist
+    + is_local_sandbox + get_thread_data from every tool function.
+
+    Usage::
+
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                path = replace_virtual_path(path, thread_data)
+            sandbox.read_file(path)
+    """
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    thread_data = get_thread_data(runtime) if is_local_sandbox(runtime) else None
+    yield sandbox, thread_data
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -272,12 +327,11 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            command = replace_virtual_paths_in_command(command, thread_data)
-        return sandbox.execute_command(command)
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                command = replace_virtual_paths_in_command(command, thread_data)
+            output = sandbox.execute_command(command)
+            return truncate_output(output, MAX_BASH_OUTPUT_LENGTH)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -293,15 +347,13 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         path: The **absolute** path to the directory to list.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = replace_virtual_path(path, thread_data)
-        children = sandbox.list_dir(path)
-        if not children:
-            return "(empty)"
-        return "\n".join(children)
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                path = replace_virtual_path(path, thread_data)
+            children = sandbox.list_dir(path)
+            if not children:
+                return "(empty)"
+            return "\n".join(children)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -333,17 +385,15 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = replace_virtual_path(path, thread_data)
-        content = sandbox.read_file(path)
-        if not content:
-            return "(empty)"
-        if start_line is not None and end_line is not None:
-            content = "\n".join(content.splitlines()[start_line - 1 : end_line])
-        return content
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                path = replace_virtual_path(path, thread_data)
+            content = sandbox.read_file(path)
+            if not content:
+                return "(empty)"
+            if start_line is not None and end_line is not None:
+                content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+            return content
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -376,13 +426,11 @@ def write_file_tool(
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = replace_virtual_path(path, thread_data)
-        sandbox.write_file(path, content, append)
-        return "OK"
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                path = replace_virtual_path(path, thread_data)
+            sandbox.write_file(path, content, append)
+            return "OK"
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError:
@@ -422,22 +470,20 @@ def str_replace_tool(
         replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = replace_virtual_path(path, thread_data)
-        content = sandbox.read_file(path)
-        if not content:
+        with sandbox_context(runtime) as (sandbox, thread_data):
+            if thread_data:
+                path = replace_virtual_path(path, thread_data)
+            content = sandbox.read_file(path)
+            if not content:
+                return "OK"
+            if old_str not in content:
+                return f"Error: String to replace not found in file: {path}"
+            if replace_all:
+                content = content.replace(old_str, new_str)
+            else:
+                content = content.replace(old_str, new_str, 1)
+            sandbox.write_file(path, content)
             return "OK"
-        if old_str not in content:
-            return f"Error: String to replace not found in file: {path}"
-        if replace_all:
-            content = content.replace(old_str, new_str)
-        else:
-            content = content.replace(old_str, new_str, 1)
-        sandbox.write_file(path, content)
-        return "OK"
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

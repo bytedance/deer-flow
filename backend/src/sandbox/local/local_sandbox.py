@@ -1,10 +1,14 @@
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from src.sandbox.local.list_dir import list_dir
 from src.sandbox.sandbox import Sandbox
+
+# Module-level cache for detected shell executable (avoids filesystem checks per call).
+_cached_shell: str | None = None
 
 
 class LocalSandbox(Sandbox):
@@ -19,6 +23,35 @@ class LocalSandbox(Sandbox):
         """
         super().__init__(id)
         self.path_mappings = path_mappings or {}
+        self._build_path_caches()
+
+    def _build_path_caches(self) -> None:
+        """Pre-compute sorted mappings and compiled regex patterns.
+
+        Called once from __init__. Since path_mappings are set once and never
+        mutated, these caches remain valid for the lifetime of the sandbox.
+        """
+        # Sorted by container path length (longest first) for correct prefix matching
+        self._sorted_by_container_key: list[tuple[str, str]] = sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True)
+
+        # Sorted by local path length (longest first) for correct prefix matching
+        self._sorted_by_local_key: list[tuple[str, str]] = sorted(self.path_mappings.items(), key=lambda x: len(x[1]), reverse=True)
+
+        # Pre-compiled patterns for _reverse_resolve_paths_in_output:
+        # Each entry is (container_path, compiled_regex) for the corresponding local path
+        self._reverse_patterns: list[tuple[str, re.Pattern]] = []
+        for container_path, local_path in self._sorted_by_local_key:
+            local_path_resolved = str(Path(local_path).resolve())
+            escaped_local = re.escape(local_path_resolved)
+            pattern = re.compile(escaped_local + r"(?:/[^\s\"';&|<>()]*)?")
+            self._reverse_patterns.append((container_path, pattern))
+
+        # Pre-compiled unified pattern for _resolve_paths_in_command
+        if self._sorted_by_container_key:
+            patterns = [re.escape(container_path) + r"(?:/[^\s\"';&|<>()]*)??" for container_path, _ in self._sorted_by_container_key]
+            self._forward_pattern: re.Pattern | None = re.compile("|".join(f"({p})" for p in patterns))
+        else:
+            self._forward_pattern = None
 
     def _resolve_path(self, path: str) -> str:
         """
@@ -33,7 +66,7 @@ class LocalSandbox(Sandbox):
         path_str = str(path)
 
         # Try each mapping (longest prefix first for more specific matches)
-        for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
+        for container_path, local_path in self._sorted_by_container_key:
             if path_str.startswith(container_path):
                 # Replace the container path prefix with local path
                 relative = path_str[len(container_path) :].lstrip("/")
@@ -56,7 +89,7 @@ class LocalSandbox(Sandbox):
         path_str = str(Path(path).resolve())
 
         # Try each mapping (longest local path first for more specific matches)
-        for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[1]), reverse=True):
+        for container_path, local_path in self._sorted_by_local_key:
             local_path_resolved = str(Path(local_path).resolve())
             if path_str.startswith(local_path_resolved):
                 # Replace the local path prefix with container path
@@ -77,23 +110,11 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
-        import re
-
-        # Sort mappings by local path length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings.items(), key=lambda x: len(x[1]), reverse=True)
-
-        if not sorted_mappings:
+        if not self._reverse_patterns:
             return output
 
-        # Create pattern that matches absolute paths
-        # Match paths like /Users/... or other absolute paths
         result = output
-        for container_path, local_path in sorted_mappings:
-            local_path_resolved = str(Path(local_path).resolve())
-            # Escape the local path for use in regex
-            escaped_local = re.escape(local_path_resolved)
-            # Match the local path followed by optional path components
-            pattern = re.compile(escaped_local + r"(?:/[^\s\"';&|<>()]*)?")
+        for _container_path, pattern in self._reverse_patterns:
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
@@ -113,25 +134,14 @@ class LocalSandbox(Sandbox):
         Returns:
             Command with container paths resolved to local paths
         """
-        import re
-
-        # Sort mappings by length (longest first) for correct prefix matching
-        sorted_mappings = sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True)
-
-        # Build regex pattern to match all container paths
-        # Match container path followed by optional path components
-        if not sorted_mappings:
+        if self._forward_pattern is None:
             return command
-
-        # Create pattern that matches any of the container paths
-        patterns = [re.escape(container_path) + r"(?:/[^\s\"';&|<>()]*)??" for container_path, _ in sorted_mappings]
-        pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
             return self._resolve_path(matched_path)
 
-        return pattern.sub(replace_match, command)
+        return self._forward_pattern.sub(replace_match, command)
 
     @staticmethod
     def _get_shell() -> str:
@@ -140,12 +150,19 @@ class LocalSandbox(Sandbox):
         Returns the first available shell in order of preference:
         /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
         Raises a RuntimeError if no suitable shell is found.
+
+        Results are cached at module level so filesystem checks only run once.
         """
+        global _cached_shell
+        if _cached_shell is not None:
+            return _cached_shell
         for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
             if os.path.isfile(shell) and os.access(shell, os.X_OK):
+                _cached_shell = shell
                 return shell
         shell_from_path = shutil.which("sh")
         if shell_from_path is not None:
+            _cached_shell = shell_from_path
             return shell_from_path
         raise RuntimeError(
             "No suitable shell executable found. Tried /bin/zsh, /bin/bash, "

@@ -56,6 +56,24 @@ class AioSandbox(Sandbox):
             logger.error(f"Failed to execute command in sandbox: {e}")
             return f"Error: {e}"
 
+    def _read_file_raw(self, path: str) -> str:
+        """Read file content, raising on failure.
+
+        This is the internal implementation that propagates exceptions.
+        Use read_file() for the public API that returns error strings.
+
+        Args:
+            path: The absolute path of the file to read.
+
+        Returns:
+            The content of the file.
+
+        Raises:
+            Exception: If the file cannot be read.
+        """
+        result = self._client.file.read_file(file=path)
+        return result.data.content if result.data else ""
+
     def read_file(self, path: str) -> str:
         """Read the content of a file in the sandbox.
 
@@ -63,11 +81,10 @@ class AioSandbox(Sandbox):
             path: The absolute path of the file to read.
 
         Returns:
-            The content of the file.
+            The content of the file, or an error string on failure.
         """
         try:
-            result = self._client.file.read_file(file=path)
-            return result.data.content if result.data else ""
+            return self._read_file_raw(path)
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
@@ -104,10 +121,15 @@ class AioSandbox(Sandbox):
         """
         try:
             if append:
-                # Read existing content first and append
-                existing = self.read_file(path)
-                if not existing.startswith("Error:"):
+                # Read existing content and append. Use _read_file_raw() which
+                # raises on failure instead of returning error strings — avoids
+                # the fragile startswith("Error:") check that would silently
+                # discard file content legitimately starting with "Error:".
+                try:
+                    existing = self._read_file_raw(path)
                     content = existing + content
+                except Exception:
+                    pass  # File doesn't exist yet, write fresh content
             self._client.file.write_file(file=path, content=content)
         except Exception as e:
             logger.error(f"Failed to write file in sandbox: {e}")
