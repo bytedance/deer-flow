@@ -432,8 +432,6 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
-Models from providers with OpenAI-compatible APIs — such as [MiniMax](https://platform.minimax.io) (204K context window) — can be used by setting the `base_url` in `config.yaml`. See `config.example.yaml` for configuration examples.
-
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API:
