@@ -18,8 +18,8 @@ def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
         "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
     }
 
-    assert replace_virtual_path("/mnt/user-data/workspace/a.txt", thread_data) == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
-    assert replace_virtual_path("/mnt/user-data", thread_data) == "/tmp/deer-flow/threads/t1/user-data"
+    assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", thread_data)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
+    assert Path(replace_virtual_path("/mnt/user-data", thread_data)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 
 def test_mask_local_paths_in_output_hides_host_paths() -> None:
