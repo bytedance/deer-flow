@@ -10,6 +10,26 @@ from src.config.title_config import get_title_config
 from src.models import create_chat_model
 
 
+def _extract_text_content(content) -> str:
+    """Extract text from message content, handling both string and list[dict] formats.
+
+    When using the OpenAI Responses API, message content may be a list of content
+    parts like: [{"type": "text", "text": "actual content", "index": 0, "id": "msg_..."}]
+    instead of a plain string. This helper normalizes both formats to a string.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        return " ".join(parts) if parts else ""
+    return str(content) if content else ""
+
+
 class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
@@ -52,9 +72,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg_content = next((m.content for m in messages if m.type == "human"), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
-        # Ensure content is string (LangChain messages can have list content)
-        user_msg = str(user_msg_content) if user_msg_content else ""
-        assistant_msg = str(assistant_msg_content) if assistant_msg_content else ""
+        # Extract text content (handles both string and list[dict] formats from Responses API)
+        user_msg = _extract_text_content(user_msg_content)
+        assistant_msg = _extract_text_content(assistant_msg_content)
 
         # Use a lightweight model to generate title
         model = create_chat_model(thinking_enabled=False)
@@ -67,8 +87,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         try:
             response = await model.ainvoke(prompt)
-            # Ensure response content is string
-            title_content = str(response.content) if response.content else ""
+            # Extract text from response (handles both string and list[dict] formats)
+            title_content = _extract_text_content(response.content)
             title = title_content.strip().strip('"').strip("'")
             # Limit to max characters
             return title[: config.max_chars] if len(title) > config.max_chars else title
