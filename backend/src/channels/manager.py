@@ -351,12 +351,12 @@ class ChannelManager:
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
 
-        # Look up existing DeerFlow thread by topic_id (if present)
-        thread_id = None
-        if msg.topic_id:
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
-            if thread_id:
-                logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+        # Look up existing DeerFlow thread.
+        # topic_id may be None (e.g. Telegram private chats) — the store
+        # handles this by using the "channel:chat_id" key without a topic suffix.
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        if thread_id:
+            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
 
         # No existing thread found — create a new one
         if thread_id is None:
