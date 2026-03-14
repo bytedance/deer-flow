@@ -78,7 +78,7 @@ class AppConfig(BaseModel):
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
-            config_data = yaml.safe_load(f)
+            config_data = yaml.safe_load(f) or {}
 
         # Check config version before processing
         cls._check_config_version(config_data, resolved_path)
@@ -121,9 +121,19 @@ class AppConfig(BaseModel):
         """
         user_version = config_data.get("config_version", 0)
 
-        # Find config.example.yaml relative to config.yaml location
-        example_path = config_path.parent / "config.example.yaml"
-        if not example_path.exists():
+        # Find config.example.yaml by searching config.yaml's directory and its parents
+        example_path = None
+        search_dir = config_path.parent
+        for _ in range(5):  # search up to 5 levels
+            candidate = search_dir / "config.example.yaml"
+            if candidate.exists():
+                example_path = candidate
+                break
+            parent = search_dir.parent
+            if parent == search_dir:
+                break
+            search_dir = parent
+        if example_path is None:
             return
 
         try:
