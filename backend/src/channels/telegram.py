@@ -234,6 +234,17 @@ class TelegramChannel(Channel):
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
 
+        # Use the same topic_id logic as _on_text so that commands
+        # like /new target the correct thread mapping.
+        if update.effective_chat.type == "private":
+            topic_id = None
+        else:
+            reply_to = update.message.reply_to_message
+            if reply_to:
+                topic_id = str(reply_to.message_id)
+            else:
+                topic_id = msg_id
+
         inbound = self._make_inbound(
             chat_id=chat_id,
             user_id=user_id,
@@ -241,6 +252,7 @@ class TelegramChannel(Channel):
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
         )
+        inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
             asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
@@ -259,14 +271,19 @@ class TelegramChannel(Channel):
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
 
-        # topic_id: if the user is replying to a bot message, look up
-        # the original topic_id stored for that reply chain.  Otherwise
-        # the current message starts a new topic.
-        reply_to = update.message.reply_to_message
-        if reply_to:
-            topic_id = str(reply_to.message_id)
+        # topic_id determines which DeerFlow thread the message maps to.
+        # In private chats, use None so that all messages share a single
+        # thread (the store key becomes "channel:chat_id").
+        # In group chats, use the reply-to message id or the current
+        # message id to keep separate conversation threads.
+        if update.effective_chat.type == "private":
+            topic_id = None
         else:
-            topic_id = msg_id
+            reply_to = update.message.reply_to_message
+            if reply_to:
+                topic_id = str(reply_to.message_id)
+            else:
+                topic_id = msg_id
 
         inbound = self._make_inbound(
             chat_id=chat_id,
