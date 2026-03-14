@@ -625,8 +625,8 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_each_message_creates_new_thread(self):
-        """Every chat message should create a new DeerFlow thread (one-shot Q&A)."""
+    def test_each_topic_creates_new_thread(self):
+        """Messages with distinct topic_ids should each create a new DeerFlow thread."""
         from src.channels.manager import ChannelManager
 
         async def go():
@@ -652,20 +652,21 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages from the same chat
-            for text in ["first", "second"]:
+            # Send two messages with different topic_ids (e.g. group chat, each starts a new topic)
+            for i, text in enumerate(["first", "second"]):
                 await bus.publish_inbound(
                     InboundMessage(
                         channel_name="test",
                         chat_id="chat1",
                         user_id="user1",
                         text=text,
+                        topic_id=f"topic-{i}",
                     )
                 )
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create should be called twice (one per message)
+            # threads.create should be called twice (different topics)
             assert mock_client.threads.create.call_count == 2
 
             # runs.wait should be called twice with different thread_ids
@@ -717,6 +718,50 @@ class TestChannelManager:
             assert mock_client.runs.wait.call_count == 2
             for call in mock_client.runs.wait.call_args_list:
                 assert call[0][0] == "topic-thread-1"
+
+        _run(go())
+
+    def test_none_topic_reuses_thread(self):
+        """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
+        from src.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client(thread_id="private-thread-1")
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+
+            # Send two messages with topic_id=None (simulates Telegram private chat)
+            for text in ["hello", "what did I just say?"]:
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text=text,
+                    topic_id=None,
+                )
+                await bus.publish_inbound(msg)
+
+            await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
+            await manager.stop()
+
+            # threads.create should be called only ONCE (second message reuses the thread)
+            mock_client.threads.create.assert_called_once()
+
+            # Both runs.wait calls should use the same thread_id
+            assert mock_client.runs.wait.call_count == 2
+            for call in mock_client.runs.wait.call_args_list:
+                assert call[0][0] == "private-thread-1"
 
         _run(go())
 
@@ -1211,6 +1256,163 @@ class TestTelegramSendRetry:
                 await ch.send(msg)
 
             assert mock_bot.send_message.call_count == 3
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Telegram private-chat thread context tests
+# ---------------------------------------------------------------------------
+
+
+def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+    """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
+    update = MagicMock()
+    update.effective_chat.type = chat_type
+    update.effective_chat.id = 100
+    update.effective_user.id = 42
+    update.message.text = text
+    update.message.message_id = message_id
+    if reply_to_message_id is not None:
+        reply_msg = MagicMock()
+        reply_msg.message_id = reply_to_message_id
+        update.message.reply_to_message = reply_msg
+    else:
+        update.message.reply_to_message = None
+    return update
+
+
+class TestTelegramPrivateChatThread:
+    """Verify that private chats use topic_id=None (single thread per chat)."""
+
+    def test_private_chat_no_reply_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=10)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_private_chat_with_reply_still_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_group_chat_no_reply_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=20)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+
+        _run(go())
+
+    def test_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "15"
+
+        _run(go())
+
+    def test_supergroup_chat_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("supergroup", message_id=25)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "25"
+
+        _run(go())
+
+    def test_cmd_generic_private_chat_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=30, text="/new")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_cmd_generic_group_chat_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=31, text="/status")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "31"
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_cmd_generic_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+            assert msg.msg_type == InboundMessageType.COMMAND
 
         _run(go())
 
