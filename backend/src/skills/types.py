@@ -11,13 +11,15 @@ class Skill:
     license: str | None
     skill_dir: Path
     skill_file: Path
+    relative_path: Path  # Relative path from category root to skill directory
     category: str  # 'public' or 'custom'
     enabled: bool = False  # Whether this skill is enabled
 
     @property
     def skill_path(self) -> str:
-        """Returns the relative path from skills root to this skill's directory"""
-        return self.skill_dir.name
+        """Returns the relative path from the category root (skills/{category}) to this skill's directory"""
+        path = self.relative_path.as_posix()
+        return "" if path == "." else path
 
     def get_container_path(self, container_base_path: str = "/mnt/skills") -> str:
         """
@@ -29,7 +31,11 @@ class Skill:
         Returns:
             Full container path to the skill directory
         """
-        return f"{container_base_path}/{self.category}/{self.skill_dir.name}"
+        category_base = f"{container_base_path}/{self.category}"
+        skill_path = self.skill_path
+        if skill_path:
+            return f"{category_base}/{skill_path}"
+        return category_base
 
     def get_container_file_path(self, container_base_path: str = "/mnt/skills") -> str:
         """
@@ -41,7 +47,7 @@ class Skill:
         Returns:
             Full container path to the skill's SKILL.md file
         """
-        return f"{container_base_path}/{self.category}/{self.skill_dir.name}/SKILL.md"
+        return f"{self.get_container_path(container_base_path)}/SKILL.md"
 
     def __repr__(self) -> str:
         return f"Skill(name={self.name!r}, description={self.description!r}, category={self.category!r})"
