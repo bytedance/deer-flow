@@ -69,22 +69,114 @@ class TestTitleMiddleware:
         assert middleware is not None
         assert middleware.state_schema is not None
 
-    # TODO: Add integration tests with mock Runtime
-    # def test_should_generate_title(self):
-    #     """Test title generation trigger logic."""
-    #     pass
+    def test_should_generate_title_first_turn(self):
+        """Test title generation trigger for first turn."""
+        # Set up config
+        config = TitleConfig(enabled=True)
+        set_title_config(config)
 
-    # def test_generate_title(self):
-    #     """Test title generation."""
-    #     pass
+        middleware = TitleMiddleware()
 
-    # def test_after_agent_hook(self):
-    #     """Test after_agent hook."""
-    #     pass
+        # First turn: only user message, no title - should NOT generate
+        state = TitleMiddlewareState(
+            messages=[{"type": "human", "content": "Hello"}],
+            title=None
+        )
+        assert middleware._should_generate_title(state) is False
+
+        # Second turn: user + assistant message - SHOULD generate
+        state = TitleMiddlewareState(
+            messages=[
+                {"type": "human", "content": "Hello"},
+                {"type": "ai", "content": "Hi there!"}
+            ],
+            title=None
+        )
+        assert middleware._should_generate_title(state) is True
+
+    def test_should_generate_title_disabled(self):
+        """Test title generation is disabled when config is disabled."""
+        config = TitleConfig(enabled=False)
+        set_title_config(config)
+
+        middleware = TitleMiddleware()
+
+        state = TitleMiddlewareState(
+            messages=[
+                {"type": "human", "content": "Hello"},
+                {"type": "ai", "content": "Hi there!"}
+            ],
+            title=None
+        )
+        assert middleware._should_generate_title(state) is False
+
+    def test_should_generate_title_existing_title(self):
+        """Test title generation is skipped when title already exists."""
+        config = TitleConfig(enabled=True)
+        set_title_config(config)
+
+        middleware = TitleMiddleware()
+
+        state = TitleMiddlewareState(
+            messages=[
+                {"type": "human", "content": "Hello"},
+                {"type": "ai", "content": "Hi there!"}
+            ],
+            title="Existing Title"
+        )
+        assert middleware._should_generate_title(state) is False
+
+    def test_should_generate_title_multiple_turns(self):
+        """Test title generation is skipped after first turn."""
+        config = TitleConfig(enabled=True)
+        set_title_config(config)
+
+        middleware = TitleMiddleware()
+
+        # Multiple turns - should NOT generate (already past first turn)
+        state = TitleMiddlewareState(
+            messages=[
+                {"type": "human", "content": "Hello"},
+                {"type": "ai", "content": "Hi there!"},
+                {"type": "human", "content": "Tell me more"},
+                {"type": "ai", "content": "Sure!"}
+            ],
+            title=None
+        )
+        assert middleware._should_generate_title(state) is False
 
 
-# TODO: Add integration tests
-# - Test with real LangGraph runtime
-# - Test title persistence with checkpointer
-# - Test fallback behavior when LLM fails
-# - Test concurrent title generation
+class TestTitleGenerationFallback:
+    """Tests for title generation fallback behavior."""
+
+    def test_fallback_to_user_message(self):
+        """Test fallback uses first part of user message when LLM fails."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+
+        config = TitleConfig(enabled=True, max_chars=50)
+        set_title_config(config)
+
+        middleware = TitleMiddleware()
+
+        state = TitleMiddlewareState(
+            messages=[
+                {"type": "human", "content": "This is a very long user message that should be truncated"},
+                {"type": "ai", "content": "Response"}
+            ],
+            title=None
+        )
+
+        # Mock the model to raise an exception
+        with patch('src.agents.middlewares.title_middleware.create_chat_model') as mock_model:
+            mock_model.return_value = AsyncMock()
+            mock_model.return_value.ainvoke = AsyncMock(side_effect=Exception("LLM Error"))
+
+            # Run the async method
+            result = asyncio.get_event_loop().run_until_complete(
+                middleware._generate_title(state)
+            )
+
+            # Should fallback to user message truncated
+            assert "This is a very long user message" in result
+            assert len(result) <= 53  # 50 chars + "..."
