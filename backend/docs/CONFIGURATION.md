@@ -25,7 +25,7 @@ models:
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
 - Any LangChain-compatible provider
 
-For OpenAI-compatible gateways (for example Novita), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
+For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
 
 ```yaml
 models:
@@ -40,7 +40,35 @@ models:
       extra_body:
         thinking:
           type: enabled
+
+  - name: minimax-m2.5
+    display_name: MiniMax M2.5
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M2.5
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true
+
+  - name: minimax-m2.5-highspeed
+    display_name: MiniMax M2.5 Highspeed
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M2.5-highspeed
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true
+  - name: openrouter-gemini-2.5-flash
+    display_name: Gemini 2.5 Flash (OpenRouter)
+    use: langchain_openai:ChatOpenAI
+    model: google/gemini-2.5-flash-preview
+    api_key: $OPENAI_API_KEY
+    base_url: https://openrouter.ai/api/v1
 ```
+
+If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
 **Thinking Models**:
 Some models support "thinking" mode for complex reasoning:

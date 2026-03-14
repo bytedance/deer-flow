@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -399,6 +401,18 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
+def _make_stream_part(event: str, data):
+    return SimpleNamespace(event=event, data=data)
+
+
+def _make_async_iterator(items):
+    async def iterator():
+        for item in items:
+            yield item
+
+    return iterator()
+
+
 class TestChannelManager:
     def test_handle_chat_creates_thread(self):
         from src.channels.manager import ChannelManager
@@ -550,6 +564,126 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
+        from src.channels.manager import ChannelManager
+
+        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            stream_events = [
+                _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": " world", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "Hello world"},
+                        ],
+                        "artifacts": [],
+                    },
+                ),
+            ]
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 3)
+            await manager.stop()
+
+            mock_client.runs.stream.assert_called_once()
+            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.is_final for msg in outbound_received] == [False, False, True]
+            assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
+
+        _run(go())
+
+    def test_handle_feishu_stream_error_still_sends_final(self, monkeypatch):
+        """When the stream raises mid-way, a final outbound with is_final=True must still be published."""
+        from src.channels.manager import ChannelManager
+
+        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            async def _failing_stream():
+                yield _make_stream_part(
+                    "messages-tuple",
+                    [
+                        {"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                )
+                raise ConnectionError("stream broken")
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_failing_stream())
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await manager.stop()
+
+            # Should have at least one intermediate and one final message
+            final_msgs = [m for m in outbound_received if m.is_final]
+            assert len(final_msgs) == 1
+            assert final_msgs[0].thread_ts == "om-source-1"
+
+        _run(go())
+
     def test_handle_command_help(self):
         from src.channels.manager import ChannelManager
 
@@ -625,8 +759,8 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_each_message_creates_new_thread(self):
-        """Every chat message should create a new DeerFlow thread (one-shot Q&A)."""
+    def test_each_topic_creates_new_thread(self):
+        """Messages with distinct topic_ids should each create a new DeerFlow thread."""
         from src.channels.manager import ChannelManager
 
         async def go():
@@ -652,20 +786,21 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages from the same chat
-            for text in ["first", "second"]:
+            # Send two messages with different topic_ids (e.g. group chat, each starts a new topic)
+            for i, text in enumerate(["first", "second"]):
                 await bus.publish_inbound(
                     InboundMessage(
                         channel_name="test",
                         chat_id="chat1",
                         user_id="user1",
                         text=text,
+                        topic_id=f"topic-{i}",
                     )
                 )
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create should be called twice (one per message)
+            # threads.create should be called twice (different topics)
             assert mock_client.threads.create.call_count == 2
 
             # runs.wait should be called twice with different thread_ids
@@ -717,6 +852,50 @@ class TestChannelManager:
             assert mock_client.runs.wait.call_count == 2
             for call in mock_client.runs.wait.call_args_list:
                 assert call[0][0] == "topic-thread-1"
+
+        _run(go())
+
+    def test_none_topic_reuses_thread(self):
+        """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
+        from src.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client(thread_id="private-thread-1")
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+
+            # Send two messages with topic_id=None (simulates Telegram private chat)
+            for text in ["hello", "what did I just say?"]:
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text=text,
+                    topic_id=None,
+                )
+                await bus.publish_inbound(msg)
+
+            await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
+            await manager.stop()
+
+            # threads.create should be called only ONCE (second message reuses the thread)
+            mock_client.threads.create.assert_called_once()
+
+            # Both runs.wait calls should use the same thread_id
+            assert mock_client.runs.wait.call_count == 2
+            for call in mock_client.runs.wait.call_args_list:
+                assert call[0][0] == "private-thread-1"
 
         _run(go())
 
@@ -1047,6 +1226,180 @@ class TestHandleChatWithArtifacts:
         _run(go())
 
 
+class TestFeishuChannel:
+    def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = FeishuChannel(bus, config={})
+
+            reply_started = asyncio.Event()
+            release_reply = asyncio.Event()
+
+            async def slow_reply(message_id: str, text: str) -> str:
+                reply_started.set()
+                await release_reply.wait()
+                return "om-running-card"
+
+            channel._add_reaction = AsyncMock()
+            channel._reply_card = AsyncMock(side_effect=slow_reply)
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="hello",
+                thread_ts="om-source-msg",
+            )
+
+            prepare_task = asyncio.create_task(channel._prepare_inbound("om-source-msg", inbound))
+
+            await _wait_for(lambda: bus.publish_inbound.await_count == 1)
+            await prepare_task
+
+            assert reply_started.is_set()
+            assert "om-source-msg" in channel._running_card_tasks
+            assert channel._reply_card.await_count == 1
+
+            release_reply.set()
+            await _wait_for(lambda: channel._running_card_ids.get("om-source-msg") == "om-running-card")
+            await _wait_for(lambda: "om-source-msg" not in channel._running_card_tasks)
+
+        _run(go())
+
+    def test_prepare_inbound_and_send_share_running_card_task(self):
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            reply_started = asyncio.Event()
+            release_reply = asyncio.Event()
+
+            async def slow_reply(message_id: str, text: str) -> str:
+                reply_started.set()
+                await release_reply.wait()
+                return "om-running-card"
+
+            channel._add_reaction = AsyncMock()
+            channel._reply_card = AsyncMock(side_effect=slow_reply)
+            channel._update_card = AsyncMock()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="hello",
+                thread_ts="om-source-msg",
+            )
+
+            prepare_task = asyncio.create_task(channel._prepare_inbound("om-source-msg", inbound))
+            await _wait_for(lambda: bus.publish_inbound.await_count == 1)
+            await _wait_for(reply_started.is_set)
+
+            send_task = asyncio.create_task(
+                channel.send(
+                    OutboundMessage(
+                        channel_name="feishu",
+                        chat_id="chat-1",
+                        thread_id="thread-1",
+                        text="Hello",
+                        is_final=False,
+                        thread_ts="om-source-msg",
+                    )
+                )
+            )
+
+            await asyncio.sleep(0)
+            assert channel._reply_card.await_count == 1
+
+            release_reply.set()
+            await prepare_task
+            await send_task
+
+            assert channel._reply_card.await_count == 1
+            channel._update_card.assert_awaited_once_with("om-running-card", "Hello")
+            assert "om-source-msg" not in channel._running_card_tasks
+
+        _run(go())
+
+    def test_streaming_reuses_single_running_card(self):
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from src.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._PatchMessageRequest = PatchMessageRequest
+            channel._PatchMessageRequestBody = PatchMessageRequestBody
+            channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+            channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            channel._Emoji = Emoji
+
+            reply_response = MagicMock()
+            reply_response.data.message_id = "om-running-card"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+            channel._api_client.im.v1.message.patch = MagicMock()
+            channel._api_client.im.v1.message_reaction.create = MagicMock()
+
+            await channel._send_running_reply("om-source-msg")
+
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Hello",
+                    is_final=False,
+                    thread_ts="om-source-msg",
+                )
+            )
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Hello world",
+                    is_final=True,
+                    thread_ts="om-source-msg",
+                )
+            )
+
+            assert channel._api_client.im.v1.message.reply.call_count == 1
+            assert channel._api_client.im.v1.message.patch.call_count == 2
+            assert channel._api_client.im.v1.message_reaction.create.call_count == 1
+            assert "om-source-msg" not in channel._running_card_ids
+            assert "om-source-msg" not in channel._running_card_tasks
+
+            first_patch_request = channel._api_client.im.v1.message.patch.call_args_list[0].args[0]
+            final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]
+            assert first_patch_request.message_id == "om-running-card"
+            assert final_patch_request.message_id == "om-running-card"
+            assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "Hello"
+            assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "Hello world"
+            assert json.loads(final_patch_request.body.content)["config"]["update_multi"] is True
+
+        _run(go())
+
+
 class TestChannelService:
     def test_get_status_no_channels(self):
         from src.channels.service import ChannelService
@@ -1211,6 +1564,163 @@ class TestTelegramSendRetry:
                 await ch.send(msg)
 
             assert mock_bot.send_message.call_count == 3
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Telegram private-chat thread context tests
+# ---------------------------------------------------------------------------
+
+
+def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+    """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
+    update = MagicMock()
+    update.effective_chat.type = chat_type
+    update.effective_chat.id = 100
+    update.effective_user.id = 42
+    update.message.text = text
+    update.message.message_id = message_id
+    if reply_to_message_id is not None:
+        reply_msg = MagicMock()
+        reply_msg.message_id = reply_to_message_id
+        update.message.reply_to_message = reply_msg
+    else:
+        update.message.reply_to_message = None
+    return update
+
+
+class TestTelegramPrivateChatThread:
+    """Verify that private chats use topic_id=None (single thread per chat)."""
+
+    def test_private_chat_no_reply_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=10)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_private_chat_with_reply_still_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_group_chat_no_reply_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=20)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+
+        _run(go())
+
+    def test_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "15"
+
+        _run(go())
+
+    def test_supergroup_chat_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("supergroup", message_id=25)
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "25"
+
+        _run(go())
+
+    def test_cmd_generic_private_chat_uses_none_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=30, text="/new")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id is None
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_cmd_generic_group_chat_uses_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=31, text="/status")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "31"
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_cmd_generic_group_chat_reply_uses_reply_msg_id_as_topic(self):
+        from src.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
+            await ch._cmd_generic(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.topic_id == "20"
+            assert msg.msg_type == InboundMessageType.COMMAND
 
         _run(go())
 

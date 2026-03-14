@@ -127,6 +127,12 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
 
+### IM Channels
+
+The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
+
+For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
+
 ---
 
 ## Quick Start
