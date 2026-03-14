@@ -1,10 +1,13 @@
-"""Memory API router for retrieving and managing global memory data."""
+"""Memory API router for retrieving and managing user-specific memory data."""
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from src.agents.memory.updater import get_memory_data, reload_memory_data
 from src.config.memory_config import get_memory_config
+from src.gateway.middleware.auth import TokenData, get_optional_user
 
 router = APIRouter(prefix="/api", tags=["memory"])
 
@@ -76,10 +79,12 @@ class MemoryStatusResponse(BaseModel):
     "/memory",
     response_model=MemoryResponse,
     summary="Get Memory Data",
-    description="Retrieve the current global memory data including user context, history, and facts.",
+    description="Retrieve the current user's memory data including user context, history, and facts.",
 )
-async def get_memory() -> MemoryResponse:
-    """Get the current global memory data.
+async def get_memory(
+    current_user: Annotated[TokenData, Depends(get_optional_user)],
+) -> MemoryResponse:
+    """Get the current user's memory data.
 
     Returns:
         The current memory data with user context, history, and facts.
@@ -112,7 +117,7 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data()
+    memory_data = get_memory_data(user_id=current_user.user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -122,7 +127,9 @@ async def get_memory() -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
-async def reload_memory() -> MemoryResponse:
+async def reload_memory(
+    current_user: Annotated[TokenData, Depends(get_optional_user)],
+) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -131,7 +138,7 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data()
+    memory_data = reload_memory_data(user_id=current_user.user_id)
     return MemoryResponse(**memory_data)
 
 
@@ -141,7 +148,9 @@ async def reload_memory() -> MemoryResponse:
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+async def get_memory_config_endpoint(
+    current_user: Annotated[TokenData, Depends(get_optional_user)],
+) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -178,14 +187,16 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status() -> MemoryStatusResponse:
+async def get_memory_status(
+    current_user: Annotated[TokenData, Depends(get_optional_user)],
+) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_data()
+    memory_data = get_memory_data(user_id=current_user.user_id)
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

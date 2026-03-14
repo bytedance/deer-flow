@@ -12,7 +12,7 @@ class Paths:
     """
     Centralized path configuration for DeerFlow application data.
 
-    Directory layout (host side):
+    Directory layout (host side, single-tenant mode):
         {base_dir}/
         ├── memory.json
         ├── USER.md          <-- global user profile (injected into all agents)
@@ -28,6 +28,24 @@ class Paths:
                     ├── uploads/       <-- /mnt/user-data/uploads/
                     └── outputs/       <-- /mnt/user-data/outputs/
 
+    Directory layout (host side, multi-tenant mode):
+        {base_dir}/
+        ├── users/
+        │   └── {user_id}/
+        │       ├── memory.json       <-- per-user memory
+        │       ├── USER.md           <-- per-user profile
+        │       └── threads/
+        │           └── {thread_id}/
+        │               └── user-data/ <-- mounted as /mnt/user-data/ inside sandbox
+        │                   ├── workspace/
+        │                   ├── uploads/
+        │                   └── outputs/
+        └── agents/              <-- global agents shared across users
+            └── {agent_name}/
+                ├── config.yaml
+                ├── SOUL.md
+                └── memory.json
+
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
         2. DEER_FLOW_HOME environment variable
@@ -35,8 +53,9 @@ class Paths:
         4. Default: $HOME/.deer-flow
     """
 
-    def __init__(self, base_dir: str | Path | None = None) -> None:
+    def __init__(self, base_dir: str | Path | None = None, user_id: str | None = None) -> None:
         self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
+        self._user_id = user_id
 
     @property
     def host_base_dir(self) -> Path:
@@ -79,6 +98,52 @@ class Paths:
         return self.base_dir / "USER.md"
 
     @property
+    def global_user_md_file(self) -> Path:
+        """Path to the global user profile file: `{base_dir}/USER.md`.
+
+        This is an alias for user_md_file for clarity in multi-tenant contexts.
+        """
+        return self.base_dir / "USER.md"
+
+    @property
+    def users_dir(self) -> Path:
+        """Root directory for all users: `{base_dir}/users/`."""
+        return self.base_dir / "users"
+
+    def user_dir(self, user_id: str) -> Path:
+        """Directory for a specific user: `{base_dir}/users/{user_id}/`.
+
+        Args:
+            user_id: The user's unique identifier.
+
+        Returns:
+            Path to the user's directory.
+        """
+        return self.users_dir / user_id
+
+    def user_memory_file(self, user_id: str) -> Path:
+        """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`.
+
+        Args:
+            user_id: The user's unique identifier.
+
+        Returns:
+            Path to the user's memory file.
+        """
+        return self.user_dir(user_id) / "memory.json"
+
+    def user_md_file_for_user(self, user_id: str) -> Path:
+        """Per-user profile: `{base_dir}/users/{user_id}/USER.md`.
+
+        Args:
+            user_id: The user's unique identifier.
+
+        Returns:
+            Path to the user's profile file.
+        """
+        return self.user_dir(user_id) / "USER.md"
+
+    @property
     def agents_dir(self) -> Path:
         """Root directory for all custom agents: `{base_dir}/agents/`."""
         return self.base_dir / "agents"
@@ -91,12 +156,19 @@ class Paths:
         """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
         return self.agent_dir(name) / "memory.json"
 
-    def thread_dir(self, thread_id: str) -> Path:
+    def thread_dir(self, thread_id: str, user_id: str | None = None) -> Path:
         """
-        Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
+        Host path for a thread's data.
+
+        Multi-tenant: `{base_dir}/users/{user_id}/threads/{thread_id}/`
+        Single-tenant: `{base_dir}/threads/{thread_id}/`
 
         This directory contains a `user-data/` subdirectory that is mounted
         as `/mnt/user-data/` inside the sandbox.
+
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
 
         Raises:
             ValueError: If `thread_id` contains unsafe characters (path separators
@@ -104,41 +176,64 @@ class Paths:
         """
         if not _SAFE_THREAD_ID_RE.match(thread_id):
             raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+
+        if user_id:
+            return self.user_dir(user_id) / "threads" / thread_id
         return self.base_dir / "threads" / thread_id
 
-    def sandbox_work_dir(self, thread_id: str) -> Path:
+    def sandbox_work_dir(self, thread_id: str, user_id: str | None = None) -> Path:
         """
         Host path for the agent's workspace directory.
-        Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
+        Multi-tenant Host: `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/workspace/`
+        Single-tenant Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
         Sandbox: `/mnt/user-data/workspace/`
-        """
-        return self.thread_dir(thread_id) / "user-data" / "workspace"
 
-    def sandbox_uploads_dir(self, thread_id: str) -> Path:
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
+        """
+        return self.thread_dir(thread_id, user_id) / "user-data" / "workspace"
+
+    def sandbox_uploads_dir(self, thread_id: str, user_id: str | None = None) -> Path:
         """
         Host path for user-uploaded files.
-        Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
+        Multi-tenant Host: `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/uploads/`
+        Single-tenant Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
         Sandbox: `/mnt/user-data/uploads/`
-        """
-        return self.thread_dir(thread_id) / "user-data" / "uploads"
 
-    def sandbox_outputs_dir(self, thread_id: str) -> Path:
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
+        """
+        return self.thread_dir(thread_id, user_id) / "user-data" / "uploads"
+
+    def sandbox_outputs_dir(self, thread_id: str, user_id: str | None = None) -> Path:
         """
         Host path for agent-generated artifacts.
-        Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
+        Multi-tenant Host: `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/outputs/`
+        Single-tenant Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
         Sandbox: `/mnt/user-data/outputs/`
-        """
-        return self.thread_dir(thread_id) / "user-data" / "outputs"
 
-    def sandbox_user_data_dir(self, thread_id: str) -> Path:
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
+        """
+        return self.thread_dir(thread_id, user_id) / "user-data" / "outputs"
+
+    def sandbox_user_data_dir(self, thread_id: str, user_id: str | None = None) -> Path:
         """
         Host path for the user-data root.
-        Host: `{base_dir}/threads/{thread_id}/user-data/`
+        Multi-tenant Host: `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/`
+        Single-tenant Host: `{base_dir}/threads/{thread_id}/user-data/`
         Sandbox: `/mnt/user-data/`
-        """
-        return self.thread_dir(thread_id) / "user-data"
 
-    def ensure_thread_dirs(self, thread_id: str) -> None:
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
+        """
+        return self.thread_dir(thread_id, user_id) / "user-data"
+
+    def ensure_thread_dirs(self, thread_id: str, user_id: str | None = None) -> None:
         """Create all standard sandbox directories for a thread.
 
         Directories are created with mode 0o777 so that sandbox containers
@@ -146,16 +241,20 @@ class Paths:
         write to the volume-mounted paths without "Permission denied" errors.
         The explicit chmod() call is necessary because Path.mkdir(mode=...) is
         subject to the process umask and may not yield the intended permissions.
+
+        Args:
+            thread_id: The thread ID.
+            user_id: Optional user ID for multi-tenant mode.
         """
         for d in [
-            self.sandbox_work_dir(thread_id),
-            self.sandbox_uploads_dir(thread_id),
-            self.sandbox_outputs_dir(thread_id),
+            self.sandbox_work_dir(thread_id, user_id),
+            self.sandbox_uploads_dir(thread_id, user_id),
+            self.sandbox_outputs_dir(thread_id, user_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
 
-    def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
+    def resolve_virtual_path(self, thread_id: str, virtual_path: str, user_id: str | None = None) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
 
         Args:
@@ -163,6 +262,7 @@ class Paths:
             virtual_path: Virtual path as seen inside the sandbox, e.g.
                           ``/mnt/user-data/outputs/report.pdf``.
                           Leading slashes are stripped before matching.
+            user_id: Optional user ID for multi-tenant mode.
 
         Returns:
             The resolved absolute host filesystem path.
@@ -180,7 +280,7 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id).resolve()
+        base = self.sandbox_user_data_dir(thread_id, user_id).resolve()
         actual = (base / relative).resolve()
 
         try:

@@ -17,6 +17,7 @@ class ConversationContext:
     messages: list[Any]
     timestamp: datetime = field(default_factory=datetime.utcnow)
     agent_name: str | None = None
+    user_id: str | None = None
 
 
 class MemoryUpdateQueue:
@@ -34,13 +35,14 @@ class MemoryUpdateQueue:
         self._timer: threading.Timer | None = None
         self._processing = False
 
-    def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None) -> None:
+    def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None, user_id: str | None = None) -> None:
         """Add a conversation to the update queue.
 
         Args:
             thread_id: The thread ID.
             messages: The conversation messages.
-            agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            agent_name: If provided, memory is stored per-agent. If None, uses user/global memory.
+            user_id: Optional user ID for multi-tenant mode.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -50,18 +52,21 @@ class MemoryUpdateQueue:
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
+            user_id=user_id,
         )
 
         with self._lock:
-            # Check if this thread already has a pending update
+            # Check if this (user_id, thread_id) already has a pending update
             # If so, replace it with the newer one
-            self._queue = [c for c in self._queue if c.thread_id != thread_id]
+            # Use tuple (user_id, thread_id) for deduplication
+            self._queue = [c for c in self._queue if not (c.user_id == user_id and c.thread_id == thread_id)]
             self._queue.append(context)
 
             # Reset or start the debounce timer
             self._reset_timer()
 
-        print(f"Memory update queued for thread {thread_id}, queue size: {len(self._queue)}")
+        user_suffix = f" (user: {user_id})" if user_id else ""
+        print(f"Memory update queued for thread {thread_id}{user_suffix}, queue size: {len(self._queue)}")
 
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""
@@ -103,20 +108,22 @@ class MemoryUpdateQueue:
         print(f"Processing {len(contexts_to_process)} queued memory updates")
 
         try:
-            updater = MemoryUpdater()
-
             for context in contexts_to_process:
                 try:
-                    print(f"Updating memory for thread {context.thread_id}")
+                    user_suffix = f" (user: {context.user_id})" if context.user_id else ""
+                    print(f"Updating memory for thread {context.thread_id}{user_suffix}")
+
+                    # Create updater with user_id
+                    updater = MemoryUpdater(user_id=context.user_id)
                     success = updater.update_memory(
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
                     )
                     if success:
-                        print(f"Memory updated successfully for thread {context.thread_id}")
+                        print(f"Memory updated successfully for thread {context.thread_id}{user_suffix}")
                     else:
-                        print(f"Memory update skipped/failed for thread {context.thread_id}")
+                        print(f"Memory update skipped/failed for thread {context.thread_id}{user_suffix}")
                 except Exception as e:
                     print(f"Error updating memory for thread {context.thread_id}: {e}")
 

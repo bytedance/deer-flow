@@ -20,6 +20,39 @@ from src.config.tool_config import ToolConfig, ToolGroupConfig
 load_dotenv()
 
 
+class MultiTenantConfig(BaseModel):
+    """Multi-tenant configuration for user authentication and isolation."""
+
+    enabled: bool = Field(default=False, description="Enable multi-tenant mode")
+    jwt_secret: str | None = Field(default=None, description="JWT secret key for authentication")
+    default_user_id: str = Field(default="default", description="Default user ID for unauthenticated requests")
+    token_expire_minutes: int = Field(default=1440, description="Token expiration time in minutes")
+
+
+class StateStoreConfig(BaseModel):
+    """State store configuration for sandbox state persistence."""
+
+    type: str = Field(default="file", description="Storage type: 'file' or 'redis'")
+    redis_url: str | None = Field(default=None, description="Redis connection URL (if type: 'redis')")
+
+
+class UserQuotaConfig(BaseModel):
+    """Individual user quota configuration."""
+
+    max_threads: int = Field(default=100, description="Maximum number of threads (-1 = unlimited)")
+    max_sandboxes: int = Field(default=5, description="Maximum concurrent sandboxes (-1 = unlimited)")
+    max_storage_mb: int = Field(default=1000, description="Maximum storage in megabytes (-1 = unlimited)")
+
+
+class UserQuotasConfig(BaseModel):
+    """User quota configuration."""
+
+    default: UserQuotaConfig = Field(default_factory=UserQuotaConfig, description="Default user quotas")
+    admin: UserQuotaConfig = Field(default_factory=lambda: UserQuotaConfig(
+        max_threads=-1, max_sandboxes=-1, max_storage_mb=-1
+    ), description="Admin user quotas")
+
+
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
@@ -31,6 +64,9 @@ class AppConfig(BaseModel):
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
+    multi_tenant: MultiTenantConfig = Field(default_factory=MultiTenantConfig, description="Multi-tenant configuration")
+    state_store: StateStoreConfig = Field(default_factory=StateStoreConfig, description="State store configuration")
+    user_quotas: UserQuotasConfig = Field(default_factory=UserQuotasConfig, description="User quota configuration")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -111,6 +147,9 @@ class AppConfig(BaseModel):
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
 
+        If an environment variable is not found, the original string is returned,
+        allowing Pydantic models to use their default values.
+
         Args:
             config: The config to resolve environment variables in.
 
@@ -120,9 +159,8 @@ class AppConfig(BaseModel):
         if isinstance(config, str):
             if config.startswith("$"):
                 env_value = os.getenv(config[1:])
-                if env_value is None:
-                    raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
-                return env_value
+                # Return None if env var not found, allowing field defaults to take over
+                return env_value if env_value is not None else None
             return config
         elif isinstance(config, dict):
             return {k: cls.resolve_env_variables(v) for k, v in config.items()}
