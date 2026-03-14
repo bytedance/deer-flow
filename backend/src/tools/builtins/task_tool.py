@@ -180,9 +180,9 @@ def task_tool(
     from src.tools import get_available_tools
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting).
-    # MCP tools are excluded because they are async-only (StructuredTool with only
-    # coroutine, no func) and subagents run synchronously in a thread pool.
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False, include_mcp=False)
+    # MCP tools are now supported: the executor uses asyncio.run() + agent.astream()
+    # so async-only StructuredTools work correctly.
+    tools = get_available_tools(model_name=parent_model, subagent_enabled=False, include_mcp=True)
 
     # Create executor
     executor = SubagentExecutor(

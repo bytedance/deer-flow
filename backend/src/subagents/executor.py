@@ -1,5 +1,6 @@
 """Subagent execution engine."""
 
+import asyncio
 import logging
 import os
 import threading
@@ -350,6 +351,40 @@ class SubagentExecutor:
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously.
 
+        Wraps the async _aexecute method with asyncio.run() so that
+        async-only tools (e.g. MCP StructuredTools) work correctly.
+
+        Args:
+            task: The task description for the subagent.
+            result_holder: Optional pre-created result object to update during execution.
+
+        Returns:
+            SubagentResult with the execution result.
+        """
+        try:
+            return asyncio.run(self._aexecute(task, result_holder))
+        except RuntimeError as e:
+            # If we're already inside an event loop (shouldn't happen in ThreadPoolExecutor,
+            # but handle defensively), fall back to a clear error.
+            logger.error(f"[trace={self.trace_id}] asyncio.run() failed: {e}")
+            if result_holder is not None:
+                result_holder.status = SubagentStatus.FAILED
+                result_holder.error = f"Async execution error: {e}"
+                result_holder.completed_at = datetime.now()
+                return result_holder
+            return SubagentResult(
+                task_id=str(uuid.uuid4())[:8],
+                trace_id=self.trace_id,
+                status=SubagentStatus.FAILED,
+                error=f"Async execution error: {e}",
+                completed_at=datetime.now(),
+            )
+
+    async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+        """Execute a task asynchronously.
+
+        Uses agent.astream() to support async-only tools (e.g. MCP tools).
+
         Args:
             task: The task description for the subagent.
             result_holder: Optional pre-created result object to update during execution.
@@ -388,11 +423,10 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting execution with max_turns={self.config.max_turns}")
 
-            # Use stream instead of invoke to get real-time updates
-            # This allows us to collect AI messages as they are generated
+            # Use astream to support async-only tools (e.g. MCP StructuredTools)
             final_state = None
             seen_message_count = 0
-            for chunk in agent.stream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 final_state = chunk
 
                 # Extract streamed messages from the current state
