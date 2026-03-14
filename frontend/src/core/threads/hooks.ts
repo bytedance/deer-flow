@@ -34,6 +34,13 @@ export type ThreadStreamOptions = {
 
 const BACKGROUND_THREAD_SYNC_MS = 5000;
 
+function shouldSyncInBackground() {
+  if (typeof document === "undefined") {
+    return false;
+  }
+  return document.hidden || !document.hasFocus();
+}
+
 function messageIdOf(message: Message) {
   return typeof message.id === "string" && message.id.length > 0
     ? message.id
@@ -285,6 +292,9 @@ export function useThreadStream({
     isLoading: thread.isLoading,
   });
   const backgroundSyncReadyRef = useRef(false);
+  const [shouldBackgroundSync, setShouldBackgroundSync] = useState(() =>
+    shouldSyncInBackground(),
+  );
 
   useEffect(() => {
     streamStateRef.current = {
@@ -305,7 +315,32 @@ export function useThreadStream({
   }, [onStreamThreadId]);
 
   useEffect(() => {
-    if (!onStreamThreadId) {
+    const updateBackgroundSyncState = () => {
+      setShouldBackgroundSync(shouldSyncInBackground());
+    };
+
+    updateBackgroundSyncState();
+    document.addEventListener("visibilitychange", updateBackgroundSyncState);
+    window.addEventListener("focus", updateBackgroundSyncState);
+    window.addEventListener("blur", updateBackgroundSyncState);
+
+    return () => {
+      document.removeEventListener(
+        "visibilitychange",
+        updateBackgroundSyncState,
+      );
+      window.removeEventListener("focus", updateBackgroundSyncState);
+      window.removeEventListener("blur", updateBackgroundSyncState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !onStreamThreadId ||
+      !onThreadUpdate ||
+      !shouldBackgroundSync ||
+      thread.isLoading
+    ) {
       return;
     }
 
@@ -371,7 +406,14 @@ export function useThreadStream({
       disposed = true;
       window.clearInterval(intervalId);
     };
-  }, [isMock, onStreamThreadId, queryClient]);
+  }, [
+    isMock,
+    onStreamThreadId,
+    onThreadUpdate,
+    queryClient,
+    shouldBackgroundSync,
+    thread.isLoading,
+  ]);
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);

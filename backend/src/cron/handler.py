@@ -193,8 +193,8 @@ async def _deliver_to_channel(
     thread_ts: str | None = None,
 ) -> None:
     """Deliver cron job result to a channel via MessageBus."""
-    from src.channels.message_bus import OutboundMessage
-    from src.channels.service import get_channel_service
+    from app.channels.message_bus import OutboundMessage
+    from app.channels.service import get_channel_service
 
     channel_service = get_channel_service()
     if channel_service is None:

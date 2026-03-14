@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from src.cron.handler import handle_cron_job
 
         cron_service = await start_cron_service(on_job=handle_cron_job)
-        logger.info("Cron service started: %s", cron_service.status())
+        logger.info("Cron service started: %s", await cron_service.status())
     except Exception:
         logger.exception("Cron service failed to start")
 

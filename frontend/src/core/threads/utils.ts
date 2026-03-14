@@ -23,8 +23,11 @@ export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
 }
 
-export function notificationBodyOfThread(state: AgentThreadState) {
-  let body = "Conversation finished";
+export function notificationBodyOfThread(
+  state: AgentThreadState,
+  fallback = "New message received",
+) {
+  const body = fallback;
   const lastMessage = state.messages.at(-1);
   if (!lastMessage) {
     return body;

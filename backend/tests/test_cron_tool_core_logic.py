@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from src.cron.types import CronJob, CronPayload, CronSchedule
 
-cron_tool_module = importlib.import_module("src.tools.builtins.cron_tool")
+cron_tool_module = importlib.import_module("deerflow.tools.builtins.cron_tool")
 cron_handler_module = importlib.import_module("src.cron.handler")
 
 

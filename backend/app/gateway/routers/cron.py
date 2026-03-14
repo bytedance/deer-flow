@@ -1,7 +1,7 @@
 """API router for cron job management."""
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -144,6 +144,12 @@ def _job_to_response(job: dict) -> CronJobResponse:
     job_state = job.get("state", {})
     next_run = job_state.get("next_run_at_ms")
     last_run = job_state.get("last_run_at_ms")
+    created_at_ms = job.get("created_at_ms", 0)
+
+    def _isoformat_ms(timestamp_ms: int | None) -> str | None:
+        if timestamp_ms is None:
+            return None
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()
 
     return CronJobResponse(
         id=job["id"],
@@ -152,13 +158,13 @@ def _job_to_response(job: dict) -> CronJobResponse:
         schedule=CronScheduleResponse(**job["schedule"]),
         payload=CronPayloadResponse(**job["payload"]),
         state=CronJobStateResponse(
-            next_run_at=datetime.fromtimestamp(next_run / 1000).isoformat() if next_run else None,
-            last_run_at=datetime.fromtimestamp(last_run / 1000).isoformat() if last_run else None,
+            next_run_at=_isoformat_ms(next_run),
+            last_run_at=_isoformat_ms(last_run),
             last_status=job_state.get("last_status", "pending"),
             last_error=job_state.get("last_error"),
         ),
         delete_after_run=job.get("delete_after_run", False),
-        created_at=datetime.fromtimestamp(job.get("created_at_ms", 0) / 1000).isoformat(),
+        created_at=_isoformat_ms(created_at_ms) or datetime.fromtimestamp(0, tz=UTC).isoformat(),
     )
 
 
@@ -169,7 +175,7 @@ async def list_jobs(include_disabled: bool = True) -> list[CronJobResponse]:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    jobs = cron_service.list_jobs(include_disabled=include_disabled)
+    jobs = await cron_service.list_jobs(include_disabled=include_disabled)
     return [_job_to_response(job) for job in jobs]
 
 
@@ -180,7 +186,7 @@ async def get_status() -> CronStatusResponse:
     if cron_service is None:
         return CronStatusResponse(running=False, jobs=0, enabled=0, disabled=0)
 
-    return CronStatusResponse(**cron_service.status())
+    return CronStatusResponse(**(await cron_service.status()))
 
 
 @router.post("", response_model=CronJobResponse)
@@ -236,7 +242,7 @@ async def add_job(request: AddCronJobRequest) -> CronJobResponse:
             subagent_enabled=request.payload.subagent_enabled,
         )
 
-        job = cron_service.add_job(
+        job = await cron_service.add_job(
             name=request.name,
             schedule=schedule,
             payload=payload,
@@ -258,7 +264,7 @@ async def remove_job(job_id: str) -> CronJobActionResponse:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    if cron_service.remove_job(job_id):
+    if await cron_service.remove_job(job_id):
         return CronJobActionResponse(status="removed", job_id=job_id)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -272,7 +278,7 @@ async def enable_job(job_id: str) -> CronJobActionResponse:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
     try:
-        if cron_service.enable_job(job_id, enabled=True):
+        if await cron_service.enable_job(job_id, enabled=True):
             return CronJobActionResponse(status="enabled", job_id=job_id)
     except NoFutureRunTimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -287,7 +293,7 @@ async def disable_job(job_id: str) -> CronJobActionResponse:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    if cron_service.enable_job(job_id, enabled=False):
+    if await cron_service.enable_job(job_id, enabled=False):
         return CronJobActionResponse(status="disabled", job_id=job_id)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

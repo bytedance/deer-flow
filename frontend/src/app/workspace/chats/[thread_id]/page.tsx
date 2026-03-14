@@ -32,15 +32,27 @@ export default function ChatPage() {
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
-  const notifyThreadUpdate = useCallback(
-    (state: AgentThreadState) => {
+  const showThreadNotification = useCallback(
+    (state: AgentThreadState, fallback?: string) => {
       if (document.hidden || !document.hasFocus()) {
         showNotification(state.title, {
-          body: notificationBodyOfThread(state),
+          body: notificationBodyOfThread(state, fallback),
         });
       }
     },
     [showNotification],
+  );
+  const notifyThreadUpdate = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state);
+    },
+    [showThreadNotification],
+  );
+  const notifyThreadFinish = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state, "Conversation finished");
+    },
+    [showThreadNotification],
   );
 
   const [thread, sendMessage] = useThreadStream({
@@ -52,7 +64,7 @@ export default function ChatPage() {
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${threadId}`);
     },
-    onFinish: notifyThreadUpdate,
+    onFinish: notifyThreadFinish,
     onThreadUpdate: notifyThreadUpdate,
   });
 

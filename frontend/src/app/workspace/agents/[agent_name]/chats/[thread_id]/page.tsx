@@ -39,15 +39,27 @@ export default function AgentChatPage() {
   const { threadId, isNewThread, setIsNewThread } = useThreadChat();
 
   const { showNotification } = useNotification();
-  const notifyThreadUpdate = useCallback(
-    (state: AgentThreadState) => {
+  const showThreadNotification = useCallback(
+    (state: AgentThreadState, fallback?: string) => {
       if (document.hidden || !document.hasFocus()) {
         showNotification(state.title, {
-          body: notificationBodyOfThread(state),
+          body: notificationBodyOfThread(state, fallback),
         });
       }
     },
     [showNotification],
+  );
+  const notifyThreadUpdate = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state);
+    },
+    [showThreadNotification],
+  );
+  const notifyThreadFinish = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state, "Conversation finished");
+    },
+    [showThreadNotification],
   );
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
@@ -61,7 +73,7 @@ export default function AgentChatPage() {
         `/workspace/agents/${agent_name}/chats/${threadId}`,
       );
     },
-    onFinish: notifyThreadUpdate,
+    onFinish: notifyThreadFinish,
     onThreadUpdate: notifyThreadUpdate,
   });
 
