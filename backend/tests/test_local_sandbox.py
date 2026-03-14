@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import subprocess
+import re
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+import src.sandbox.local.local_sandbox as local_sandbox_mod
 from src.sandbox.local.local_sandbox import LocalSandbox
 
 
@@ -170,6 +171,130 @@ class TestFileOperations:
 class TestGetShell:
     """Tests for LocalSandbox._get_shell()."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_shell_cache(self):
+        """Reset the module-level shell cache before and after each test."""
+        saved = local_sandbox_mod._cached_shell
+        local_sandbox_mod._cached_shell = None
+        yield
+        local_sandbox_mod._cached_shell = saved
+
     def test_returns_valid_shell(self) -> None:
         shell = LocalSandbox._get_shell()
         assert shell.endswith(("sh", "bash", "zsh"))
+
+    def test_shell_detection_cached(self) -> None:
+        """After first call, filesystem checks should not be repeated."""
+        with patch("os.path.isfile", return_value=True) as mock_isfile, patch("os.access", return_value=True):
+            first = LocalSandbox._get_shell()
+            second = LocalSandbox._get_shell()
+
+        assert first == second
+        # os.path.isfile should only be called during the first invocation
+        assert mock_isfile.call_count == 1
+
+    def test_shell_cache_populated(self) -> None:
+        """After calling _get_shell(), the module-level cache should be set."""
+        assert local_sandbox_mod._cached_shell is None
+        result = LocalSandbox._get_shell()
+        assert local_sandbox_mod._cached_shell is not None
+        assert local_sandbox_mod._cached_shell == result
+
+
+# ---------------------------------------------------------------------------
+# Path cache verification (Fix 2)
+# ---------------------------------------------------------------------------
+class TestPathCaches:
+    """Tests for _build_path_caches() — pre-computed sorted mappings and compiled regex."""
+
+    def test_path_caches_built_on_init(self, tmp_path: Path) -> None:
+        """Verify all cache attributes are correctly populated with 3 mappings."""
+        mappings = {
+            "/mnt/a": str(tmp_path / "a"),
+            "/mnt/a/deep": str(tmp_path / "a_deep"),
+            "/mnt/b": str(tmp_path / "b_local_longer_name"),
+        }
+        sandbox = LocalSandbox(id="local", path_mappings=mappings)
+
+        # _sorted_by_container_key: sorted by container path length descending
+        assert len(sandbox._sorted_by_container_key) == 3
+        container_lens = [len(cp) for cp, _ in sandbox._sorted_by_container_key]
+        assert container_lens == sorted(container_lens, reverse=True)
+
+        # _sorted_by_local_key: sorted by local path length descending
+        assert len(sandbox._sorted_by_local_key) == 3
+        local_lens = [len(lp) for _, lp in sandbox._sorted_by_local_key]
+        assert local_lens == sorted(local_lens, reverse=True)
+
+        # _reverse_patterns: list of (str, re.Pattern)
+        assert len(sandbox._reverse_patterns) == 3
+        for container_path, pattern in sandbox._reverse_patterns:
+            assert isinstance(container_path, str)
+            assert isinstance(pattern, re.Pattern)
+
+        # _forward_pattern: single compiled regex
+        assert isinstance(sandbox._forward_pattern, re.Pattern)
+
+    def test_path_caches_empty_mappings(self) -> None:
+        """With no mappings, caches should be empty/None."""
+        sandbox = LocalSandbox(id="local", path_mappings={})
+
+        assert sandbox._sorted_by_container_key == []
+        assert sandbox._sorted_by_local_key == []
+        assert sandbox._reverse_patterns == []
+        assert sandbox._forward_pattern is None
+
+    def test_sorted_not_called_during_resolve(self, tmp_path: Path) -> None:
+        """After init, _resolve_path() should NOT call sorted() — it uses cached lists."""
+        mappings = {"/mnt/skills": str(tmp_path / "skills")}
+        sandbox = LocalSandbox(id="local", path_mappings=mappings)
+
+        with patch("builtins.sorted") as mock_sorted:
+            sandbox._resolve_path("/mnt/skills/tool.py")
+            sandbox._resolve_path("/mnt/skills/other.py")
+            sandbox._resolve_path("/home/user/file.py")
+        mock_sorted.assert_not_called()
+
+    def test_regex_not_recompiled_per_call(self, tmp_path: Path) -> None:
+        """After init, _resolve_paths_in_command() should NOT recompile regex patterns."""
+        mappings = {"/mnt/skills": str(tmp_path / "skills")}
+        sandbox = LocalSandbox(id="local", path_mappings=mappings)
+
+        with patch("re.compile") as mock_compile:
+            for _ in range(5):
+                sandbox._resolve_paths_in_command("cat /mnt/skills/tool.py")
+                sandbox._reverse_resolve_paths_in_output(f"reading {tmp_path}/skills/tool.py")
+        mock_compile.assert_not_called()
+
+    def test_resolve_paths_consistency(self, tmp_path: Path) -> None:
+        """Cached path resolution produces identical results to expected values."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        mappings = {
+            "/mnt/skills": str(skills_dir),
+            "/mnt/data": str(data_dir),
+        }
+        sandbox = LocalSandbox(id="local", path_mappings=mappings)
+
+        # Forward resolution
+        assert sandbox._resolve_path("/mnt/skills/tool.py") == str(skills_dir / "tool.py")
+        assert sandbox._resolve_path("/mnt/data/file.csv") == str(data_dir / "file.csv")
+        assert sandbox._resolve_path("/home/user/other") == "/home/user/other"
+
+        # Reverse resolution
+        assert sandbox._reverse_resolve_path(str(skills_dir / "tool.py")) == "/mnt/skills/tool.py"
+        assert sandbox._reverse_resolve_path(str(data_dir / "file.csv")) == "/mnt/data/file.csv"
+
+        # Command resolution
+        cmd = "cat /mnt/skills/a.py /mnt/data/b.csv"
+        resolved = sandbox._resolve_paths_in_command(cmd)
+        assert str(skills_dir / "a.py") in resolved
+        assert str(data_dir / "b.csv") in resolved
+
+        # Output reverse resolution
+        output = f"File at {skills_dir}/tool.py processed"
+        reversed_output = sandbox._reverse_resolve_paths_in_output(output)
+        assert "/mnt/skills/tool.py" in reversed_output
