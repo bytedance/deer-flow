@@ -117,33 +117,6 @@ Important Rules:
 Return ONLY valid JSON, no explanation or markdown."""
 
 
-# Prompt template for extracting facts from a single message
-FACT_EXTRACTION_PROMPT = """Extract factual information about the user from this message.
-
-Message:
-{message}
-
-Extract facts in this JSON format:
-{{
-  "facts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal", "confidence": 0.0-1.0 }}
-  ]
-}}
-
-Categories:
-- preference: User preferences (likes/dislikes, styles, tools)
-- knowledge: User's expertise or knowledge areas
-- context: Background context (location, job, projects)
-- behavior: Behavioral patterns
-- goal: User's goals or objectives
-
-Rules:
-- Only extract clear, specific facts
-- Confidence should reflect certainty (explicit statement = 0.9+, implied = 0.6-0.8)
-- Skip vague or temporary information
-
-Return ONLY valid JSON."""
-
 
 def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
     """Count tokens in text using tiktoken.

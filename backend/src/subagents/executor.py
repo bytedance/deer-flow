@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -67,12 +68,32 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
+# Calculate dynamic worker count for execution pool
+# Default: max(3, min(cpu_count or 4, 10))
+# Can be overridden by DEERFLOW_SUBAGENT_WORKERS environment variable
+_execution_workers = 3
+try:
+    env_workers = os.environ.get("DEERFLOW_SUBAGENT_WORKERS")
+    if env_workers is not None:
+        _execution_workers = max(1, int(env_workers))
+        if int(env_workers) < 1:
+            logger.warning(f"DEERFLOW_SUBAGENT_WORKERS={env_workers} is less than 1, clamped to 1")
+        else:
+            logger.info(f"Using DEERFLOW_SUBAGENT_WORKERS={_execution_workers} from environment")
+    else:
+        cpu_count = os.cpu_count() or 4
+        _execution_workers = max(3, min(cpu_count, 10))
+        logger.info(f"Dynamic subagent execution workers: {_execution_workers} (cpu_count={cpu_count})")
+except (ValueError, TypeError) as e:
+    logger.warning(f"Failed to parse DEERFLOW_SUBAGENT_WORKERS, using default: {_execution_workers}. Error: {e}")
+
 # Thread pool for background task scheduling and orchestration
+# Scheduler pool stays at 3 workers (it's just for scheduling, doesn't need more)
 _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
 
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
-_execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+_execution_pool = ThreadPoolExecutor(max_workers=_execution_workers, thread_name_prefix="subagent-exec-")
 
 
 def _filter_tools(
@@ -421,9 +442,6 @@ class SubagentExecutor:
 
         _scheduler_pool.submit(run_task)
         return task_id
-
-
-MAX_CONCURRENT_SUBAGENTS = 3
 
 
 def get_background_task_result(task_id: str) -> SubagentResult | None:

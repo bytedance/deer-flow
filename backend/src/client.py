@@ -184,16 +184,47 @@ class DeerFlowClient:
     def _ensure_agent(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = config.get("configurable", {})
+        
+        # Helper function to get skill state tuple
+        def _get_skill_state() -> tuple:
+            """Return a frozen tuple of (skill_name, enabled) pairs."""
+            try:
+                from src.skills.loader import load_skills
+                skills = load_skills(enabled_only=False)
+                return tuple(sorted((skill.name, skill.enabled) for skill in skills))
+            except Exception:
+                return ()
+        
+        # Helper function to get memory file mtime
+        def _get_memory_mtime() -> float | None:
+            """Return the modification time of the memory file, or None if it doesn't exist."""
+            try:
+                from src.agents.memory.updater import _get_memory_file_path
+                memory_file_path = _get_memory_file_path(None)
+                if memory_file_path.exists():
+                    return memory_file_path.stat().st_mtime
+            except Exception:
+                pass
+            return None
+        
+        # Build the cache key with all state components
         key = (
             cfg.get("model_name"),
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            _get_skill_state(),      # Skill state
+            _get_memory_mtime(),     # Memory file mtime
         )
-
+        
+        # Check if agent needs to be recreated
         if self._agent is not None and self._agent_config_key == key:
             return
-
+        
+        # Log cache invalidation if we have a previous key
+        if self._agent is not None and self._agent_config_key != key:
+            logger.info("Agent cache invalidated - config or state changed")
+        
         thinking_enabled = cfg.get("thinking_enabled", True)
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)

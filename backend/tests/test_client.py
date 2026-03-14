@@ -402,10 +402,35 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False)
+
+        # Mock skill and memory state that _ensure_agent will compute
+        mock_skill = MagicMock()
+        mock_skill.name = "test-skill"
+        mock_skill.enabled = True
+        mock_skill_state = (("test-skill", True),)
+
+        mock_memory_mtime = 123456.789
+        mock_memory_file = MagicMock()
+        mock_memory_file.exists.return_value = True
+        mock_stat_result = MagicMock()
+        mock_stat_result.st_mtime = mock_memory_mtime
+        mock_memory_file.stat.return_value = mock_stat_result
+
+        # Pre-set key to match what _ensure_agent will compute
+        client._agent_config_key = (None, True, False, False, mock_skill_state, mock_memory_mtime)
 
         config = client._get_runnable_config("t1")
-        client._ensure_agent(config)
+
+        with (
+            patch("src.skills.loader.load_skills", return_value=[mock_skill]),
+            patch("src.agents.memory.updater._get_memory_file_path", return_value=mock_memory_file),
+            patch("src.client.create_chat_model"),
+            patch("src.client.create_agent", return_value=mock_agent),
+            patch("src.client._build_middlewares", return_value=[]),
+            patch("src.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+        ):
+            client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
