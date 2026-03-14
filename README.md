@@ -42,7 +42,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
-    - [IM Channels](#im-channels)
+      - [IM Channels](#im-channels)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -94,9 +94,17 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
        max_tokens: 4096                  # Maximum tokens per request
        temperature: 0.7                  # Sampling temperature
+
+     - name: openrouter-gemini-2.5-flash
+       display_name: Gemini 2.5 Flash (OpenRouter)
+       use: langchain_openai:ChatOpenAI
+       model: google/gemini-2.5-flash-preview
+       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       base_url: https://openrouter.ai/api/v1
    ```
 
-  
+   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -107,6 +115,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```bash
    TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
+   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
    # Add other provider keys as needed
    INFOQUEST_API_KEY=your-infoquest-api-key
    ```
@@ -129,17 +138,26 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 #### Option 1: Docker (Recommended)
 
-The fastest way to get started with a consistent environment:
+**Development** (hot-reload, source mounts):
 
-1. **Initialize and start**:
-   ```bash
-   make docker-init    # Pull sandbox image (Only once or when image updates)
-   make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
-   ```
+```bash
+make docker-init    # Pull sandbox image (only once or when image updates)
+make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
+```
 
-   `make docker-start` now starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
-2. **Access**: http://localhost:2026
+**Production** (builds images locally, mounts runtime config and data):
+
+```bash
+make up     # Build images and start all production services
+make down   # Stop and remove containers
+```
+
+> [!NOTE]
+> The LangGraph agent server currently runs via `langgraph dev` (the open-source CLI server).
+
+Access: http://localhost:2026
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -321,7 +339,11 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
+When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
+
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+
+Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 ```
 # Paths inside the sandbox container
