@@ -5,6 +5,9 @@ target-version = "py312"
 select = ["E", "F", "I", "UP"]
 ignore = []
 
+[lint.isort]
+known-first-party = ["deerflow", "app"]
+
 [format]
 quote-style = "double"
 indent-style = "space"

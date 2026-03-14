@@ -36,4 +36,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 EXPOSE 8001 2024
 
 # Default command (can be overridden in docker-compose)
-CMD ["sh", "-c", "uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001"]
+CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]

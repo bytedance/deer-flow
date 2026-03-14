@@ -143,12 +143,12 @@ Root-level orchestration and config:
 
 Backend core:
 
-- `backend/src/agents/` - lead agent, middleware chain, memory
-- `backend/src/gateway/` - FastAPI gateway API
-- `backend/src/sandbox/` - sandbox provider + tool wrappers
-- `backend/src/subagents/` - subagent registry/execution
-- `backend/src/mcp/` - MCP integration
-- `backend/langgraph.json` - graph entrypoint (`src.agents:make_lead_agent`)
+- `backend/packages/harness/deerflow/agents/` - lead agent, middleware chain, memory
+- `backend/app/gateway/` - FastAPI gateway API
+- `backend/packages/harness/deerflow/sandbox/` - sandbox provider + tool wrappers
+- `backend/packages/harness/deerflow/subagents/` - subagent registry/execution
+- `backend/packages/harness/deerflow/mcp/` - MCP integration
+- `backend/langgraph.json` - graph entrypoint (`deerflow.agents:make_lead_agent`)
 - `backend/pyproject.toml` - Python deps and `requires-python`
 - `backend/ruff.toml` - lint/format policy
 - `backend/tests/` - backend unit and integration-like tests
