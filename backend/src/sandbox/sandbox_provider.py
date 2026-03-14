@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 
 from src.config import get_app_config
@@ -41,6 +42,7 @@ class SandboxProvider(ABC):
 
 
 _default_sandbox_provider: SandboxProvider | None = None
+_provider_lock = threading.Lock()
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -49,14 +51,22 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     Returns a cached singleton instance. Use `reset_sandbox_provider()` to clear
     the cache, or `shutdown_sandbox_provider()` to properly shutdown and clear.
 
+    Thread-safe via double-checked locking: the fast path (already initialized)
+    requires no lock acquisition.
+
     Returns:
         A sandbox provider instance.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is None:
-        config = get_app_config()
-        cls = resolve_class(config.sandbox.use, SandboxProvider)
-        _default_sandbox_provider = cls(**kwargs)
+    # Fast path: already initialized (no lock needed)
+    if _default_sandbox_provider is not None:
+        return _default_sandbox_provider
+    with _provider_lock:
+        # Double-check after acquiring lock
+        if _default_sandbox_provider is None:
+            config = get_app_config()
+            cls = resolve_class(config.sandbox.use, SandboxProvider)
+            _default_sandbox_provider = cls(**kwargs)
     return _default_sandbox_provider
 
 
@@ -71,7 +81,8 @@ def reset_sandbox_provider() -> None:
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
-    _default_sandbox_provider = None
+    with _provider_lock:
+        _default_sandbox_provider = None
 
 
 def shutdown_sandbox_provider() -> None:
@@ -82,10 +93,11 @@ def shutdown_sandbox_provider() -> None:
     is shutting down or when you need to completely reset the sandbox system.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is not None:
-        if hasattr(_default_sandbox_provider, "shutdown"):
-            _default_sandbox_provider.shutdown()
-        _default_sandbox_provider = None
+    with _provider_lock:
+        if _default_sandbox_provider is not None:
+            if hasattr(_default_sandbox_provider, "shutdown"):
+                _default_sandbox_provider.shutdown()
+            _default_sandbox_provider = None
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:

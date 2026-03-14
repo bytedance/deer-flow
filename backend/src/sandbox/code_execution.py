@@ -14,6 +14,7 @@ from src.sandbox.tools import (
     get_thread_data,
     is_local_sandbox,
     replace_virtual_path,
+    truncate_output,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,8 +106,8 @@ def execute_python_tool(
         if len(output) <= MAX_OUTPUT_LENGTH:
             return output
 
-        truncated = output[:MAX_OUTPUT_LENGTH]
-        notice = f"\n\n[Output truncated — {len(output)} chars total, showing first {MAX_OUTPUT_LENGTH}]"
+        truncated = truncate_output(output, MAX_OUTPUT_LENGTH)
+        notice = f"\n\n[Output truncated — {len(output)} chars total]"
         if save_output_to:
             notice += f"\n[Full output saved to {save_output_to}]"
         else:
