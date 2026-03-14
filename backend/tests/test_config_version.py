@@ -97,6 +97,18 @@ def test_no_example_file_no_warning(caplog):
         assert "outdated" not in caplog.text
 
 
+def test_string_config_version_does_not_raise_type_error(caplog):
+    """config_version stored as a YAML string should not raise TypeError on comparison."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = _make_config_files(
+            Path(tmpdir),
+            user_config={"config_version": "1"},  # string, as YAML can produce
+            example_config={"config_version": 2},
+        )
+        # Must not raise TypeError: '<' not supported between instances of 'str' and 'int'
+        AppConfig._check_config_version({"config_version": "1"}, config_path)
+
+
 def test_newer_user_version_no_warning(caplog):
     """If user has a newer version than example (edge case), no warning."""
     with tempfile.TemporaryDirectory() as tmpdir:

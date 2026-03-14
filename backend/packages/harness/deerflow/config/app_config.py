@@ -119,7 +119,10 @@ class AppConfig(BaseModel):
         Emits a warning if the user's config_version is lower than the example's.
         Missing config_version is treated as version 0 (pre-versioning).
         """
-        user_version = config_data.get("config_version", 0)
+        try:
+            user_version = int(config_data.get("config_version", 0))
+        except (TypeError, ValueError):
+            user_version = 0
 
         # Find config.example.yaml by searching config.yaml's directory and its parents
         example_path = None
@@ -139,7 +142,11 @@ class AppConfig(BaseModel):
         try:
             with open(example_path, encoding="utf-8") as f:
                 example_data = yaml.safe_load(f)
-            example_version = example_data.get("config_version", 0) if example_data else 0
+            raw = example_data.get("config_version", 0) if example_data else 0
+            try:
+                example_version = int(raw)
+            except (TypeError, ValueError):
+                example_version = 0
         except Exception:
             return
 
