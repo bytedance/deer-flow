@@ -565,9 +565,9 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
-        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
 
         async def go():
             bus = MessageBus()
@@ -634,9 +634,9 @@ class TestChannelManager:
 
     def test_handle_feishu_stream_error_still_sends_final(self, monkeypatch):
         """When the stream raises mid-way, a final outbound with is_final=True must still be published."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
-        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
 
         async def go():
             bus = MessageBus()
@@ -1228,7 +1228,7 @@ class TestHandleChatWithArtifacts:
 
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
@@ -1270,7 +1270,7 @@ class TestFeishuChannel:
         _run(go())
 
     def test_prepare_inbound_and_send_share_running_card_task(self):
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
@@ -1339,7 +1339,7 @@ class TestFeishuChannel:
             ReplyMessageRequestBody,
         )
 
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
