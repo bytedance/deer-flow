@@ -77,6 +77,15 @@ const RIGHT_PANEL_WIDTH_STORAGE_KEY = "right_panel_width_px";
 const RIGHT_PANEL_MIN_WIDTH_PX = 280;
 const RIGHT_PANEL_MAX_WIDTH_PX = 520;
 
+function getTodoListSignature(todos: Todo[]): string {
+  return JSON.stringify(
+    todos.map((todo) => ({
+      content: todo.content ?? "",
+      status: todo.status ?? "pending",
+    })),
+  );
+}
+
 interface TruncateMessagesResponse {
   success: boolean;
   messages_kept: number;
@@ -265,6 +274,8 @@ function ChatInner() {
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
   const { open: todoPanelOpen, setOpen: setTodoPanelOpen } = useRightPanel();
   const showTodoPanel = todoPanelOpen;
+  const lastTodoSignatureRef = useRef<string | null>(null);
+  const todos = thread.values.todos ?? [];
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     if (typeof window === "undefined") {
       return 320;
@@ -279,6 +290,19 @@ function ChatInner() {
       Math.max(RIGHT_PANEL_MIN_WIDTH_PX, parsed),
     );
   });
+  useEffect(() => {
+    const signature = getTodoListSignature(todos);
+    if (lastTodoSignatureRef.current === null) {
+      lastTodoSignatureRef.current = signature;
+      return;
+    }
+    if (signature === lastTodoSignatureRef.current) {
+      return;
+    }
+    lastTodoSignatureRef.current = signature;
+    setTodoPanelOpen(true);
+    setTodoListCollapsed(false);
+  }, [setTodoPanelOpen, todos]);
   const rightPanelPointerStateRef = useRef<{
     startX: number;
     startWidth: number;
@@ -845,7 +869,7 @@ function ChatInner() {
                 showTodoPanel={showTodoPanel}
                 rightPanelWidth={rightPanelWidth}
                 handleRightPanelResizeStart={handleRightPanelResizeStart}
-                todos={thread.values.todos ?? []}
+                todos={todos}
                 todoListCollapsed={todoListCollapsed}
                 onToggleTodoList={() => setTodoListCollapsed(!todoListCollapsed)}
               />

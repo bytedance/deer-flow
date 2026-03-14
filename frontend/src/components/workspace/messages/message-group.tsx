@@ -61,6 +61,53 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 
+function buildFaviconCandidates(url: string): string[] {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname;
+    const origin = parsed.origin;
+    const candidates = [
+      `${origin}/favicon.ico`,
+      `https://icons.duckduckgo.com/ip3/${hostname}.ico`,
+      `https://www.google.com/s2/favicons?domain=${hostname}&sz=32`,
+    ];
+    return [...new Set(candidates)];
+  } catch {
+    return [];
+  }
+}
+
+function SearchResultFavicon({ url }: { url: string }) {
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const candidates = useMemo(() => buildFaviconCandidates(url), [url]);
+
+  useEffect(() => {
+    setSourceIndex(0);
+  }, [url]);
+
+  if (sourceIndex >= candidates.length) {
+    return <GlobeIcon className="text-muted-foreground size-4 shrink-0" />;
+  }
+
+  const src = candidates[sourceIndex];
+  if (!src) {
+    return <GlobeIcon className="text-muted-foreground size-4 shrink-0" />;
+  }
+
+  return (
+    <img
+      alt=""
+      aria-hidden="true"
+      className="size-4 shrink-0 rounded-[2px]"
+      loading="lazy"
+      onError={() => {
+        setSourceIndex((prev) => prev + 1);
+      }}
+      src={src}
+    />
+  );
+}
+
 export const MessageGroup = memo(function MessageGroup({
   className,
   messages,
@@ -371,7 +418,7 @@ export const ToolCall = memo(function ToolCall({
                     rel="noreferrer"
                     target="_blank"
                   >
-                    <GlobeIcon className="text-muted-foreground size-4 shrink-0" />
+                    <SearchResultFavicon url={item.url} />
                     <span className="text-foreground min-w-0 flex-1 truncate">
                       {item.title}
                     </span>
@@ -454,13 +501,19 @@ export const ToolCall = memo(function ToolCall({
       <ChainOfThoughtStep
         key={id}
         label={t.toolCalls.viewWebPage}
-        icon={GlobeIcon}
+        icon={url ? <SearchResultFavicon url={url} /> : GlobeIcon}
       >
         {!hideContent && (
           <ChainOfThoughtSearchResult>
             {url && (
-              <a href={url} target="_blank" rel="noreferrer">
-                {title}
+              <a
+                className="group flex items-center gap-2"
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <SearchResultFavicon url={url} />
+                <span className="truncate">{title}</span>
               </a>
             )}
           </ChainOfThoughtSearchResult>
