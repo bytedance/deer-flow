@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -23,6 +24,7 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "is_plan_mode": False,
     "subagent_enabled": False,
 }
+STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -90,6 +92,98 @@ def _extract_response_text(result: dict | list) -> str:
                 if text:
                     return text
     return ""
+
+
+def _extract_text_content(content: Any) -> str:
+    """Extract text from a streaming payload content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, Mapping):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                else:
+                    nested = block.get("content")
+                    if isinstance(nested, str):
+                        parts.append(nested)
+        return "".join(parts)
+    if isinstance(content, Mapping):
+        for key in ("text", "content"):
+            value = content.get(key)
+            if isinstance(value, str):
+                return value
+    return ""
+
+
+def _merge_stream_text(existing: str, chunk: str) -> str:
+    """Merge either delta text or cumulative text into a single snapshot."""
+    if not chunk:
+        return existing
+    if not existing or chunk == existing:
+        return chunk or existing
+    if chunk.startswith(existing):
+        return chunk
+    if existing.endswith(chunk):
+        return existing
+    return existing + chunk
+
+
+def _extract_stream_message_id(payload: Any, metadata: Any) -> str | None:
+    """Best-effort extraction of the streamed AI message identifier."""
+    candidates = [payload, metadata]
+    if isinstance(payload, Mapping):
+        candidates.append(payload.get("kwargs"))
+
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        for key in ("id", "message_id"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _accumulate_stream_text(
+    buffers: dict[str, str],
+    current_message_id: str | None,
+    event_data: Any,
+) -> tuple[str | None, str | None]:
+    """Convert a ``messages-tuple`` event into the latest displayable AI text."""
+    payload = event_data
+    metadata: Any = None
+    if isinstance(event_data, (list, tuple)):
+        if event_data:
+            payload = event_data[0]
+        if len(event_data) > 1:
+            metadata = event_data[1]
+
+    if isinstance(payload, str):
+        message_id = current_message_id or "__default__"
+        buffers[message_id] = _merge_stream_text(buffers.get(message_id, ""), payload)
+        return buffers[message_id], message_id
+
+    if not isinstance(payload, Mapping):
+        return None, current_message_id
+
+    payload_type = str(payload.get("type", "")).lower()
+    if "tool" in payload_type:
+        return None, current_message_id
+
+    text = _extract_text_content(payload.get("content"))
+    if not text and isinstance(payload.get("kwargs"), Mapping):
+        text = _extract_text_content(payload["kwargs"].get("content"))
+    if not text:
+        return None, current_message_id
+
+    message_id = _extract_stream_message_id(payload, metadata) or current_message_id or "__default__"
+    buffers[message_id] = _merge_stream_text(buffers.get(message_id, ""), text)
+    return buffers[message_id], message_id
 
 
 def _extract_artifacts(result: dict | list) -> list[str]:
@@ -183,6 +277,33 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
         except (ValueError, OSError) as exc:
             logger.warning("[Manager] failed to resolve artifact %s: %s", virtual_path, exc)
     return attachments
+
+
+def _prepare_artifact_delivery(
+    thread_id: str,
+    response_text: str,
+    artifacts: list[str],
+) -> tuple[str, list[ResolvedAttachment]]:
+    """Resolve attachments and append filename fallbacks to the text response."""
+    attachments: list[ResolvedAttachment] = []
+    if not artifacts:
+        return response_text, attachments
+
+    attachments = _resolve_attachments(thread_id, artifacts)
+    resolved_virtuals = {attachment.virtual_path for attachment in attachments}
+    unresolved = [path for path in artifacts if path not in resolved_virtuals]
+
+    if unresolved:
+        artifact_text = _format_artifact_text(unresolved)
+        response_text = (response_text + "\n\n" + artifact_text) if response_text else artifact_text
+
+    # Always include resolved attachment filenames as a text fallback so files
+    # remain discoverable even when the upload is skipped or fails.
+    if attachments:
+        resolved_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+        response_text = (response_text + "\n\n" + resolved_text) if response_text else resolved_text
+
+    return response_text, attachments
 
 
 class ChannelManager:
@@ -363,6 +484,17 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+        if msg.channel_name == "feishu":
+            await self._handle_streaming_chat(
+                client,
+                msg,
+                thread_id,
+                assistant_id,
+                run_config,
+                run_context,
+            )
+            return
+
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
         result = await client.runs.wait(
             thread_id,
@@ -382,20 +514,7 @@ class ChannelManager:
             len(artifacts),
         )
 
-        # Resolve artifact virtual paths to actual files for channel upload
-        attachments: list[ResolvedAttachment] = []
-        if artifacts:
-            attachments = _resolve_attachments(thread_id, artifacts)
-            resolved_virtuals = {a.virtual_path for a in attachments}
-            unresolved = [p for p in artifacts if p not in resolved_virtuals]
-            if unresolved:
-                artifact_text = _format_artifact_text(unresolved)
-                response_text = (response_text + "\n\n" + artifact_text) if response_text else artifact_text
-            # Always include resolved attachment filenames as a text fallback so
-            # files remain discoverable even when the upload is skipped or fails.
-            if attachments:
-                resolved_text = _format_artifact_text([a.virtual_path for a in attachments])
-                response_text = (response_text + "\n\n" + resolved_text) if response_text else resolved_text
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
         if not response_text:
             if attachments:
@@ -414,6 +533,103 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_streaming_chat(
+        self,
+        client,
+        msg: InboundMessage,
+        thread_id: str,
+        assistant_id: str,
+        run_config: dict[str, Any],
+        run_context: dict[str, Any],
+    ) -> None:
+        logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+
+        last_values: dict[str, Any] | list | None = None
+        streamed_buffers: dict[str, str] = {}
+        current_message_id: str | None = None
+        latest_text = ""
+        last_published_text = ""
+        last_publish_at = 0.0
+        stream_error: BaseException | None = None
+
+        try:
+            async for chunk in client.runs.stream(
+                thread_id,
+                assistant_id,
+                input={"messages": [{"role": "human", "content": msg.text}]},
+                config=run_config,
+                context=run_context,
+                stream_mode=["messages-tuple", "values"],
+            ):
+                event = getattr(chunk, "event", "")
+                data = getattr(chunk, "data", None)
+
+                if event == "messages-tuple":
+                    accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
+                    if accumulated_text:
+                        latest_text = accumulated_text
+                elif event == "values" and isinstance(data, (dict, list)):
+                    last_values = data
+                    snapshot_text = _extract_response_text(data)
+                    if snapshot_text:
+                        latest_text = snapshot_text
+
+                if not latest_text or latest_text == last_published_text:
+                    continue
+
+                now = time.monotonic()
+                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
+                    continue
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel_name=msg.channel_name,
+                        chat_id=msg.chat_id,
+                        thread_id=thread_id,
+                        text=latest_text,
+                        is_final=False,
+                        thread_ts=msg.thread_ts,
+                    )
+                )
+                last_published_text = latest_text
+                last_publish_at = now
+        except Exception as exc:
+            stream_error = exc
+            logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
+        finally:
+            result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
+            response_text = _extract_response_text(result)
+            artifacts = _extract_artifacts(result)
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+
+            if not response_text:
+                if attachments:
+                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+                elif stream_error:
+                    response_text = "An error occurred while processing your request. Please try again."
+                else:
+                    response_text = latest_text or "(No response from agent)"
+
+            logger.info(
+                "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
+                thread_id,
+                len(response_text),
+                len(artifacts),
+                stream_error,
+            )
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel_name=msg.channel_name,
+                    chat_id=msg.chat_id,
+                    thread_id=thread_id,
+                    text=response_text,
+                    artifacts=artifacts,
+                    attachments=attachments,
+                    is_final=True,
+                    thread_ts=msg.thread_ts,
+                )
+            )
 
     # -- command handling --------------------------------------------------
 

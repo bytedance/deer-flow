@@ -33,11 +33,7 @@ class ChannelService:
         langgraph_url = config.pop("langgraph_url", None) or "http://localhost:2024"
         gateway_url = config.pop("gateway_url", None) or "http://localhost:8001"
         default_session = config.pop("session", None)
-        channel_sessions = {
-            name: channel_config.get("session")
-            for name, channel_config in config.items()
-            if isinstance(channel_config, dict)
-        }
+        channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
         self.manager = ChannelManager(
             bus=self.bus,
             store=self.store,
