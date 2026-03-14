@@ -9,6 +9,7 @@ from app.gateway.routers import (
     agents,
     artifacts,
     channels,
+    cron,
     mcp,
     memory,
     models,
@@ -57,7 +58,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("No IM channels configured or channel service failed to start")
 
+    # Start cron service
+    try:
+        from src.cron import start_cron_service
+        from src.cron.handler import handle_cron_job
+
+        cron_service = await start_cron_service(on_job=handle_cron_job)
+        logger.info("Cron service started: %s", await cron_service.status())
+    except Exception:
+        logger.exception("Cron service failed to start")
+
     yield
+
+    # Stop cron service on shutdown
+    try:
+        from src.cron import stop_cron_service
+
+        stop_cron_service()
+    except Exception:
+        logger.exception("Failed to stop cron service")
 
     # Stop channel service on shutdown
     try:
@@ -140,6 +159,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "cron",
+                "description": "Manage scheduled tasks and recurring reminders",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -175,6 +198,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Cron API is mounted at /api/cron
+    app.include_router(cron.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

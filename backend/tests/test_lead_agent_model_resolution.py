@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import TypeAdapter
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
+from deerflow.agents.thread_state import AgentContext
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -107,6 +109,49 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert captured["name"] == "safe-model"
     assert captured["thinking_enabled"] is False
     assert result["model"] is not None
+
+
+def test_make_lead_agent_registers_context_schema(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=True)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+
+    captured: dict[str, object] = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(lead_agent_module, "create_agent", fake_create_agent)
+
+    lead_agent_module.make_lead_agent(
+        {
+            "configurable": {
+                "model_name": "safe-model",
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+            }
+        }
+    )
+
+    assert captured["context_schema"] is AgentContext
+
+    validated = TypeAdapter(AgentContext).validate_python(
+        {
+            "thread_id": "thread-1",
+            "chat_id": "chat-1",
+            "custom": "extra-context",
+        }
+    )
+    assert validated["thread_id"] == "thread-1"
+    assert validated["chat_id"] == "chat-1"
+    assert validated["custom"] == "extra-context"
 
 
 def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):

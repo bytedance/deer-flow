@@ -28,8 +28,135 @@ export type ThreadStreamOptions = {
   isMock?: boolean;
   onStart?: (threadId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
+  onThreadUpdate?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
 };
+
+const BACKGROUND_THREAD_SYNC_MS = 5000;
+
+function shouldSyncInBackground() {
+  if (typeof document === "undefined") {
+    return false;
+  }
+  return document.hidden || !document.hasFocus();
+}
+
+function messageIdOf(message: Message) {
+  return typeof message.id === "string" && message.id.length > 0
+    ? message.id
+    : null;
+}
+
+function hasSameLastMessage(previous: Message[], next: Message[]) {
+  if (previous.length === 0 && next.length === 0) {
+    return true;
+  }
+
+  const previousLast = previous.at(-1);
+  const nextLast = next.at(-1);
+  if (!previousLast || !nextLast) {
+    return false;
+  }
+
+  const previousId = messageIdOf(previousLast);
+  const nextId = messageIdOf(nextLast);
+  if (previousId && nextId) {
+    return previousId === nextId;
+  }
+
+  return JSON.stringify(previousLast.content) === JSON.stringify(nextLast.content);
+}
+
+function getNewMessages(previous: Message[], next: Message[]) {
+  const previousIds = new Set(
+    previous
+      .map((message) => messageIdOf(message))
+      .filter((id): id is string => id !== null),
+  );
+
+  const unseenById = next.filter((message) => {
+    const id = messageIdOf(message);
+    return id ? !previousIds.has(id) : false;
+  });
+  if (unseenById.length > 0) {
+    return unseenById;
+  }
+
+  if (next.length > previous.length) {
+    return next.slice(previous.length);
+  }
+
+  return [];
+}
+
+function shouldReplaceThreadState(
+  current: AgentThreadState | null,
+  next: AgentThreadState,
+) {
+  if (current === null) {
+    return true;
+  }
+
+  if (current.messages.length !== next.messages.length) {
+    return true;
+  }
+  if (!hasSameLastMessage(current.messages, next.messages)) {
+    return true;
+  }
+  if (current.title !== next.title) {
+    return true;
+  }
+  if (current.artifacts.length !== next.artifacts.length) {
+    return true;
+  }
+  if ((current.todos?.length ?? 0) !== (next.todos?.length ?? 0)) {
+    return true;
+  }
+
+  return false;
+}
+
+function pickLatestThreadState(
+  streamValues: AgentThreadState,
+  syncedValues: AgentThreadState | null,
+) {
+  if (syncedValues === null) {
+    return streamValues;
+  }
+
+  if (syncedValues.messages.length > streamValues.messages.length) {
+    return syncedValues;
+  }
+  if (syncedValues.messages.length < streamValues.messages.length) {
+    return streamValues;
+  }
+  if (!hasSameLastMessage(streamValues.messages, syncedValues.messages)) {
+    return syncedValues;
+  }
+  if (syncedValues.artifacts.length > streamValues.artifacts.length) {
+    return syncedValues;
+  }
+  if ((syncedValues.todos?.length ?? 0) > (streamValues.todos?.length ?? 0)) {
+    return syncedValues;
+  }
+  if (syncedValues.title && syncedValues.title !== streamValues.title) {
+    return syncedValues;
+  }
+
+  return streamValues;
+}
+
+function normalizeThreadState(
+  values: Partial<AgentThreadState> | null | undefined,
+  fallbackMessages: Message[] = [],
+): AgentThreadState {
+  return {
+    title: typeof values?.title === "string" ? values.title : "",
+    messages: Array.isArray(values?.messages) ? values.messages : fallbackMessages,
+    artifacts: Array.isArray(values?.artifacts) ? values.artifacts : [],
+    todos: Array.isArray(values?.todos) ? values.todos : undefined,
+  };
+}
 
 export function useThreadStream({
   threadId,
@@ -37,6 +164,7 @@ export function useThreadStream({
   isMock,
   onStart,
   onFinish,
+  onThreadUpdate,
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
@@ -50,13 +178,14 @@ export function useThreadStream({
   const listeners = useRef({
     onStart,
     onFinish,
+    onThreadUpdate,
     onToolEnd,
   });
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onStart, onFinish, onToolEnd };
-  }, [onStart, onFinish, onToolEnd]);
+    listeners.current = { onStart, onFinish, onThreadUpdate, onToolEnd };
+  }, [onFinish, onStart, onThreadUpdate, onToolEnd]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -153,6 +282,138 @@ export function useThreadStream({
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     },
   });
+
+  const [syncedThreadState, setSyncedThreadState] =
+    useState<AgentThreadState | null>(null);
+  const syncedThreadStateRef = useRef<AgentThreadState | null>(null);
+  const streamStateRef = useRef({
+    messages: thread.messages,
+    values: normalizeThreadState(thread.values, thread.messages),
+    isLoading: thread.isLoading,
+  });
+  const backgroundSyncReadyRef = useRef(false);
+  const [shouldBackgroundSync, setShouldBackgroundSync] = useState(() =>
+    shouldSyncInBackground(),
+  );
+
+  useEffect(() => {
+    streamStateRef.current = {
+      messages: thread.messages,
+      values: normalizeThreadState(thread.values, thread.messages),
+      isLoading: thread.isLoading,
+    };
+  }, [thread.isLoading, thread.messages, thread.values]);
+
+  useEffect(() => {
+    syncedThreadStateRef.current = syncedThreadState;
+  }, [syncedThreadState]);
+
+  useEffect(() => {
+    setSyncedThreadState(null);
+    syncedThreadStateRef.current = null;
+    backgroundSyncReadyRef.current = false;
+  }, [onStreamThreadId]);
+
+  useEffect(() => {
+    const updateBackgroundSyncState = () => {
+      setShouldBackgroundSync(shouldSyncInBackground());
+    };
+
+    updateBackgroundSyncState();
+    document.addEventListener("visibilitychange", updateBackgroundSyncState);
+    window.addEventListener("focus", updateBackgroundSyncState);
+    window.addEventListener("blur", updateBackgroundSyncState);
+
+    return () => {
+      document.removeEventListener(
+        "visibilitychange",
+        updateBackgroundSyncState,
+      );
+      window.removeEventListener("focus", updateBackgroundSyncState);
+      window.removeEventListener("blur", updateBackgroundSyncState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !onStreamThreadId ||
+      !onThreadUpdate ||
+      !shouldBackgroundSync ||
+      thread.isLoading
+    ) {
+      return;
+    }
+
+    const client = getAPIClient(isMock);
+    let disposed = false;
+    let inFlight = false;
+
+    const syncThreadState = async () => {
+      if (disposed || inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      try {
+        const latest = await client.threads.getState<AgentThreadState>(
+          onStreamThreadId,
+        );
+        if (disposed) {
+          return;
+        }
+
+        const nextValues = normalizeThreadState(latest.values);
+        const currentStreamState = streamStateRef.current;
+        const currentMergedState = pickLatestThreadState(
+          currentStreamState.values,
+          syncedThreadStateRef.current,
+        );
+        const newMessages = getNewMessages(
+          currentMergedState.messages,
+          nextValues.messages,
+        );
+
+        if (shouldReplaceThreadState(syncedThreadStateRef.current, nextValues)) {
+          setSyncedThreadState(nextValues);
+          syncedThreadStateRef.current = nextValues;
+          void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        }
+
+        if (!backgroundSyncReadyRef.current) {
+          backgroundSyncReadyRef.current = true;
+          return;
+        }
+
+        if (
+          !currentStreamState.isLoading &&
+          newMessages.some((message) => message.type === "ai")
+        ) {
+          listeners.current.onThreadUpdate?.(nextValues);
+        }
+      } catch (error) {
+        console.warn("Failed to sync thread state", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void syncThreadState();
+    const intervalId = window.setInterval(() => {
+      void syncThreadState();
+    }, BACKGROUND_THREAD_SYNC_MS);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    isMock,
+    onStreamThreadId,
+    onThreadUpdate,
+    queryClient,
+    shouldBackgroundSync,
+    thread.isLoading,
+  ]);
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
@@ -348,14 +609,23 @@ export function useThreadStream({
     [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
-  // Merge thread with optimistic messages for display
+  // Merge server-pushed state with optimistic messages for display.
+  const latestThreadValues = pickLatestThreadState(
+    normalizeThreadState(thread.values, thread.messages),
+    syncedThreadState,
+  );
   const mergedThread =
     optimisticMessages.length > 0
       ? ({
           ...thread,
-          messages: [...thread.messages, ...optimisticMessages],
+          values: latestThreadValues,
+          messages: [...latestThreadValues.messages, ...optimisticMessages],
         } as typeof thread)
-      : thread;
+      : ({
+          ...thread,
+          values: latestThreadValues,
+          messages: latestThreadValues.messages,
+        } as typeof thread);
 
   return [mergedThread, sendMessage] as const;
 }

@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import type { AgentThread } from "./types";
+import type { AgentThread, AgentThreadState } from "./types";
 
 export function pathOfThread(threadId: string) {
   return `/workspace/chats/${threadId}`;
@@ -21,4 +21,24 @@ export function textOfMessage(message: Message) {
 
 export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
+}
+
+export function notificationBodyOfThread(
+  state: AgentThreadState,
+  fallback = "New message received",
+) {
+  const body = fallback;
+  const lastMessage = state.messages.at(-1);
+  if (!lastMessage) {
+    return body;
+  }
+
+  const textContent = textOfMessage(lastMessage);
+  if (!textContent) {
+    return body;
+  }
+
+  return textContent.length > 200
+    ? textContent.substring(0, 200) + "..."
+    : textContent;
 }

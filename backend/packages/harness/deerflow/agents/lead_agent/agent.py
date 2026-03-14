@@ -13,7 +13,7 @@ from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import AgentContext, ThreadState
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import get_summarization_config
@@ -322,6 +322,7 @@ def make_lead_agent(config: RunnableConfig):
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=system_prompt,
             state_schema=ThreadState,
+            context_schema=AgentContext,
         )
 
     # Default lead agent (unchanged behavior)
@@ -331,4 +332,5 @@ def make_lead_agent(config: RunnableConfig):
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
+        context_schema=AgentContext,
     )

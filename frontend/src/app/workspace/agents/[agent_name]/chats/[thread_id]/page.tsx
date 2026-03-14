@@ -20,7 +20,8 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
-import { textOfMessage } from "@/core/threads/utils";
+import type { AgentThreadState } from "@/core/threads/types";
+import { notificationBodyOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +39,28 @@ export default function AgentChatPage() {
   const { threadId, isNewThread, setIsNewThread } = useThreadChat();
 
   const { showNotification } = useNotification();
+  const showThreadNotification = useCallback(
+    (state: AgentThreadState, fallback?: string) => {
+      if (document.hidden || !document.hasFocus()) {
+        showNotification(state.title, {
+          body: notificationBodyOfThread(state, fallback),
+        });
+      }
+    },
+    [showNotification],
+  );
+  const notifyThreadUpdate = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state);
+    },
+    [showThreadNotification],
+  );
+  const notifyThreadFinish = useCallback(
+    (state: AgentThreadState) => {
+      showThreadNotification(state, "Conversation finished");
+    },
+    [showThreadNotification],
+  );
   const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
@@ -50,22 +73,8 @@ export default function AgentChatPage() {
         `/workspace/agents/${agent_name}/chats/${threadId}`,
       );
     },
-    onFinish: (state) => {
-      if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
-        const lastMessage = state.messages[state.messages.length - 1];
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
-      }
-    },
+    onFinish: notifyThreadFinish,
+    onThreadUpdate: notifyThreadUpdate,
   });
 
   const handleSubmit = useCallback(
