@@ -94,9 +94,17 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
        max_tokens: 4096                  # Maximum tokens per request
        temperature: 0.7                  # Sampling temperature
+
+     - name: openrouter-gemini-2.5-flash
+       display_name: Gemini 2.5 Flash (OpenRouter)
+       use: langchain_openai:ChatOpenAI
+       model: google/gemini-2.5-flash-preview
+       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       base_url: https://openrouter.ai/api/v1
    ```
 
-  
+   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -107,6 +115,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```bash
    TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
+   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
    # Add other provider keys as needed
    INFOQUEST_API_KEY=your-infoquest-api-key
    ```
@@ -136,7 +145,7 @@ make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
 ```
 
-`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: src.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
 **Production** (builds images locally, mounts runtime config and data):
 
@@ -430,7 +439,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API:
 
 ```python
-from src.client import DeerFlowClient
+from deerflow.client import DeerFlowClient
 
 client = DeerFlowClient()
 
@@ -449,7 +458,7 @@ client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
 ```
 
-All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/src/client.py` for full API documentation.
+All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
 ## Documentation
 
