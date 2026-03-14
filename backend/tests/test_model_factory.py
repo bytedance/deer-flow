@@ -410,3 +410,91 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 
     # The disable path should have set thinking to disabled (not the raw enabled shortcut)
     assert captured.get("thinking") == {"type": "disabled"}
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible providers (MiniMax, Novita, etc.)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_compatible_provider_passes_base_url(monkeypatch):
+    """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
+    model = ModelConfig(
+        name="minimax-m2.5",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        max_tokens=4096,
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m2.5")
+
+    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("base_url") == "https://api.minimax.io/v1"
+    assert captured.get("api_key") == "test-key"
+    assert captured.get("temperature") == 1.0
+    assert captured.get("max_tokens") == 4096
+
+
+def test_openai_compatible_provider_multiple_models(monkeypatch):
+    """Multiple models from the same OpenAI-compatible provider should coexist."""
+    m1 = ModelConfig(
+        name="minimax-m2.5",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    m2 = ModelConfig(
+        name="minimax-m2.5-highspeed",
+        display_name="MiniMax M2.5 Highspeed",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5-highspeed",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([m1, m2])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # Create first model
+    factory_module.create_chat_model(name="minimax-m2.5")
+    assert captured.get("model") == "MiniMax-M2.5"
+
+    # Create second model
+    factory_module.create_chat_model(name="minimax-m2.5-highspeed")
+    assert captured.get("model") == "MiniMax-M2.5-highspeed"
