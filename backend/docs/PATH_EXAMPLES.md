@@ -144,7 +144,7 @@ async function uploadAndProcess(threadId: string, file: File) {
 
 ```python
 from pathlib import Path
-from src.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
+from deerflow.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
 
 def process_uploaded_file(thread_id: str, filename: str):
     # 使用实际路径

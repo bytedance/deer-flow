@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.channels.base import Channel
-from src.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
-from src.channels.store import ChannelStore
+from app.channels.base import Channel
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from app.channels.store import ChannelStore
 
 
 def _run(coro):
@@ -277,19 +277,19 @@ class TestChannelBase:
 
 class TestExtractResponseText:
     def test_string_content(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {"messages": [{"type": "ai", "content": "hello"}]}
         assert _extract_response_text(result) == "hello"
 
     def test_list_content_blocks(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {"messages": [{"type": "ai", "content": [{"type": "text", "text": "hello"}, {"type": "text", "text": " world"}]}]}
         assert _extract_response_text(result) == "hello world"
 
     def test_picks_last_ai_message(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {
             "messages": [
@@ -301,24 +301,24 @@ class TestExtractResponseText:
         assert _extract_response_text(result) == "second"
 
     def test_empty_messages(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         assert _extract_response_text({"messages": []}) == ""
 
     def test_no_ai_messages(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {"messages": [{"type": "human", "content": "hi"}]}
         assert _extract_response_text(result) == ""
 
     def test_list_result(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = [{"type": "ai", "content": "from list"}]
         assert _extract_response_text(result) == "from list"
 
     def test_skips_empty_ai_content(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {
             "messages": [
@@ -329,7 +329,7 @@ class TestExtractResponseText:
         assert _extract_response_text(result) == "actual response"
 
     def test_clarification_tool_message(self):
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {
             "messages": [
@@ -342,7 +342,7 @@ class TestExtractResponseText:
 
     def test_clarification_over_empty_ai(self):
         """When AI content is empty but ask_clarification tool message exists, use the tool message."""
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {
             "messages": [
@@ -354,7 +354,7 @@ class TestExtractResponseText:
 
     def test_does_not_leak_previous_turn_text(self):
         """When current turn AI has no text (only tool calls), do not return previous turn's text."""
-        from src.channels.manager import _extract_response_text
+        from app.channels.manager import _extract_response_text
 
         result = {
             "messages": [
@@ -415,7 +415,7 @@ def _make_async_iterator(items):
 
 class TestChannelManager:
     def test_handle_chat_creates_thread(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -459,7 +459,7 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_chat_uses_channel_session_overrides(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -506,7 +506,7 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_chat_uses_user_session_overrides(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -565,9 +565,9 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
-        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
 
         async def go():
             bus = MessageBus()
@@ -634,9 +634,9 @@ class TestChannelManager:
 
     def test_handle_feishu_stream_error_still_sends_final(self, monkeypatch):
         """When the stream raises mid-way, a final outbound with is_final=True must still be published."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
-        monkeypatch.setattr("src.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
 
         async def go():
             bus = MessageBus()
@@ -685,7 +685,7 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_command_help(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -718,7 +718,7 @@ class TestChannelManager:
         _run(go())
 
     def test_handle_command_new(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -761,7 +761,7 @@ class TestChannelManager:
 
     def test_each_topic_creates_new_thread(self):
         """Messages with distinct topic_ids should each create a new DeerFlow thread."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -813,7 +813,7 @@ class TestChannelManager:
 
     def test_same_topic_reuses_thread(self):
         """Messages with the same topic_id should reuse the same DeerFlow thread."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -857,7 +857,7 @@ class TestChannelManager:
 
     def test_none_topic_reuses_thread(self):
         """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -901,7 +901,7 @@ class TestChannelManager:
 
     def test_different_topics_get_different_threads(self):
         """Messages with different topic_ids should create separate threads."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -951,7 +951,7 @@ class TestChannelManager:
 
 class TestExtractArtifacts:
     def test_extracts_from_present_files_tool_call(self):
-        from src.channels.manager import _extract_artifacts
+        from app.channels.manager import _extract_artifacts
 
         result = {
             "messages": [
@@ -969,7 +969,7 @@ class TestExtractArtifacts:
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/report.md"]
 
     def test_empty_when_no_present_files(self):
-        from src.channels.manager import _extract_artifacts
+        from app.channels.manager import _extract_artifacts
 
         result = {
             "messages": [
@@ -980,14 +980,14 @@ class TestExtractArtifacts:
         assert _extract_artifacts(result) == []
 
     def test_empty_for_list_result_no_tool_calls(self):
-        from src.channels.manager import _extract_artifacts
+        from app.channels.manager import _extract_artifacts
 
         result = [{"type": "ai", "content": "hello"}]
         assert _extract_artifacts(result) == []
 
     def test_only_extracts_after_last_human_message(self):
         """Artifacts from previous turns (before the last human message) should be ignored."""
-        from src.channels.manager import _extract_artifacts
+        from app.channels.manager import _extract_artifacts
 
         result = {
             "messages": [
@@ -1015,7 +1015,7 @@ class TestExtractArtifacts:
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png"]
 
     def test_multiple_files_in_single_call(self):
-        from src.channels.manager import _extract_artifacts
+        from app.channels.manager import _extract_artifacts
 
         result = {
             "messages": [
@@ -1034,13 +1034,13 @@ class TestExtractArtifacts:
 
 class TestFormatArtifactText:
     def test_single_artifact(self):
-        from src.channels.manager import _format_artifact_text
+        from app.channels.manager import _format_artifact_text
 
         text = _format_artifact_text(["/mnt/user-data/outputs/report.md"])
         assert text == "Created File: 📎 report.md"
 
     def test_multiple_artifacts(self):
-        from src.channels.manager import _format_artifact_text
+        from app.channels.manager import _format_artifact_text
 
         text = _format_artifact_text(
             ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"],
@@ -1050,7 +1050,7 @@ class TestFormatArtifactText:
 
 class TestHandleChatWithArtifacts:
     def test_artifacts_appended_to_text(self):
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -1097,7 +1097,7 @@ class TestHandleChatWithArtifacts:
 
     def test_artifacts_only_no_text(self):
         """When agent produces artifacts but no text, the artifacts should be the response."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -1145,7 +1145,7 @@ class TestHandleChatWithArtifacts:
 
     def test_only_last_turn_artifacts_returned(self):
         """Only artifacts from the current turn's present_files calls should be included."""
-        from src.channels.manager import ChannelManager
+        from app.channels.manager import ChannelManager
 
         async def go():
             bus = MessageBus()
@@ -1228,7 +1228,7 @@ class TestHandleChatWithArtifacts:
 
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
@@ -1270,7 +1270,7 @@ class TestFeishuChannel:
         _run(go())
 
     def test_prepare_inbound_and_send_share_running_card_task(self):
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
@@ -1339,7 +1339,7 @@ class TestFeishuChannel:
             ReplyMessageRequestBody,
         )
 
-        from src.channels.feishu import FeishuChannel
+        from app.channels.feishu import FeishuChannel
 
         async def go():
             bus = MessageBus()
@@ -1402,7 +1402,7 @@ class TestFeishuChannel:
 
 class TestChannelService:
     def test_get_status_no_channels(self):
-        from src.channels.service import ChannelService
+        from app.channels.service import ChannelService
 
         async def go():
             service = ChannelService(channels_config={})
@@ -1419,7 +1419,7 @@ class TestChannelService:
         _run(go())
 
     def test_disabled_channels_are_skipped(self):
-        from src.channels.service import ChannelService
+        from app.channels.service import ChannelService
 
         async def go():
             service = ChannelService(
@@ -1434,7 +1434,7 @@ class TestChannelService:
         _run(go())
 
     def test_session_config_is_forwarded_to_manager(self):
-        from src.channels.service import ChannelService
+        from app.channels.service import ChannelService
 
         service = ChannelService(
             channels_config={
@@ -1465,7 +1465,7 @@ class TestChannelService:
 
 class TestSlackSendRetry:
     def test_retries_on_failure_then_succeeds(self):
-        from src.channels.slack import SlackChannel
+        from app.channels.slack import SlackChannel
 
         async def go():
             bus = MessageBus()
@@ -1491,7 +1491,7 @@ class TestSlackSendRetry:
         _run(go())
 
     def test_raises_after_all_retries_exhausted(self):
-        from src.channels.slack import SlackChannel
+        from app.channels.slack import SlackChannel
 
         async def go():
             bus = MessageBus()
@@ -1517,7 +1517,7 @@ class TestSlackSendRetry:
 
 class TestTelegramSendRetry:
     def test_retries_on_failure_then_succeeds(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1547,7 +1547,7 @@ class TestTelegramSendRetry:
         _run(go())
 
     def test_raises_after_all_retries_exhausted(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1594,7 +1594,7 @@ class TestTelegramPrivateChatThread:
     """Verify that private chats use topic_id=None (single thread per chat)."""
 
     def test_private_chat_no_reply_uses_none_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1610,7 +1610,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_private_chat_with_reply_still_uses_none_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1626,7 +1626,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_group_chat_no_reply_uses_msg_id_as_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1642,7 +1642,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_group_chat_reply_uses_reply_msg_id_as_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1658,7 +1658,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_supergroup_chat_uses_msg_id_as_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1674,7 +1674,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_cmd_generic_private_chat_uses_none_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1691,7 +1691,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_cmd_generic_group_chat_uses_msg_id_as_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1708,7 +1708,7 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
     def test_cmd_generic_group_chat_reply_uses_reply_msg_id_as_topic(self):
-        from src.channels.telegram import TelegramChannel
+        from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
@@ -1734,20 +1734,20 @@ class TestSlackMarkdownConversion:
     """Verify that the SlackChannel.send() path applies mrkdwn conversion."""
 
     def test_bold_converted(self):
-        from src.channels.slack import _slack_md_converter
+        from app.channels.slack import _slack_md_converter
 
         result = _slack_md_converter.convert("this is **bold** text")
         assert "*bold*" in result
         assert "**" not in result
 
     def test_link_converted(self):
-        from src.channels.slack import _slack_md_converter
+        from app.channels.slack import _slack_md_converter
 
         result = _slack_md_converter.convert("[click](https://example.com)")
         assert "<https://example.com|click>" in result
 
     def test_heading_converted(self):
-        from src.channels.slack import _slack_md_converter
+        from app.channels.slack import _slack_md_converter
 
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result

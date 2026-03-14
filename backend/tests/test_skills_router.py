@@ -2,11 +2,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-import src.gateway.routers.skills as skills_router
+from deerflow.skills.validation import _validate_skill_frontmatter
 
 VALIDATE_SKILL_FRONTMATTER = cast(
     Callable[[Path], tuple[bool, str, str | None]],
-    getattr(skills_router, "_validate_skill_frontmatter"),
+    _validate_skill_frontmatter,
 )
 
 

@@ -3,8 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from src.community.infoquest import tools
-from src.community.infoquest.infoquest_client import InfoQuestClient
+from deerflow.community.infoquest import tools
+from deerflow.community.infoquest.infoquest_client import InfoQuestClient
 
 
 class TestInfoQuestClient:
@@ -24,7 +24,7 @@ class TestInfoQuestClient:
         assert client.fetch_navigation_timeout == 60
         assert client.search_time_range == 24
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_fetch_success(self, mock_post):
         """Test successful fetch operation."""
         mock_response = MagicMock()
@@ -42,7 +42,7 @@ class TestInfoQuestClient:
         assert kwargs["json"]["url"] == "https://example.com"
         assert kwargs["json"]["format"] == "HTML"
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_fetch_non_200_status(self, mock_post):
         """Test fetch operation with non-200 status code."""
         mock_response = MagicMock()
@@ -55,7 +55,7 @@ class TestInfoQuestClient:
 
         assert result == "Error: fetch API returned status 404: Not Found"
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_fetch_empty_response(self, mock_post):
         """Test fetch operation with empty response."""
         mock_response = MagicMock()
@@ -68,7 +68,7 @@ class TestInfoQuestClient:
 
         assert result == "Error: no result found"
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_web_search_raw_results_success(self, mock_post):
         """Test successful web_search_raw_results operation."""
         mock_response = MagicMock()
@@ -85,7 +85,7 @@ class TestInfoQuestClient:
         assert args[0] == "https://search.infoquest.bytepluses.com"
         assert kwargs["json"]["query"] == "test query"
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_web_search_success(self, mock_post):
         """Test successful web_search operation."""
         mock_response = MagicMock()
@@ -133,7 +133,7 @@ class TestInfoQuestClient:
         assert cleaned[0]["thumbnail_url"] == "https://example.com/thumb1.jpg"
         assert cleaned[0]["url"] == "https://example.com/page1"
 
-    @patch("src.community.infoquest.tools._get_infoquest_client")
+    @patch("deerflow.community.infoquest.tools._get_infoquest_client")
     def test_web_search_tool(self, mock_get_client):
         """Test web_search_tool function."""
         mock_client = MagicMock()
@@ -146,7 +146,7 @@ class TestInfoQuestClient:
         mock_get_client.assert_called_once()
         mock_client.web_search.assert_called_once_with("test query")
 
-    @patch("src.community.infoquest.tools._get_infoquest_client")
+    @patch("deerflow.community.infoquest.tools._get_infoquest_client")
     def test_web_fetch_tool(self, mock_get_client):
         """Test web_fetch_tool function."""
         mock_client = MagicMock()
@@ -159,7 +159,7 @@ class TestInfoQuestClient:
         mock_get_client.assert_called_once()
         mock_client.fetch.assert_called_once_with("https://example.com")
 
-    @patch("src.community.infoquest.tools.get_app_config")
+    @patch("deerflow.community.infoquest.tools.get_app_config")
     def test_get_infoquest_client(self, mock_get_app_config):
         """Test _get_infoquest_client function with config."""
         mock_config = MagicMock()
@@ -173,7 +173,7 @@ class TestInfoQuestClient:
         assert client.fetch_timeout == 30
         assert client.fetch_navigation_timeout == 60
 
-    @patch("src.community.infoquest.infoquest_client.requests.post")
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_web_search_api_error(self, mock_post):
         """Test web_search operation with API error."""
         mock_post.side_effect = Exception("Connection error")

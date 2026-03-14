@@ -8,6 +8,13 @@
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
 # ============================================================================
+# Config Version (used to detect outdated config files)
+# ============================================================================
+# Bump this number when the config schema changes.
+# Run `make config-upgrade` to merge new fields into your local config.yaml.
+config_version: 1
+
+# ============================================================================
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
@@ -16,7 +23,7 @@ models:
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
-  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: doubao-seed-1-8-251228
   #   api_base: https://ark.cn-beijing.volces.com/api/v3
   #   api_key: $VOLCENGINE_API_KEY
@@ -62,7 +69,7 @@ models:
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
   #   display_name: DeepSeek V3 (Thinking)
-  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
   #   max_tokens: 16384
@@ -76,7 +83,7 @@ models:
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
-  #   use: src.models.patched_deepseek:PatchedChatDeepSeek
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: kimi-k2.5
   #   api_base: https://api.moonshot.cn/v1
   #   api_key: $MOONSHOT_API_KEY
@@ -160,27 +167,27 @@ tools:
   # Web search tool (requires Tavily API key)
   - name: web_search
     group: web
-    use: src.community.tavily.tools:web_search_tool
+    use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (requires InfoQuest API key)
   # - name: web_search
   #   group: web
-  #   use: src.community.infoquest.tools:web_search_tool
+  #   use: deerflow.community.infoquest.tools:web_search_tool
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
 
   # Web fetch tool (uses Jina AI reader)
   - name: web_fetch
     group: web
-    use: src.community.jina_ai.tools:web_fetch_tool
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
 
   # Web fetch tool (uses InfoQuest AI reader)
   # - name: web_fetch
   #   group: web
-  #   use: src.community.infoquest.tools:web_fetch_tool
+  #   use: deerflow.community.infoquest.tools:web_fetch_tool
   #   # Overall timeout for the entire crawling process (in seconds). Set to positive value to enable, -1 to disable
   #   timeout: 10
   #   # Waiting time after page loading (in seconds). Set to positive value to enable, -1 to disable
@@ -192,30 +199,30 @@ tools:
   # Use this to find reference images before image generation
   - name: image_search
     group: web
-    use: src.community.image_search.tools:image_search_tool
+    use: deerflow.community.image_search.tools:image_search_tool
     max_results: 5
 
   # File operations tools
   - name: ls
     group: file:read
-    use: src.sandbox.tools:ls_tool
+    use: deerflow.sandbox.tools:ls_tool
 
   - name: read_file
     group: file:read
-    use: src.sandbox.tools:read_file_tool
+    use: deerflow.sandbox.tools:read_file_tool
 
   - name: write_file
     group: file:write
-    use: src.sandbox.tools:write_file_tool
+    use: deerflow.sandbox.tools:write_file_tool
 
   - name: str_replace
     group: file:write
-    use: src.sandbox.tools:str_replace_tool
+    use: deerflow.sandbox.tools:str_replace_tool
 
   # Bash execution tool
   - name: bash
     group: bash
-    use: src.sandbox.tools:bash_tool
+    use: deerflow.sandbox.tools:bash_tool
 
 # ============================================================================
 # Sandbox Configuration
@@ -225,7 +232,7 @@ tools:
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 sandbox:
-  use: src.sandbox.local:LocalSandboxProvider
+  use: deerflow.sandbox.local:LocalSandboxProvider
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -233,7 +240,7 @@ sandbox:
 # On other platforms: Uses Docker
 # Uncomment to use:
 # sandbox:
-#   use: src.community.aio_sandbox:AioSandboxProvider
+#   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
@@ -271,7 +278,7 @@ sandbox:
 # Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
 # Recommended for production or advanced users who want better isolation and scalability.:
 # sandbox:
-#   use: src.community.aio_sandbox:AioSandboxProvider
+#   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
 
 # ============================================================================

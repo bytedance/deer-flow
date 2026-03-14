@@ -1,7 +1,7 @@
 import asyncio
 from unittest.mock import MagicMock
 
-from src.gateway.routers import suggestions
+from app.gateway.routers import suggestions
 
 
 def test_strip_markdown_code_fence_removes_wrapping():

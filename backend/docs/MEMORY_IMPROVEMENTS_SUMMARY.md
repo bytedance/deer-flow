@@ -33,6 +33,6 @@ No `current_context` argument is currently available in `main`.
 
 ## Verification Pointers
 
-- Implementation: `backend/src/agents/memory/prompt.py`
-- Prompt assembly: `backend/src/agents/lead_agent/prompt.py`
+- Implementation: `packages/harness/deerflow/agents/memory/prompt.py`
+- Prompt assembly: `packages/harness/deerflow/agents/lead_agent/prompt.py`
 - Regression tests: `backend/tests/test_memory_prompt_injection.py`
