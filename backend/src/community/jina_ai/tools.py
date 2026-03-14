@@ -1,7 +1,7 @@
 from langchain.tools import tool
 
 from src.community.jina_ai.jina_client import JinaClient
-from src.config import get_app_config
+from src.config import get_app_config, get_max_content_chars
 from src.utils.readability import ReadabilityExtractor
 
 readability_extractor = ReadabilityExtractor()
@@ -25,4 +25,4 @@ def web_fetch_tool(url: str) -> str:
         timeout = config.model_extra.get("timeout")
     html_content = jina_client.crawl(url, return_format="html", timeout=timeout)
     article = readability_extractor.extract_article(html_content)
-    return article.to_markdown()[:4096]
+    return article.to_markdown()[:get_max_content_chars()]

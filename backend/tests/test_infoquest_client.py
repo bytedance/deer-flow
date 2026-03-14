@@ -146,9 +146,14 @@ class TestInfoQuestClient:
         mock_get_client.assert_called_once()
         mock_client.web_search.assert_called_once_with("test query")
 
+    @patch("src.community.infoquest.tools.get_app_config")
     @patch("src.community.infoquest.tools._get_infoquest_client")
-    def test_web_fetch_tool(self, mock_get_client):
+    def test_web_fetch_tool(self, mock_get_client, mock_get_app_config):
         """Test web_fetch_tool function."""
+        mock_config = MagicMock()
+        mock_config.get_tool_config.return_value = None
+        mock_get_app_config.return_value = mock_config
+
         mock_client = MagicMock()
         mock_client.fetch.return_value = "<html><body>Test content</body></html>"
         mock_get_client.return_value = mock_client

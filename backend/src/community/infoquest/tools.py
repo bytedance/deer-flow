@@ -1,6 +1,6 @@
 from langchain.tools import tool
 
-from src.config import get_app_config
+from src.config import get_app_config, get_max_content_chars
 from src.utils.readability import ReadabilityExtractor
 
 from .infoquest_client import InfoQuestClient
@@ -60,4 +60,4 @@ def web_fetch_tool(url: str) -> str:
     if result.startswith("Error: "):
         return result
     article = readability_extractor.extract_article(result)
-    return article.to_markdown()[:4096]
+    return article.to_markdown()[:get_max_content_chars()]

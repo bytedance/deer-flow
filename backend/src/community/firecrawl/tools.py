@@ -3,7 +3,7 @@ import json
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
-from src.config import get_app_config
+from src.config import get_app_config, get_max_content_chars
 
 
 def _get_firecrawl_client() -> FirecrawlApp:
@@ -70,4 +70,4 @@ def web_fetch_tool(url: str) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
-    return f"# {title}\n\n{markdown_content[:4096]}"
+    return f"# {title}\n\n{markdown_content[:get_max_content_chars()]}"
