@@ -1,5 +1,6 @@
 """Prompt templates for memory update and injection."""
 
+import math
 import re
 from typing import Any
 
@@ -166,6 +167,22 @@ def _count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
         return len(text) // 4
 
 
+def _coerce_confidence(value: Any, default: float = 0.0) -> float:
+    """Coerce a confidence-like value to a bounded float in [0, 1].
+
+    Non-finite values (NaN, inf, -inf) are treated as invalid and fall back
+    to the default before clamping, preventing them from dominating ranking.
+    The ``default`` parameter is assumed to be a finite value.
+    """
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return max(0.0, min(1.0, default))
+    if not math.isfinite(confidence):
+        return max(0.0, min(1.0, default))
+    return max(0.0, min(1.0, confidence))
+
+
 def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2000) -> str:
     """Format memory data for injection into system prompt.
 
@@ -216,6 +233,55 @@ def format_memory_for_injection(memory_data: dict[str, Any], max_tokens: int = 2
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
+
+    # Format facts (sorted by confidence; include as many as token budget allows)
+    facts_data = memory_data.get("facts", [])
+    if isinstance(facts_data, list) and facts_data:
+        ranked_facts = sorted(
+            (
+                f
+                for f in facts_data
+                if isinstance(f, dict)
+                and isinstance(f.get("content"), str)
+                and f.get("content").strip()
+            ),
+            key=lambda fact: _coerce_confidence(fact.get("confidence"), default=0.0),
+            reverse=True,
+        )
+
+        # Compute token count for existing sections once, then account
+        # incrementally for each fact line to avoid full-string re-tokenization.
+        base_text = "\n\n".join(sections)
+        base_tokens = _count_tokens(base_text) if base_text else 0
+        # Account for the separator between existing sections and the facts section.
+        facts_header = "Facts:\n"
+        separator_tokens = _count_tokens("\n\n" + facts_header) if base_text else _count_tokens(facts_header)
+        running_tokens = base_tokens + separator_tokens
+
+        fact_lines: list[str] = []
+        for fact in ranked_facts:
+            content_value = fact.get("content")
+            if not isinstance(content_value, str):
+                continue
+            content = content_value.strip()
+            if not content:
+                continue
+            category = str(fact.get("category", "context")).strip() or "context"
+            confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
+            line = f"- [{category} | {confidence:.2f}] {content}"
+
+            # Each additional line is preceded by a newline (except the first).
+            line_text = ("\n" + line) if fact_lines else line
+            line_tokens = _count_tokens(line_text)
+
+            if running_tokens + line_tokens <= max_tokens:
+                fact_lines.append(line)
+                running_tokens += line_tokens
+            else:
+                break
+
+        if fact_lines:
+            sections.append("Facts:\n" + "\n".join(fact_lines))
 
     if not sections:
         return ""

@@ -1,6 +1,8 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev dev-daemon start stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+
+PYTHON ?= python
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -14,6 +16,10 @@ help:
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
+	@echo "Docker Production Commands:"
+	@echo "  make up              - Build and start production Docker services (localhost:2026)"
+	@echo "  make down            - Stop and remove production Docker containers"
+	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
@@ -23,17 +29,11 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
-		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
-		exit 1; \
-	fi
-	@cp config.example.yaml config.yaml
-	@test -f .env || cp .env.example .env
-	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@$(PYTHON) ./scripts/configure.py
 
 # Check required tools
 check:
-	@./scripts/check.sh
+	@$(PYTHON) ./scripts/check.py
 
 # Install all dependencies
 install:
@@ -141,3 +141,15 @@ docker-logs-frontend:
 	@./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@./scripts/docker.sh logs --gateway
+
+# ==========================================
+# Production Docker Commands
+# ==========================================
+
+# Build and start production services
+up:
+	@./scripts/deploy.sh
+
+# Stop and remove production containers
+down:
+	@./scripts/deploy.sh down
