@@ -17,6 +17,63 @@ from src.subagents.executor import SubagentStatus, cleanup_background_task, get_
 
 logger = logging.getLogger(__name__)
 
+# Maximum characters to return from salvaged partial output
+_MAX_SALVAGE_CHARS = 8000
+
+
+def _extract_text(content) -> str:
+    """Extract plain text from an AI message's content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
+def _salvage_partial_output(result) -> str | None:
+    """Extract meaningful content from a failed subagent's accumulated AI messages.
+
+    When a subagent hits the recursion limit or fails, it has already generated
+    many messages with useful content.  This function:
+    1. Prefers the last text-only AI message (a coherent summary).
+    2. Falls back to collecting reasoning snippets from all AI messages,
+       building a composite of the agent's observations.
+    """
+    if not result.ai_messages:
+        return None
+
+    # First pass: find the last AI message that is purely text (no tool calls)
+    for msg in reversed(result.ai_messages):
+        tool_calls = msg.get("tool_calls") or []
+        text = _extract_text(msg.get("content", ""))
+        if text.strip() and not tool_calls:
+            return text[:_MAX_SALVAGE_CHARS]
+
+    # Second pass: collect reasoning from ALL AI messages (including those
+    # with tool calls).  Each message's text is the agent's reasoning about
+    # what it found, so this reconstructs the agent's observations even
+    # when it never produced a final summary.
+    snippets: list[str] = []
+    total_chars = 0
+    for msg in result.ai_messages:
+        text = _extract_text(msg.get("content", "")).strip()
+        if not text:
+            continue
+        # Skip very short messages (just "Let me read..." etc.)
+        if len(text) < 40:
+            continue
+        snippets.append(text)
+        total_chars += len(text)
+        if total_chars >= _MAX_SALVAGE_CHARS:
+            break
+
+    if snippets:
+        composite = "\n---\n".join(snippets)
+        return composite[:_MAX_SALVAGE_CHARS]
+
+    return None
+
 
 @tool("task", parse_docstring=True)
 def task_tool(
@@ -170,7 +227,10 @@ def task_tool(
         elif result.status == SubagentStatus.FAILED:
             writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+            salvaged = _salvage_partial_output(result)
             cleanup_background_task(task_id)
+            if salvaged:
+                return f"Task failed ({result.error}) but produced partial results:\n\n{salvaged}"
             return f"Task failed. Error: {result.error}"
         elif result.status == SubagentStatus.TIMED_OUT:
             writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
