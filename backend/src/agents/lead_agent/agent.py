@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.middlewares.budget_enforcement_middleware import BudgetEnforcementMiddleware
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from src.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
@@ -249,6 +250,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # BudgetEnforcementMiddleware — inject warnings and force output before recursion limit
     recursion_limit = config.get("recursion_limit", 100)
     middlewares.append(BudgetEnforcementMiddleware(max_turns=recursion_limit))
+    
+    # LoopDetectionMiddleware — detect and break repetitive tool call loops
+    middlewares.append(LoopDetectionMiddleware())
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
