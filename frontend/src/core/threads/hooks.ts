@@ -351,15 +351,6 @@ export function useThreadStream({
           }),
         );
 
-        const namespaceType =
-          typeof extraContext?.namespace_type === "string" && extraContext.namespace_type.trim().length > 0
-            ? extraContext.namespace_type
-            : "org_user";
-        const namespaceId =
-          typeof extraContext?.namespace_id === "string" && extraContext.namespace_id.trim().length > 0
-            ? extraContext.namespace_id
-            : "local-default";
-
         await thread.submit(
           {
             messages: [
@@ -389,8 +380,6 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
-              namespace_type: namespaceType,
-              namespace_id: namespaceId,
               thread_id: threadId,
             },
           },
