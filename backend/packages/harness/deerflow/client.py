@@ -512,6 +512,7 @@ class DeerFlowClient:
         self._atomic_write_json(config_path, config_data)
 
         self._agent = None
+        self._agent_config_key = None
         reloaded = reload_extensions_config()
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
@@ -577,6 +578,7 @@ class DeerFlowClient:
         self._atomic_write_json(config_path, config_data)
 
         self._agent = None
+        self._agent_config_key = None
         reload_extensions_config()
 
         updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
@@ -729,7 +731,8 @@ class DeerFlowClient:
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
-        resolved_files = []
+        resolved_files: list[tuple[Path, str]] = []  # (source_path, dest_name)
+        seen_names: set[str] = set()
         convertible_extensions = {ext.lower() for ext in CONVERTIBLE_EXTENSIONS}
         has_convertible_file = False
         for f in files:
@@ -738,7 +741,15 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            resolved_files.append(p)
+            dest_name = p.name
+            if dest_name in seen_names:
+                stem, suffix = p.stem, p.suffix
+                counter = 1
+                while dest_name in seen_names:
+                    dest_name = f"{stem}_{counter}{suffix}"
+                    counter += 1
+            seen_names.add(dest_name)
+            resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in convertible_extensions:
                 has_convertible_file = True
 
@@ -762,17 +773,19 @@ class DeerFlowClient:
             return asyncio.run(convert_file_to_markdown(path))
 
         try:
-            for src_path in resolved_files:
-                dest = uploads_dir / src_path.name
+            for src_path, dest_name in resolved_files:
+                dest = uploads_dir / dest_name
                 shutil.copy2(src_path, dest)
 
                 info: dict[str, Any] = {
-                    "filename": src_path.name,
+                    "filename": dest_name,
                     "size": str(dest.stat().st_size),
                     "path": str(dest),
-                    "virtual_path": f"/mnt/user-data/uploads/{src_path.name}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
+                    "virtual_path": f"/mnt/user-data/uploads/{dest_name}",
+                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{dest_name}",
                 }
+                if dest_name != src_path.name:
+                    info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in convertible_extensions:
                     try:
@@ -815,8 +828,6 @@ class DeerFlowClient:
             ``list_uploaded_files`` response.
         """
         uploads_dir = self._get_uploads_dir(thread_id)
-        if not uploads_dir.exists():
-            return {"files": [], "count": 0}
 
         files = []
         with os.scandir(uploads_dir) as entries:
@@ -887,8 +898,8 @@ class DeerFlowClient:
         """
         virtual_prefix = "mnt/user-data"
         clean_path = path.lstrip("/")
-        if not clean_path.startswith(virtual_prefix):
-            raise ValueError(f"Path must start with /{virtual_prefix}")
+        if not (clean_path == virtual_prefix or clean_path.startswith(virtual_prefix + "/")):
+            raise ValueError(f"Path must start with /{virtual_prefix}/")
 
         relative = clean_path[len(virtual_prefix) :].lstrip("/")
         base_dir = get_paths().sandbox_user_data_dir(thread_id)

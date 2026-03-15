@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: F401
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -487,6 +487,7 @@ class TestMcpConfig:
             assert "mcp_servers" in result
             assert "new-server" in result["mcp_servers"]
             assert client._agent is None  # M2: agent invalidated
+            assert client._agent_config_key is None
 
             # Verify file was actually written
             with open(tmp_path) as f:
@@ -548,6 +549,7 @@ class TestSkillsManagement:
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
             assert client._agent is None  # M2: agent invalidated
+            assert client._agent_config_key is None
         finally:
             tmp_path.unlink()
 
@@ -1697,3 +1699,710 @@ class TestGatewayConformance:
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
         assert parsed.data.version == "1.0"
+
+
+# ===========================================================================
+# Hardening — install_skill security gates
+# ===========================================================================
+
+
+class TestInstallSkillSecurity:
+    """Every security gate in install_skill() must have a red-line test."""
+
+    def test_zip_bomb_rejected(self, client):
+        """Archives whose extracted size exceeds 100 MB are rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "bomb.skill"
+            # 101 MB of zeros compresses to ~100 KB on disk but file_size = 101 MB.
+            data = b"\x00" * (101 * 1024 * 1024)
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("big.bin", data)
+
+            skills_root = Path(tmp) / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="too large"):
+                    client.install_skill(archive)
+
+    def test_absolute_path_in_archive_rejected(self, client):
+        """ZIP entries with absolute paths are rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "abs.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("/etc/passwd", "root:x:0:0")
+
+            skills_root = Path(tmp) / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="Unsafe path"):
+                    client.install_skill(archive)
+
+    def test_dotdot_path_in_archive_rejected(self, client):
+        """ZIP entries with '..' path components are rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "traversal.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("skill/../../../etc/shadow", "bad")
+
+            skills_root = Path(tmp) / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="Unsafe path"):
+                    client.install_skill(archive)
+
+    def test_symlinks_removed_after_extraction(self, client):
+        """Symlinks inside the archive are removed before installation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            # Build a real directory with a symlink, then zip it.
+            src_dir = tmp_path / "src-skill"
+            src_dir.mkdir()
+            (src_dir / "SKILL.md").write_text("---\nname: sym-skill\ndescription: test\n---\nBody")
+            link = src_dir / "sneaky_link"
+            link.symlink_to("/etc/passwd")
+
+            archive = tmp_path / "sym-skill.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                for p in src_dir.rglob("*"):
+                    if not p.is_symlink():
+                        zf.write(p, f"sym-skill/{p.relative_to(src_dir)}")
+                    # Symlinks can't be faithfully stored in standard ZIP;
+                    # test the cleanup path by patching extractall to create one.
+
+            skills_root = tmp_path / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            real_extractall = zipfile.ZipFile.extractall
+
+            def extractall_with_symlink(zf_self, path=None, members=None, pwd=None):
+                real_extractall(zf_self, path, members, pwd)
+                # Inject a symlink post-extraction to simulate a crafted archive.
+                extracted = Path(path)
+                for d in extracted.iterdir():
+                    if d.is_dir():
+                        (d / "injected_link").symlink_to("/etc/passwd")
+
+            with (
+                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
+                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "sym-skill")),
+                patch.object(zipfile.ZipFile, "extractall", extractall_with_symlink),
+            ):
+                result = client.install_skill(archive)
+
+            assert result["success"] is True
+            installed = skills_root / "custom" / "sym-skill"
+            # Verify no symlinks survived into the installed directory.
+            for p in installed.rglob("*"):
+                assert not p.is_symlink(), f"Symlink not cleaned: {p}"
+
+    def test_invalid_skill_name_rejected(self, client):
+        """Skill names containing special characters are rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            skill_dir = tmp_path / "bad-name"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text("---\nname: ../evil\ndescription: test\n---\n")
+
+            archive = tmp_path / "bad.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(skill_dir / "SKILL.md", "bad-name/SKILL.md")
+
+            skills_root = tmp_path / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with (
+                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
+                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
+            ):
+                with pytest.raises(ValueError, match="Invalid skill name"):
+                    client.install_skill(archive)
+
+    def test_existing_skill_rejected(self, client):
+        """Installing a skill that already exists is rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            skill_dir = tmp_path / "dupe-skill"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text("---\nname: dupe-skill\ndescription: test\n---\n")
+
+            archive = tmp_path / "dupe-skill.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(skill_dir / "SKILL.md", "dupe-skill/SKILL.md")
+
+            skills_root = tmp_path / "skills"
+            (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
+
+            with (
+                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
+                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
+            ):
+                with pytest.raises(ValueError, match="already exists"):
+                    client.install_skill(archive)
+
+    def test_empty_archive_rejected(self, client):
+        """An archive with no entries is rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "empty.skill"
+            with zipfile.ZipFile(archive, "w"):
+                pass  # empty archive
+
+            skills_root = Path(tmp) / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="empty"):
+                    client.install_skill(archive)
+
+    def test_invalid_frontmatter_rejected(self, client):
+        """Archive with invalid SKILL.md frontmatter is rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            skill_dir = tmp_path / "bad-meta"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text("no frontmatter at all")
+
+            archive = tmp_path / "bad-meta.skill"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(skill_dir / "SKILL.md", "bad-meta/SKILL.md")
+
+            skills_root = tmp_path / "skills"
+            (skills_root / "custom").mkdir(parents=True)
+
+            with (
+                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
+                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
+            ):
+                with pytest.raises(ValueError, match="Invalid skill"):
+                    client.install_skill(archive)
+
+    def test_not_a_zip_rejected(self, client):
+        """A .skill file that is not a valid ZIP is rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "fake.skill"
+            archive.write_text("this is not a zip file")
+
+            with pytest.raises(ValueError, match="not a valid ZIP"):
+                client.install_skill(archive)
+
+    def test_directory_path_rejected(self, client):
+        """Passing a directory instead of a file is rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(ValueError, match="not a file"):
+                client.install_skill(tmp)
+
+
+# ===========================================================================
+# Hardening — _atomic_write_json error paths
+# ===========================================================================
+
+
+class TestAtomicWriteJson:
+    def test_temp_file_cleaned_on_serialization_failure(self):
+        """If json.dump raises, the temp file is removed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "config.json"
+
+            # An object that cannot be serialized to JSON.
+            bad_data = {"key": object()}
+
+            with pytest.raises(TypeError):
+                DeerFlowClient._atomic_write_json(target, bad_data)
+
+            # Target should not have been created.
+            assert not target.exists()
+            # No stray .tmp files should remain.
+            tmp_files = list(Path(tmp).glob("*.tmp"))
+            assert tmp_files == []
+
+    def test_happy_path_writes_atomically(self):
+        """Normal write produces correct JSON and no temp files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "out.json"
+            data = {"key": "value", "nested": [1, 2, 3]}
+
+            DeerFlowClient._atomic_write_json(target, data)
+
+            assert target.exists()
+            with open(target) as f:
+                loaded = json.load(f)
+            assert loaded == data
+            # No temp files left behind.
+            assert list(Path(tmp).glob("*.tmp")) == []
+
+    def test_original_preserved_on_failure(self):
+        """If write fails, the original file is not corrupted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "config.json"
+            target.write_text('{"original": true}')
+
+            bad_data = {"key": object()}
+            with pytest.raises(TypeError):
+                DeerFlowClient._atomic_write_json(target, bad_data)
+
+            # Original content must survive.
+            with open(target) as f:
+                assert json.load(f) == {"original": True}
+
+
+# ===========================================================================
+# Hardening — config update error paths
+# ===========================================================================
+
+
+class TestConfigUpdateErrors:
+    def test_update_mcp_config_no_config_file(self, client):
+        """FileNotFoundError when extensions_config.json cannot be located."""
+        with patch("src.client.ExtensionsConfig.resolve_config_path", return_value=None):
+            with pytest.raises(FileNotFoundError, match="Cannot locate"):
+                client.update_mcp_config({"server": {}})
+
+    def test_update_skill_no_config_file(self, client):
+        """FileNotFoundError when extensions_config.json cannot be located."""
+        skill = MagicMock()
+        skill.name = "some-skill"
+
+        with (
+            patch("src.skills.loader.load_skills", return_value=[skill]),
+            patch("src.client.ExtensionsConfig.resolve_config_path", return_value=None),
+        ):
+            with pytest.raises(FileNotFoundError, match="Cannot locate"):
+                client.update_skill("some-skill", enabled=False)
+
+    def test_update_skill_disappears_after_write(self, client):
+        """RuntimeError when skill vanishes between write and re-read."""
+        skill = MagicMock()
+        skill.name = "ghost-skill"
+
+        ext_config = MagicMock()
+        ext_config.mcp_servers = {}
+        ext_config.skills = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "extensions_config.json"
+            config_file.write_text("{}")
+
+            with (
+                patch("src.skills.loader.load_skills", side_effect=[[skill], []]),
+                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("src.client.get_extensions_config", return_value=ext_config),
+                patch("src.client.reload_extensions_config"),
+            ):
+                with pytest.raises(RuntimeError, match="disappeared"):
+                    client.update_skill("ghost-skill", enabled=False)
+
+
+# ===========================================================================
+# Hardening — stream / chat edge cases
+# ===========================================================================
+
+
+class TestStreamHardening:
+    def test_agent_exception_propagates(self, client):
+        """Exceptions from agent.stream() propagate to caller."""
+        agent = MagicMock()
+        agent.stream.side_effect = RuntimeError("model quota exceeded")
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            with pytest.raises(RuntimeError, match="model quota exceeded"):
+                list(client.stream("hi", thread_id="t-err"))
+
+    def test_messages_without_id(self, client):
+        """Messages without id attribute are emitted without crashing."""
+        ai = AIMessage(content="no id here")
+        # Forcibly remove the id attribute to simulate edge case.
+        object.__setattr__(ai, "id", None)
+        chunks = [{"messages": [ai]}]
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-noid"))
+
+        # Should produce events without error.
+        assert events[-1].type == "end"
+        ai_events = _ai_events(events)
+        assert len(ai_events) == 1
+        assert ai_events[0].data["content"] == "no id here"
+
+    def test_tool_calls_only_no_text(self, client):
+        """chat() returns empty string when agent only emits tool calls."""
+        ai = AIMessage(
+            content="",
+            id="ai-1",
+            tool_calls=[{"name": "bash", "args": {"cmd": "ls"}, "id": "tc-1"}],
+        )
+        tool = ToolMessage(content="output", id="tm-1", tool_call_id="tc-1", name="bash")
+        chunks = [
+            {"messages": [ai]},
+            {"messages": [ai, tool]},
+        ]
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            result = client.chat("do it", thread_id="t-tc-only")
+
+        assert result == ""
+
+    def test_duplicate_messages_without_id_not_deduplicated(self, client):
+        """Messages with id=None are NOT deduplicated (each is emitted)."""
+        ai1 = AIMessage(content="first")
+        ai2 = AIMessage(content="second")
+        object.__setattr__(ai1, "id", None)
+        object.__setattr__(ai2, "id", None)
+
+        chunks = [
+            {"messages": [ai1]},
+            {"messages": [ai2]},
+        ]
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-dup-noid"))
+
+        ai_msgs = _ai_events(events)
+        assert len(ai_msgs) == 2
+
+
+# ===========================================================================
+# Hardening — _serialize_message coverage
+# ===========================================================================
+
+
+class TestSerializeMessage:
+    def test_system_message(self):
+        msg = SystemMessage(content="You are a helpful assistant.", id="sys-1")
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["type"] == "system"
+        assert result["content"] == "You are a helpful assistant."
+        assert result["id"] == "sys-1"
+
+    def test_unknown_message_type(self):
+        """Non-standard message types serialize as 'unknown'."""
+        msg = MagicMock()
+        msg.id = "unk-1"
+        msg.content = "something"
+        # Not an instance of AIMessage/ToolMessage/HumanMessage/SystemMessage
+        type(msg).__name__ = "CustomMessage"
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["type"] == "unknown"
+        assert result["id"] == "unk-1"
+
+    def test_ai_message_with_tool_calls(self):
+        msg = AIMessage(
+            content="",
+            id="ai-tc",
+            tool_calls=[{"name": "bash", "args": {"cmd": "ls"}, "id": "tc-1"}],
+        )
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["type"] == "ai"
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["name"] == "bash"
+
+    def test_tool_message_non_string_content(self):
+        msg = ToolMessage(content={"key": "value"}, id="tm-1", tool_call_id="tc-1", name="tool")
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["type"] == "tool"
+        assert isinstance(result["content"], str)
+
+
+# ===========================================================================
+# Hardening — upload / delete symlink attack
+# ===========================================================================
+
+
+class TestUploadDeleteSymlink:
+    def test_delete_upload_symlink_outside_dir(self, client):
+        """A symlink in uploads dir pointing outside is caught by path traversal check."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+
+            # Create a target file outside uploads dir.
+            outside = Path(tmp) / "secret.txt"
+            outside.write_text("sensitive data")
+
+            # Create a symlink inside uploads dir pointing to outside file.
+            link = uploads_dir / "harmless.txt"
+            link.symlink_to(outside)
+
+            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+                # The resolved path of the symlink escapes uploads_dir,
+                # so path traversal check should catch it.
+                with pytest.raises(PermissionError):
+                    client.delete_upload("thread-1", "harmless.txt")
+
+            # The outside file must NOT have been deleted.
+            assert outside.exists()
+
+    def test_upload_filename_with_spaces_and_unicode(self, client):
+        """Files with spaces and unicode characters in names upload correctly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            weird_name = "report 2024 数据.txt"
+            src_file = tmp_path / weird_name
+            src_file.write_text("data")
+
+            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("thread-1", [src_file])
+
+            assert result["success"] is True
+            assert result["files"][0]["filename"] == weird_name
+            assert (uploads_dir / weird_name).exists()
+
+
+# ===========================================================================
+# Hardening — artifact edge cases
+# ===========================================================================
+
+
+class TestArtifactHardening:
+    def test_artifact_directory_rejected(self, client):
+        """get_artifact rejects paths that resolve to a directory."""
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data_dir = Path(tmp) / "user-data"
+            outputs = user_data_dir / "outputs" / "subdir"
+            outputs.mkdir(parents=True)
+
+            mock_paths = MagicMock()
+            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
+
+            with patch("src.client.get_paths", return_value=mock_paths):
+                with pytest.raises(ValueError, match="not a file"):
+                    client.get_artifact("t1", "mnt/user-data/outputs/subdir")
+
+    def test_artifact_leading_slash_stripped(self, client):
+        """Paths with leading slash are handled correctly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data_dir = Path(tmp) / "user-data"
+            outputs = user_data_dir / "outputs"
+            outputs.mkdir(parents=True)
+            (outputs / "file.txt").write_text("content")
+
+            mock_paths = MagicMock()
+            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
+
+            with patch("src.client.get_paths", return_value=mock_paths):
+                content, _mime = client.get_artifact("t1", "/mnt/user-data/outputs/file.txt")
+
+            assert content == b"content"
+
+
+# ===========================================================================
+# BUG DETECTION — tests that expose real bugs in client.py
+# ===========================================================================
+
+
+class TestUploadDuplicateFilenames:
+    """Regression: upload_files must auto-rename duplicate basenames.
+
+    Previously it silently overwrote the first file with the second,
+    then reported both in the response while only one existed on disk.
+    Now duplicates are renamed (data.txt → data_1.txt) and the response
+    includes original_filename so the agent / caller can see what happened.
+    """
+
+    def test_duplicate_filenames_auto_renamed(self, client):
+        """Two files with same basename → second gets _1 suffix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            dir_a = tmp_path / "a"
+            dir_b = tmp_path / "b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+            (dir_a / "data.txt").write_text("version A")
+            (dir_b / "data.txt").write_text("version B")
+
+            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("t-dup", [dir_a / "data.txt", dir_b / "data.txt"])
+
+            assert result["success"] is True
+            assert len(result["files"]) == 2
+
+            # Both files exist on disk with distinct names.
+            disk_files = sorted(p.name for p in uploads_dir.iterdir())
+            assert disk_files == ["data.txt", "data_1.txt"]
+
+            # First keeps original name, second is renamed.
+            assert result["files"][0]["filename"] == "data.txt"
+            assert "original_filename" not in result["files"][0]
+
+            assert result["files"][1]["filename"] == "data_1.txt"
+            assert result["files"][1]["original_filename"] == "data.txt"
+
+            # Content preserved correctly.
+            assert (uploads_dir / "data.txt").read_text() == "version A"
+            assert (uploads_dir / "data_1.txt").read_text() == "version B"
+
+    def test_triple_duplicate_increments_counter(self, client):
+        """Three files with same basename → _1, _2 suffixes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            for name in ["x", "y", "z"]:
+                d = tmp_path / name
+                d.mkdir()
+                (d / "report.csv").write_text(f"from {name}")
+
+            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files(
+                    "t-triple",
+                    [tmp_path / "x" / "report.csv", tmp_path / "y" / "report.csv", tmp_path / "z" / "report.csv"],
+                )
+
+            filenames = [f["filename"] for f in result["files"]]
+            assert filenames == ["report.csv", "report_1.csv", "report_2.csv"]
+            assert len(list(uploads_dir.iterdir())) == 3
+
+    def test_different_filenames_no_rename(self, client):
+        """Non-duplicate filenames upload normally without rename."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            (tmp_path / "a.txt").write_text("aaa")
+            (tmp_path / "b.txt").write_text("bbb")
+
+            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("t-ok", [tmp_path / "a.txt", tmp_path / "b.txt"])
+
+            assert result["success"] is True
+            assert len(result["files"]) == 2
+            assert all("original_filename" not in f for f in result["files"])
+            assert len(list(uploads_dir.iterdir())) == 2
+
+
+class TestBugArtifactPrefixMatchTooLoose:
+    """Regression: get_artifact must reject paths like ``mnt/user-data-evil/...``.
+
+    Previously ``startswith("mnt/user-data")`` matched ``"mnt/user-data-evil"``
+    because it was a string prefix, not a path-segment check.
+    """
+
+    def test_non_canonical_prefix_rejected(self, client):
+        """Paths that share a string prefix but differ at segment boundary are rejected."""
+        with pytest.raises(ValueError, match="must start with"):
+            client.get_artifact("t1", "mnt/user-data-evil/secret.txt")
+
+    def test_exact_prefix_without_subpath_accepted(self, client):
+        """Bare 'mnt/user-data' is accepted (will later fail as directory, not at prefix)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data_dir = Path(tmp) / "user-data"
+            user_data_dir.mkdir()
+
+            mock_paths = MagicMock()
+            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
+
+            with patch("src.client.get_paths", return_value=mock_paths):
+                # Accepted at prefix check, but fails because it's a directory.
+                with pytest.raises(ValueError, match="not a file"):
+                    client.get_artifact("t1", "mnt/user-data")
+
+
+class TestBugListUploadsDeadCode:
+    """Regression: list_uploads works even when called on a fresh thread
+    (directory auto-created by _get_uploads_dir).
+    """
+
+    def test_list_uploads_on_fresh_thread(self, client):
+        """list_uploads on a thread that never had uploads returns empty list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            non_existent = Path(tmp) / "does-not-exist" / "uploads"
+            assert not non_existent.exists()
+
+            mock_paths = MagicMock()
+            mock_paths.sandbox_uploads_dir.return_value = non_existent
+
+            with patch("src.client.get_paths", return_value=mock_paths):
+                result = client.list_uploads("thread-fresh")
+
+            assert non_existent.exists()
+            assert result == {"files": [], "count": 0}
+
+
+class TestBugAgentInvalidationInconsistency:
+    """Regression: update_skill and update_mcp_config must reset both
+    _agent and _agent_config_key, just like reset_agent() does.
+    """
+
+    def test_update_mcp_resets_config_key(self, client):
+        """After update_mcp_config, both _agent and _agent_config_key are None."""
+        client._agent = MagicMock()
+        client._agent_config_key = ("model", True, False, False)
+
+        current_config = MagicMock()
+        current_config.skills = {}
+        reloaded = MagicMock()
+        reloaded.mcp_servers = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "ext.json"
+            config_file.write_text("{}")
+
+            with (
+                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("src.client.get_extensions_config", return_value=current_config),
+                patch("src.client.reload_extensions_config", return_value=reloaded),
+            ):
+                client.update_mcp_config({})
+
+        assert client._agent is None
+        assert client._agent_config_key is None
+
+    def test_update_skill_resets_config_key(self, client):
+        """After update_skill, both _agent and _agent_config_key are None."""
+        client._agent = MagicMock()
+        client._agent_config_key = ("model", True, False, False)
+
+        skill = MagicMock()
+        skill.name = "s1"
+        updated = MagicMock()
+        updated.name = "s1"
+        updated.description = "d"
+        updated.license = "MIT"
+        updated.category = "c"
+        updated.enabled = False
+
+        ext_config = MagicMock()
+        ext_config.mcp_servers = {}
+        ext_config.skills = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "ext.json"
+            config_file.write_text("{}")
+
+            with (
+                patch("src.skills.loader.load_skills", side_effect=[[skill], [updated]]),
+                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("src.client.get_extensions_config", return_value=ext_config),
+                patch("src.client.reload_extensions_config"),
+            ):
+                client.update_skill("s1", enabled=False)
+
+        assert client._agent is None
+        assert client._agent_config_key is None
