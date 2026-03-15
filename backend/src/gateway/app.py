@@ -17,6 +17,7 @@ from src.gateway.routers import (
     models,
     projects,
     providers,
+    ptc,
     skills,
     threads,
     uploads,
@@ -209,6 +210,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # User preferences API
     app.include_router(user_preferences.router)
+
+    # PTC (Programmatic Tool Calling) proxy API
+    app.include_router(ptc.router)
 
     # ── Prometheus metrics instrumentation ──────────────────────────────────
     from src.gateway.metrics import setup_metrics

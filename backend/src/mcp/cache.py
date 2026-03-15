@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool
 logger = logging.getLogger(__name__)
 
 _mcp_tools_cache: list[BaseTool] | None = None
+_mcp_tools_by_server_cache: dict[str, list[BaseTool]] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
@@ -62,24 +63,32 @@ def _is_cache_stale() -> bool:
 async def initialize_mcp_tools() -> list[BaseTool]:
     """Initialize and cache MCP tools.
 
-    This should be called once at application startup.
+    This should be called once at application startup.  Also populates the
+    by-server cache for PTC code generation.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _mcp_tools_by_server_cache, _cache_initialized, _config_mtime
 
     async with _initialization_lock:
         if _cache_initialized:
             logger.info("MCP tools already initialized")
             return _mcp_tools_cache or []
 
-        from src.mcp.tools import get_mcp_tools
+        from src.mcp.tools import get_mcp_tools_by_server
 
         logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
+        by_server = await get_mcp_tools_by_server()
+        _mcp_tools_by_server_cache = by_server
+
+        # Flatten into the existing flat cache
+        _mcp_tools_cache = []
+        for tools in by_server.values():
+            _mcp_tools_cache.extend(tools)
+
         _cache_initialized = True
-        _config_mtime = _get_config_mtime()  # Record config file mtime
+        _config_mtime = _get_config_mtime()
         logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
 
         return _mcp_tools_cache
@@ -87,15 +96,19 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
 def _background_refresh() -> None:
     """Refresh MCP tools in a background thread without blocking callers."""
-    global _mcp_tools_cache, _config_mtime, _background_refresh_in_progress
+    global _mcp_tools_cache, _mcp_tools_by_server_cache, _config_mtime, _background_refresh_in_progress
 
     async def _do_refresh():
-        global _mcp_tools_cache, _config_mtime, _background_refresh_in_progress
+        global _mcp_tools_cache, _mcp_tools_by_server_cache, _config_mtime, _background_refresh_in_progress
         try:
-            from src.mcp.tools import get_mcp_tools
+            from src.mcp.tools import get_mcp_tools_by_server
 
             logger.info("Background refresh: reloading MCP tools...")
-            new_tools = await get_mcp_tools()
+            by_server = await get_mcp_tools_by_server()
+            _mcp_tools_by_server_cache = by_server
+            new_tools = []
+            for tools in by_server.values():
+                new_tools.extend(tools)
             _mcp_tools_cache = new_tools
             _config_mtime = _get_config_mtime()
             logger.info(f"Background refresh complete: {len(new_tools)} tool(s) loaded (config mtime: {_config_mtime})")
@@ -158,13 +171,29 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     return _mcp_tools_cache or []
 
 
+def get_cached_mcp_tools_by_server() -> dict[str, list[BaseTool]]:
+    """Get cached MCP tools grouped by server name.
+
+    Triggers lazy initialization if tools are not yet cached.
+
+    Returns:
+        Dict mapping server_name to list of tools from that server.
+    """
+    if not _cache_initialized:
+        # Trigger lazy initialization via the flat cache getter
+        get_cached_mcp_tools()
+
+    return _mcp_tools_by_server_cache or {}
+
+
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime, _background_refresh_in_progress
+    global _mcp_tools_cache, _mcp_tools_by_server_cache, _cache_initialized, _config_mtime, _background_refresh_in_progress
     _mcp_tools_cache = None
+    _mcp_tools_by_server_cache = None
     _cache_initialized = False
     _config_mtime = None
     _background_refresh_in_progress = False

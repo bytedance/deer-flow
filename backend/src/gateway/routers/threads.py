@@ -272,7 +272,7 @@ async def rename_thread(
         client = get_client(url=_langgraph_url())
         await client.threads.update_state(
             thread_id,
-            {"values": {"title": request.title}},
+            {"title": request.title},
         )
     except Exception as e:
         logger.error(f"Error renaming thread {thread_id}: {e}", exc_info=True)
