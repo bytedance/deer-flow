@@ -60,6 +60,14 @@ class TestTitleConfig:
         set_title_config(original_config)
 
 
+class MockMessage:
+    """Minimal mock for LangChain message objects."""
+
+    def __init__(self, msg_type: str, content: str = ""):
+        self.type = msg_type
+        self.content = content
+
+
 class TestTitleMiddleware:
     """Tests for TitleMiddleware."""
 
@@ -69,22 +77,54 @@ class TestTitleMiddleware:
         assert middleware is not None
         assert middleware.state_schema is not None
 
-    # TODO: Add integration tests with mock Runtime
-    # def test_should_generate_title(self):
-    #     """Test title generation trigger logic."""
-    #     pass
+    def test_should_generate_title_first_user_message(self):
+        """Title should be generated on first turn with a single user message."""
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [MockMessage("human", "Hello")],
+        }
+        assert middleware._should_generate_title(state) is True
 
-    # def test_generate_title(self):
-    #     """Test title generation."""
-    #     pass
+    def test_should_not_generate_title_when_title_exists(self):
+        """Title should not be regenerated if one already exists."""
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [MockMessage("human", "Hello")],
+            "title": "Existing Title",
+        }
+        assert middleware._should_generate_title(state) is False
 
-    # def test_after_agent_hook(self):
-    #     """Test after_agent hook."""
-    #     pass
+    def test_should_not_generate_title_no_messages(self):
+        """Title should not be generated when there are no messages."""
+        middleware = TitleMiddleware()
+        assert middleware._should_generate_title({"messages": []}) is False
 
+    def test_should_not_generate_title_multiple_user_messages(self):
+        """Title should not be generated on subsequent turns."""
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                MockMessage("human", "Hello"),
+                MockMessage("ai", "Hi there!"),
+                MockMessage("human", "How are you?"),
+            ],
+        }
+        assert middleware._should_generate_title(state) is False
 
-# TODO: Add integration tests
-# - Test with real LangGraph runtime
-# - Test title persistence with checkpointer
-# - Test fallback behavior when LLM fails
-# - Test concurrent title generation
+    def test_should_not_generate_title_when_disabled(self):
+        """Title should not be generated when config is disabled."""
+        original_config = get_title_config()
+        set_title_config(TitleConfig(enabled=False))
+        try:
+            middleware = TitleMiddleware()
+            state = {"messages": [MockMessage("human", "Hello")]}
+            assert middleware._should_generate_title(state) is False
+        finally:
+            set_title_config(original_config)
+
+    def test_should_generate_title_with_user_only(self):
+        """Title generation no longer requires an assistant response."""
+        middleware = TitleMiddleware()
+        # Single user message without assistant response — should still trigger
+        state = {"messages": [MockMessage("human", "Explain quantum computing")]}
+        assert middleware._should_generate_title(state) is True

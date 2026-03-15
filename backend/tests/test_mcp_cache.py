@@ -121,14 +121,17 @@ class TestInitializeMcpTools:
 
     @pytest.mark.asyncio
     @patch("src.mcp.cache._get_config_mtime", return_value=1234.0)
-    @patch("src.mcp.cache.get_mcp_tools", new_callable=AsyncMock, create=True)
-    async def test_initializes_and_caches(self, mock_get_tools, mock_mtime) -> None:
+    async def test_initializes_and_caches(self, mock_mtime) -> None:
         import src.mcp.cache as cache_mod
 
         fake_tools = [MagicMock(name="tool1"), MagicMock(name="tool2")]
+
+        async def mock_by_server():
+            return {"server_a": fake_tools}
+
+        mock_get_by_server = AsyncMock(side_effect=mock_by_server)
         # Need to patch the lazy import
-        with patch.dict("sys.modules", {"src.mcp.tools": MagicMock(get_mcp_tools=mock_get_tools)}):
-            mock_get_tools.return_value = fake_tools
+        with patch.dict("sys.modules", {"src.mcp.tools": MagicMock(get_mcp_tools_by_server=mock_get_by_server)}):
             # Reset the lock for this test
             cache_mod._initialization_lock = asyncio.Lock()
 
