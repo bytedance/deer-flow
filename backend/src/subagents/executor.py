@@ -434,6 +434,8 @@ MAX_CONCURRENT_SUBAGENTS = 3
 def get_background_task_result(task_id: str) -> SubagentResult | None:
     """Get the result of a background task.
 
+    Also performs periodic cleanup of stale completed tasks.
+
     Args:
         task_id: The task ID returned by execute_async.
 
@@ -441,6 +443,7 @@ def get_background_task_result(task_id: str) -> SubagentResult | None:
         SubagentResult if found, None otherwise.
     """
     with _background_tasks_lock:
+        _cleanup_stale_tasks()
         return _background_tasks.get(task_id)
 
 
@@ -452,6 +455,24 @@ def list_background_tasks() -> list[SubagentResult]:
     """
     with _background_tasks_lock:
         return list(_background_tasks.values())
+
+
+_STALE_TASK_TTL_SECONDS = 1800
+
+
+def _cleanup_stale_tasks() -> None:
+    """Remove completed tasks older than _STALE_TASK_TTL_SECONDS.
+
+    Called automatically during get_background_task_result() to prevent
+    unbounded growth of _background_tasks when callers fail to clean up.
+    """
+    now = datetime.now()
+    terminal_states = {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT}
+    stale_ids = [task_id for task_id, result in _background_tasks.items() if result.status in terminal_states and result.completed_at is not None and (now - result.completed_at).total_seconds() > _STALE_TASK_TTL_SECONDS]
+    for task_id in stale_ids:
+        del _background_tasks[task_id]
+    if stale_ids:
+        logger.info("Auto-cleaned %d stale background task(s)", len(stale_ids))
 
 
 def cleanup_background_task(task_id: str) -> None:
@@ -469,12 +490,9 @@ def cleanup_background_task(task_id: str) -> None:
     with _background_tasks_lock:
         result = _background_tasks.get(task_id)
         if result is None:
-            # Nothing to clean up; may have been removed already.
             logger.debug("Requested cleanup for unknown background task %s", task_id)
             return
 
-        # Only clean up tasks that are in a terminal state to avoid races with
-        # the background executor still updating the task entry.
         is_terminal_status = result.status in {
             SubagentStatus.COMPLETED,
             SubagentStatus.FAILED,

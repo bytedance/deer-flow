@@ -104,8 +104,8 @@ async def list_agents() -> AgentsListResponse:
         agents = list_custom_agents()
         return AgentsListResponse(agents=[_agent_config_to_response(a) for a in agents])
     except Exception as e:
-        logger.error(f"Failed to list agents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+        logger.error("Failed to list agents: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to list agents")
 
 
 @router.get(
@@ -158,8 +158,8 @@ async def get_agent(name: str) -> AgentResponse:
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
-        logger.error(f"Failed to get agent '{name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get agent: {str(e)}")
+        logger.error("Failed to get agent '%s': %s", name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get agent")
 
 
 @router.post(
@@ -220,8 +220,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         # Clean up on failure
         if agent_dir.exists():
             shutil.rmtree(agent_dir)
-        logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
+        logger.error("Failed to create agent '%s': %s", request.name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to create agent")
 
 
 @router.put(
@@ -287,8 +287,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
+        logger.error("Failed to update agent '%s': %s", name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update agent")
 
 
 class UserProfileResponse(BaseModel):
@@ -322,8 +322,8 @@ async def get_user_profile() -> UserProfileResponse:
         raw = user_md_path.read_text(encoding="utf-8").strip()
         return UserProfileResponse(content=raw or None)
     except Exception as e:
-        logger.error(f"Failed to read user profile: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to read user profile: {str(e)}")
+        logger.error("Failed to read user profile: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to read user profile")
 
 
 @router.put(
@@ -348,8 +348,8 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
         logger.info(f"Updated USER.md at {paths.user_md_file}")
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
-        logger.error(f"Failed to update user profile: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")
+        logger.error("Failed to update user profile: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update user profile")
 
 
 @router.delete(
@@ -379,5 +379,5 @@ async def delete_agent(name: str) -> None:
         shutil.rmtree(agent_dir)
         logger.info(f"Deleted agent '{name}' from {agent_dir}")
     except Exception as e:
-        logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
+        logger.error("Failed to delete agent '%s': %s", name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to delete agent")

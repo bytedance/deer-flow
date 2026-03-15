@@ -1,6 +1,7 @@
 import re
 
 from langchain.tools import ToolRuntime, tool
+from langgraph.config import get_config
 from langgraph.typing import ContextT
 
 from src.agents.thread_state import ThreadDataState, ThreadState
@@ -28,26 +29,28 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
 
     Returns:
         The path with virtual prefix replaced by actual path.
+
+    Raises:
+        PermissionError: If path traversal is detected.
     """
+    from pathlib import Path as _Path
+
     if not path.startswith(VIRTUAL_PATH_PREFIX):
         return path
 
     if thread_data is None:
         return path
 
-    # Map virtual subdirectories to thread_data keys
     path_mapping = {
         "workspace": thread_data.get("workspace_path"),
         "uploads": thread_data.get("uploads_path"),
         "outputs": thread_data.get("outputs_path"),
     }
 
-    # Extract the subdirectory after /mnt/user-data/
     relative_path = path[len(VIRTUAL_PATH_PREFIX) :].lstrip("/")
     if not relative_path:
         return path
 
-    # Find which subdirectory this path belongs to
     parts = relative_path.split("/", 1)
     subdir = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
@@ -57,7 +60,11 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
         return path
 
     if rest:
-        return f"{actual_base}/{rest}"
+        resolved = _Path(actual_base, rest).resolve()
+        base = _Path(actual_base).resolve()
+        if not str(resolved).startswith(str(base) + "/") and resolved != base:
+            raise PermissionError(f"Path traversal detected: {path}")
+        return str(resolved)
     return actual_base
 
 
@@ -173,7 +180,13 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    ctx = runtime.context
+    thread_id = ctx.get("thread_id") if (ctx is not None and hasattr(ctx, "get")) else None
+    if thread_id is None:
+        try:
+            thread_id = get_config().get("configurable", {}).get("thread_id")
+        except RuntimeError:
+            pass
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 

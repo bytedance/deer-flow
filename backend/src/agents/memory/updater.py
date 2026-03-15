@@ -1,9 +1,11 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
+import logging
 import re
+import threading
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,8 @@ from src.agents.memory.prompt import (
 from src.config.memory_config import get_memory_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -41,7 +45,7 @@ def _create_empty_memory() -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
         "version": "1.0",
-        "lastUpdated": datetime.utcnow().isoformat() + "Z",
+        "lastUpdated": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "user": {
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
@@ -59,6 +63,7 @@ def _create_empty_memory() -> dict[str, Any]:
 # Per-agent memory cache: keyed by agent_name (None = global)
 # Value: (memory_data, file_mtime)
 _memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+_memory_cache_lock = threading.Lock()
 
 
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
@@ -81,15 +86,15 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     except OSError:
         current_mtime = None
 
-    cached = _memory_cache.get(agent_name)
+    with _memory_cache_lock:
+        cached = _memory_cache.get(agent_name)
 
-    # Invalidate cache if file has been modified or doesn't exist
-    if cached is None or cached[1] != current_mtime:
-        memory_data = _load_memory_from_file(agent_name)
-        _memory_cache[agent_name] = (memory_data, current_mtime)
-        return memory_data
+        if cached is None or cached[1] != current_mtime:
+            memory_data = _load_memory_from_file(agent_name)
+            _memory_cache[agent_name] = (memory_data, current_mtime)
+            return memory_data
 
-    return cached[0]
+        return cached[0]
 
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
@@ -109,7 +114,8 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     except OSError:
         mtime = None
 
-    _memory_cache[agent_name] = (memory_data, mtime)
+    with _memory_cache_lock:
+        _memory_cache[agent_name] = (memory_data, mtime)
     return memory_data
 
 
@@ -132,7 +138,7 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
             data = json.load(f)
         return data
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to load memory file: {e}")
+        logger.warning("Failed to load memory file: %s", e)
         return _create_empty_memory()
 
 
@@ -189,8 +195,7 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         # Ensure directory exists
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Update lastUpdated timestamp
-        memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+        memory_data["lastUpdated"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         # Write atomically using temp file
         temp_path = file_path.with_suffix(".tmp")
@@ -206,13 +211,17 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         except OSError:
             mtime = None
 
-        _memory_cache[agent_name] = (memory_data, mtime)
+        with _memory_cache_lock:
+            _memory_cache[agent_name] = (memory_data, mtime)
 
-        print(f"Memory saved to {file_path}")
+        logger.info("Memory saved to %s", file_path)
         return True
     except OSError as e:
-        print(f"Failed to save memory file: {e}")
+        logger.warning("Failed to save memory file: %s", e)
         return False
+
+
+_update_lock = threading.Lock()
 
 
 class MemoryUpdater:
@@ -251,52 +260,43 @@ class MemoryUpdater:
             return False
 
         try:
-            # Get current memory
-            current_memory = get_memory_data(agent_name)
-
-            # Format conversation for prompt
-            conversation_text = format_conversation_for_update(messages)
-
-            if not conversation_text.strip():
-                return False
-
-            # Build prompt
-            prompt = MEMORY_UPDATE_PROMPT.format(
-                current_memory=json.dumps(current_memory, indent=2),
-                conversation=conversation_text,
-            )
-
-            # Call LLM
-            model = self._get_model()
-            response = model.invoke(prompt)
-            response_text = str(response.content).strip()
-
-            # Parse response
-            # Remove markdown code blocks if present
-            if response_text.startswith("```"):
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-            update_data = json.loads(response_text)
-
-            # Apply updates
-            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
-
-            # Strip file-upload mentions from all summaries before saving.
-            # Uploaded files are session-scoped and won't exist in future sessions,
-            # so recording upload events in long-term memory causes the agent to
-            # try (and fail) to locate those files in subsequent conversations.
-            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-
-            # Save
-            return _save_memory_to_file(updated_memory, agent_name)
-
+            with _update_lock:
+                return self._do_update(messages, thread_id, agent_name)
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.exception("Memory update failed: %s", e)
             return False
+
+    def _do_update(self, messages: list[Any], thread_id: str | None, agent_name: str | None) -> bool:
+        """Perform the actual memory update under lock."""
+        current_memory = get_memory_data(agent_name)
+
+        conversation_text = format_conversation_for_update(messages)
+
+        if not conversation_text.strip():
+            return False
+
+        prompt = MEMORY_UPDATE_PROMPT.format(
+            current_memory=json.dumps(current_memory, indent=2),
+            conversation=conversation_text,
+        )
+
+        model = self._get_model()
+        response = model.invoke(prompt)
+        response_text = str(response.content).strip()
+
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+        update_data = json.loads(response_text)
+
+        updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+
+        return _save_memory_to_file(updated_memory, agent_name)
 
     def _apply_updates(
         self,
@@ -315,7 +315,11 @@ class MemoryUpdater:
             Updated memory data.
         """
         config = get_memory_config()
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+        current_memory.setdefault("user", {})
+        current_memory.setdefault("history", {})
+        current_memory.setdefault("facts", [])
 
         # Update user sections
         user_updates = update_data.get("user", {})

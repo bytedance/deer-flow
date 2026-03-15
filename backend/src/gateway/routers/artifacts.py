@@ -129,7 +129,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> FileRespo
 
     actual_path = resolve_thread_virtual_path(thread_id, path)
 
-    logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
+    logger.info("Resolving artifact path: thread_id=%s, requested_path=%s, actual_path=%s", thread_id, path, actual_path)
 
     if not actual_path.exists():
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")

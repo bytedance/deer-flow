@@ -36,7 +36,7 @@ async def get_mcp_tools() -> list[BaseTool]:
 
     try:
         # Create the multi-server MCP client
-        logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
+        logger.info("Initializing MCP client with %d server(s)", len(servers_config))
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
         initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
@@ -57,10 +57,10 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Get all tools from all servers
         tools = await client.get_tools()
-        logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
+        logger.info("Successfully loaded %d tool(s) from MCP servers", len(tools))
 
         return tools
 
     except Exception as e:
-        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
+        logger.error("Failed to load MCP tools: %s", e, exc_info=True)
         return []

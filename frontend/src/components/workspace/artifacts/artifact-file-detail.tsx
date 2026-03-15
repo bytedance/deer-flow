@@ -83,7 +83,11 @@ export function ArtifactFileDetail({
   const isSupportPreview = useMemo(() => {
     return language === "html" || language === "markdown";
   }, [language]);
-  const { content } = useArtifactContent({
+  const {
+    content,
+    isLoading: isContentLoading,
+    error: contentError,
+  } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -114,15 +118,15 @@ export function ArtifactFileDetail({
       if (result.success) {
         toast.success(result.message);
       } else {
-        toast.error(result.message ?? "Failed to install skill");
+        toast.error(result.message ?? t.common.operationFailed);
       }
     } catch (error) {
       console.error("Failed to install skill:", error);
-      toast.error("Failed to install skill");
+      toast.error(t.common.operationFailed);
     } finally {
       setIsInstalling(false);
     }
-  }, [threadId, filepath, isInstalling]);
+  }, [threadId, filepath, isInstalling, t.common.operationFailed]);
   return (
     <Artifact className={cn(className)}>
       <ArtifactHeader className="px-2">
@@ -206,7 +210,7 @@ export function ArtifactFileDetail({
                     await navigator.clipboard.writeText(displayContent ?? "");
                     toast.success(t.clipboard.copiedToClipboard);
                   } catch (error) {
-                    toast.error("Failed to copy to clipboard");
+                    toast.error(t.clipboard.failedToCopyToClipboard);
                     console.error(error);
                   }
                 }}
@@ -235,7 +239,19 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="p-0">
-        {isSupportPreview &&
+        {isContentLoading && (
+          <div className="flex size-full items-center justify-center">
+            <LoaderIcon className="text-muted-foreground size-6 animate-spin" />
+          </div>
+        )}
+        {contentError && !isContentLoading && (
+          <div className="text-destructive flex size-full items-center justify-center text-sm">
+            {t.common.operationFailed}
+          </div>
+        )}
+        {!isContentLoading &&
+          !contentError &&
+          isSupportPreview &&
           viewMode === "preview" &&
           (language === "markdown" || language === "html") && (
             <ArtifactFilePreview
@@ -243,13 +259,16 @@ export function ArtifactFileDetail({
               language={language ?? "text"}
             />
           )}
-        {isCodeFile && viewMode === "code" && (
-          <CodeEditor
-            className="size-full resize-none rounded-none border-none"
-            value={displayContent ?? ""}
-            readonly
-          />
-        )}
+        {!isContentLoading &&
+          !contentError &&
+          isCodeFile &&
+          viewMode === "code" && (
+            <CodeEditor
+              className="size-full resize-none rounded-none border-none"
+              value={displayContent ?? ""}
+              readonly
+            />
+          )}
         {!isCodeFile && (
           <iframe
             className="size-full"
@@ -287,7 +306,7 @@ export function ArtifactFilePreview({
         className="size-full"
         title="Artifact preview"
         srcDoc={content}
-        sandbox="allow-scripts allow-forms"
+        sandbox="allow-forms"
       />
     );
   }

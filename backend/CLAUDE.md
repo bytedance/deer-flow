@@ -194,7 +194,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 ### Subagent System (`src/subagents/`)
 
-**Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
+**Built-in Agents**: `general-purpose` (all tools except `task`), `bash` (command specialist), `literature-reviewer` (academic literature search and citation analysis), `statistical-analyst` (hypothesis testing and APA reporting), and `code-reviewer` (research code quality review)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
@@ -206,7 +206,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with mtime invalidation)
 3. **Built-in tools**:
-   - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`)
+   - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); when `DEER_FLOW_EXPORT_DIR` is set, presented files are also copied to `{DEER_FLOW_EXPORT_DIR}/{thread_id}/...`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
    - `view_image` - Read image as base64 (added only if model supports vision)
 4. **Subagent tool** (if enabled):
@@ -217,6 +217,9 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `jina_ai/` - Web fetch via Jina reader API with readability extraction
 - `firecrawl/` - Web scraping via Firecrawl API
 - `image_search/` - Image search via DuckDuckGo
+- `semantic_scholar/` - Academic paper search, paper details, and author profiles via Semantic Scholar API
+- `crossref/` - DOI resolution, citation metadata lookup, and reference validation via CrossRef API
+- `arxiv_search/` - Preprint search and retrieval via arXiv API with category filtering
 
 ### MCP System (`src/mcp/`)
 

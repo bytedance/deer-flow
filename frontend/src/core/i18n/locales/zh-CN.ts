@@ -43,6 +43,17 @@ export const zhCN: Translations = {
     save: "保存",
     install: "安装",
     create: "创建",
+    operationFailed: "操作失败",
+  },
+
+  // Error pages
+  errorPage: {
+    title: "出错了",
+    description: "发生了意外错误，请重试。",
+    retry: "重试",
+    goHome: "返回首页",
+    notFoundTitle: "页面未找到",
+    notFoundDescription: "您访问的页面不存在或已被移动。",
   },
 
   // Welcome
@@ -255,6 +266,13 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    subagentTypes: {
+      "general-purpose": "通用任务",
+      bash: "命令执行",
+      "literature-reviewer": "文献检索",
+      "statistical-analyst": "统计分析",
+      "code-reviewer": "代码审查",
+    },
   },
 
   // Settings

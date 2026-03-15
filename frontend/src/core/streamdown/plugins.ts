@@ -1,10 +1,21 @@
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { StreamdownProps } from "streamdown";
 
 import { rehypeSplitWordsIntoSpans } from "../rehype";
+
+const sanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code ?? []), "className"],
+    span: [...(defaultSchema.attributes?.span ?? []), "className", "style"],
+    div: [...(defaultSchema.attributes?.div ?? []), "className", "style"],
+  },
+};
 
 export const streamdownPlugins = {
   remarkPlugins: [
@@ -13,6 +24,7 @@ export const streamdownPlugins = {
   ] as StreamdownProps["remarkPlugins"],
   rehypePlugins: [
     rehypeRaw,
+    [rehypeSanitize, sanitizeSchema],
     [rehypeKatex, { output: "html" }],
   ] as StreamdownProps["rehypePlugins"],
 };

@@ -58,8 +58,8 @@ services:
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway/langgraph and (optionally) provisioner.
   # Select nginx config via NGINX_CONF:
-  # - nginx.local.conf (default): no provisioner route (local/aio modes)
-  # - nginx.conf: includes provisioner route (provisioner mode)
+  # - nginx.conf (default): includes provisioner route (provisioner mode)
+  # - nginx.local.conf: no provisioner route (local/aio modes)
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
@@ -68,9 +68,23 @@ services:
     volumes:
       - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
     depends_on:
-      - frontend
-      - gateway
-      - langgraph
+      gateway:
+        condition: service_healthy
+      langgraph:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:2026/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -83,7 +97,7 @@ services:
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
     container_name: deer-flow-frontend
-    command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
+    command: sh -c "cd frontend && pnpm run dev 2>&1 | tee /app/logs/frontend.log"
     volumes:
       - ../frontend/src:/app/frontend/src
       - ../frontend/public:/app/frontend/public
@@ -98,6 +112,17 @@ services:
       - CI=true
     env_file:
       - ../frontend/.env
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -109,7 +134,7 @@ services:
       dockerfile: backend/Dockerfile
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
+    command: sh -c "cd backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' 2>&1 | tee /app/logs/gateway.log"
     volumes:
       - ../backend/src:/app/backend/src
       - ../backend/.env:/app/backend/.env
@@ -117,6 +142,8 @@ services:
       - ../skills:/app/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
+      # Persist LangGraph local runtime metadata (threads/runs index) across container recreation
+      - ../backend/.langgraph_api:/app/backend/.langgraph_api
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
@@ -127,6 +154,17 @@ services:
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -138,7 +176,7 @@ services:
       dockerfile: backend/Dockerfile
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
     container_name: deer-flow-langgraph
-    command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
+    command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 2>&1 | tee /app/logs/langgraph.log"
     volumes:
       - ../backend/src:/app/backend/src
       - ../backend/.env:/app/backend/.env
@@ -146,6 +184,8 @@ services:
       - ../skills:/app/skills
       - ../logs:/app/logs
       - ../backend/.deer-flow:/app/backend/.deer-flow
+      # Persist LangGraph local runtime metadata (threads/runs index) across container recreation
+      - ../backend/.langgraph_api:/app/backend/.langgraph_api
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
     working_dir: /app
@@ -153,6 +193,17 @@ services:
       - CI=true
     env_file:
       - ../.env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2024/ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
     networks:
       - deer-flow-dev
     restart: unless-stopped

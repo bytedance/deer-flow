@@ -57,11 +57,11 @@ def get_available_tools(
             if extensions_config.get_enabled_mcp_servers():
                 mcp_tools = get_cached_mcp_tools()
                 if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+                    logger.info("Using %d cached MCP tool(s)", len(mcp_tools))
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+            logger.error("Failed to get cached MCP tools: %s", e)
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
@@ -79,6 +79,6 @@ def get_available_tools(
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
-        logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        logger.info("Including view_image_tool for model '%s' (supports_vision=True)", model_name)
 
     return loaded_tools + builtin_tools + mcp_tools

@@ -1,4 +1,6 @@
+import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, Self
 
@@ -16,6 +18,8 @@ from src.config.subagents_config import load_subagents_config_from_dict
 from src.config.summarization_config import load_summarization_config_from_dict
 from src.config.title_config import load_title_config_from_dict
 from src.config.tool_config import ToolConfig, ToolGroupConfig
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -43,12 +47,12 @@ class AppConfig(BaseModel):
         """
         if config_path:
             path = Path(config_path)
-            if not Path.exists(path):
+            if not path.exists():
                 raise FileNotFoundError(f"Config file specified by param `config_path` not found at {path}")
             return path
         elif os.getenv("DEER_FLOW_CONFIG_PATH"):
             path = Path(os.getenv("DEER_FLOW_CONFIG_PATH"))
-            if not Path.exists(path):
+            if not path.exists():
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
         else:
@@ -75,7 +79,9 @@ class AppConfig(BaseModel):
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
-            config_data = yaml.safe_load(f)
+            config_data = yaml.safe_load(f) or {}
+        if not isinstance(config_data, dict):
+            raise ValueError("Config file root must be a mapping/object")
         config_data = cls.resolve_env_variables(config_data)
 
         # Load title config if present
@@ -106,28 +112,37 @@ class AppConfig(BaseModel):
         return result
 
     @classmethod
-    def resolve_env_variables(cls, config: Any) -> Any:
+    def resolve_env_variables(cls, config: Any, _path: str = "") -> Any:
         """Recursively resolve environment variables in the config.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Environment variables are resolved using the `os.getenv` function.
+        Example: $OPENAI_API_KEY
+
+        When an env var is not set, the value is replaced with None and a
+        warning is logged instead of crashing the entire application.  This
+        allows models whose API key is not configured to be gracefully
+        skipped while the rest of the system remains operational.
 
         Args:
             config: The config to resolve environment variables in.
+            _path: Internal – dot-separated config path for log messages.
 
         Returns:
             The config with environment variables resolved.
         """
         if isinstance(config, str):
             if config.startswith("$"):
-                env_value = os.getenv(config[1:])
+                env_var = config[1:]
+                env_value = os.getenv(env_var)
                 if env_value is None:
-                    raise ValueError(f"Environment variable {config[1:]} not found for config value {config}")
+                    logger.warning("Environment variable %s is not set (config path: %s). The feature using this value will be unavailable.", env_var, _path or "<root>")
+                    return None
                 return env_value
             return config
         elif isinstance(config, dict):
-            return {k: cls.resolve_env_variables(v) for k, v in config.items()}
+            return {k: cls.resolve_env_variables(v, f"{_path}.{k}" if _path else k) for k, v in config.items()}
         elif isinstance(config, list):
-            return [cls.resolve_env_variables(item) for item in config]
+            return [cls.resolve_env_variables(item, f"{_path}[{i}]") for i, item in enumerate(config)]
         return config
 
     def get_model_config(self, name: str) -> ModelConfig | None:
@@ -165,6 +180,7 @@ class AppConfig(BaseModel):
 
 
 _app_config: AppConfig | None = None
+_app_config_lock = threading.Lock()
 
 
 def get_app_config() -> AppConfig:
@@ -172,11 +188,15 @@ def get_app_config() -> AppConfig:
 
     Returns a cached singleton instance. Use `reload_app_config()` to reload
     from file, or `reset_app_config()` to clear the cache.
+    Thread-safe via internal lock.
     """
     global _app_config
-    if _app_config is None:
-        _app_config = AppConfig.from_file()
-    return _app_config
+    if _app_config is not None:
+        return _app_config
+    with _app_config_lock:
+        if _app_config is None:
+            _app_config = AppConfig.from_file()
+        return _app_config
 
 
 def reload_app_config(config_path: str | None = None) -> AppConfig:
@@ -193,8 +213,9 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
         The newly loaded AppConfig instance.
     """
     global _app_config
-    _app_config = AppConfig.from_file(config_path)
-    return _app_config
+    with _app_config_lock:
+        _app_config = AppConfig.from_file(config_path)
+        return _app_config
 
 
 def reset_app_config() -> None:
@@ -205,7 +226,8 @@ def reset_app_config() -> None:
     or when switching between different configurations.
     """
     global _app_config
-    _app_config = None
+    with _app_config_lock:
+        _app_config = None
 
 
 def set_app_config(config: AppConfig) -> None:
@@ -217,4 +239,5 @@ def set_app_config(config: AppConfig) -> None:
         config: The AppConfig instance to use.
     """
     global _app_config
-    _app_config = config
+    with _app_config_lock:
+        _app_config = config

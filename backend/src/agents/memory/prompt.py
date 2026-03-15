@@ -61,6 +61,22 @@ Memory Section Guidelines:
   * context: Background facts (job title, projects, locations, languages)
   * behavior: Working patterns, communication habits, problem-solving approaches
   * goal: Stated objectives, learning targets, project ambitions
+  * research: Research direction, methodology preferences (quantitative/qualitative/mixed/DSR),
+    target venues (journals and conferences), ongoing studies, theoretical frameworks adopted,
+    co-authors and collaborators, funding sources, ethics approvals, research paradigm,
+    writing language preferences, discipline-specific conventions
+  * literature: Key papers read with metadata (title, authors, year, venue, DOI),
+    citation format preference (APA/GB-T/IEEE), BibTeX keys used, foundational papers
+    in their field, papers cited in manuscripts, systematic review protocols,
+    reference manager used (Zotero/Mendeley/EndNote), reading lists and priorities
+  * experiment: Experiment progress with run IDs, model configurations (hyperparameters,
+    architecture choices), dataset versions used, evaluation metrics and best results achieved,
+    hardware setup (GPU type, memory), reproducibility seeds, failed approaches and reasons,
+    baseline comparisons completed, experiment tracking platform (MLflow/W&B/local)
+  * writing_progress: Current manuscript title and status (drafting/revising/submitted),
+    chapters or sections completed with word counts, target venue and its formatting requirements,
+    submission deadlines, reviewer feedback received, revision round number,
+    co-author assignments, citation style in use, thesis/dissertation progress tracking
 - Confidence levels:
   * 0.9-1.0: Explicitly stated facts ("I work on X", "My role is Y")
   * 0.7-0.8: Strongly implied from actions/discussions
@@ -93,7 +109,7 @@ Output Format (JSON):
     "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
   }},
   "newFacts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|research|literature|experiment|writing_progress", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"]
 }}
@@ -125,7 +141,7 @@ Message:
 Extract facts in this JSON format:
 {{
   "facts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal", "confidence": 0.0-1.0 }}
+    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|research|literature|experiment|writing_progress", "confidence": 0.0-1.0 }}
   ]
 }}
 
@@ -135,6 +151,18 @@ Categories:
 - context: Background context (location, job, projects)
 - behavior: Behavioral patterns
 - goal: User's goals or objectives
+- research: Research direction, methodology, target venues, ongoing studies, theoretical frameworks,
+  co-authors, funding sources, research paradigm (quantitative/qualitative/mixed/DSR)
+  Example: {{"content": "User studies attention mechanisms for mathematical reasoning, targeting NeurIPS 2026", "category": "research", "confidence": 0.9}}
+- literature: Key papers with metadata (title, authors, year, DOI), citation format preference,
+  BibTeX keys, foundational papers, reference manager used
+  Example: {{"content": "User cited Vaswani et al. 2017 (Attention Is All You Need) as foundational reference", "category": "literature", "confidence": 0.9}}
+- experiment: Experiment progress, model configs, datasets, results, seeds, failed approaches,
+  tracking platform (MLflow/W&B)
+  Example: {{"content": "CalcFormer model achieved 91.3% on GSM8K with seed=42, AdamW lr=1e-4", "category": "experiment", "confidence": 0.95}}
+- writing_progress: Manuscript title and status, sections completed, target venue, deadlines,
+  reviewer feedback, revision round, citation style
+  Example: {{"content": "Completed Introduction and Related Work for NeurIPS paper, 8-page format", "category": "writing_progress", "confidence": 0.9}}
 
 Rules:
 - Only extract clear, specific facts
@@ -262,8 +290,9 @@ def format_conversation_for_update(messages: list[Any]) -> str:
                 continue
 
         # Truncate very long messages
-        if len(str(content)) > 1000:
-            content = str(content)[:1000] + "..."
+        MAX_CONTENT_LENGTH = 1000
+        if len(str(content)) > MAX_CONTENT_LENGTH:
+            content = str(content)[:MAX_CONTENT_LENGTH] + "..."
 
         if role == "human":
             lines.append(f"User: {content}")

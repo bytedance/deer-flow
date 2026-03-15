@@ -1,11 +1,16 @@
+import logging
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
+from src.agents.middlewares.utils import get_thread_id_from_runtime
 from src.agents.thread_state import ThreadDataState
 from src.config.paths import Paths, get_paths
+
+logger = logging.getLogger(__name__)
 
 
 class ThreadDataMiddlewareState(AgentState):
@@ -71,8 +76,17 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        thread_id = get_thread_id_from_runtime(runtime)
         if thread_id is None:
+            try:
+                cfg = get_config()
+                logger.debug("ThreadDataMiddleware - thread_id is None. Config: %s", cfg)
+            except RuntimeError:
+                logger.debug("ThreadDataMiddleware - thread_id is None. No config context.")
+
+            if runtime.context:
+                logger.debug("ThreadDataMiddleware - Runtime context: %s", runtime.context)
+
             raise ValueError("Thread ID is required in the context")
 
         if self._lazy_init:
@@ -81,7 +95,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         else:
             # Eager initialization: create directories immediately
             paths = self._create_thread_directories(thread_id)
-            print(f"Created thread data directories for thread {thread_id}")
+            logger.info("Created thread data directories for thread %s", thread_id)
 
         return {
             "thread_data": {

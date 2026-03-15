@@ -487,8 +487,8 @@ def main():
     parser.add_argument(
         "--action",
         required=True,
-        choices=["inspect", "query", "summary"],
-        help="Action to perform: inspect, query, or summary",
+        choices=["inspect", "query", "summary", "export_for_stats"],
+        help="Action to perform: inspect, query, summary, or export_for_stats",
     )
     parser.add_argument(
         "--sql",
@@ -557,6 +557,20 @@ def main():
         action_query(con, args.sql, table_map, args.output_file)
     elif args.action == "summary":
         action_summary(con, args.table, table_map)
+    elif args.action == "export_for_stats":
+        sql = args.sql or f"SELECT * FROM {args.table}" if args.table else None
+        if not sql:
+            print("Error: --sql or --table required for export_for_stats")
+            sys.exit(1)
+        resolved_sql = sql
+        for virtual_name, real_name in table_map.items():
+            resolved_sql = resolved_sql.replace(virtual_name, real_name)
+        result_df = con.execute(resolved_sql).fetchdf()
+        export_path = args.output_file or "/mnt/user-data/workspace/stats_input.csv"
+        os.makedirs(os.path.dirname(export_path), exist_ok=True)
+        result_df.to_csv(export_path, index=False)
+        print(f"Exported {len(result_df)} rows × {len(result_df.columns)} columns to {export_path}")
+        print("Ready for statistical analysis with: python statistical_analysis.py --files " + export_path)
 
     con.close()
 

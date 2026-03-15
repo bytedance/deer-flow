@@ -64,6 +64,49 @@ Return the following to the user:
 - The image URL.
 - The complete `args` (specification) used for generation.
 
+### 5. Visualization Narrative Design
+
+When creating charts for academic or analytical purposes, design the visualization to tell a story, not just display data:
+
+**Chart Selection by Research Insight**:
+- "X is significantly different from Y" → Bar chart with error bars and significance brackets
+- "X correlates with Y" → Scatter plot with regression line and CI band
+- "Trend changes over time" → Line chart with shaded confidence intervals
+- "Distribution differs between groups" → Violin plot or Raincloud plot
+- "Multiple factors interact" → Heatmap with hierarchical clustering or interaction plot
+- "Part-to-whole composition" → Stacked bar (absolute) or 100% stacked bar (proportional)
+- "Flow or process" → Sankey chart or flow diagram
+- "Multi-dimensional comparison" → Radar chart or parallel coordinates
+
+**Publication-Quality Standards**:
+- Resolution: 300 DPI minimum; 600 DPI for line art
+- Fonts: Axis labels ≥ 8pt at final print size
+- Colors: Maximum 7 colors; use colorblind-safe palettes (viridis, cividis, Set2)
+- Uncertainty: Always show error bars, CI bands, or bootstrapped distributions
+- Annotations: Add statistical significance directly on plots (* p<.05, ** p<.01, *** p<.001)
+- Export: SVG/PDF for LaTeX/Illustrator, PNG for web
+
+**Caption Requirements** (for academic figures):
+- First sentence: What the figure SHOWS (not what it IS)
+- Define all abbreviations, statistical tests, and significance thresholds
+- Specify n per group and exact p-values for key comparisons
+- Example: "Fig. 3. Treatment X reduces tumor volume compared to control.
+  (A) Tumor volume over 28 days. Error bars represent SEM (n=12 per group).
+  *p < 0.05, **p < 0.01, two-tailed t-test."
+
+**Journal-Specific Formatting**:
+- Match target journal column width (single: 85mm, double: 170mm)
+- File format: PDF (vector) for line/bar, TIFF/PNG for photos/heatmaps
+- Color: Use Okabe-Ito or ColorBrewer palettes for colorblind accessibility
+- Font: Arial or Helvetica, minimum 8pt after scaling to print size
+
+**Anti-patterns to avoid**:
+- 3D charts (distort perception)
+- Dual y-axes (misleading — use faceted/small-multiple plots)
+- Rainbow color maps (perceptually non-uniform)
+- Truncated y-axis without clear indication
+- Bar charts for continuous distributions (use violin/density/box)
+
 ## Reference Material
 Detailed specifications for each chart type are located in the `references/` directory. Consult these files to ensure the `args` passed to the script match the expected schema.
 

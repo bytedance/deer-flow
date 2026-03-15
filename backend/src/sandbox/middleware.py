@@ -1,11 +1,15 @@
+import logging
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from src.agents.thread_state import SandboxState, ThreadDataState
 from src.sandbox import get_sandbox_provider
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxMiddlewareState(AgentState):
@@ -42,7 +46,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     def _acquire_sandbox(self, thread_id: str) -> str:
         provider = get_sandbox_provider()
         sandbox_id = provider.acquire(thread_id)
-        print(f"Acquiring sandbox {sandbox_id}")
+        logger.debug("Acquiring sandbox %s", sandbox_id)
         return sandbox_id
 
     @override
@@ -53,8 +57,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         # Eager initialization (original behavior)
         if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = runtime.context["thread_id"]
-            print(f"Thread ID: {thread_id}")
+            ctx = runtime.context
+            thread_id = ctx.get("thread_id") if (ctx is not None and hasattr(ctx, "get")) else None
+            if not thread_id:
+                try:
+                    thread_id = get_config().get("configurable", {}).get("thread_id")
+                except RuntimeError:
+                    pass
+            logger.debug("Thread ID: %s", thread_id)
             sandbox_id = self._acquire_sandbox(thread_id)
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)

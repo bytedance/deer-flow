@@ -34,6 +34,13 @@ jobs:
         working-directory: backend
         run: make lint
 
-      - name: Run unit tests of backend
+      - name: Run unit tests of backend with coverage
         working-directory: backend
-        run: make test
+        run: |
+          uv run pytest tests/ -v --tb=short --co -q 2>/dev/null | tail -1 || true
+          uv run pytest tests/ -v --tb=short
+
+      - name: Check test coverage
+        working-directory: backend
+        run: |
+          uv run pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=30 || echo "::warning::Coverage below 30% threshold"

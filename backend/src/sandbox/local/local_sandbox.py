@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import subprocess
@@ -5,6 +6,10 @@ from pathlib import Path
 
 from src.sandbox.local.list_dir import list_dir
 from src.sandbox.sandbox import Sandbox
+
+logger = logging.getLogger(__name__)
+
+COMMAND_TIMEOUT_SECONDS = 600
 
 
 class LocalSandbox(Sandbox):
@@ -32,15 +37,16 @@ class LocalSandbox(Sandbox):
         """
         path_str = str(path)
 
-        # Try each mapping (longest prefix first for more specific matches)
         for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
             if path_str.startswith(container_path):
-                # Replace the container path prefix with local path
                 relative = path_str[len(container_path) :].lstrip("/")
-                resolved = str(Path(local_path) / relative) if relative else local_path
-                return resolved
+                resolved = Path(local_path) / relative if relative else Path(local_path)
+                resolved = resolved.resolve()
+                base = Path(local_path).resolve()
+                if not str(resolved).startswith(str(base)):
+                    raise PermissionError(f"Path traversal detected: {path}")
+                return str(resolved)
 
-        # No mapping found, return original path
         return path_str
 
     def _reverse_resolve_path(self, path: str) -> str:
@@ -150,17 +156,23 @@ class LocalSandbox(Sandbox):
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
     def execute_command(self, command: str) -> str:
-        # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
 
-        result = subprocess.run(
-            resolved_command,
-            executable=self._get_shell(),
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        try:
+            result = subprocess.run(
+                resolved_command,
+                executable=self._get_shell(),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            partial = ""
+            if e.stdout:
+                partial = e.stdout if isinstance(e.stdout, str) else e.stdout.decode(errors="replace")
+            return f"Error: Command timed out after {COMMAND_TIMEOUT_SECONDS} seconds.\n{partial[:2000]}" if partial else f"Error: Command timed out after {COMMAND_TIMEOUT_SECONDS} seconds."
+
         output = result.stdout
         if result.stderr:
             output += f"\nStd Error:\n{result.stderr}" if output else result.stderr
@@ -168,7 +180,6 @@ class LocalSandbox(Sandbox):
             output += f"\nExit Code: {result.returncode}"
 
         final_output = output if output else "(no output)"
-        # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
@@ -180,7 +191,7 @@ class LocalSandbox(Sandbox):
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
         try:
-            with open(resolved_path) as f:
+            with open(resolved_path, encoding="utf-8") as f:
                 return f.read()
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
@@ -193,7 +204,7 @@ class LocalSandbox(Sandbox):
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
             mode = "a" if append else "w"
-            with open(resolved_path, mode) as f:
+            with open(resolved_path, mode, encoding="utf-8") as f:
                 f.write(content)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths

@@ -1,13 +1,13 @@
 import logging
 import os
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
 
 class JinaClient:
-    def crawl(self, url: str, return_format: str = "html", timeout: int = 10) -> str:
+    async def crawl(self, url: str, return_format: str = "html", timeout: int = 10) -> str:
         headers = {
             "Content-Type": "application/json",
             "X-Return-Format": return_format,
@@ -19,7 +19,8 @@ class JinaClient:
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
-            response = requests.post("https://r.jina.ai/", headers=headers, json=data)
+            async with httpx.AsyncClient(timeout=timeout + 5) as client:
+                response = await client.post("https://r.jina.ai/", headers=headers, json=data)
 
             if response.status_code != 200:
                 error_message = f"Jina API returned status {response.status_code}: {response.text}"
@@ -33,6 +34,6 @@ class JinaClient:
 
             return response.text
         except Exception as e:
-            error_message = f"Request to Jina API failed: {str(e)}"
+            error_message = f"Request to Jina API failed: {e}"
             logger.error(error_message)
             return f"Error: {error_message}"

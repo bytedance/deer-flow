@@ -92,7 +92,22 @@ async def get_mcp_configuration() -> McpConfigResponse:
     """
     config = get_extensions_config()
 
-    return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in config.mcp_servers.items()})
+    sanitized_servers = {}
+    for name, server in config.mcp_servers.items():
+        server_data = server.model_dump()
+        if server_data.get("env"):
+            server_data["env"] = {k: "***" for k in server_data["env"]}
+        if server_data.get("headers"):
+            server_data["headers"] = {k: "***" for k in server_data["headers"]}
+        if server_data.get("oauth"):
+            oauth = server_data["oauth"]
+            if oauth.get("client_secret"):
+                oauth["client_secret"] = "***"
+            if oauth.get("refresh_token"):
+                oauth["refresh_token"] = "***"
+        sanitized_servers[name] = McpServerConfigResponse(**server_data)
+
+    return McpConfigResponse(mcp_servers=sanitized_servers)
 
 
 @router.put(
@@ -165,5 +180,5 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
         return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
 
     except Exception as e:
-        logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+        logger.error("Failed to update MCP configuration: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update MCP configuration")

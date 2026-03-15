@@ -58,7 +58,53 @@
           "client_id": "$MCP_OAUTH_CLIENT_ID",
           "client_secret": "$MCP_OAUTH_CLIENT_SECRET"
         }
-    }  
+    },
+    "zotero": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "zotero-mcp-server"],
+      "env": {
+        "ZOTERO_API_KEY": "$ZOTERO_API_KEY",
+        "ZOTERO_USER_ID": "$ZOTERO_USER_ID"
+      },
+      "description": "Zotero reference manager for academic literature management — search, add, organize references and generate citations"
+    },
+    "jupyter": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-jupyter"],
+      "env": {
+        "JUPYTER_TOKEN": "$JUPYTER_TOKEN",
+        "JUPYTER_URL": "http://localhost:8888"
+      },
+      "description": "JupyterLab integration for interactive scientific computing — execute notebook cells, inspect variables, run experiments"
+    },
+    "arxiv": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "arxiv-mcp-server"],
+      "env": {},
+      "description": "arXiv paper search and retrieval — search papers, get abstracts, download PDFs for academic research"
+    },
+    "semantic-scholar": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "semantic-scholar-mcp-server"],
+      "env": {
+        "SEMANTIC_SCHOLAR_API_KEY": "$SEMANTIC_SCHOLAR_API_KEY"
+      },
+      "description": "Semantic Scholar API for paper search, citation analysis, author profiles, and citation graph traversal"
+    },
+    "overleaf": {
+      "enabled": false,
+      "type": "http",
+      "url": "",
+      "description": "Overleaf LaTeX collaboration (requires Overleaf Server Pro or community API)"
+    }
   },
   "skills": {
     "pdf-processing": {

@@ -1,12 +1,12 @@
-"use client"
+"use client";
 
-import React, { memo } from "react"
+import React, { memo } from "react";
 
 interface AuroraTextProps {
-  children: React.ReactNode
-  className?: string
-  colors?: string[]
-  speed?: number
+  children: React.ReactNode;
+  className?: string;
+  colors?: string[];
+  speed?: number;
 }
 
 export const AuroraText = memo(
@@ -23,7 +23,7 @@ export const AuroraText = memo(
       WebkitBackgroundClip: "text",
       WebkitTextFillColor: "transparent",
       animationDuration: `${10 / speed}s`,
-    }
+    };
 
     return (
       <span className={`relative inline-block ${className}`}>
@@ -36,8 +36,8 @@ export const AuroraText = memo(
           {children}
         </span>
       </span>
-    )
-  }
-)
+    );
+  },
+);
 
-AuroraText.displayName = "AuroraText"
+AuroraText.displayName = "AuroraText";

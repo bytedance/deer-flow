@@ -17,10 +17,25 @@ PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
 
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Invalid port: $PORT"
+    exit 1
+fi
+
+if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [ "$TIMEOUT" -lt 1 ]; then
+    echo "Invalid timeout seconds: $TIMEOUT"
+    exit 1
+fi
+
 elapsed=0
 interval=1
 
-while ! lsof -i :"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; do
+# 使用 TCP 连接检测（在 WSL 上比 lsof 更可靠）
+check_port() {
+    (echo >/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null
+}
+
+while ! check_port; do
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"

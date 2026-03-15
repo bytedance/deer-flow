@@ -9,13 +9,23 @@ import {
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 
-export function CitationLink({ 
-  href, 
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function CitationLink({
+  href,
   children,
-  ...props 
+  ...props
 }: ComponentProps<"a">) {
-  const domain = extractDomain(href ?? "");
-  
+  const safeHref = href && isSafeUrl(href) ? href : undefined;
+  const domain = extractDomain(safeHref ?? "");
+
   // Priority: children > domain
   const childrenText =
     typeof children === "string"
@@ -28,7 +38,7 @@ export function CitationLink({
     <HoverCard closeDelay={0} openDelay={0}>
       <HoverCardTrigger asChild>
         <a
-          href={href}
+          href={safeHref}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center"
@@ -48,18 +58,18 @@ export function CitationLink({
         <div className="p-3">
           <div className="space-y-1">
             {displayText && (
-              <h4 className="truncate font-medium text-sm leading-tight">
+              <h4 className="truncate text-sm leading-tight font-medium">
                 {displayText}
               </h4>
             )}
-            {href && (
-              <p className="truncate break-all text-muted-foreground text-xs">
-                {href}
+            {safeHref && (
+              <p className="text-muted-foreground truncate text-xs break-all">
+                {safeHref}
               </p>
             )}
           </div>
           <a
-            href={href}
+            href={safeHref}
             target="_blank"
             rel="noopener noreferrer"
             className="text-primary mt-2 inline-flex items-center gap-1 text-xs hover:underline"

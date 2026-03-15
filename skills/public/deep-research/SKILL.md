@@ -177,6 +177,24 @@ Your research is sufficient when you can confidently answer:
 - What are the challenges or limitations?
 - What makes this topic relevant or important now?
 
+## Academic Research Mode
+
+When the research intent is **academic or scholarly** (detected from keywords like "paper", "study", "literature", "citation", "peer-reviewed", "journal"), switch to Academic Research Mode:
+
+**Preferred tools for academic research:**
+- `semantic_scholar_search(query="topic keywords", limit=20, year_range="2020-2026")` — Search peer-reviewed papers with citation counts and abstracts
+- `arxiv_search(query="topic", category="cs.AI", max_results=10)` — Find latest preprints and working papers
+- `crossref_lookup(doi="10.xxxx/xxxxx")` — Validate DOIs and retrieve authoritative citation metadata
+- `semantic_scholar_paper(paper_id="DOI_or_S2_ID")` — Trace citation chains, find seminal and derivative works
+
+**Academic research workflow:**
+1. **Phase 1**: Use `semantic_scholar_search` for broad academic survey + `web_search` for industry context
+2. **Phase 2**: Use `arxiv_search` for cutting-edge preprints not yet indexed + `semantic_scholar_paper` for citation chain analysis
+3. **Phase 3**: Use `crossref_lookup` to validate and enrich all DOIs for BibTeX generation
+4. **Phase 4**: Synthesize findings with proper academic citation format
+
+These tools complement (not replace) `web_search` and `web_fetch` — use them together for the most comprehensive coverage.
+
 ## Common Mistakes to Avoid
 
 - ❌ Stopping after 1-2 searches
@@ -185,6 +203,7 @@ Your research is sufficient when you can confidently answer:
 - ❌ Ignoring contradicting viewpoints or challenges
 - ❌ Using outdated information when current data exists
 - ❌ Starting content generation before research is complete
+- ❌ Using only web search for academic topics when academic API tools are available
 
 ## Output
 

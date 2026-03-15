@@ -1,21 +1,16 @@
-import { getBackendBaseURL } from "@/core/config";
+import { apiFetch, apiJson } from "@/core/api/fetch";
 
 import type { MCPConfig } from "./types";
 
 export async function loadMCPConfig() {
-  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`);
-  return response.json() as Promise<MCPConfig>;
+  return apiJson<MCPConfig>("/api/mcp/config");
 }
 
 export async function updateMCPConfig(config: MCPConfig) {
-  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(config),
-    },
-  );
-  return response.json();
+  const res = await apiFetch("/api/mcp/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return res.json();
 }

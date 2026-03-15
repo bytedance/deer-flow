@@ -1,11 +1,14 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+import logging
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from src.agents.memory.updater import get_memory_data, reload_memory_data
 from src.config.memory_config import get_memory_config
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["memory"])
 
 
@@ -112,8 +115,12 @@ async def get_memory() -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data()
-    return MemoryResponse(**memory_data)
+    try:
+        memory_data = get_memory_data()
+        return MemoryResponse(**memory_data)
+    except Exception as e:
+        logger.error("Failed to get memory data: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get memory data")
 
 
 @router.post(
@@ -131,8 +138,12 @@ async def reload_memory() -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data()
-    return MemoryResponse(**memory_data)
+    try:
+        memory_data = reload_memory_data()
+        return MemoryResponse(**memory_data)
+    except Exception as e:
+        logger.error("Failed to reload memory data: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to reload memory data")
 
 
 @router.get(

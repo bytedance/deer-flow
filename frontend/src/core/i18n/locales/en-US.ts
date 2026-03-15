@@ -43,6 +43,18 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    operationFailed: "Operation failed",
+  },
+
+  // Error pages
+  errorPage: {
+    title: "Something went wrong",
+    description: "An unexpected error occurred. Please try again.",
+    retry: "Try again",
+    goHome: "Go to Home",
+    notFoundTitle: "Page not found",
+    notFoundDescription:
+      "The page you are looking for does not exist or has been moved.",
   },
 
   // Welcome
@@ -268,6 +280,13 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    subagentTypes: {
+      "general-purpose": "General Purpose",
+      bash: "Command Execution",
+      "literature-reviewer": "Literature Review",
+      "statistical-analyst": "Statistical Analysis",
+      "code-reviewer": "Code Review",
+    },
   },
 
   // Settings

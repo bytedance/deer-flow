@@ -13,7 +13,7 @@ help:
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
+	@echo "  make docker-init     - Pull sandbox image required for local Docker workflow"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
@@ -28,6 +28,7 @@ config:
 	@cp config.example.yaml config.yaml
 	@test -f .env || cp .env.example .env
 	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@test -f extensions_config.json || (test -f extensions_config.example.json && cp extensions_config.example.json extensions_config.json || true)
 
 # Check required tools
 check:
@@ -155,16 +156,7 @@ dev:
 
 # Stop all services
 stop:
-	@echo "Stopping all services..."
-	@-pkill -f "langgraph dev" 2>/dev/null || true
-	@-pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
-	@-pkill -f "next dev" 2>/dev/null || true
-	@-nginx -c $(PWD)/docker/nginx/nginx.local.conf -p $(PWD) -s quit 2>/dev/null || true
-	@sleep 1
-	@-pkill -9 nginx 2>/dev/null || true
-	@echo "Cleaning up sandbox containers..."
-	@-./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
-	@echo "✓ All services stopped"
+	@./scripts/start.sh --stop
 
 # Clean up
 clean: stop

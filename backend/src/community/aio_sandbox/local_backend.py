@@ -130,7 +130,7 @@ class LocalContainerBackend(SandboxBackend):
             if port:
                 release_port(port)
         except Exception:
-            pass
+            logger.warning("Failed to release port from sandbox_url %s", info.sandbox_url, exc_info=True)
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""

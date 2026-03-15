@@ -32,6 +32,7 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    operationFailed: string;
   };
 
   // Welcome
@@ -40,6 +41,16 @@ export interface Translations {
     description: string;
     createYourOwnSkill: string;
     createYourOwnSkillDescription: string;
+  };
+
+  // Error pages
+  errorPage: {
+    title: string;
+    description: string;
+    retry: string;
+    goHome: string;
+    notFoundTitle: string;
+    notFoundDescription: string;
   };
 
   // Clipboard
@@ -205,6 +216,7 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    subagentTypes: Record<string, string>;
   };
 
   // Settings

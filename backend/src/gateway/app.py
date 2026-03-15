@@ -1,8 +1,11 @@
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.config.app_config import get_app_config
 from src.gateway.config import get_gateway_config
@@ -41,7 +44,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception(error_msg)
         raise RuntimeError(error_msg) from e
     config = get_gateway_config()
-    logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+    logger.info("Starting API Gateway on %s:%s", config.host, config.port)
 
     # NOTE: MCP tools initialization is NOT done here because:
     # 1. Gateway doesn't use MCP tools - they are used by Agents in the LangGraph Server
@@ -146,7 +149,21 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS is handled by nginx - no need for FastAPI middleware
+    # CORS: nginx adds headers when proxying; add middleware for direct Gateway access (e.g. port 8001)
+    gateway_config = get_gateway_config()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=gateway_config.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
+    )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        request_id = str(uuid.uuid4())[:8]
+        logger.error("[%s] Unhandled exception on %s %s: %s", request_id, request.method, request.url.path, exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error", "request_id": request_id})
 
     # Include routers
     # Models API is mounted at /api/models

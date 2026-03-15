@@ -1,5 +1,6 @@
 import base64
 import logging
+import shlex
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
@@ -85,7 +86,7 @@ class AioSandbox(Sandbox):
         try:
             # Use shell command to list directory with depth limit
             # The -L flag limits the depth for the tree command
-            result = self._client.shell.exec_command(command=f"find {path} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
+            result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {int(max_depth)} -type f -o -type d 2>/dev/null | head -500")
             output = result.data.output if result.data else ""
             if output:
                 return [line.strip() for line in output.strip().split("\n") if line.strip()]

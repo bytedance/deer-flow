@@ -8,6 +8,7 @@ docker/.cache/
 .Trashes
 ehthumbs.db
 Thumbs.db
+*:Zone.Identifier
 
 # Python cache
 __pycache__/

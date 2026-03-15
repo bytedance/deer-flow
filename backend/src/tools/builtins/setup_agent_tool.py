@@ -1,8 +1,10 @@
 import logging
+import shutil
 
 import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
+from langgraph.config import get_config
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
@@ -24,7 +26,13 @@ def setup_agent(
         description: One-line description of what the agent does.
     """
 
-    agent_name: str | None = runtime.context.get("agent_name")
+    ctx = runtime.context
+    agent_name: str | None = ctx.get("agent_name") if (ctx is not None and hasattr(ctx, "get")) else None
+    if agent_name is None:
+        try:
+            agent_name = get_config().get("configurable", {}).get("agent_name")
+        except RuntimeError:
+            pass
 
     try:
         paths = get_paths()
@@ -53,8 +61,6 @@ def setup_agent(
         )
 
     except Exception as e:
-        import shutil
-
         if agent_name and agent_dir.exists():
             # Cleanup the custom agent directory only if it was created but an error occurred during setup
             shutil.rmtree(agent_dir)

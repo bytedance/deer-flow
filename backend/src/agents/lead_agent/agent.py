@@ -249,7 +249,23 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+
+    _validate_middleware_order(middlewares)
     return middlewares
+
+
+def _validate_middleware_order(middlewares: list) -> None:
+    """Validate critical middleware ordering constraints."""
+    names = [type(m).__name__ for m in middlewares]
+
+    if "ClarificationMiddleware" in names:
+        assert names[-1] == "ClarificationMiddleware", "ClarificationMiddleware must be the last middleware"
+
+    if "ThreadDataMiddleware" in names and "SandboxMiddleware" in names:
+        assert names.index("ThreadDataMiddleware") < names.index("SandboxMiddleware"), "ThreadDataMiddleware must precede SandboxMiddleware"
+
+    if "TitleMiddleware" in names and "MemoryMiddleware" in names:
+        assert names.index("TitleMiddleware") < names.index("MemoryMiddleware"), "TitleMiddleware must precede MemoryMiddleware"
 
 
 def make_lead_agent(config: RunnableConfig):

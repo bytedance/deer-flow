@@ -82,19 +82,24 @@ export const CodeBlock = ({
 }: CodeBlockProps) => {
   const [html, setHtml] = useState<string>("");
   const [darkHtml, setDarkHtml] = useState<string>("");
-  const mounted = useRef(false);
 
   useEffect(() => {
-    highlightCode(code, language, showLineNumbers).then(([light, dark]) => {
-      if (!mounted.current) {
-        setHtml(light);
-        setDarkHtml(dark);
-        mounted.current = true;
-      }
-    });
+    let cancelled = false;
+    highlightCode(code, language, showLineNumbers)
+      .then(([light, dark]) => {
+        if (!cancelled) {
+          setHtml(light);
+          setDarkHtml(dark);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("Failed to highlight code:", err);
+        }
+      });
 
     return () => {
-      mounted.current = false;
+      cancelled = true;
     };
   }, [code, language, showLineNumbers]);
 

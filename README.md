@@ -143,6 +143,9 @@ The fastest way to get started with a consistent environment:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
+> [!TIP]
+> To keep conversation history across restarts in Docker development, keep both `backend/.deer-flow` and `backend/.langgraph_api` directories. These store persisted checkpoints and LangGraph local runtime metadata (thread/run index).
+
 #### Option 2: Local Development
 
 If you prefer running services locally:
@@ -173,6 +176,31 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
 5. **Access**: http://localhost:2026
 
 ### Advanced
+#### Local Output Export
+
+If you want DeerFlow's final generated files to be saved to a local folder automatically, set:
+
+```bash
+DEER_FLOW_EXPORT_DIR=~/Downloads/deerflow-outputs
+```
+
+When enabled, every file presented via `present_files` is copied to:
+
+```text
+{DEER_FLOW_EXPORT_DIR}/{thread_id}/...
+```
+
+This works for both local and Docker development:
+
+- Local (`make dev`): use any host path, e.g. `~/Downloads/deerflow-outputs`
+- Docker (`make docker-start`): set `DEER_FLOW_EXPORT_DIR` to a path inside a mounted volume, recommended:
+
+```bash
+DEER_FLOW_EXPORT_DIR=/app/backend/.deer-flow/exports
+```
+
+In Docker mode, this maps to `backend/.deer-flow/exports` on your host, so exported files persist after container restarts.
+
 #### Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:

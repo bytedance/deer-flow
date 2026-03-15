@@ -1,4 +1,7 @@
+import logging
 from importlib import import_module
+
+logger = logging.getLogger(__name__)
 
 MODULE_TO_PACKAGE_HINTS = {
     "langchain_google_genai": "langchain-google-genai",
@@ -6,6 +9,17 @@ MODULE_TO_PACKAGE_HINTS = {
     "langchain_openai": "langchain-openai",
     "langchain_deepseek": "langchain-deepseek",
 }
+
+ALLOWED_MODULE_PREFIXES = (
+    "src",
+    "langchain",
+    "langchain_openai",
+    "langchain_anthropic",
+    "langchain_google_genai",
+    "langchain_deepseek",
+    "langchain_community",
+    "langchain_core",
+)
 
 
 def _build_missing_dependency_hint(module_path: str, err: ImportError) -> str:
@@ -44,6 +58,9 @@ def resolve_variable[T](
         module_path, variable_name = variable_path.rsplit(":", 1)
     except ValueError as err:
         raise ImportError(f"{variable_path} doesn't look like a variable path. Example: parent_package_name.sub_package_name.module_name:variable_name") from err
+
+    if not any(module_path == prefix or module_path.startswith(prefix + ".") for prefix in ALLOWED_MODULE_PREFIXES):
+        raise ImportError(f"Module path '{module_path}' is not in the allowed module prefixes. Allowed: {ALLOWED_MODULE_PREFIXES}")
 
     try:
         module = import_module(module_path)

@@ -39,6 +39,17 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
+    "numpy>=2.4.1",
+    "pandas>=2.3.3",
+    "scipy>=1.17.1",
+    "statsmodels>=0.14.6",
+    "scikit-learn>=1.8.0",
+    "pingouin>=0.6.0",
+    "lifelines>=0.30.3",
+    "matplotlib>=3.10.8",
+    "seaborn>=0.13.2",
+    "openpyxl>=3.1.5",
+    "sympy>=1.14.0",
 ]
 
 [dependency-groups]

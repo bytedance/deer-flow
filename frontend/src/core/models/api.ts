@@ -1,9 +1,8 @@
-import { getBackendBaseURL } from "../config";
+import { apiJson } from "../api/fetch";
 
 import type { Model } from "./types";
 
 export async function loadModels() {
-  const res = await fetch(`${getBackendBaseURL()}/api/models`);
-  const { models } = (await res.json()) as { models: Model[] };
+  const { models } = await apiJson<{ models: Model[] }>("/api/models");
   return models;
 }

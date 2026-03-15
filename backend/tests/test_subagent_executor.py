@@ -749,9 +749,7 @@ class TestCleanupBackgroundTask:
         # Should not raise
         executor_module.cleanup_background_task("nonexistent-task")
 
-    def test_cleanup_removes_task_with_completed_at_even_if_running(
-        self, executor_module, classes
-    ):
+    def test_cleanup_removes_task_with_completed_at_even_if_running(self, executor_module, classes):
         """Test that cleanup removes task if completed_at is set, even if status is RUNNING.
 
         This is a safety net: if completed_at is set, the task is considered done

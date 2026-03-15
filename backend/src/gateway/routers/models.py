@@ -1,8 +1,11 @@
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from src.config import get_app_config
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["models"])
 
 
@@ -57,18 +60,22 @@ async def list_models() -> ModelsListResponse:
         }
         ```
     """
-    config = get_app_config()
-    models = [
-        ModelResponse(
-            name=model.name,
-            display_name=model.display_name,
-            description=model.description,
-            supports_thinking=model.supports_thinking,
-            supports_reasoning_effort=model.supports_reasoning_effort,
-        )
-        for model in config.models
-    ]
-    return ModelsListResponse(models=models)
+    try:
+        config = get_app_config()
+        models = [
+            ModelResponse(
+                name=model.name,
+                display_name=model.display_name,
+                description=model.description,
+                supports_thinking=model.supports_thinking,
+                supports_reasoning_effort=model.supports_reasoning_effort,
+            )
+            for model in config.models
+        ]
+        return ModelsListResponse(models=models)
+    except Exception as e:
+        logger.error("Failed to list models: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to list models")
 
 
 @router.get(

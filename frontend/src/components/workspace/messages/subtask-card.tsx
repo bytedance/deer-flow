@@ -1,8 +1,12 @@
 import {
+  BarChart3Icon,
+  BookOpenIcon,
   CheckCircleIcon,
   ChevronUp,
   ClipboardListIcon,
+  CodeIcon,
   Loader2Icon,
+  TerminalIcon,
   XCircleIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -41,8 +45,9 @@ export function SubtaskCard({
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
+  const task = useSubtask(taskId);
   const icon = useMemo(() => {
+    if (!task) return null;
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
     } else if (task.status === "failed") {
@@ -50,7 +55,34 @@ export function SubtaskCard({
     } else if (task.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
     }
-  }, [task.status]);
+  }, [task]);
+  const subagentIcon = useMemo(() => {
+    if (!task) return <ClipboardListIcon />;
+    switch (task.subagent_type) {
+      case "literature-reviewer":
+        return <BookOpenIcon />;
+      case "statistical-analyst":
+        return <BarChart3Icon />;
+      case "code-reviewer":
+        return <CodeIcon />;
+      case "bash":
+        return <TerminalIcon />;
+      default:
+        return <ClipboardListIcon />;
+    }
+  }, [task]);
+  if (!task) {
+    return (
+      <div
+        className={cn(
+          "flex w-full items-center justify-center rounded-lg border p-4",
+          className,
+        )}
+      >
+        <Loader2Icon className="size-4 animate-spin" />
+      </div>
+    );
+  }
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
@@ -81,15 +113,24 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 className="font-normal"
                 label={
-                  task.status === "in_progress" ? (
-                    <Shimmer duration={3} spread={3}>
-                      {task.description}
-                    </Shimmer>
-                  ) : (
-                    task.description
-                  )
+                  <span className="inline-flex items-center gap-1.5">
+                    {task.status === "in_progress" ? (
+                      <Shimmer duration={3} spread={3}>
+                        {task.description}
+                      </Shimmer>
+                    ) : (
+                      task.description
+                    )}
+                    {task.subagent_type &&
+                      task.subagent_type !== "general-purpose" && (
+                        <span className="text-muted-foreground bg-muted inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium">
+                          {t.subtasks.subagentTypes[task.subagent_type] ??
+                            task.subagent_type}
+                        </span>
+                      )}
+                  </span>
                 }
-                icon={<ClipboardListIcon />}
+                icon={subagentIcon}
               ></ChainOfThoughtStep>
               <div className="flex items-center gap-1">
                 {collapsed && (

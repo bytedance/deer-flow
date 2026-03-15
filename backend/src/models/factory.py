@@ -53,7 +53,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not thinking_enabled and has_thinking_settings:
         if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
-            kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
+            # For most providers (DeepSeek, etc.), omitting 'thinking' is sufficient to disable it.
+            # Explicitly sending 'disabled' can cause "Unknown parameter" errors if the provider
+            # doesn't support the Anthropic-style 'disabled' type.
+            # kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
             kwargs.update({"reasoning_effort": "minimal"})
         elif effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
@@ -73,7 +76,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             )
             existing_callbacks = model_instance.callbacks or []
             model_instance.callbacks = [*existing_callbacks, tracer]
-            logger.debug(f"LangSmith tracing attached to model '{name}' (project='{tracing_config.project}')")
+            logger.debug("LangSmith tracing attached to model '%s' (project='%s')", name, tracing_config.project)
         except Exception as e:
-            logger.warning(f"Failed to attach LangSmith tracing to model '{name}': {e}")
+            logger.warning("Failed to attach LangSmith tracing to model '%s': %s", name, e)
     return model_instance

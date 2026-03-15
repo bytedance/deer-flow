@@ -39,6 +39,10 @@ async def restart_channel(name: str) -> ChannelRestartResponse:
     """Restart a specific IM channel."""
     from src.channels.service import get_channel_service
 
+    allowed_channels = {"feishu", "slack", "telegram"}
+    if name not in allowed_channels:
+        raise HTTPException(status_code=400, detail=f"Unknown channel: {name}. Allowed: {', '.join(sorted(allowed_channels))}")
+
     service = get_channel_service()
     if service is None:
         raise HTTPException(status_code=503, detail="Channel service is not running")

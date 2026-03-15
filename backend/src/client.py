@@ -36,7 +36,7 @@ from langchain_core.runnables import RunnableConfig
 from src.agents.lead_agent.agent import _build_middlewares
 from src.agents.lead_agent.prompt import apply_prompt_template
 from src.agents.thread_state import ThreadState
-from src.config.app_config import get_app_config, reload_app_config
+from src.config.app_config import get_app_config
 from src.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
@@ -121,8 +121,11 @@ class DeerFlowClient:
             plan_mode: Enable TodoList middleware for plan mode.
         """
         if config_path is not None:
-            reload_app_config(config_path)
-        self._app_config = get_app_config()
+            from src.config.app_config import AppConfig
+
+            self._app_config = AppConfig.from_file(config_path)
+        else:
+            self._app_config = get_app_config()
 
         self._checkpointer = checkpointer
         self._model_name = model_name

@@ -7,9 +7,32 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from src.config.paths import Paths, get_paths
+
+
+def _get_thread_id(runtime: Runtime) -> str | None:
+    ctx = runtime.context
+    if ctx is not None and hasattr(ctx, "get"):
+        # 1. Check top-level (legacy)
+        thread_id = ctx.get("thread_id")
+        if thread_id:
+            return thread_id
+        # 2. Check configurable (standard)
+        configurable = ctx.get("configurable")
+        if configurable and isinstance(configurable, dict):
+            thread_id = configurable.get("thread_id")
+            if thread_id:
+                return thread_id
+
+    try:
+        cfg = get_config()
+        return cfg.get("configurable", {}).get("thread_id")
+    except RuntimeError:
+        return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +169,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             return None
 
         # Resolve uploads directory for existence checks
-        thread_id = runtime.context.get("thread_id")
+        thread_id = _get_thread_id(runtime)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
@@ -176,25 +199,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Create files message and prepend to the last human message content
         files_message = self._create_files_message(new_files, historical_files)
 
-        # Extract original content - handle both string and list formats
-        original_content = ""
-        if isinstance(last_message.content, str):
-            original_content = last_message.content
-        elif isinstance(last_message.content, list):
-            text_parts = []
-            for block in last_message.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            original_content = "\n".join(text_parts)
-
         # Create new message with combined content.
         # Preserve additional_kwargs (including files metadata) so the frontend
         # can read structured file info from the streamed message.
-        updated_message = HumanMessage(
-            content=f"{files_message}\n\n{original_content}",
-            id=last_message.id,
-            additional_kwargs=last_message.additional_kwargs,
-        )
+        if isinstance(last_message.content, list):
+            # If content is a list, prepend a text block with the files message
+            new_content = [{"type": "text", "text": files_message}] + last_message.content
+            updated_message = HumanMessage(
+                content=new_content,
+                id=last_message.id,
+                additional_kwargs=last_message.additional_kwargs,
+            )
+        else:
+            # If content is a string (or other), treat as string
+            original_content = last_message.content if isinstance(last_message.content, str) else str(last_message.content)
+            updated_message = HumanMessage(
+                content=f"{files_message}\n\n{original_content}",
+                id=last_message.id,
+                additional_kwargs=last_message.additional_kwargs,
+            )
 
         messages[last_message_index] = updated_message
 

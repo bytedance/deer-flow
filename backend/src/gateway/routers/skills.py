@@ -185,8 +185,8 @@ async def list_skills() -> SkillsListResponse:
         skills = load_skills(enabled_only=False)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
-        logger.error(f"Failed to load skills: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+        logger.error("Failed to load skills: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load skills")
 
 
 @router.get(
@@ -229,8 +229,8 @@ async def get_skill(skill_name: str) -> SkillResponse:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
+        logger.error("Failed to get skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get skill")
 
 
 @router.put(
@@ -322,8 +322,8 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update skill: {str(e)}")
+        logger.error("Failed to update skill %s: %s", skill_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update skill")
 
 
 @router.post(
@@ -400,8 +400,21 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
-            # Extract the .skill file
+            MAX_ARCHIVE_TOTAL_SIZE = 10 * 1024 * 1024  # 10 MB
+            MAX_SINGLE_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+
             with zipfile.ZipFile(skill_file_path, "r") as zip_ref:
+                total_size = 0
+                for entry in zip_ref.infolist():
+                    if entry.filename.startswith("/") or ".." in entry.filename:
+                        raise HTTPException(status_code=400, detail=f"Unsafe path in archive: {entry.filename}")
+                    if entry.external_attr >> 28 == 0xA:
+                        raise HTTPException(status_code=400, detail=f"Symlinks not allowed in archive: {entry.filename}")
+                    if entry.file_size > MAX_SINGLE_FILE_SIZE:
+                        raise HTTPException(status_code=400, detail=f"File too large in archive: {entry.filename} ({entry.file_size} bytes)")
+                    total_size += entry.file_size
+                    if total_size > MAX_ARCHIVE_TOTAL_SIZE:
+                        raise HTTPException(status_code=400, detail=f"Archive exceeds maximum total size of {MAX_ARCHIVE_TOTAL_SIZE // (1024 * 1024)} MB")
                 zip_ref.extractall(temp_path)
 
             # Find the skill directory (should be the only top-level directory)
@@ -438,5 +451,5 @@ async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to install skill: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+        logger.error("Failed to install skill: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to install skill")

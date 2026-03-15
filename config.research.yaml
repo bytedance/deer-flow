@@ -1,0 +1,194 @@
+# DeerFlow 科研模式预设配置
+# 使用方式：cp config.research.yaml config.yaml
+#
+# 此配置针对科研场景优化，包含：
+# - 学术 API 工具（Semantic Scholar、CrossRef、arXiv）
+# - 更大的记忆容量和更低的事实置信阈值
+# - 更长的子代理超时时间
+# - 启用摘要和记忆注入
+
+# ============================================================================
+# Models Configuration
+# ============================================================================
+models:
+  # 请根据您的 API 提供商配置模型
+  # 推荐使用支持 thinking 模式的模型以获得最佳科研写作质量
+
+  # Example: OpenAI GPT-4o
+  # - name: gpt-4o
+  #   display_name: GPT-4o
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-4o
+  #   api_key: $OPENAI_API_KEY
+  #   max_tokens: 16384
+  #   temperature: 0.3
+  #   supports_vision: true
+  #   supports_thinking: false
+
+  # Example: Claude 3.5 Sonnet (recommended for academic writing)
+  # - name: claude-3-5-sonnet
+  #   display_name: Claude 3.5 Sonnet
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: claude-3-5-sonnet-20241022
+  #   api_key: $ANTHROPIC_API_KEY
+  #   max_tokens: 8192
+  #   supports_vision: true
+  #   when_thinking_enabled:
+  #     thinking:
+  #       type: enabled
+
+  - name: gpt-4o
+    display_name: GPT-4o (placeholder - configure your model)
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    max_tokens: 16384
+    temperature: 0.3
+    supports_vision: true
+
+# ============================================================================
+# Tool Groups Configuration
+# ============================================================================
+tool_groups:
+  - name: web
+  - name: academic
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+# ============================================================================
+# Tools Configuration
+# ============================================================================
+tools:
+  # Web search and fetch
+  - name: web_search
+    group: web
+    use: src.community.tavily.tools:web_search_tool
+    max_results: 5
+    api_key: $TAVILY_API_KEY
+
+  - name: web_fetch
+    group: web
+    use: src.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+
+  # Academic API tools
+  - name: semantic_scholar_search
+    group: academic
+    use: src.community.semantic_scholar.tools:semantic_scholar_search_tool
+
+  - name: semantic_scholar_paper
+    group: academic
+    use: src.community.semantic_scholar.tools:semantic_scholar_paper_tool
+
+  - name: semantic_scholar_author
+    group: academic
+    use: src.community.semantic_scholar.tools:semantic_scholar_author_tool
+
+  - name: crossref_lookup
+    group: academic
+    use: src.community.crossref.tools:crossref_lookup_tool
+
+  - name: arxiv_search
+    group: academic
+    use: src.community.arxiv_search.tools:arxiv_search_tool
+
+  # Image search
+  - name: image_search
+    group: web
+    use: src.community.image_search.tools:image_search_tool
+    max_results: 5
+
+  # File operations
+  - name: ls
+    group: file:read
+    use: src.sandbox.tools:ls_tool
+
+  - name: read_file
+    group: file:read
+    use: src.sandbox.tools:read_file_tool
+
+  - name: write_file
+    group: file:write
+    use: src.sandbox.tools:write_file_tool
+
+  - name: str_replace
+    group: file:write
+    use: src.sandbox.tools:str_replace_tool
+
+  - name: bash
+    group: bash
+    use: src.sandbox.tools:bash_tool
+
+# ============================================================================
+# Sandbox Configuration
+# ============================================================================
+sandbox:
+  use: src.sandbox.local:LocalSandboxProvider
+
+# ============================================================================
+# Subagents Configuration (Research-optimized)
+# ============================================================================
+subagents:
+  timeout_seconds: 900
+
+  agents:
+    general-purpose:
+      timeout_seconds: 1800
+    bash:
+      timeout_seconds: 600
+    literature-reviewer:
+      timeout_seconds: 600
+    statistical-analyst:
+      timeout_seconds: 900
+    code-reviewer:
+      timeout_seconds: 600
+
+# ============================================================================
+# Skills Configuration
+# ============================================================================
+skills:
+  container_path: /mnt/skills
+
+# ============================================================================
+# Title Generation
+# ============================================================================
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null
+
+# ============================================================================
+# Summarization (enabled for long research conversations)
+# ============================================================================
+summarization:
+  enabled: true
+  model_name: null
+  trigger:
+    - type: tokens
+      value: 15564
+  keep:
+    type: messages
+    value: 10
+  trim_tokens_to_summarize: 15564
+
+# ============================================================================
+# Memory Configuration (Research-optimized)
+# ============================================================================
+memory:
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 200
+  fact_confidence_threshold: 0.6
+  injection_enabled: true
+  max_injection_tokens: 3000
+
+# ============================================================================
+# Checkpointer
+# ============================================================================
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db

@@ -7,13 +7,58 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from src.gateway.path_utils import validate_thread_id
 from src.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 
-# File extensions that should be converted to markdown
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB per file
+
+ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+    ".doc",
+    ".docx",
+    ".txt",
+    ".md",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".bmp",
+    ".py",
+    ".r",
+    ".ipynb",
+    ".tex",
+    ".bib",
+    ".html",
+    ".css",
+    ".js",
+    ".log",
+    ".xml",
+    ".ini",
+    ".cfg",
+    ".toml",
+    ".sh",
+    ".bat",
+    ".zip",
+    ".tar",
+    ".gz",
+}
+
 CONVERTIBLE_EXTENSIONS = {
     ".pdf",
     ".ppt",
@@ -42,6 +87,7 @@ def get_uploads_dir(thread_id: str) -> Path:
     Returns:
         Path to the uploads directory.
     """
+    validate_thread_id(thread_id)
     base_dir = get_paths().sandbox_uploads_dir(thread_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir
@@ -66,10 +112,10 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         md_path = file_path.with_suffix(".md")
         md_path.write_text(result.text_content, encoding="utf-8")
 
-        logger.info(f"Converted {file_path.name} to markdown: {md_path.name}")
+        logger.info("Converted %s to markdown: %s", file_path.name, md_path.name)
         return md_path
     except Exception as e:
-        logger.error(f"Failed to convert {file_path.name} to markdown: {e}")
+        logger.error("Failed to convert %s to markdown: %s", file_path.name, e, exc_info=True)
         return None
 
 
@@ -113,6 +159,13 @@ async def upload_files(
                 continue
 
             content = await file.read()
+            if len(content) > MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"File '{safe_filename}' exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB")
+
+            file_ext = Path(safe_filename).suffix.lower()
+            if file_ext and file_ext not in ALLOWED_EXTENSIONS:
+                raise HTTPException(status_code=400, detail=f"File type '{file_ext}' is not allowed")
+
             file_path = uploads_dir / safe_filename
             file_path.write_bytes(content)
 
@@ -153,9 +206,11 @@ async def upload_files(
 
             uploaded_files.append(file_info)
 
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+            logger.error("Failed to upload %s: %s", file.filename, e, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}")
 
     return UploadResponse(
         success=True,
@@ -210,13 +265,16 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
     Returns:
         Success message.
     """
+    safe_filename = Path(filename).name
+    if not safe_filename or safe_filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
+
     uploads_dir = get_uploads_dir(thread_id)
-    file_path = uploads_dir / filename
+    file_path = uploads_dir / safe_filename
 
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+        raise HTTPException(status_code=404, detail=f"File not found: {safe_filename}")
 
-    # Security check: ensure the path is within the uploads directory
     try:
         file_path.resolve().relative_to(uploads_dir.resolve())
     except ValueError:
@@ -227,5 +285,5 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
         logger.info(f"Deleted file: {filename}")
         return {"success": True, "message": f"Deleted {filename}"}
     except Exception as e:
-        logger.error(f"Failed to delete {filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")
+        logger.error("Failed to delete %s: %s", filename, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete {filename}")

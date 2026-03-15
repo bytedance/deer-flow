@@ -1,13 +1,13 @@
 """Task tool for delegating work to subagents."""
 
+import asyncio
 import logging
-import time
 import uuid
 from dataclasses import replace
 from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
-from langgraph.config import get_stream_writer
+from langgraph.config import get_config, get_stream_writer
 from langgraph.typing import ContextT
 
 from src.agents.lead_agent.prompt import get_skills_prompt_section
@@ -19,11 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 @tool("task", parse_docstring=True)
-def task_tool(
+async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash"],
+    subagent_type: Literal["general-purpose", "bash", "literature-reviewer", "statistical-analyst", "code-reviewer"],
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -40,6 +40,14 @@ def task_tool(
       multiple dependent steps, or would benefit from isolated context.
     - **bash**: Command execution specialist for running bash commands. Use for
       git operations, build processes, or when command output would be verbose.
+    - **literature-reviewer**: Specialized for academic literature search, citation
+      chain analysis, and related work synthesis using Semantic Scholar, CrossRef,
+      and arXiv APIs. Returns structured findings with BibTeX entries.
+    - **statistical-analyst**: Specialized for statistical analysis, hypothesis testing,
+      data quality audit, and publication-ready APA-formatted reporting. Uses
+      scipy, statsmodels, pingouin in sandbox.
+    - **code-reviewer**: Specialized for research code review — reproducibility,
+      numerical stability, test coverage, and paper-code alignment checks.
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -60,7 +68,7 @@ def task_tool(
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash"
+        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash, literature-reviewer, statistical-analyst, code-reviewer"
 
     # Build config overrides
     overrides: dict = {}
@@ -85,7 +93,13 @@ def task_tool(
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id")
+        ctx = runtime.context
+        thread_id = ctx.get("thread_id") if (ctx is not None and hasattr(ctx, "get")) else None
+        if not thread_id:
+            try:
+                thread_id = get_config().get("configurable", {}).get("thread_id")
+            except RuntimeError:
+                pass
 
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})
@@ -178,8 +192,8 @@ def task_tool(
             cleanup_background_task(task_id)
             return f"Task timed out. Error: {result.error}"
 
-        # Still running, wait before next poll
-        time.sleep(5)  # Poll every 5 seconds
+        # Still running, yield control while waiting
+        await asyncio.sleep(5)
         poll_count += 1
 
         # Polling timeout as a safety net (in case thread pool timeout doesn't work)

@@ -3,7 +3,8 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi import UploadFile
+import pytest
+from fastapi import HTTPException, UploadFile
 
 from src.gateway.routers import uploads
 
@@ -96,3 +97,23 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
 
     # Only the safely normalised file should exist
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
+
+
+def test_upload_files_keeps_http_exception_status_code(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.acquire.return_value = "local"
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = UploadFile(filename="malware.exe", file=BytesIO(b"binary"))
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(uploads.upload_files("thread-local", files=[file]))
+
+    assert exc_info.value.status_code == 400
