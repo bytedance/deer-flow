@@ -1,7 +1,7 @@
 import builtins
 
-import src.sandbox.local.local_sandbox as local_sandbox
-from src.sandbox.local.local_sandbox import LocalSandbox
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 
 def _open(base, file, mode="r", *args, **kwargs):
