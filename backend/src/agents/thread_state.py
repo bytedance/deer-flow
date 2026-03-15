@@ -91,6 +91,19 @@ def merge_subagent_trajectories(
     return {**existing, **new}
 
 
+def merge_discovered_tools(existing: list[str] | None, new: list[str] | None) -> list[str]:
+    """Reducer for discovered_tools - union of existing and new tool names.
+
+    Tools once discovered are never removed within a thread.
+    Uses list[str] (not set) for JSON serialization compatibility with LangGraph checkpointing.
+    """
+    if existing is None:
+        return new or []
+    if new is None:
+        return existing
+    return list(dict.fromkeys(existing + new))
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -101,3 +114,4 @@ class ThreadState(AgentState):
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     token_usage: Annotated[TokenUsageState, merge_token_usage]
     subagent_trajectories: Annotated[dict[str, SubagentTrajectoryState], merge_subagent_trajectories]
+    discovered_tools: Annotated[list[str], merge_discovered_tools]

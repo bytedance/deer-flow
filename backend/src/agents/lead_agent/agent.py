@@ -4,15 +4,15 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
-from src.agents.lead_agent.prompt import apply_prompt_template
+from src.agents.lead_agent.prompt import _build_ptc_section, apply_prompt_template
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.timeline_logging_middleware import TimelineLoggingMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
+from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.tool_retry_middleware import ToolRetryMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
 from src.agents.middlewares.usage_tracking_middleware import UsageTrackingMiddleware
@@ -233,17 +233,20 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
+# ToolSearchMiddleware gates which tools are visible to the LLM (after ToolRetry, before UsageTracking)
 # SummarizationMiddleware should be early to reduce context before other processing
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig):
+def _build_middlewares(config: RunnableConfig, tool_search_ctx: dict | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
+        tool_search_ctx: Optional dict with 'catalog', 'tool_search_tool', and 'core_tool_names'
+            for enabling tool search middleware.
 
     Returns:
         List of middleware instances.
@@ -254,8 +257,21 @@ def _build_middlewares(config: RunnableConfig):
         SandboxMiddleware(),
         DanglingToolCallMiddleware(),
         ToolRetryMiddleware(),
-        UsageTrackingMiddleware(),
     ]
+
+    # Add tool search middleware if catalog has deferred tools
+    if tool_search_ctx is not None:
+        from src.agents.middlewares.tool_search_middleware import ToolSearchMiddleware
+
+        catalog = tool_search_ctx["catalog"]
+        if catalog.get_deferred_entries():
+            middlewares.append(ToolSearchMiddleware(
+                catalog=catalog,
+                tool_search_tool=tool_search_ctx["tool_search_tool"],
+                core_tool_names=tool_search_ctx["core_tool_names"],
+            ))
+
+    middlewares.append(UsageTrackingMiddleware())
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
@@ -351,21 +367,107 @@ def make_lead_agent(config: RunnableConfig):
 
     tools = get_available_tools(model_name=model_name, runtime_model=runtime_model, subagent_enabled=subagent_enabled)
 
+    # Build tool search catalog for dynamic tool discovery
+    tool_search_ctx = _build_tool_search_context(tools)
+
     # Compute tool usage policies based on available tools
     from src.tools.docs.tool_policies import get_tool_usage_policies
 
     tool_names = [getattr(t, "name", "") for t in tools]
     tool_policies = get_tool_usage_policies(tool_names)
 
+    # Generate tool search prompt section if there are deferred tools
+    tool_search_section = ""
+    if tool_search_ctx is not None:
+        tool_search_section = tool_search_ctx["catalog"].format_catalog_summary()
+
+    # Generate PTC prompt section (empty if PTC disabled or no MCP tools)
+    ptc_section = _build_ptc_section()
+
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model=runtime_model),
         tools=tools,
-        middleware=_build_middlewares(config),
+        middleware=_build_middlewares(config, tool_search_ctx=tool_search_ctx),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             thinking_enabled=thinking_enabled,
             tool_policies=tool_policies,
+            tool_search_section=tool_search_section,
+            ptc_section=ptc_section,
         ),
         state_schema=ThreadState,
     )
+
+
+def _build_tool_search_context(tools: list) -> dict | None:
+    """Build tool search catalog and context for the middleware.
+
+    Returns None if tool search is not needed (too few tools or no deferred tools).
+
+    Args:
+        tools: All available tools from get_available_tools().
+
+    Returns:
+        Dict with 'catalog', 'tool_search_tool', and 'core_tool_names', or None.
+    """
+    from src.tools.builtins.tool_search_tool import tool_search_tool
+    from src.tools.catalog import ToolCatalog
+
+    app_config = get_app_config()
+
+    # Core tools: config-defined tools (sandbox, web, etc.) + built-in tools
+    core_tool_names = {t.name for t in app_config.tools} | {
+        "present_files", "ask_clarification", "reflection",
+        "view_image", "task", "write_todos", "tool_search",
+    }
+
+    # Build MCP server mapping for catalog metadata
+    mcp_server_map = _build_mcp_server_map(tools)
+
+    # Build catalog from all tools
+    catalog = ToolCatalog.from_tools(
+        tools=tools,
+        core_tool_names=core_tool_names,
+        mcp_server_map=mcp_server_map,
+    )
+
+    # Only activate if there are deferred tools
+    if not catalog.get_deferred_entries():
+        return None
+
+    # Add tool_search to the tool list so it gets registered in ToolNode
+    tools.append(tool_search_tool)
+
+    logger.info(
+        "Tool search enabled: %d total tools, %d core, %d deferred",
+        len(catalog.entries),
+        len([e for e in catalog.entries.values() if e.is_core]),
+        len(catalog.get_deferred_entries()),
+    )
+
+    return {
+        "catalog": catalog,
+        "tool_search_tool": tool_search_tool,
+        "core_tool_names": core_tool_names,
+    }
+
+
+def _build_mcp_server_map(tools: list) -> dict[str, str]:
+    """Build a mapping from tool name to MCP server name.
+
+    MCP adapter tools may have metadata about their origin server.
+    """
+    from langchain_core.tools import BaseTool
+
+    server_map: dict[str, str] = {}
+    for tool in tools:
+        if not isinstance(tool, BaseTool):
+            continue
+        # langchain-mcp-adapters may store server info in metadata
+        metadata = getattr(tool, "metadata", None)
+        if isinstance(metadata, dict):
+            server_name = metadata.get("mcp_server_name")
+            if server_name:
+                server_map[tool.name] = server_name
+    return server_map

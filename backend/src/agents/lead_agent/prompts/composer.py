@@ -168,6 +168,8 @@ class PromptComposer:
         subagent_thinking: str = "",
         subagent_reminder: str = "",
         tool_policies: str = "",
+        tool_search_section: str = "",
+        ptc_section: str = "",
         skills_section: str = "",
         current_date: str = "",
         extra_variables: dict[str, Any] | None = None,
@@ -176,9 +178,9 @@ class PromptComposer:
 
         Section ordering:
         identity -> memory -> thinking_style -> clarification ->
-        tool_policies -> skills -> subagent -> working_directory ->
-        response_style -> citations -> research_planning ->
-        critical_reminders -> current_date
+        tool_policies -> tool_search -> ptc -> skills -> subagent ->
+        working_directory -> response_style -> citations ->
+        research_planning -> critical_reminders -> current_date
 
         Args:
             memory_context: Pre-formatted ``<memory>`` block or empty string.
@@ -186,6 +188,8 @@ class PromptComposer:
             subagent_thinking: Thinking bullet for subagent decomposition.
             subagent_reminder: Critical-reminders bullet for subagent mode.
             tool_policies: Pre-formatted ``<tool_usage_policies>`` block or empty.
+            tool_search_section: Pre-formatted ``<tool_search_system>`` block or empty.
+            ptc_section: Pre-formatted ``<ptc_system>`` block or empty.
             skills_section: Pre-formatted ``<skill_system>`` block or empty.
             current_date: Formatted date string for ``<current_date>`` tag.
             extra_variables: Additional template variables merged with defaults.
@@ -220,6 +224,14 @@ class PromptComposer:
         # 5. Tool policies (pass-through)
         if tool_policies.strip():
             sections.append(tool_policies)
+
+        # 5.5. Tool search (pass-through)
+        if tool_search_section.strip():
+            sections.append(tool_search_section)
+
+        # 5.6. PTC - Programmatic Tool Calling (pass-through)
+        if ptc_section.strip():
+            sections.append(ptc_section)
 
         # 6. Skills (pass-through)
         if skills_section.strip():

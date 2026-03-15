@@ -225,11 +225,98 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
+def _build_ptc_section() -> str:
+    """Build the PTC (Programmatic Tool Calling) system prompt section.
+
+    Lists available MCP tool modules with import examples so the LLM knows
+    it can use ``execute_python`` with MCP tool wrappers.
+
+    Returns:
+        Formatted PTC section string, or empty string if PTC is not enabled
+        or no MCP tools are available.
+    """
+    try:
+        from src.config.app_config import get_app_config
+
+        config = get_app_config()
+        if not config.sandbox or not config.sandbox.ptc_enabled:
+            return ""
+    except Exception:
+        return ""
+
+    try:
+        from src.mcp.cache import get_cached_mcp_tools_by_server
+        from src.ptc.client_codegen import _sanitize_identifier
+        from src.tools.catalog import ToolCatalog
+
+        by_server = get_cached_mcp_tools_by_server()
+        if not by_server:
+            return ""
+
+        # Build catalog for schema info
+        all_tools = []
+        mcp_map = {}
+        for server_name, tools in by_server.items():
+            all_tools.extend(tools)
+            for t in tools:
+                mcp_map[t.name] = server_name
+
+        catalog = ToolCatalog.from_tools(tools=all_tools, core_tool_names=set(), mcp_server_map=mcp_map)
+        catalog_by_server = catalog.get_tools_by_server()
+
+        # Build import examples
+        module_lines: list[str] = []
+        for server_name, entries in sorted(catalog_by_server.items(), key=lambda x: x[0] or ""):
+            if server_name is None:
+                continue
+            safe = _sanitize_identifier(server_name)
+            func_names = ", ".join(_sanitize_identifier(e.name) for e in entries[:5])
+            if len(entries) > 5:
+                func_names += ", ..."
+            module_lines.append(f"  - from tools.{safe} import {func_names}")
+
+        if not module_lines:
+            return ""
+
+        modules_str = "\n".join(module_lines)
+
+        return f"""<ptc_system>
+Programmatic Tool Calling (PTC) is enabled.
+When calling 3+ MCP tools or filtering/aggregating results in code,
+use execute_python with tool imports instead of individual tool calls.
+This reduces round-trips and keeps intermediate data out of the conversation.
+
+Available modules:
+{modules_str}
+
+Example:
+  from tools.postgres import query
+  import json
+  results = query(sql="SELECT * FROM sales WHERE region='West'")
+  filtered = [r for r in json.loads(results) if r['revenue'] > 10000]
+  print(json.dumps(filtered))
+
+Rules:
+- Each execute_python call is stateless. Import all needed modules at the top.
+- Only the final print() output enters the conversation context.
+- Use PTC when programmatic filtering, aggregation, or multi-tool orchestration is beneficial.
+- For simple single-tool calls, use the tool directly (no need for PTC).
+</ptc_system>"""
+
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("Failed to build PTC section: %s", e)
+        return ""
+
+
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
     thinking_enabled: bool = False,
     tool_policies: str = "",
+    tool_search_section: str = "",
+    ptc_section: str = "",
 ) -> str:
     # Get memory context
     memory_context = _get_memory_context()
@@ -266,6 +353,8 @@ def apply_prompt_template(
         subagent_thinking=subagent_thinking,
         subagent_reminder=subagent_reminder,
         tool_policies=tool_policies,
+        tool_search_section=tool_search_section,
+        ptc_section=ptc_section,
         skills_section=skills_section,
         current_date=datetime.now().strftime("%Y-%m-%d, %A"),
     )
