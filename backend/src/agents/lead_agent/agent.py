@@ -17,6 +17,7 @@ from src.agents.thread_state import ThreadState
 from src.config.agents_config import load_agent_config
 from src.config.app_config import get_app_config
 from src.config.summarization_config import get_summarization_config
+from src.config.title_config import get_title_config
 from src.models import create_chat_model
 from src.sandbox.middleware import SandboxMiddleware
 
@@ -227,8 +228,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
-    # Add TitleMiddleware
-    middlewares.append(TitleMiddleware())
+    # Add TitleMiddleware only if title generation is enabled
+    title_config = get_title_config()
+    if title_config.enabled:
+        middlewares.append(TitleMiddleware())
 
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
