@@ -67,5 +67,9 @@ class SandboxConfig(BaseModel):
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
+    ptc_enabled: bool = Field(
+        default=False,
+        description="Enable Programmatic Tool Calling (PTC). When true, execute_python can call MCP tools as Python functions via a host-side proxy.",
+    )
 
     model_config = ConfigDict(extra="allow")

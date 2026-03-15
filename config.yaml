@@ -213,6 +213,9 @@ tools:
 # Executes commands directly on the host machine
 sandbox:
   use: src.sandbox.local:LocalSandboxProvider
+  # ptc_enabled: false  # Set true to enable Programmatic Tool Calling (PTC).
+                         # When enabled, execute_python can call MCP tools as
+                         # Python functions via a host-side proxy.
 
 # Option 2: Daytona Cloud Sandbox (Default)
 # Executes commands in isolated Daytona cloud sandboxes
