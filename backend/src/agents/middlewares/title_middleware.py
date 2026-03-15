@@ -20,7 +20,11 @@ class TitleMiddlewareState(AgentState):
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
-    """Automatically generate a title for the thread after the first user message."""
+    """Automatically generate a title for the thread before the agent runs.
+
+    Title is generated in abefore_agent so it is persisted even when the
+    agent workflow is interrupted (user stop, exceptions, timeouts).
+    """
 
     state_schema = TitleMiddlewareState
 
@@ -34,38 +38,33 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if state.get("title"):
             return False
 
-        # Check if this is the first turn (has at least one user message and one assistant response)
         messages = state.get("messages", [])
-        if len(messages) < 2:
+        if not messages:
             return False
 
-        # Count user and assistant messages
+        # Generate only on the first turn (exactly one user message)
         user_messages = [m for m in messages if m.type == "human"]
-        assistant_messages = [m for m in messages if m.type == "ai"]
-
-        # Generate title after first complete exchange
-        return len(user_messages) == 1 and len(assistant_messages) >= 1
+        return len(user_messages) == 1
 
     async def _generate_title(self, state: TitleMiddlewareState) -> str:
-        """Generate a concise title based on the conversation."""
+        """Generate a concise title based on the user's first message."""
         config = get_title_config()
         messages = state.get("messages", [])
 
-        # Get first user message and first assistant response
+        # Get first user message
         user_msg_content = next((m.content for m in messages if m.type == "human"), "")
-        assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
         # Ensure content is string (LangChain messages can have list content)
         user_msg = str(user_msg_content) if user_msg_content else ""
-        assistant_msg = str(assistant_msg_content) if assistant_msg_content else ""
 
         # Use a lightweight model to generate title
         model = create_chat_model(thinking_enabled=False)
 
-        prompt = config.prompt_template.format(
-            max_words=config.max_words,
-            user_msg=user_msg[:500],
-            assistant_msg=assistant_msg[:500],
+        prompt = (
+            f"Generate a concise title (max {config.max_words} words) for a conversation "
+            f"that starts with this user message.\n"
+            f"User: {user_msg[:500]}\n\n"
+            f"Return ONLY the title, no quotes, no explanation."
         )
 
         try:
@@ -78,19 +77,22 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         except Exception as e:
             logger.warning("Failed to generate title: %s", e)
             # Fallback: use first part of user message (by character count)
-            fallback_chars = min(config.max_chars, 50)  # Use max_chars or 50, whichever is smaller
+            fallback_chars = min(config.max_chars, 50)
             if len(user_msg) > fallback_chars:
                 return user_msg[:fallback_chars].rstrip() + "..."
             return user_msg if user_msg else "New Conversation"
 
     @override
-    async def aafter_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        """Generate and set thread title after the first agent response."""
+    async def abefore_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+        """Generate and set thread title before the agent runs.
+
+        By generating the title here rather than in aafter_agent, the title
+        is persisted even when the agent workflow is interrupted (user stop,
+        exceptions, timeouts).
+        """
         if self._should_generate_title(state):
             title = await self._generate_title(state)
             logger.info("Generated thread title: %s", title)
-
-            # Store title in state (will be persisted by checkpointer if configured)
             return {"title": title}
 
         return None
