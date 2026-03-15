@@ -38,7 +38,7 @@ export function MarkdownContent({
             return <CitationLink {...props}>{text}</CitationLink>;
           }
         }
-        return <a {...props} />;
+        return <a {...props} className="text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/60 transition-colors" target="_blank" rel="noopener noreferrer" />;
       },
       ...componentsFromProps,
     };
