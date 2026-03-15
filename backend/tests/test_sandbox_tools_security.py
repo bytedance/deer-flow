@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.sandbox.tools import (
+from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     mask_local_paths_in_output,
     replace_virtual_path,

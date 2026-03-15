@@ -11,13 +11,13 @@ Covers:
 
 import pytest
 
-from src.config.subagents_config import (
+from deerflow.config.subagents_config import (
     SubagentOverrideConfig,
     SubagentsAppConfig,
     get_subagents_app_config,
     load_subagents_config_from_dict,
 )
-from src.subagents.config import SubagentConfig
+from deerflow.subagents.config import SubagentConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -195,32 +195,32 @@ class TestRegistryGetSubagentConfig:
         _reset_subagents_config()
 
     def test_returns_none_for_unknown_agent(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         assert get_subagent_config("nonexistent") is None
 
     def test_returns_config_for_builtin_agents(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         assert get_subagent_config("general-purpose") is not None
         assert get_subagent_config("bash") is not None
 
     def test_default_timeout_preserved_when_no_config(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config(timeout_seconds=900)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 900
 
     def test_global_timeout_override_applied(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config(timeout_seconds=1800)
         config = get_subagent_config("general-purpose")
         assert config.timeout_seconds == 1800
 
     def test_per_agent_timeout_override_applied(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         load_subagents_config_from_dict(
             {
@@ -232,7 +232,7 @@ class TestRegistryGetSubagentConfig:
         assert bash_config.timeout_seconds == 120
 
     def test_per_agent_override_does_not_affect_other_agents(self):
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.registry import get_subagent_config
 
         load_subagents_config_from_dict(
             {
@@ -245,8 +245,8 @@ class TestRegistryGetSubagentConfig:
 
     def test_builtin_config_object_is_not_mutated(self):
         """Registry must return a new object, leaving the builtin default intact."""
-        from src.subagents.builtins import BUILTIN_SUBAGENTS
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
 
         original_timeout = BUILTIN_SUBAGENTS["bash"].timeout_seconds
         load_subagents_config_from_dict({"timeout_seconds": 42})
@@ -257,8 +257,8 @@ class TestRegistryGetSubagentConfig:
 
     def test_config_preserves_other_fields(self):
         """Applying timeout override must not change other SubagentConfig fields."""
-        from src.subagents.builtins import BUILTIN_SUBAGENTS
-        from src.subagents.registry import get_subagent_config
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.registry import get_subagent_config
 
         _reset_subagents_config(timeout_seconds=300)
         original = BUILTIN_SUBAGENTS["general-purpose"]
@@ -282,21 +282,21 @@ class TestRegistryListSubagents:
         _reset_subagents_config()
 
     def test_lists_both_builtin_agents(self):
-        from src.subagents.registry import list_subagents
+        from deerflow.subagents.registry import list_subagents
 
         names = {cfg.name for cfg in list_subagents()}
         assert "general-purpose" in names
         assert "bash" in names
 
     def test_all_returned_configs_get_global_override(self):
-        from src.subagents.registry import list_subagents
+        from deerflow.subagents.registry import list_subagents
 
         _reset_subagents_config(timeout_seconds=123)
         for cfg in list_subagents():
             assert cfg.timeout_seconds == 123, f"{cfg.name} has wrong timeout"
 
     def test_per_agent_overrides_reflected_in_list(self):
-        from src.subagents.registry import list_subagents
+        from deerflow.subagents.registry import list_subagents
 
         load_subagents_config_from_dict(
             {

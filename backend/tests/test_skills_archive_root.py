@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from src.gateway.routers.skills import _resolve_skill_dir_from_archive_root
+from app.gateway.routers.skills import _resolve_skill_dir_from_archive_root
 
 
 def _write_skill(skill_dir: Path) -> None:
