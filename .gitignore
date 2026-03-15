@@ -48,3 +48,7 @@ sandbox_image_cache.tar
 
 # ignore the legacy `web` folder
 web/
+
+# Deployment artifacts
+backend/Dockerfile.langgraph
+config.yaml.bak

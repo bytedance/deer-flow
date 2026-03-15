@@ -1,10 +1,13 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev dev-daemon start stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+
+PYTHON ?= python
 
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
+	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
@@ -13,6 +16,10 @@ help:
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
+	@echo ""
+	@echo "Docker Production Commands:"
+	@echo "  make up              - Build and start production Docker services (localhost:2026)"
+	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
 	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
@@ -23,17 +30,14 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
-		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
-		exit 1; \
-	fi
-	@cp config.example.yaml config.yaml
-	@test -f .env || cp .env.example .env
-	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@$(PYTHON) ./scripts/configure.py
+
+config-upgrade:
+	@./scripts/config-upgrade.sh
 
 # Check required tools
 check:
-	@./scripts/check.sh
+	@$(PYTHON) ./scripts/check.py
 
 # Install all dependencies
 install:
@@ -96,7 +100,7 @@ dev-daemon:
 stop:
 	@echo "Stopping all services..."
 	@-pkill -f "langgraph dev" 2>/dev/null || true
-	@-pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
+	@-pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 	@-pkill -f "next dev" 2>/dev/null || true
 	@-pkill -f "next start" 2>/dev/null || true
 	@-pkill -f "next-server" 2>/dev/null || true
@@ -141,3 +145,15 @@ docker-logs-frontend:
 	@./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@./scripts/docker.sh logs --gateway
+
+# ==========================================
+# Production Docker Commands
+# ==========================================
+
+# Build and start production services
+up:
+	@./scripts/deploy.sh
+
+# Stop and remove production containers
+down:
+	@./scripts/deploy.sh down

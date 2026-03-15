@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.client import DeerFlowClient, StreamEvent
+from deerflow.client import DeerFlowClient, StreamEvent
 
 # Skip entire module in CI or when no config.yaml exists
 _skip_reason = None
