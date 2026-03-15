@@ -82,6 +82,7 @@
     "ogl": "^1.0.11",
     "pnpm": "^10.29.3",
     "react": "^19.0.0",
+    "react-data-grid": "7.0.0-beta.59",
     "react-dom": "^19.0.0",
     "react-resizable-panels": "^4.4.1",
     "react-router": "^7.1.0",
