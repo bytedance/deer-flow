@@ -50,6 +50,8 @@ on:
     tags:
       - "worldbank-mcp/v*"
       - "fiscaldata-mcp/v*"
+      - "clinicaltrials-mcp/v*"
+      - "ncbi-mcp/v*"
 
   workflow_dispatch:
     inputs:
@@ -60,6 +62,8 @@ on:
         options:
           - worldbank-mcp
           - fiscaldata-mcp
+          - clinicaltrials-mcp
+          - ncbi-mcp
 
 jobs:
   determine-package:
@@ -81,8 +85,10 @@ jobs:
 
           # Map package name to directory
           case "$PACKAGE" in
-            worldbank-mcp)  DIR="mcp_servers/worldbank" ;;
-            fiscaldata-mcp) DIR="mcp_servers/fiscaldata" ;;
+            worldbank-mcp)      DIR="mcp_servers/worldbank" ;;
+            fiscaldata-mcp)     DIR="mcp_servers/fiscaldata" ;;
+            clinicaltrials-mcp) DIR="mcp_servers/clinicaltrials" ;;
+            ncbi-mcp)           DIR="mcp_servers/ncbi" ;;
             *) echo "::error::Unknown package: $PACKAGE"; exit 1 ;;
           esac
 
