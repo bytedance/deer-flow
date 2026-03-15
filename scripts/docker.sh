@@ -105,7 +105,7 @@ start() {
     sandbox_mode="$(detect_sandbox_mode)"
 
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway langgraph nginx provisioner"
+       services="frontend gateway langgraph provisioner nginx"
         export NGINX_CONF="nginx.conf"
     else
         services="frontend gateway langgraph nginx"
@@ -118,7 +118,7 @@ start() {
     else
         echo -e "${BLUE}Provisioner disabled (not required for this sandbox mode).${NC}"
     fi
-    echo -e "${BLUE}Using nginx config: $NGINX_CONF${NC}"
+    
     echo ""
     
     # Set DEER_FLOW_ROOT for provisioner if not already set
@@ -168,10 +168,9 @@ start() {
     echo "  DeerFlow Docker is starting!"
     echo "=========================================="
     echo ""
-    echo "  🌐 Unified App: http://localhost:2026"
-    echo "  🌐 Frontend:    http://localhost:3000"
-    echo "  📡 API Gateway: http://localhost:8001/api/*"
-    echo "  🤖 LangGraph:   http://localhost:2024/*"
+    echo "  🌐 Application: http://localhost:2026"
+    echo "  📡 API Gateway: http://localhost:2026/api/*"
+    echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
     echo ""
     echo "  📋 View logs: make docker-logs"
     echo "  🛑 Stop:      make docker-stop"
