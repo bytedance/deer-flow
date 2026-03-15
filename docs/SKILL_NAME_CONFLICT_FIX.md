@@ -48,7 +48,7 @@
 
 ## 详细代码改动
 
-### 一、后端配置层 (`backend/src/config/extensions_config.py`)
+### 一、后端配置层 (`backend/packages/harness/deerflow/config/extensions_config.py`)
 
 #### 1.1 新增方法: `get_skill_key()`
 
@@ -138,7 +138,7 @@ def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
 
 ---
 
-### 二、后端技能加载器 (`backend/src/skills/loader.py`)
+### 二、后端技能加载器 (`backend/packages/harness/deerflow/skills/loader.py`)
 
 #### 2.1 添加重复检查逻辑
 
@@ -200,7 +200,7 @@ for category in ["public", "custom"]:
 
 ---
 
-### 三、后端 API 路由 (`backend/src/gateway/routers/skills.py`)
+### 三、后端 API 路由 (`backend/app/gateway/routers/skills.py`)
 
 #### 3.1 新增辅助函数: `_find_skill_by_name()`
 
@@ -830,9 +830,9 @@ Body: { "enabled": false }
 ### 改动统计
 
 - **后端文件**: 3 个文件修改
-  - `backend/src/config/extensions_config.py`: +1 方法，修改 1 方法
-  - `backend/src/skills/loader.py`: +重复检查逻辑
-  - `backend/src/gateway/routers/skills.py`: +1 辅助函数，修改 3 个端点
+  - `backend/packages/harness/deerflow/config/extensions_config.py`: +1 方法，修改 1 方法
+  - `backend/packages/harness/deerflow/skills/loader.py`: +重复检查逻辑
+  - `backend/app/gateway/routers/skills.py`: +1 辅助函数，修改 3 个端点
 
 - **前端文件**: 3 个文件修改
   - `frontend/src/core/skills/api.ts`: 修改 1 个函数
