@@ -241,6 +241,43 @@ class TestAsyncExecutionPath:
         assert result.ai_messages[1]["id"] == "msg-2"
 
     @pytest.mark.anyio
+    async def test_aexecute_captures_usage_state(self, classes, base_config, mock_agent, msg):
+        """Test that usage from streamed state is captured on SubagentResult."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_message = msg.ai("Done", "msg-1")
+        final_state = {
+            "messages": [msg.human("Task"), final_message],
+            "usage": {
+                "models": [
+                    {
+                        "model": "subagent-model",
+                        "prompt_tokens": 20,
+                        "completion_tokens": 10,
+                        "total_tokens": 30,
+                    }
+                ],
+                "tool_calls": {"bash": 1},
+            },
+        }
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.usage is not None
+        assert result.usage["models"][0]["total_tokens"] == 30
+        assert result.usage["tool_calls"]["bash"] == 1
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_duplicate_messages(self, classes, base_config, mock_agent, msg):
         """Test that duplicate AI messages are not added."""
         SubagentExecutor = classes["SubagentExecutor"]

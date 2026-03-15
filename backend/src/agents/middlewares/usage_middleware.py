@@ -6,13 +6,14 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from src.agents.thread_state import UsageSummaryState
+from src.agents.thread_state import UsageDetailsState, UsageSummaryState
 
 
 class UsageMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     usage: NotRequired[UsageSummaryState]
+    usage_details: NotRequired[UsageDetailsState]
 
 
 def _to_int(value: object) -> int:
@@ -178,4 +179,10 @@ class UsageMiddleware(AgentMiddleware[UsageMiddlewareState]):
         if delta is None:
             return None
 
-        return {"usage": delta}
+        return {
+            "usage": delta,
+            "usage_details": {
+                "lead": delta,
+                "subagent": {"models": [], "tool_calls": {}},
+            },
+        }

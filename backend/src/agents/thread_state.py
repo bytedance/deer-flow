@@ -30,6 +30,15 @@ class UsageSummaryState(TypedDict):
     tool_calls: dict[str, int]
 
 
+class UsageDetailsState(TypedDict):
+    lead: UsageSummaryState
+    subagent: UsageSummaryState
+
+
+def _empty_usage_summary() -> UsageSummaryState:
+    return {"models": [], "tool_calls": {}}
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -105,6 +114,25 @@ def merge_usage(existing: UsageSummaryState | None, new: UsageSummaryState | Non
     }
 
 
+def merge_usage_details(existing: UsageDetailsState | None, new: UsageDetailsState | None) -> UsageDetailsState:
+    """Reducer for usage details split by execution source.
+
+    Aggregates lead and subagent usage independently, each using merge_usage.
+    """
+    if existing is None:
+        existing = {
+            "lead": _empty_usage_summary(),
+            "subagent": _empty_usage_summary(),
+        }
+    if new is None:
+        return existing
+
+    return {
+        "lead": merge_usage(existing.get("lead"), new.get("lead")),
+        "subagent": merge_usage(existing.get("subagent"), new.get("subagent")),
+    }
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -114,3 +142,4 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     usage: Annotated[UsageSummaryState, merge_usage]
+    usage_details: Annotated[UsageDetailsState, merge_usage_details]

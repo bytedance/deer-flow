@@ -11,12 +11,30 @@ from langgraph.config import get_stream_writer
 from langgraph.typing import ContextT
 
 from src.agents.lead_agent.prompt import get_skills_prompt_section
-from src.agents.thread_state import ThreadState
+from src.agents.thread_state import ThreadState, merge_usage, merge_usage_details
 from src.subagents import SubagentExecutor, get_subagent_config
+from src.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 from src.utils.runtime import get_thread_id
-from src.subagents.executor import SubagentStatus, get_background_task_result
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_subagent_usage_into_parent(runtime: ToolRuntime[ContextT, ThreadState], subagent_usage: object) -> None:
+    """Merge subagent usage into parent thread state usage in-place."""
+    if runtime is None or runtime.state is None or not isinstance(subagent_usage, dict):
+        return
+
+    existing_usage = runtime.state.get("usage")
+    runtime.state["usage"] = merge_usage(existing_usage, subagent_usage)
+
+    existing_usage_details = runtime.state.get("usage_details")
+    runtime.state["usage_details"] = merge_usage_details(
+        existing_usage_details,
+        {
+            "lead": {"models": [], "tool_calls": {}},
+            "subagent": subagent_usage,
+        },
+    )
 
 
 @tool("task", parse_docstring=True)
@@ -164,16 +182,19 @@ def task_tool(
 
         # Check if task completed, failed, or timed out
         if result.status == SubagentStatus.COMPLETED:
+            _merge_subagent_usage_into_parent(runtime, getattr(result, "usage", None))
             writer({"type": "task_completed", "task_id": task_id, "result": result.result})
             logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
             cleanup_background_task(task_id)
             return f"Task Succeeded. Result: {result.result}"
         elif result.status == SubagentStatus.FAILED:
+            _merge_subagent_usage_into_parent(runtime, getattr(result, "usage", None))
             writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
             cleanup_background_task(task_id)
             return f"Task failed. Error: {result.error}"
         elif result.status == SubagentStatus.TIMED_OUT:
+            _merge_subagent_usage_into_parent(runtime, getattr(result, "usage", None))
             writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
             logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
             cleanup_background_task(task_id)

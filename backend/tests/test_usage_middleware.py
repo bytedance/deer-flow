@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from src.agents.middlewares.usage_middleware import extract_usage_delta
+from src.agents.thread_state import merge_usage_details
 
 
 def test_extract_usage_delta_from_usage_metadata() -> None:
@@ -74,3 +75,30 @@ def test_extract_usage_delta_with_tool_calls_only() -> None:
 def test_extract_usage_delta_returns_none_for_non_ai() -> None:
     message = SimpleNamespace(type="human", usage_metadata={"input_tokens": 1})
     assert extract_usage_delta(message) is None
+
+
+def test_merge_usage_details_splits_lead_and_subagent() -> None:
+    existing = {
+        "lead": {
+            "models": [{"model": "lead-model", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}],
+            "tool_calls": {"task": 1},
+        },
+        "subagent": {
+            "models": [],
+            "tool_calls": {},
+        },
+    }
+
+    new = {
+        "lead": {"models": [], "tool_calls": {}},
+        "subagent": {
+            "models": [{"model": "sub-model", "prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}],
+            "tool_calls": {"bash": 2},
+        },
+    }
+
+    merged = merge_usage_details(existing, new)
+    assert merged["lead"]["models"][0]["total_tokens"] == 15
+    assert merged["lead"]["tool_calls"]["task"] == 1
+    assert merged["subagent"]["models"][0]["total_tokens"] == 30
+    assert merged["subagent"]["tool_calls"]["bash"] == 2
