@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
 from src.agents.lead_agent.prompt import apply_prompt_template
+from src.agents.middlewares.attachments_resolver_middleware import AttachmentsResolverMiddleware
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -15,6 +16,7 @@ from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
 from src.agents.middlewares.todo_middleware import TodoMiddleware
 from src.agents.middlewares.uploads_middleware import UploadsMiddleware
+from src.agents.middlewares.usage_middleware import UsageMiddleware
 from src.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from src.agents.thread_state import ThreadState
 from src.config.agents_config import load_agent_config
@@ -194,6 +196,8 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 
 
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
+# AttachmentsResolverMiddleware should run before UploadsMiddleware so
+# one-go attachment descriptors become normalized files metadata.
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
 # SummarizationMiddleware should be early to reduce context before other processing
@@ -212,7 +216,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     Returns:
         List of middleware instances.
     """
-    middlewares = [ThreadDataMiddleware(), UploadsMiddleware(), SandboxMiddleware(), DanglingToolCallMiddleware()]
+    middlewares = [ThreadDataMiddleware(), AttachmentsResolverMiddleware(), UploadsMiddleware(), SandboxMiddleware(), DanglingToolCallMiddleware()]
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
@@ -227,6 +231,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
+
+    # Add UsageMiddleware to aggregate normalized token usage in thread state.
+    middlewares.append(UsageMiddleware())
 
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name))
@@ -269,6 +276,8 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
+    namespace_type = cfg.get("namespace_type")
+    namespace_id = cfg.get("namespace_id")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
@@ -314,7 +323,13 @@ def make_lead_agent(config: RunnableConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        system_prompt = apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"]))
+        system_prompt = apply_prompt_template(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            available_skills=set(["bootstrap"]),
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
+        )
 
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
@@ -329,6 +344,12 @@ def make_lead_agent(config: RunnableConfig):
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
-        system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
+        system_prompt=apply_prompt_template(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
+        ),
         state_schema=ThreadState,
     )

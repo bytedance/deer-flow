@@ -18,6 +18,27 @@ class ViewedImageData(TypedDict):
     mime_type: str
 
 
+class ModelUsageState(TypedDict):
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class UsageSummaryState(TypedDict):
+    models: list[ModelUsageState]
+    tool_calls: dict[str, int]
+
+
+class UsageDetailsState(TypedDict):
+    lead: UsageSummaryState
+    subagent: UsageSummaryState
+
+
+def _empty_usage_summary() -> UsageSummaryState:
+    return {"models": [], "tool_calls": {}}
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -45,6 +66,73 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_usage(existing: UsageSummaryState | None, new: UsageSummaryState | None) -> UsageSummaryState:
+    """Reducer for usage summary.
+
+    - Aggregates model token usage by model name.
+    - Aggregates tool call counters by tool name.
+    """
+    if existing is None:
+        return new or {"models": [], "tool_calls": {}}
+    if new is None:
+        return existing
+
+    merged_models: dict[str, ModelUsageState] = {}
+
+    for item in existing.get("models", []):
+        model_name = str(item.get("model", "unknown"))
+        merged_models[model_name] = {
+            "model": model_name,
+            "prompt_tokens": int(item.get("prompt_tokens", 0)),
+            "completion_tokens": int(item.get("completion_tokens", 0)),
+            "total_tokens": int(item.get("total_tokens", 0)),
+        }
+
+    for item in new.get("models", []):
+        model_name = str(item.get("model", "unknown"))
+        if model_name not in merged_models:
+            merged_models[model_name] = {
+                "model": model_name,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+
+        merged_models[model_name]["prompt_tokens"] += int(item.get("prompt_tokens", 0))
+        merged_models[model_name]["completion_tokens"] += int(item.get("completion_tokens", 0))
+        merged_models[model_name]["total_tokens"] += int(item.get("total_tokens", 0))
+
+    merged_tool_calls: dict[str, int] = {}
+    for name, count in existing.get("tool_calls", {}).items():
+        merged_tool_calls[str(name)] = int(count)
+    for name, count in new.get("tool_calls", {}).items():
+        merged_tool_calls[str(name)] = merged_tool_calls.get(str(name), 0) + int(count)
+
+    return {
+        "models": sorted(merged_models.values(), key=lambda x: x["model"]),
+        "tool_calls": merged_tool_calls,
+    }
+
+
+def merge_usage_details(existing: UsageDetailsState | None, new: UsageDetailsState | None) -> UsageDetailsState:
+    """Reducer for usage details split by execution source.
+
+    Aggregates lead and subagent usage independently, each using merge_usage.
+    """
+    if existing is None:
+        existing = {
+            "lead": _empty_usage_summary(),
+            "subagent": _empty_usage_summary(),
+        }
+    if new is None:
+        return existing
+
+    return {
+        "lead": merge_usage(existing.get("lead"), new.get("lead")),
+        "subagent": merge_usage(existing.get("subagent"), new.get("subagent")),
+    }
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -53,3 +141,5 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    usage: Annotated[UsageSummaryState, merge_usage]
+    usage_details: Annotated[UsageDetailsState, merge_usage_details]

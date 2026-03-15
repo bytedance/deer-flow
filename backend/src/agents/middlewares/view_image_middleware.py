@@ -255,12 +255,20 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
     @override
     def before_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject image details before LLM call, then clear them (sync version)."""
+        """Inject image details before LLM call (sync)."""
+        # Extract/inject image data first. Running cleanup before injection would
+        # strip the __view_image__ payload and make extraction impossible.
+        injection = self._inject_image_message(state)
+        if injection is not None:
+            return injection
         self._cleanup_stale_images(state)
-        return self._inject_image_message(state)
+        return None
 
     @override
     async def abefore_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject image details before LLM call, then clear them (async version)."""
+        """Inject image details before LLM call (async)."""
+        injection = self._inject_image_message(state)
+        if injection is not None:
+            return injection
         self._cleanup_stale_images(state)
-        return self._inject_image_message(state)
+        return None

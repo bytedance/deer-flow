@@ -9,7 +9,7 @@ export interface AgentThreadState extends Record<string, unknown> {
   todos?: Todo[];
 }
 
-export interface AgentThread extends Thread<AgentThreadState> {}
+export interface AgentThread extends Thread<AgentThreadState> { }
 
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;

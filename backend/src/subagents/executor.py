@@ -16,7 +16,7 @@ from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from src.agents.thread_state import SandboxState, ThreadDataState, ThreadState
+from src.agents.thread_state import SandboxState, ThreadDataState, ThreadState, UsageSummaryState
 from src.models import create_chat_model
 from src.subagents.config import SubagentConfig
 
@@ -53,6 +53,7 @@ class SubagentResult:
     status: SubagentStatus
     result: str | None = None
     error: str | None = None
+    usage: UsageSummaryState | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
@@ -169,11 +170,13 @@ class SubagentExecutor:
         # Subagents need minimal middlewares to ensure tools can access sandbox and thread_data
         # These middlewares will reuse the sandbox/thread_data from parent agent
         from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+        from src.agents.middlewares.usage_middleware import UsageMiddleware
         from src.sandbox.middleware import SandboxMiddleware
 
         middlewares = [
             ThreadDataMiddleware(lazy_init=True),  # Compute thread paths
             SandboxMiddleware(lazy_init=True),  # Reuse parent's sandbox (no re-acquisition)
+            UsageMiddleware(),  # Capture subagent model usage for parent aggregation.
         ]
 
         return create_agent(
@@ -248,6 +251,11 @@ class SubagentExecutor:
             final_state = None
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 final_state = chunk
+
+                # Keep latest usage snapshot as the subagent runs.
+                usage_state = chunk.get("usage")
+                if isinstance(usage_state, dict):
+                    result.usage = usage_state
 
                 # Extract AI messages from the current state
                 messages = chunk.get("messages", [])
@@ -407,6 +415,7 @@ class SubagentExecutor:
                         _background_tasks[task_id].status = exec_result.status
                         _background_tasks[task_id].result = exec_result.result
                         _background_tasks[task_id].error = exec_result.error
+                        _background_tasks[task_id].usage = exec_result.usage
                         _background_tasks[task_id].completed_at = datetime.now()
                         _background_tasks[task_id].ai_messages = exec_result.ai_messages
                 except FuturesTimeoutError:

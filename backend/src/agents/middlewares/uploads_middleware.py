@@ -2,14 +2,16 @@
 
 import logging
 from pathlib import Path
-from typing import NotRequired, override
+from typing import Callable, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from src.utils.runtime import get_thread_id
+from src.config.app_config import get_app_config
+from src.config.paths import Paths, get_paths
+from src.storage import get_thread_file_backend
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
     Reads file metadata from the current message's additional_kwargs.files
     (set by the frontend after upload) and prepends an <uploaded_files> block
     to the last human message so the model knows which files are available.
-
-    Uses the storage abstraction to list files, so it works with both
-    local filesystem and R2/S3 backends.
     """
 
     state_schema = UploadsMiddlewareState
@@ -37,10 +36,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """Initialize the middleware.
 
         Args:
-            base_dir: Deprecated. Previously used for local filesystem access.
-                      Now uses the storage abstraction instead.
+            base_dir: Base directory for thread data. Defaults to Paths resolution.
         """
         super().__init__()
+        self._paths = Paths(base_dir) if base_dir else get_paths()
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
         """Create a formatted message listing uploaded files.
@@ -81,12 +80,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
-    def _files_from_kwargs(self, message: HumanMessage, thread_id: str | None = None) -> list[dict] | None:
+    def _files_from_kwargs(self, message: HumanMessage, file_exists: Callable[[str], bool] | None = None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
+
+        The frontend sends uploaded file metadata in additional_kwargs.files
+        after a successful upload. Each entry has: filename, size (bytes),
+        path (virtual path), status.
 
         Args:
             message: The human message to inspect.
-            thread_id: Thread ID for verifying file existence in storage.
+            file_exists: Optional existence callback for uploaded filenames.
+                         When provided, entries whose files no longer exist are skipped.
 
         Returns:
             List of file dicts with virtual paths, or None if the field is absent or empty.
@@ -95,19 +99,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(kwargs_files, list) or not kwargs_files:
             return None
 
-        # Optionally verify files exist in storage
-        existing_filenames = None
-        if thread_id:
-            try:
-                from src.storage import get_storage
-
-                storage = get_storage()
-                prefix = storage.uploads_prefix(thread_id)
-                existing = storage.list_files(prefix)
-                existing_filenames = {f.filename for f in existing}
-            except Exception:
-                existing_filenames = None
-
         files = []
         for f in kwargs_files:
             if not isinstance(f, dict):
@@ -115,7 +106,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             filename = f.get("filename") or ""
             if not filename or Path(filename).name != filename:
                 continue
-            if existing_filenames is not None and filename not in existing_filenames:
+            if file_exists is not None and not file_exists(filename):
                 continue
             files.append(
                 {
@@ -127,43 +118,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             )
         return files if files else None
 
-    def _get_historical_files(self, thread_id: str, exclude_filenames: set[str]) -> list[dict]:
-        """Get historical files from storage.
-
-        Args:
-            thread_id: The thread ID.
-            exclude_filenames: Filenames to exclude (newly uploaded).
-
-        Returns:
-            List of file dicts for historical uploads.
-        """
-        try:
-            from src.storage import get_storage
-
-            storage = get_storage()
-            prefix = storage.uploads_prefix(thread_id)
-            file_infos = storage.list_files(prefix)
-
-            return [
-                {
-                    "filename": info.filename,
-                    "size": info.size,
-                    "path": f"/mnt/user-data/uploads/{info.filename}",
-                    "extension": info.extension,
-                }
-                for info in file_infos
-                if info.filename not in exclude_filenames
-            ]
-        except Exception as e:
-            logger.warning(f"Failed to list historical uploads from storage: {e}")
-            return []
-
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
         """Inject uploaded files information before agent execution.
 
         New files come from the current message's additional_kwargs.files.
-        Historical files are listed from persistent storage.
+        Historical files are scanned from the thread's uploads directory,
+        excluding the new ones.
+
+        Prepends <uploaded_files> context to the last human message content.
+        The original additional_kwargs (including files metadata) is preserved
+        on the updated message so the frontend can read it from the stream.
 
         Args:
             state: Current agent state.
@@ -182,14 +147,61 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
-        thread_id = get_thread_id(runtime)
+        # Resolve uploads backend and existence checks.
+        # Local mode keeps existing path-based behavior to stay compatible with
+        # base_dir overrides in middleware tests and local runtime semantics.
+        thread_id = runtime.context.get("thread_id")
+        backend_kind = "local"
+        try:
+            backend_kind = get_app_config().thread_files.backend_for_feature("uploads")
+        except Exception:
+            # Unit tests may run without a full app config file; keep legacy local behavior.
+            backend_kind = "local"
 
-        # Get newly uploaded files from the current message
-        new_files = self._files_from_kwargs(last_message, thread_id) or []
+        if backend_kind == "local":
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+            new_files = self._files_from_kwargs(last_message, (lambda name: bool(uploads_dir and (uploads_dir / name).is_file())) if thread_id else None) or []
+        else:
+            uploads_backend = get_thread_file_backend("uploads") if thread_id else None
 
-        # Collect historical files from storage
+            def _exists(filename: str) -> bool:
+                if not thread_id or uploads_backend is None:
+                    return False
+                return uploads_backend.exists_virtual_file(thread_id, f"/mnt/user-data/uploads/{filename}")
+
+            new_files = self._files_from_kwargs(last_message, _exists if thread_id else None) or []
+
+        # Collect historical files from the uploads directory (all except the new ones)
         new_filenames = {f["filename"] for f in new_files}
-        historical_files = self._get_historical_files(thread_id, new_filenames) if thread_id else []
+        historical_files: list[dict] = []
+        if backend_kind == "local":
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
+            if uploads_dir and uploads_dir.exists():
+                for file_path in sorted(uploads_dir.iterdir()):
+                    if file_path.is_file() and file_path.name not in new_filenames:
+                        stat = file_path.stat()
+                        historical_files.append(
+                            {
+                                "filename": file_path.name,
+                                "size": stat.st_size,
+                                "path": f"/mnt/user-data/uploads/{file_path.name}",
+                                "extension": file_path.suffix,
+                            }
+                        )
+        else:
+            uploads_backend = get_thread_file_backend("uploads") if thread_id else None
+            if thread_id and uploads_backend is not None:
+                for item in uploads_backend.list_uploads(thread_id):
+                    if item.filename in new_filenames:
+                        continue
+                    historical_files.append(
+                        {
+                            "filename": item.filename,
+                            "size": item.size,
+                            "path": f"/mnt/user-data/uploads/{item.filename}",
+                            "extension": item.extension,
+                        }
+                    )
 
         if not new_files and not historical_files:
             return None
@@ -211,6 +223,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             original_content = "\n".join(text_parts)
 
         # Create new message with combined content.
+        # Preserve additional_kwargs (including files metadata) so the frontend
+        # can read structured file info from the streamed message.
         updated_message = HumanMessage(
             content=f"{files_message}\n\n{original_content}",
             id=last_message.id,

@@ -17,6 +17,9 @@ class ConversationContext:
     messages: list[Any]
     timestamp: datetime = field(default_factory=datetime.utcnow)
     agent_name: str | None = None
+    namespace_type: str | None = None
+    namespace_id: str | None = None
+    subscription_tier: str | None = None
 
 
 class MemoryUpdateQueue:
@@ -34,13 +37,22 @@ class MemoryUpdateQueue:
         self._timer: threading.Timer | None = None
         self._processing = False
 
-    def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None) -> None:
+    def add(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None = None,
+        namespace_type: str | None = None,
+        namespace_id: str | None = None,
+        subscription_tier: str | None = None,
+    ) -> None:
         """Add a conversation to the update queue.
 
         Args:
             thread_id: The thread ID.
             messages: The conversation messages.
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            subscription_tier: Subscription tier value used to cap fact storage.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -50,6 +62,9 @@ class MemoryUpdateQueue:
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
+            namespace_type=namespace_type,
+            namespace_id=namespace_id,
+            subscription_tier=subscription_tier,
         )
 
         with self._lock:
@@ -112,6 +127,9 @@ class MemoryUpdateQueue:
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
+                        namespace_type=context.namespace_type,
+                        namespace_id=context.namespace_id,
+                        subscription_tier=context.subscription_tier,
                     )
                     if success:
                         print(f"Memory updated successfully for thread {context.thread_id}")

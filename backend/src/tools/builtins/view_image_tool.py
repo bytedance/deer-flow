@@ -4,6 +4,7 @@ import logging
 import mimetypes
 from pathlib import Path
 from typing import Annotated
+import json
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage

@@ -12,6 +12,8 @@ from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
 from src.config.sandbox_config import SandboxConfig
 from src.config.skills_config import SkillsConfig
+from src.config.subscription_config import load_subscription_config_from_dict
+from src.config.thread_files_config import ThreadFilesConfig
 from src.config.subagents_config import load_subagents_config_from_dict
 from src.config.summarization_config import load_summarization_config_from_dict
 from src.config.title_config import load_title_config_from_dict
@@ -28,6 +30,7 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
+    thread_files: ThreadFilesConfig = Field(default_factory=ThreadFilesConfig, description="Thread uploads/artifacts storage configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
@@ -89,6 +92,10 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Load subscription config if present
+        if "subscription" in config_data:
+            load_subscription_config_from_dict(config_data["subscription"])
 
         # Load subagents config if present
         if "subagents" in config_data:

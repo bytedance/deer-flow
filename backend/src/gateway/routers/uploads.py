@@ -1,17 +1,15 @@
 """Upload router for handling file uploads."""
 
 import logging
-import mimetypes
-import threading
 from pathlib import Path
-from typing import Optional
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from src.sandbox.sandbox_provider import get_sandbox_provider
-from src.storage import get_storage
+from src.storage import build_upload_metadata, evict_local_upload_cache, get_thread_file_backend, materialize_upload_to_local_cache
 
 logger = logging.getLogger(__name__)
 
@@ -37,29 +35,53 @@ class UploadResponse(BaseModel):
     message: str
 
 
-class PresignResponse(BaseModel):
-    """Response model for presigned upload URL."""
+class TrustedAttachmentDescriptor(BaseModel):
+    """Trusted downstream attachment descriptor for finalize-by-reference."""
 
-    url: str
-    key: str
-    virtual_path: str
-    artifact_url: str
-    markdown_file: Optional[str] = None
-    markdown_key: Optional[str] = None
-    markdown_virtual_path: Optional[str] = None
-    markdown_artifact_url: Optional[str] = None
+    thread_id: str = Field(description="Thread binding context from downstream")
+    filename: str
+    size: int = Field(ge=0)
+    content_type: str = Field(min_length=1)
+    object_key: str = Field(min_length=1, description="Durable object key in shared storage")
+    trusted_url: str | None = None
+    checksum: str | None = None
+    etag: str | None = None
 
 
-class PresignBatchResponse(BaseModel):
-    """Response for batch presigned URL generation."""
+class FinalizeReferencesRequest(BaseModel):
+    attachments: list[TrustedAttachmentDescriptor]
 
-    files: list[PresignResponse]
+
+class FinalizeReferencesResponse(BaseModel):
+    success: bool
+    files: list[dict[str, str]]
+    message: str
+
+
+def _validate_reference_contract(thread_id: str, descriptor: TrustedAttachmentDescriptor) -> str:
+    if descriptor.thread_id != thread_id:
+        raise HTTPException(status_code=400, detail=f"Attachment thread_id mismatch for {descriptor.filename}")
+
+    safe_filename = Path(descriptor.filename).name
+    if safe_filename != descriptor.filename or safe_filename in {"", ".", ".."}:
+        raise HTTPException(status_code=400, detail=f"Unsafe filename in attachment descriptor: {descriptor.filename!r}")
+
+    expected_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
+
+    # Primary contract input is object key, not arbitrary external URL.
+    if descriptor.object_key.strip() == "":
+        raise HTTPException(status_code=400, detail=f"Missing object_key for attachment: {safe_filename}")
+
+    if descriptor.trusted_url:
+        parsed = urlparse(descriptor.trusted_url)
+        if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+            raise HTTPException(status_code=400, detail=f"Invalid trusted_url for attachment: {safe_filename}")
+
+    return expected_virtual_path
 
 
 def get_uploads_dir(thread_id: str) -> Path:
-    """Get the uploads directory for a thread (local filesystem).
-
-    Used for temporary file processing (e.g., markdown conversion).
+    """Get the uploads directory for a thread.
 
     Args:
         thread_id: The thread ID.
@@ -72,7 +94,7 @@ def get_uploads_dir(thread_id: str) -> Path:
     return base_dir
 
 
-def _convert_file_to_markdown_sync(file_path: Path) -> Path | None:
+async def convert_file_to_markdown(file_path: Path) -> Path | None:
     """Convert a file to markdown using markitdown.
 
     Args:
@@ -98,169 +120,15 @@ def _convert_file_to_markdown_sync(file_path: Path) -> Path | None:
         return None
 
 
-def _background_sync(thread_id: str, safe_filename: str, content: bytes, file_path: Path, file_ext: str) -> None:
-    """Background task: upload to R2, convert to markdown, sync to sandbox.
-
-    This runs in a separate thread so the upload endpoint can return immediately
-    after saving to local disk.
-    """
-    try:
-        storage = get_storage()
-
-        # 1. Upload original file to persistent storage (R2)
-        storage_key = storage.upload_key(thread_id, safe_filename)
-        storage.write(storage_key, content)
-        logger.info(f"Background: synced {safe_filename} ({len(content)} bytes) to storage: {storage_key}")
-
-        # 2. Convert to markdown if applicable
-        if file_ext in CONVERTIBLE_EXTENSIONS:
-            md_path = _convert_file_to_markdown_sync(file_path)
-            if md_path:
-                md_filename = md_path.name
-                md_content = md_path.read_bytes()
-                md_storage_key = storage.upload_key(thread_id, md_filename)
-                storage.write(md_storage_key, md_content)
-                logger.info(f"Background: synced markdown {md_filename} to storage: {md_storage_key}")
-
-        # 3. Sync to sandbox if one already exists
-        sandbox_provider = get_sandbox_provider()
-        sandbox_id = sandbox_provider.get_existing(thread_id)
-        if sandbox_id and sandbox_id != "local":
-            sandbox = sandbox_provider.get(sandbox_id)
-            if sandbox:
-                virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
-                sandbox.update_file(virtual_path, content)
-                md_local = file_path.with_suffix(".md")
-                if file_ext in CONVERTIBLE_EXTENSIONS and md_local.exists():
-                    md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_local.name}"
-                    sandbox.update_file(md_virtual_path, md_local.read_bytes())
-
-    except Exception as e:
-        logger.error(f"Background sync failed for {safe_filename}: {e}")
-
-
-@router.post("/presign", response_model=PresignBatchResponse)
-async def presign_upload(
-    thread_id: str,
-    filenames: list[str] = Query(..., description="List of filenames to generate presigned URLs for"),
-) -> PresignBatchResponse:
-    """Generate presigned PUT URLs for direct browser-to-R2 uploads.
-
-    The browser uses these URLs to upload files directly to R2, bypassing the
-    gateway server entirely. This eliminates the gateway as a file proxy and
-    makes uploads as fast as the client's connection to Cloudflare.
-
-    Args:
-        thread_id: The thread ID.
-        filenames: List of filenames to generate URLs for.
-
-    Returns:
-        Presigned URLs and metadata for each file.
-    """
-    storage = get_storage()
-
-    # Check if storage supports presigned URLs
-    if not hasattr(storage, "generate_presigned_put"):
-        raise HTTPException(
-            status_code=501,
-            detail="Storage backend does not support presigned URLs. Use POST upload instead.",
-        )
-
-    results = []
-    for filename in filenames:
-        # Normalize filename to prevent path traversal
-        safe_filename = Path(filename).name
-        if not safe_filename or safe_filename in {".", ".."} or "/" in safe_filename or "\\" in safe_filename:
-            continue
-
-        storage_key = storage.upload_key(thread_id, safe_filename)
-        content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
-
-        url = storage.generate_presigned_put(storage_key, content_type=content_type)
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
-
-        result = PresignResponse(
-            url=url,
-            key=storage_key,
-            virtual_path=virtual_path,
-            artifact_url=f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
-        )
-
-        # Add expected markdown paths for convertible files
-        file_ext = Path(safe_filename).suffix.lower()
-        if file_ext in CONVERTIBLE_EXTENSIONS:
-            md_filename = Path(safe_filename).with_suffix(".md").name
-            result.markdown_file = md_filename
-            result.markdown_key = storage.upload_key(thread_id, md_filename)
-            result.markdown_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_filename}"
-            result.markdown_artifact_url = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_filename}"
-
-        results.append(result)
-
-    return PresignBatchResponse(files=results)
-
-
-@router.post("/confirm")
-async def confirm_upload(
-    thread_id: str,
-    filenames: list[str] = Query(..., description="Filenames that were uploaded directly to R2"),
-) -> dict:
-    """Confirm that files were uploaded directly to R2.
-
-    Called by the frontend after a presigned upload completes, so the backend
-    can run markdown conversion and sandbox sync in the background.
-
-    Args:
-        thread_id: The thread ID.
-        filenames: Filenames that were uploaded.
-
-    Returns:
-        Confirmation response.
-    """
-    storage = get_storage()
-    uploads_dir = get_uploads_dir(thread_id)
-
-    for filename in filenames:
-        safe_filename = Path(filename).name
-        if not safe_filename or safe_filename in {".", ".."}:
-            continue
-
-        file_ext = Path(safe_filename).suffix.lower()
-        if file_ext not in CONVERTIBLE_EXTENSIONS:
-            continue
-
-        # Download from R2 to local disk for markdown conversion
-        def _bg_convert(tid: str, fn: str, ext: str) -> None:
-            try:
-                key = storage.upload_key(tid, fn)
-                content = storage.read(key)
-                local_path = uploads_dir / fn
-                local_path.write_bytes(content)
-
-                md_path = _convert_file_to_markdown_sync(local_path)
-                if md_path:
-                    md_content = md_path.read_bytes()
-                    md_key = storage.upload_key(tid, md_path.name)
-                    storage.write(md_key, md_content)
-                    logger.info(f"Background: converted and synced {md_path.name}")
-            except Exception as e:
-                logger.error(f"Background conversion failed for {fn}: {e}")
-
-        t = threading.Thread(target=_bg_convert, args=(thread_id, safe_filename, file_ext), daemon=True)
-        t.start()
-
-    return {"success": True, "message": f"Confirmed {len(filenames)} file(s)"}
-
-
 @router.post("", response_model=UploadResponse)
-def upload_files(
+async def upload_files(
     thread_id: str,
     files: list[UploadFile] = File(...),
 ) -> UploadResponse:
-    """Upload files via multipart form (fallback when presigned URLs unavailable).
+    """Upload multiple files to a thread's uploads directory.
 
-    Saves files to local disk immediately and returns fast. R2 upload,
-    markdown conversion, and sandbox sync happen in background threads.
+    For PDF, PPT, Excel, and Word files, they will be converted to markdown using markitdown.
+    All files (original and converted) are saved to /mnt/user-data/uploads.
 
     Args:
         thread_id: The thread ID to upload files to.
@@ -273,7 +141,14 @@ def upload_files(
         raise HTTPException(status_code=400, detail="No files provided")
 
     uploads_dir = get_uploads_dir(thread_id)
+    paths = get_paths()
+    uploads_backend = get_thread_file_backend("uploads")
+    sidecar_backend = get_thread_file_backend("upload_markdown_sidecars")
     uploaded_files = []
+
+    sandbox_provider = get_sandbox_provider()
+    sandbox_id = sandbox_provider.acquire(thread_id)
+    sandbox = sandbox_provider.get(sandbox_id)
 
     for file in files:
         if not file.filename:
@@ -286,44 +161,51 @@ def upload_files(
                 logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
                 continue
 
-            content = file.file.read()
-
-            # Save to local disk immediately (fast, <1ms)
+            content = await file.read()
             file_path = uploads_dir / safe_filename
             file_path.write_bytes(content)
+            uploads_backend.put_virtual_file(thread_id, f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}", content)
+            evict_local_upload_cache(thread_id, keep_filenames={safe_filename})
 
-            storage = get_storage()
-            storage_key = storage.upload_key(thread_id, safe_filename)
+            # Build relative path from backend root
+            relative_path = str(paths.sandbox_uploads_dir(thread_id) / safe_filename)
             virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
 
-            file_info: dict[str, str] = {
+            # Keep local sandbox source of truth in thread-scoped host storage.
+            # For non-local sandboxes, also sync to virtual path for runtime visibility.
+            if sandbox_id != "local":
+                sandbox.update_file(virtual_path, content)
+
+            file_info = {
                 "filename": safe_filename,
                 "size": str(len(content)),
-                "path": storage_key,
-                "virtual_path": virtual_path,
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
+                "path": relative_path,  # Actual filesystem path (relative to backend/)
+                "virtual_path": virtual_path,  # Path for Agent in sandbox
+                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",  # HTTP URL
             }
 
-            # For convertible files, add expected markdown paths
+            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {relative_path}")
+
+            # Check if file should be converted to markdown
             file_ext = file_path.suffix.lower()
             if file_ext in CONVERTIBLE_EXTENSIONS:
-                md_filename = file_path.with_suffix(".md").name
-                file_info["markdown_file"] = md_filename
-                file_info["markdown_path"] = storage.upload_key(thread_id, md_filename)
-                file_info["markdown_virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_filename}"
-                file_info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_filename}"
+                md_path = await convert_file_to_markdown(file_path)
+                if md_path:
+                    md_relative_path = str(paths.sandbox_uploads_dir(thread_id) / md_path.name)
+                    md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+                    md_content = md_path.read_bytes()
+                    sidecar_backend.put_virtual_file(thread_id, md_virtual_path, md_content)
+                    evict_local_upload_cache(thread_id, keep_filenames={safe_filename, md_path.name})
+
+                    if sandbox_id != "local":
+                        sandbox.update_file(md_virtual_path, md_content)
+
+                    file_info["markdown_file"] = md_path.name
+                    file_info["markdown_path"] = md_relative_path
+                    file_info["markdown_virtual_path"] = md_virtual_path
+                    file_info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
             uploaded_files.append(file_info)
-
-            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to local disk")
-
-            # R2 upload + markdown conversion + sandbox sync in background
-            t = threading.Thread(
-                target=_background_sync,
-                args=(thread_id, safe_filename, content, file_path, file_ext),
-                daemon=True,
-            )
-            t.start()
 
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
@@ -336,9 +218,49 @@ def upload_files(
     )
 
 
+@router.post("/references", response_model=FinalizeReferencesResponse)
+async def finalize_upload_references(thread_id: str, request: FinalizeReferencesRequest) -> FinalizeReferencesResponse:
+    """Finalize trusted downstream upload references without proxying file bytes through this service."""
+    if not request.attachments:
+        raise HTTPException(status_code=400, detail="No attachments provided")
+
+    uploads_backend = get_thread_file_backend("uploads")
+    files: list[dict[str, str]] = []
+
+    for descriptor in request.attachments:
+        safe_filename = Path(descriptor.filename).name
+        expected_virtual_path = _validate_reference_contract(thread_id, descriptor)
+
+        # Enforce canonical key ownership to reject arbitrary external URL-driven contracts.
+        expected_suffix = f"/{thread_id}/uploads/{safe_filename}"
+        if not descriptor.object_key.endswith(expected_suffix):
+            raise HTTPException(status_code=400, detail=f"Attachment object_key is outside canonical thread uploads namespace: {safe_filename}")
+
+        if not uploads_backend.exists_virtual_file(thread_id, expected_virtual_path):
+            raise HTTPException(status_code=404, detail=f"Attachment not found in durable backend: {safe_filename}")
+
+        # Materialize on finalize for near-term runtime readiness, while remaining rehydratable cache.
+        try:
+            materialize_upload_to_local_cache(thread_id, expected_virtual_path)
+        except Exception:
+            logger.info("Attachment %s exists durably but local pre-materialization failed; runtime will lazy rehydrate", safe_filename)
+
+        files.append(
+            {
+                "filename": safe_filename,
+                "size": str(descriptor.size),
+                "path": str(get_paths().sandbox_uploads_dir(thread_id) / safe_filename),
+                "virtual_path": expected_virtual_path,
+                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
+            }
+        )
+
+    return FinalizeReferencesResponse(success=True, files=files, message=f"Finalized {len(files)} trusted attachment reference(s)")
+
+
 @router.get("/list", response_model=dict)
 async def list_uploaded_files(thread_id: str) -> dict:
-    """List all files in a thread's uploads.
+    """List all files in a thread's uploads directory.
 
     Args:
         thread_id: The thread ID to list files for.
@@ -346,30 +268,14 @@ async def list_uploaded_files(thread_id: str) -> dict:
     Returns:
         Dictionary containing list of files with their metadata.
     """
-    storage = get_storage()
-    prefix = storage.uploads_prefix(thread_id)
-    file_infos = storage.list_files(prefix)
-
-    files = []
-    for info in file_infos:
-        files.append(
-            {
-                "filename": info.filename,
-                "size": info.size,
-                "path": info.path,
-                "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{info.filename}",
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{info.filename}",
-                "extension": info.extension,
-                "modified": info.modified,
-            }
-        )
-
+    uploads_backend = get_thread_file_backend("uploads")
+    files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
     return {"files": files, "count": len(files)}
 
 
 @router.delete("/{filename}")
 async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
-    """Delete a file from a thread's uploads.
+    """Delete a file from a thread's uploads directory.
 
     Args:
         thread_id: The thread ID.
@@ -378,20 +284,37 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
     Returns:
         Success message.
     """
-    # Prevent path traversal
-    safe_filename = Path(filename).name
-    if safe_filename != filename or not safe_filename or safe_filename in {".", ".."}:
+    uploads_dir = get_uploads_dir(thread_id)
+    file_path = uploads_dir / filename
+    virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
+
+    # Security check: ensure the path is within the uploads directory
+    try:
+        file_path.resolve().relative_to(uploads_dir.resolve())
+    except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    storage = get_storage()
-    key = storage.upload_key(thread_id, safe_filename)
+    uploads_backend = get_thread_file_backend("uploads")
+
+    if not file_path.exists() and not uploads_backend.exists_virtual_file(thread_id, virtual_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
     try:
-        storage.delete(key)
+        if file_path.exists():
+            file_path.unlink()
+        uploads_backend.delete_virtual_file(thread_id, virtual_path)
+
+        # Delete derived markdown sidecar when it exists.
+        md_name = f"{Path(filename).stem}.md"
+        md_path = uploads_dir / md_name
+        md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_name}"
+        if md_path.exists():
+            md_path.unlink()
+        get_thread_file_backend("upload_markdown_sidecars").delete_virtual_file(thread_id, md_virtual_path)
+        evict_local_upload_cache(thread_id)
+
         logger.info(f"Deleted file: {filename}")
         return {"success": True, "message": f"Deleted {filename}"}
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except Exception as e:
         logger.error(f"Failed to delete {filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")

@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import mimetypes
-import os
 import re
 import shutil
 import tempfile
@@ -41,6 +40,7 @@ from src.config.app_config import get_app_config, reload_app_config
 from src.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from src.config.paths import get_paths
 from src.models import create_chat_model
+from src.storage import build_upload_metadata, extract_file_from_skill_archive_bytes, get_thread_file_backend, guess_mime_type, is_text_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -677,9 +677,20 @@ class DeerFlowClient:
         from src.config.memory_config import get_memory_config
 
         config = get_memory_config()
+        backend = config.backend if isinstance(getattr(config, "backend", None), str) else "file"
+        database_url = getattr(config, "database_url", "")
+        database_url = database_url if isinstance(database_url, str) else ""
+        strict_scope = getattr(config, "strict_scope", False)
+        strict_scope = strict_scope if isinstance(strict_scope, bool) else False
+        auth_mode = config.auth_mode if isinstance(getattr(config, "auth_mode", None), str) else "trusted"
+
         return {
             "enabled": config.enabled,
+            "backend": backend,
             "storage_path": config.storage_path,
+            "database_configured": bool(database_url) if backend == "postgres" else True,
+            "strict_scope": strict_scope,
+            "auth_mode": auth_mode,
             "debounce_seconds": config.debounce_seconds,
             "max_facts": config.max_facts,
             "fact_confidence_threshold": config.fact_confidence_threshold,
@@ -724,9 +735,8 @@ class DeerFlowClient:
 
         Raises:
             FileNotFoundError: If any file does not exist.
-            ValueError: If any supplied path exists but is not a regular file.
         """
-        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, _convert_file_to_markdown_sync
+        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -743,11 +753,30 @@ class DeerFlowClient:
                 has_convertible_file = True
 
         uploads_dir = self._get_uploads_dir(thread_id)
+        uploads_backend = get_thread_file_backend("uploads")
+        sidecar_backend = get_thread_file_backend("upload_markdown_sidecars")
         uploaded_files: list[dict] = []
 
-        for src_path in resolved_files:
-            dest = uploads_dir / src_path.name
-            shutil.copy2(src_path, dest)
+        conversion_pool = None
+        if has_convertible_file:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                conversion_pool = None
+            else:
+                import concurrent.futures
+
+                # Reuse one worker when already inside an event loop.
+                conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        def _convert_in_thread(path: Path):
+            return asyncio.run(convert_file_to_markdown(path))
+
+        try:
+            for src_path in resolved_files:
+                dest = uploads_dir / src_path.name
+                shutil.copy2(src_path, dest)
+                uploads_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{src_path.name}", dest.read_bytes())
 
                 info: dict[str, Any] = {
                     "filename": src_path.name,
@@ -757,14 +786,18 @@ class DeerFlowClient:
                     "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
                 }
 
-            if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                try:
-                    md_path = _convert_file_to_markdown_sync(dest)
-                except Exception:
-                    logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
-                    md_path = None
+                if src_path.suffix.lower() in convertible_extensions:
+                    try:
+                        if conversion_pool is not None:
+                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
+                        else:
+                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                    except Exception:
+                        logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
+                        md_path = None
 
                     if md_path is not None:
+                        sidecar_backend.put_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_path.name}", md_path.read_bytes())
                         info["markdown_file"] = md_path.name
                         info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
                         info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
@@ -790,28 +823,8 @@ class DeerFlowClient:
             Dict with "files" and "count" keys, matching the Gateway API
             ``list_uploaded_files`` response.
         """
-        uploads_dir = self._get_uploads_dir(thread_id)
-        if not uploads_dir.exists():
-            return {"files": [], "count": 0}
-
-        files = []
-        with os.scandir(uploads_dir) as entries:
-            file_entries = [entry for entry in entries if entry.is_file()]
-
-        for entry in sorted(file_entries, key=lambda item: item.name):
-            stat = entry.stat()
-            filename = entry.name
-            files.append(
-                {
-                    "filename": filename,
-                    "size": str(stat.st_size),
-                    "path": str(Path(entry.path)),
-                    "virtual_path": f"/mnt/user-data/uploads/{filename}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                    "modified": stat.st_mtime,
-                }
-            )
+        uploads_backend = get_thread_file_backend("uploads")
+        files = [build_upload_metadata(thread_id, item) for item in uploads_backend.list_uploads(thread_id)]
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
@@ -831,16 +844,27 @@ class DeerFlowClient:
         """
         uploads_dir = self._get_uploads_dir(thread_id)
         file_path = (uploads_dir / filename).resolve()
+        virtual_path = f"/mnt/user-data/uploads/{filename}"
 
         try:
             file_path.relative_to(uploads_dir.resolve())
         except ValueError as exc:
             raise PermissionError("Access denied: path traversal detected") from exc
 
-        if not file_path.is_file():
+        uploads_backend = get_thread_file_backend("uploads")
+        if not file_path.is_file() and not uploads_backend.exists_virtual_file(thread_id, virtual_path):
             raise FileNotFoundError(f"File not found: {filename}")
 
-        file_path.unlink()
+        if file_path.is_file():
+            file_path.unlink()
+        uploads_backend.delete_virtual_file(thread_id, virtual_path)
+
+        md_name = f"{Path(filename).stem}.md"
+        md_path = uploads_dir / md_name
+        if md_path.is_file():
+            md_path.unlink()
+        get_thread_file_backend("upload_markdown_sidecars").delete_virtual_file(thread_id, f"/mnt/user-data/uploads/{md_name}")
+
         return {"success": True, "message": f"Deleted {filename}"}
 
     # ------------------------------------------------------------------
@@ -866,18 +890,34 @@ class DeerFlowClient:
         if not clean_path.startswith(virtual_prefix):
             raise ValueError(f"Path must start with /{virtual_prefix}")
 
-        relative = clean_path[len(virtual_prefix) :].lstrip("/")
-        base_dir = get_paths().sandbox_user_data_dir(thread_id)
-        actual = (base_dir / relative).resolve()
+        virtual_path = f"/{clean_path}"
+        backend = get_thread_file_backend("artifact_reads")
 
-        try:
-            actual.relative_to(base_dir.resolve())
-        except ValueError as exc:
-            raise PermissionError("Access denied: path traversal detected") from exc
-        if not actual.exists():
+        if ".skill/" in clean_path:
+            skill_marker = ".skill/"
+            marker_pos = clean_path.find(skill_marker)
+            skill_file_path = clean_path[: marker_pos + len(".skill")]
+            internal_path = clean_path[marker_pos + len(skill_marker) :]
+            skill_virtual_path = f"/{skill_file_path.lstrip('/')}"
+
+            if not backend.exists_virtual_file(thread_id, skill_virtual_path):
+                raise FileNotFoundError(f"Artifact not found: {path}")
+
+            archive_bytes = backend.read_virtual_file(thread_id, skill_virtual_path)
+            content = extract_file_from_skill_archive_bytes(archive_bytes, internal_path)
+            if content is None:
+                raise FileNotFoundError(f"Artifact not found: {path}")
+
+            mime_type = guess_mime_type(internal_path) or "application/octet-stream"
+            if mime_type == "application/octet-stream" and is_text_bytes(content):
+                mime_type = "text/plain"
+            return content, mime_type
+
+        if not backend.exists_virtual_file(thread_id, virtual_path):
             raise FileNotFoundError(f"Artifact not found: {path}")
-        if not actual.is_file():
-            raise ValueError(f"Path is not a file: {path}")
 
-        mime_type, _ = mimetypes.guess_type(actual)
-        return actual.read_bytes(), mime_type or "application/octet-stream"
+        content = backend.read_virtual_file(thread_id, virtual_path)
+        mime_type = guess_mime_type(path) or "application/octet-stream"
+        if mime_type == "application/octet-stream" and is_text_bytes(content):
+            mime_type = "text/plain"
+        return content, mime_type

@@ -8,7 +8,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from src.agents.memory.queue import get_memory_queue
-from src.utils.runtime import get_thread_id
+from src.utils.runtime import get_thread_id, get_subscription_tier_context
 from src.config.memory_config import get_memory_config
 
 
@@ -145,6 +145,14 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Queue the filtered conversation for memory update
         queue = get_memory_queue()
-        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+        tier_raw, _ = get_subscription_tier_context(runtime)
+        queue.add(
+            thread_id=thread_id,
+            messages=filtered_messages,
+            agent_name=self._agent_name,
+            namespace_type=runtime.context.get("namespace_type"),
+            namespace_id=runtime.context.get("namespace_id"),
+            subscription_tier=tier_raw,
+        )
 
         return None

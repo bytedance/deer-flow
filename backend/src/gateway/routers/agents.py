@@ -292,22 +292,22 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
 
 class UserProfileResponse(BaseModel):
-    """Response model for the global user profile (USER.md)."""
+    """Response model for the global user profile document (USER.md)."""
 
     content: str | None = Field(default=None, description="USER.md content, or null if not yet created")
 
 
 class UserProfileUpdateRequest(BaseModel):
-    """Request body for setting the global user profile."""
+    """Request body for setting the global user profile document."""
 
-    content: str = Field(default="", description="USER.md content — describes the user's background and preferences")
+    content: str = Field(default="", description="USER.md content managed by the gateway user-profile API")
 
 
 @router.get(
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Get User Profile",
-    description="Read the global USER.md file that is injected into all custom agents.",
+    description="Read the global USER.md document managed by the gateway.",
 )
 async def get_user_profile() -> UserProfileResponse:
     """Return the current USER.md content.
@@ -330,7 +330,7 @@ async def get_user_profile() -> UserProfileResponse:
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Update User Profile",
-    description="Write the global USER.md file that is injected into all custom agents.",
+    description="Create or overwrite the global USER.md document managed by the gateway.",
 )
 async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileResponse:
     """Create or overwrite the global USER.md.

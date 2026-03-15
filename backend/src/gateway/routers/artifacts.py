@@ -1,66 +1,14 @@
 import logging
-import mimetypes
-import zipfile
-from io import BytesIO
-from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
-from src.gateway.path_utils import resolve_thread_virtual_path
-from src.storage import get_storage
+from src.storage import extract_file_from_skill_archive_bytes, get_thread_file_backend, guess_mime_type, is_text_bytes
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
-
-
-def is_text_content(data: bytes, sample_size: int = 8192) -> bool:
-    """Check if data is text by examining content for null bytes."""
-    chunk = data[:sample_size]
-    return b"\x00" not in chunk
-
-
-def _extract_file_from_skill_archive(zip_data: bytes, internal_path: str) -> bytes | None:
-    """Extract a file from a .skill ZIP archive.
-
-    Args:
-        zip_data: The ZIP archive as bytes.
-        internal_path: Path to the file inside the archive (e.g., "SKILL.md").
-
-    Returns:
-        The file content as bytes, or None if not found.
-    """
-    try:
-        with zipfile.ZipFile(BytesIO(zip_data), "r") as zip_ref:
-            namelist = zip_ref.namelist()
-
-            if internal_path in namelist:
-                return zip_ref.read(internal_path)
-
-            for name in namelist:
-                if name.endswith("/" + internal_path) or name == internal_path:
-                    return zip_ref.read(name)
-
-            return None
-    except (zipfile.BadZipFile, KeyError):
-        return None
-
-
-def _virtual_path_to_storage_key(thread_id: str, virtual_path: str) -> str:
-    """Convert a virtual path to a storage key.
-
-    Virtual path: mnt/user-data/outputs/file.txt or /mnt/user-data/uploads/doc.pdf
-    Storage key: threads/{thread_id}/outputs/file.txt
-    """
-    stripped = virtual_path.lstrip("/")
-    prefix = "mnt/user-data/"
-    if stripped.startswith(prefix):
-        relative = stripped[len(prefix):]  # e.g., "outputs/file.txt"
-        return f"threads/{thread_id}/{relative}"
-    return f"threads/{thread_id}/{stripped}"
 
 
 @router.get(
@@ -71,158 +19,117 @@ def _virtual_path_to_storage_key(thread_id: str, virtual_path: str) -> str:
 async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
     """Get an artifact file by its path.
 
-    Tries persistent storage (R2) first, falls back to local filesystem.
+    The endpoint automatically detects file types and returns appropriate content types.
+    Use the `?download=true` query parameter to force file download.
 
     Args:
         thread_id: The thread ID.
         path: The artifact path with virtual prefix (e.g., mnt/user-data/outputs/file.txt).
-        request: FastAPI request object.
+        request: FastAPI request object (automatically injected).
 
     Returns:
-        The file content with appropriate content type.
-    """
-    storage = get_storage()
-    storage_key = _virtual_path_to_storage_key(thread_id, path)
+        The file content as a FileResponse with appropriate content type:
+        - HTML files: Rendered as HTML
+        - Text files: Plain text with proper MIME type
+        - Binary files: Inline display with download option
 
-    # Handle .skill archive requests
+    Raises:
+        HTTPException:
+            - 400 if path is invalid or not a file
+            - 403 if access denied (path traversal detected)
+            - 404 if file not found
+
+    Query Parameters:
+        download (bool): If true, returns file as attachment for download
+
+    Example:
+        - Get HTML file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/index.html`
+        - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
+    """
+    artifact_backend = get_thread_file_backend("artifact_reads")
+
+    # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
+        # Split the path at ".skill/" to get the ZIP file path and internal path
         skill_marker = ".skill/"
         marker_pos = path.find(skill_marker)
-        skill_file_path = path[: marker_pos + len(".skill")]
-        internal_path = path[marker_pos + len(skill_marker):]
-
-        skill_key = _virtual_path_to_storage_key(thread_id, skill_file_path)
+        skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
+        internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
         try:
-            zip_data = storage.read(skill_key)
-        except FileNotFoundError:
-            # Fallback to local filesystem
-            actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
-            if not actual_skill_path.exists() or not actual_skill_path.is_file():
-                raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
-            zip_data = actual_skill_path.read_bytes()
+            skill_exists = artifact_backend.exists_virtual_file(thread_id, f"/{skill_file_path.lstrip('/')}")
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
 
-        content = _extract_file_from_skill_archive(zip_data, internal_path)
+        if not skill_exists:
+            raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
+
+        # Extract the file from the .skill archive
+        try:
+            skill_bytes = artifact_backend.read_virtual_file(thread_id, f"/{skill_file_path.lstrip('/')}")
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
+        content = extract_file_from_skill_archive_bytes(skill_bytes, internal_path)
         if content is None:
             raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
 
-        mime_type, _ = mimetypes.guess_type(internal_path)
+        # Determine MIME type based on the internal file
+        mime_type = guess_mime_type(internal_path)
+        # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
         cache_headers = {"Cache-Control": "private, max-age=300"}
         if mime_type and mime_type.startswith("text/"):
-            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
+            try:
+                return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
+            except UnicodeDecodeError:
+                return Response(content=content, media_type="application/octet-stream", headers=cache_headers)
+
+        # Default to plain text for unknown types that look like text
         try:
             return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    # Try reading from persistent storage first
-    try:
-        data = storage.read(storage_key)
-        return _build_response(data, path, request)
-    except FileNotFoundError:
-        pass
+    virtual_path = f"/{path.lstrip('/')}"
+    logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, backend={type(artifact_backend).__name__}")
 
-    # Fallback to local filesystem (for backward compatibility and local sandbox)
     try:
-        actual_path = resolve_thread_virtual_path(thread_id, path)
-    except HTTPException:
+        exists = artifact_backend.exists_virtual_file(thread_id, virtual_path)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+
+    if not exists:
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
 
-    logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
+    try:
+        content = artifact_backend.read_virtual_file(thread_id, virtual_path)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    mime_type = guess_mime_type(path)
 
-    if not actual_path.exists():
-        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
-
-    if not actual_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
-
-    mime_type, _ = mimetypes.guess_type(actual_path)
-    encoded_filename = quote(actual_path.name)
-
-    if request.query_params.get("download"):
-        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type)
-
-    if mime_type and mime_type == "text/html":
-        return HTMLResponse(content=actual_path.read_text())
-
-    if mime_type and mime_type.startswith("text/"):
-        return PlainTextResponse(content=actual_path.read_text(), media_type=mime_type)
-
-    from src.gateway.routers._artifacts_compat import is_text_file_by_content
-    if is_text_file_by_content(actual_path):
-        return PlainTextResponse(content=actual_path.read_text(), media_type=mime_type)
-
-    return Response(content=actual_path.read_bytes(), media_type=mime_type, headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"})
-
-
-def _build_response(data: bytes, path: str, request: Request) -> Response:
-    """Build an appropriate HTTP response from file data."""
-    filename = Path(path).name
-    mime_type, _ = mimetypes.guess_type(filename)
+    # Encode filename for Content-Disposition header (RFC 5987)
+    filename = path.rstrip("/").split("/")[-1]
     encoded_filename = quote(filename)
 
+    # if `download` query parameter is true, return the file as a download
     if request.query_params.get("download"):
-        return Response(
-            content=data,
-            media_type=mime_type or "application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
-        )
+        return Response(content=content, media_type=mime_type or "application/octet-stream", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
 
     if mime_type and mime_type == "text/html":
-        return HTMLResponse(content=data.decode("utf-8"))
+        try:
+            return HTMLResponse(content=content.decode("utf-8"))
+        except UnicodeDecodeError:
+            return Response(content=content, media_type=mime_type)
 
     if mime_type and mime_type.startswith("text/"):
-        return PlainTextResponse(content=data.decode("utf-8"), media_type=mime_type)
-
-    if is_text_content(data):
         try:
-            return PlainTextResponse(content=data.decode("utf-8"), media_type=mime_type or "text/plain")
+            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type)
         except UnicodeDecodeError:
-            pass
+            return Response(content=content, media_type="application/octet-stream")
 
-    return Response(
-        content=data,
-        media_type=mime_type or "application/octet-stream",
-        headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"},
-    )
+    if is_text_bytes(content):
+        try:
+            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type)
+        except UnicodeDecodeError:
+            return Response(content=content, media_type="application/octet-stream")
 
-
-class SaveArtifactRequest(BaseModel):
-    content: str
-
-
-@router.post(
-    "/threads/{thread_id}/save-artifact/{path:path}",
-    summary="Save Artifact File",
-    description="Write content to an artifact file. Only allows writing to /mnt/user-data/outputs/.",
-)
-async def save_artifact(thread_id: str, path: str, body: SaveArtifactRequest):
-    """Save content to an artifact file.
-
-    Only allows writing to files under /mnt/user-data/outputs/ for safety.
-
-    Args:
-        thread_id: The thread ID.
-        path: The artifact path (e.g., mnt/user-data/outputs/dashboard.json).
-        body: The content to write.
-
-    Returns:
-        Success status.
-    """
-    # Only allow writes to /outputs/ directory
-    normalized = path.lstrip("/")
-    if not normalized.startswith("mnt/user-data/outputs/"):
-        raise HTTPException(status_code=403, detail="Can only write to /mnt/user-data/outputs/")
-
-    actual_path = resolve_thread_virtual_path(thread_id, path)
-
-    # Ensure parent directory exists
-    actual_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        actual_path.write_text(body.content, encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed to write artifact: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to write artifact: {e}")
-
-    return {"success": True, "path": f"/{normalized}"}
+    return Response(content=content, media_type=mime_type, headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"})

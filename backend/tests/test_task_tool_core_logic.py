@@ -52,12 +52,14 @@ def _make_result(
     ai_messages: list[dict] | None = None,
     result: str | None = None,
     error: str | None = None,
+    usage: dict | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
         ai_messages=ai_messages or [],
         result=result,
         error=error,
+        usage=usage,
     )
 
 
@@ -407,3 +409,93 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     assert output.startswith("Task polling timed out after 0 minutes")
     # cleanup should NOT be called because the task is still RUNNING
     assert cleanup_calls == []
+
+
+def test_task_tool_merges_subagent_usage_into_parent_state(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+
+    runtime.state["usage"] = {
+        "models": [
+            {
+                "model": "parent-model",
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            }
+        ],
+        "tool_calls": {"task": 1},
+    }
+    runtime.state["usage_details"] = {
+        "lead": {
+            "models": [
+                {
+                    "model": "parent-model",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                }
+            ],
+            "tool_calls": {"task": 1},
+        },
+        "subagent": {
+            "models": [],
+            "tool_calls": {},
+        },
+    }
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(
+            FakeSubagentStatus.COMPLETED,
+            result="done",
+            usage={
+                "models": [
+                    {
+                        "model": "subagent-model",
+                        "prompt_tokens": 100,
+                        "completion_tokens": 40,
+                        "total_tokens": 140,
+                    }
+                ],
+                "tool_calls": {"bash": 2},
+            },
+        ),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+
+    output = task_tool_module.task_tool.func(
+        runtime=runtime,
+        description="执行任务",
+        prompt="run task",
+        subagent_type="general-purpose",
+        tool_call_id="tc-usage-merge",
+    )
+
+    assert output == "Task Succeeded. Result: done"
+    usage = runtime.state["usage"]
+    assert usage["tool_calls"]["task"] == 1
+    assert usage["tool_calls"]["bash"] == 2
+    by_model = {m["model"]: m for m in usage["models"]}
+    assert by_model["parent-model"]["total_tokens"] == 15
+    assert by_model["subagent-model"]["total_tokens"] == 140
+
+    usage_details = runtime.state["usage_details"]
+    lead_by_model = {m["model"]: m for m in usage_details["lead"]["models"]}
+    subagent_by_model = {m["model"]: m for m in usage_details["subagent"]["models"]}
+    assert lead_by_model["parent-model"]["total_tokens"] == 15
+    assert usage_details["lead"]["tool_calls"]["task"] == 1
+    assert subagent_by_model["subagent-model"]["total_tokens"] == 140
+    assert usage_details["subagent"]["tool_calls"]["bash"] == 2
