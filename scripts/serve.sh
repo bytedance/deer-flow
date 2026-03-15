@@ -30,6 +30,7 @@ fi
 
 echo "Stopping existing services if any..."
 pkill -f "langgraph dev" 2>/dev/null || true
+pkill -f "start_langgraph.py" 2>/dev/null || true
 pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
 pkill -f "next-server" 2>/dev/null || true
@@ -89,6 +90,7 @@ cleanup() {
     echo ""
     echo "Shutting down services..."
     pkill -f "langgraph dev" 2>/dev/null || true
+    pkill -f "start_langgraph.py" 2>/dev/null || true
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
@@ -113,15 +115,21 @@ trap cleanup INT TERM
 mkdir -p logs
 
 if $DEV_MODE; then
-    LANGGRAPH_EXTRA_FLAGS=""
     GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env'"
 else
-    LANGGRAPH_EXTRA_FLAGS="--no-reload"
     GATEWAY_EXTRA_FLAGS=""
 fi
 
 echo "Starting LangGraph server..."
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
+if $DEV_MODE; then
+    # Dev mode: use langgraph dev (in-memory, hot-reload)
+    (cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking > ../logs/langgraph.log 2>&1) &
+else
+    # Prod mode: use persistent storage so checkpointer config is respected.
+    # langgraph dev forces in-memory storage (langchain-ai/langgraph#5790),
+    # so we call run_server directly with file-backed SQLite for API state.
+    (cd backend && NO_COLOR=1 uv run python ../scripts/start_langgraph.py --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1) &
+fi
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "  See logs/langgraph.log for details"
     tail -20 logs/langgraph.log

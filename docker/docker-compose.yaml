@@ -86,14 +86,15 @@ services:
     restart: unless-stopped
 
   # ── LangGraph Server ───────────────────────────────────────────────────────
-  # TODO: switch to langchain/langgraph-api (licensed) once a license key is available.
-  # For now, use `langgraph dev` (no license required) with the standard backend image.
+  # Use start_langgraph.py instead of `langgraph dev` so that the custom
+  # checkpointer declared in langgraph.json is respected and internal API
+  # state is persisted to disk (langchain-ai/langgraph#5790).
   langgraph:
     build:
       context: ../
       dockerfile: backend/Dockerfile
     container_name: deer-flow-langgraph
-    command: sh -c "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
+    command: sh -c "cd /app/backend && uv run python /app/scripts/start_langgraph.py --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/extensions_config.json:ro
