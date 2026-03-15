@@ -13,6 +13,7 @@ from src.agents.memory.prompt import MEMORY_UPDATE_PROMPT, format_conversation_f
 from src.agents.memory.scope import MemoryScope
 from src.config.memory_config import get_memory_config
 from src.config.paths import get_paths
+from src.config.subscription_config import get_effective_max_memory_facts
 from src.models import create_chat_model
 
 
@@ -267,6 +268,7 @@ class MemoryUpdater:
         agent_name: str | None = None,
         namespace_type: str | None = None,
         namespace_id: str | None = None,
+        subscription_tier: str | None = None,
     ) -> bool:
         config = get_memory_config()
         if not config.enabled or not messages:
@@ -294,7 +296,7 @@ class MemoryUpdater:
                 response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
             update_data = json.loads(response_text)
-            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+            updated_memory = self._apply_updates(current_memory, update_data, thread_id, subscription_tier=subscription_tier)
             updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
             if is_postgres_backend(config.backend):
@@ -309,7 +311,7 @@ class MemoryUpdater:
             print(f"Memory update failed: {e}")
             return False
 
-    def _apply_updates(self, current_memory: dict[str, Any], update_data: dict[str, Any], thread_id: str | None = None) -> dict[str, Any]:
+    def _apply_updates(self, current_memory: dict[str, Any], update_data: dict[str, Any], thread_id: str | None = None, subscription_tier: str | None = None) -> dict[str, Any]:
         config = get_memory_config()
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -349,8 +351,9 @@ class MemoryUpdater:
                 }
                 current_memory["facts"].append(fact_entry)
 
-        if len(current_memory["facts"]) > config.max_facts:
-            current_memory["facts"] = sorted(current_memory["facts"], key=lambda f: f.get("confidence", 0), reverse=True)[: config.max_facts]
+        effective_max_facts = get_effective_max_memory_facts(config.max_facts, subscription_tier)
+        if len(current_memory["facts"]) > effective_max_facts:
+            current_memory["facts"] = sorted(current_memory["facts"], key=lambda f: f.get("confidence", 0), reverse=True)[:effective_max_facts]
 
         return current_memory
 
@@ -361,6 +364,7 @@ def update_memory_from_conversation(
     agent_name: str | None = None,
     namespace_type: str | None = None,
     namespace_id: str | None = None,
+    subscription_tier: str | None = None,
 ) -> bool:
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, namespace_type, namespace_id)
+    return updater.update_memory(messages, thread_id, agent_name, namespace_type, namespace_id, subscription_tier=subscription_tier)

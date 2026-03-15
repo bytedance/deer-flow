@@ -12,6 +12,7 @@ from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
 from src.config.sandbox_config import SandboxConfig
 from src.config.skills_config import SkillsConfig
+from src.config.subscription_config import load_subscription_config_from_dict
 from src.config.thread_files_config import ThreadFilesConfig
 from src.config.subagents_config import load_subagents_config_from_dict
 from src.config.summarization_config import load_summarization_config_from_dict
@@ -91,6 +92,10 @@ class AppConfig(BaseModel):
         # Load memory config if present
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
+
+        # Load subscription config if present
+        if "subscription" in config_data:
+            load_subscription_config_from_dict(config_data["subscription"])
 
         # Load subagents config if present
         if "subagents" in config_data:

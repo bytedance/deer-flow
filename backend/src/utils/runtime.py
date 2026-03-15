@@ -54,3 +54,36 @@ def get_context_value(runtime: Runtime | None, key: str, default: Any = None) ->
         return config.get("configurable", {}).get(key, default)
     except RuntimeError:
         return default
+
+
+def get_subscription_tier_context(runtime: Runtime | None) -> tuple[Any, str | None]:
+    """Get the subscription tier value from runtime context.
+
+    Only reads the canonical ``context.subscription_tier`` key.
+    Transport-level header aliases (x-subscription-tier, x-subscription) are
+    intentionally not accepted here — callers must normalise to the canonical
+    field before forwarding into the runtime context.
+
+    Returns:
+        (value, source_key) — source_key is ``"subscription_tier"`` when found, else ``None``.
+    """
+    key = "subscription_tier"
+
+    if runtime is not None and runtime.context is not None:
+        ctx = runtime.context
+        if isinstance(ctx, dict):
+            val = ctx.get(key)
+        else:
+            val = getattr(ctx, key, None)
+        if val is not None:
+            return val, key
+
+    try:
+        config = get_config()
+        val = config.get("configurable", {}).get(key)
+        if val is not None:
+            return val, key
+    except RuntimeError:
+        pass
+
+    return None, None
