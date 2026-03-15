@@ -14,7 +14,7 @@ from src.config.paths import get_paths
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
-AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9\u0400-\u04FF_-]+$")
 
 
 class AgentResponse(BaseModel):

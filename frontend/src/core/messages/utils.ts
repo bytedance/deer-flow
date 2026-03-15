@@ -26,6 +26,23 @@ type MessageGroup =
   | AssistantClarificationGroup
   | AssistantSubagentGroup;
 
+/** Returns true for view_image_middleware context injections that should be hidden from the UI. */
+function isViewImageContextMessage(message: Message): boolean {
+  const content = message.content;
+  if (Array.isArray(content)) {
+    return content.some(
+      (block) =>
+        (block as { type: string; text?: string }).type === "text" &&
+        (block as { type: string; text?: string }).text ===
+          "Here are the images you've viewed:",
+    );
+  }
+  if (typeof content === "string") {
+    return content.startsWith("Here are the images you've viewed:");
+  }
+  return false;
+}
+
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,
@@ -57,6 +74,10 @@ export function groupMessages<T>(
     }
 
     if (message.type === "human") {
+      // Hide view_image middleware context injections (not user-generated)
+      if (isViewImageContextMessage(message)) {
+        continue;
+      }
       groups.push({ id: message.id, type: "human", messages: [message] });
       continue;
     }

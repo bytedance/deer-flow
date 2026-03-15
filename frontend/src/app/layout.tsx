@@ -2,7 +2,7 @@ import "@/styles/globals.css";
 import "katex/dist/katex.min.css";
 
 import { type Metadata } from "next";
-import { Geist } from "next/font/google";
+import { Inter } from "next/font/google";
 
 import { ThemeProvider } from "@/components/theme-provider";
 import { I18nProvider } from "@/core/i18n/context";
@@ -13,9 +13,10 @@ export const metadata: Metadata = {
   description: "A LangChain-based framework for building super agents.",
 };
 
-const geist = Geist({
-  subsets: ["latin"],
-  variable: "--font-geist-sans",
+const inter = Inter({
+  subsets: ["latin", "cyrillic"],
+  variable: "--font-inter",
+  weight: ["300", "400", "500", "600", "700", "800"],
 });
 
 export default async function RootLayout({
@@ -25,7 +26,7 @@ export default async function RootLayout({
   return (
     <html
       lang={locale}
-      className={geist.variable}
+      className={inter.variable}
       suppressContentEditableWarning
       suppressHydrationWarning
     >

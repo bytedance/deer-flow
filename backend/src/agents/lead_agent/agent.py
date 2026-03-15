@@ -54,9 +54,12 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     # Prepare keep parameter
     keep = config.keep.to_tuple()
 
-    # Prepare model parameter
+    # Prepare model parameter — always pass a model object, not a string.
+    # Passing a bare model name string would cause SummarizationMiddleware to call
+    # langchain's init_chat_model() which auto-detects the provider and may pick
+    # the wrong one (e.g. vertexai instead of google-genai for Gemini models).
     if config.model_name:
-        model = config.model_name
+        model = create_chat_model(name=config.model_name, thinking_enabled=False)
     else:
         # Use a lightweight model for summarization to save costs
         # Falls back to default model if not explicitly specified

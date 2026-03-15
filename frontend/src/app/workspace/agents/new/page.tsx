@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 
 type Step = "name" | "chat";
 
-const NAME_RE = /^[A-Za-z0-9-]+$/;
+const NAME_RE = /^[A-Za-z0-9\u0400-\u04FF_-]+$/;
 
 export default function NewAgentPage() {
   const { t } = useI18n();

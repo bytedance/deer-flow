@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { useI18nContext } from "./context";
 import { getLocaleFromCookie, setLocaleInCookie } from "./cookies";
 import { enUS } from "./locales/en-US";
+import { ruRU } from "./locales/ru-RU";
 import { zhCN } from "./locales/zh-CN";
 
 import {
@@ -18,6 +19,7 @@ import {
 const translations: Record<Locale, Translations> = {
   "en-US": enUS,
   "zh-CN": zhCN,
+  "ru-RU": ruRU,
 };
 
 export function useI18n() {
@@ -33,7 +35,8 @@ export function useI18n() {
   // Initialize locale on mount
   useEffect(() => {
     const saved = getLocaleFromCookie();
-    if (saved) {
+    // Treat old "en-US" default cookie as no preference → migrate to DEFAULT_LOCALE
+    if (saved && saved !== "en-US") {
       const normalizedSaved = normalizeLocale(saved);
       setLocale(normalizedSaved);
       if (saved !== normalizedSaved) {
@@ -42,9 +45,9 @@ export function useI18n() {
       return;
     }
 
-    const detected = detectLocale();
-    setLocale(detected);
-    setLocaleInCookie(detected);
+    // No preference set — use DEFAULT_LOCALE (ru-RU)
+    setLocale(DEFAULT_LOCALE);
+    setLocaleInCookie(DEFAULT_LOCALE);
   }, [setLocale]);
 
   return {

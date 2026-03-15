@@ -1,5 +1,6 @@
 """Memory updater for reading, writing, and updating memory data."""
 
+import ast
 import json
 import re
 import uuid
@@ -271,13 +272,26 @@ class MemoryUpdater:
             response = model.invoke(prompt)
             response_text = str(response.content).strip()
 
-            # Parse response
-            # Remove markdown code blocks if present
-            if response_text.startswith("```"):
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-            update_data = json.loads(response_text)
+            # Parse response — extract JSON robustly from LLM output.
+            # Models sometimes wrap the JSON in markdown code fences or add
+            # explanatory text before/after the object, so we find the first
+            # outermost {...} block and parse that.
+            json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+            if not json_match:
+                print(f"Memory update skipped: no JSON object found in LLM response")
+                return False
+            raw = json_match.group()
+            try:
+                update_data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Fallback: some models return Python-style dicts (single quotes,
+                # trailing commas, True/False/None literals). ast.literal_eval
+                # handles all of these safely without executing arbitrary code.
+                try:
+                    update_data = ast.literal_eval(raw)
+                except Exception as e2:
+                    print(f"Memory update skipped: could not parse LLM response as JSON or Python literal: {e2}")
+                    return False
 
             # Apply updates
             updated_memory = self._apply_updates(current_memory, update_data, thread_id)
@@ -292,7 +306,7 @@ class MemoryUpdater:
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            print(f"Memory update failed due to JSON decode error: {e}")
             return False
         except Exception as e:
             print(f"Memory update failed: {e}")

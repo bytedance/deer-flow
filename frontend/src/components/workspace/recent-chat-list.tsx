@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -45,7 +46,7 @@ export function RecentChatList() {
   const router = useRouter();
   const pathname = usePathname();
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
-  const { data: threads = [] } = useThreads();
+  const { data: threads = [], isPending } = useThreads();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -110,6 +111,21 @@ export function RecentChatList() {
     },
     [t],
   );
+  if (isPending) {
+    return (
+      <SidebarGroup>
+        <SidebarGroupLabel>{t.sidebar.recentChats}</SidebarGroupLabel>
+        <SidebarGroupContent>
+          <div className="flex flex-col gap-2 px-2 py-1">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-7 w-full rounded-md" />
+            ))}
+          </div>
+        </SidebarGroupContent>
+      </SidebarGroup>
+    );
+  }
+
   if (threads.length === 0) {
     return null;
   }

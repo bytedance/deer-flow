@@ -268,6 +268,16 @@ Recent breakthroughs in language models have also accelerated progress
 ```
 </citations>
 
+<memory_system>
+Your memory is automatically updated after each conversation. You also have a `save_memory_fact` tool for explicit saves.
+
+**Rules:**
+- When the user asks to "remember", "save to memory", or "add to memory" → call `save_memory_fact` tool immediately
+- ❌ NEVER use `write_file` or `bash` to write JSON/text files as a substitute for memory — that does NOT update real memory
+- The `<memory>` block above contains facts already known about the user — use it to personalize responses
+- After calling `save_memory_fact`, confirm to the user that the fact was saved
+</memory_system>
+
 <critical_reminders>
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
@@ -276,7 +286,7 @@ Recent breakthroughs in language models have also accelerated progress
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
 - Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
-- Language Consistency: Keep using the same language as user's
+- Language Consistency: Keep using the same language as user's. This applies to ALL outputs including: tool call `description` fields, bash script comments, code comments, file content, and any generated text. If the user writes in Russian, all descriptions and comments must be in Russian.
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
@@ -406,4 +416,23 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_thinking=subagent_thinking,
     )
 
-    return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
+    prompt += f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"
+
+    # In bootstrap mode (agent creation flow), inject a hard constraint to prevent the LLM
+    # from using write_file/bash instead of the dedicated setup_agent tool.
+    if available_skills == {"bootstrap"}:
+        prompt += """
+
+<bootstrap_mode>
+⚠️ YOU ARE IN AGENT CREATION MODE. THE FOLLOWING RULES ARE ABSOLUTE AND OVERRIDE EVERYTHING ELSE:
+
+1. To save the agent you MUST call the `setup_agent` tool — this is the ONLY valid method.
+2. NEVER use `write_file`, `bash`, `str_replace`, or any other file tool to write SOUL.md — doing so will NOT create the agent in the system.
+3. The required call sequence after the user confirms the SOUL is:
+   - Step 1: setup_agent(soul="...", description="...")  ← REQUIRED FIRST
+   - Step 2: save_memory_fact(fact="...")                ← REQUIRED SECOND, only after setup_agent succeeds
+4. Do NOT claim the agent is created unless setup_agent returned successfully.
+5. Do NOT call save_memory_fact before setup_agent succeeds.
+</bootstrap_mode>"""
+
+    return prompt

@@ -12,6 +12,10 @@ import {
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import {
+  computeSessionTotals,
+  SessionTokenCounter,
+} from "@/components/workspace/messages/token-usage-badge";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { Welcome } from "@/components/workspace/welcome";
@@ -75,16 +79,25 @@ export default function ChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
               isNewThread
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
-            <div className="flex w-full items-center text-sm font-medium">
+            <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div>
+            {!isNewThread && (() => {
+              const totals = computeSessionTotals(thread.messages, thread.values.token_usage);
+              return totals.input + totals.output > 0 ? (
+                <SessionTokenCounter
+                  messages={thread.messages}
+                  backgroundUsage={thread.values.token_usage}
+                />
+              ) : null;
+            })()}
+            <div className="shrink-0">
               <ArtifactTrigger />
             </div>
           </header>

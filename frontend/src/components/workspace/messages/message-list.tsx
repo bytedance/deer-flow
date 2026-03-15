@@ -29,6 +29,7 @@ import { MessageListItem } from "./message-list-item";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
+
 export function MessageList({
   className,
   threadId,
@@ -52,7 +53,9 @@ export function MessageList({
       className={cn("flex size-full flex-col justify-center", className)}
     >
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
-        {groupMessages(messages, (group) => {
+        {(() => {
+          const shownFilePaths = new Set<string>();
+          return groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
             return group.messages.map((msg) => {
               return (
@@ -60,6 +63,7 @@ export function MessageList({
                   key={`${group.id}/${msg.id}`}
                   message={msg}
                   isLoading={thread.isLoading}
+                  threadId={threadId}
                 />
               );
             });
@@ -77,13 +81,17 @@ export function MessageList({
             }
             return null;
           } else if (group.type === "assistant:present-files") {
-            const files: string[] = [];
+            const allFiles: string[] = [];
             for (const message of group.messages) {
               if (hasPresentFiles(message)) {
                 const presentFiles = extractPresentFilesFromMessage(message);
-                files.push(...presentFiles);
+                allFiles.push(...presentFiles);
               }
             }
+            // Deduplicate: skip files already shown by a previous present-files group
+            const files = allFiles.filter((f) => !shownFilePaths.has(f));
+            files.forEach((f) => shownFilePaths.add(f));
+            if (files.length === 0) return null;
             return (
               <div className="w-full" key={group.id}>
                 {group.messages[0] && hasContent(group.messages[0]) && (
@@ -197,7 +205,8 @@ export function MessageList({
               isLoading={thread.isLoading}
             />
           );
-        })}
+          });
+        })()}
         {thread.isLoading && <StreamingIndicator className="my-4" />}
         <div style={{ height: `${paddingBottom}px` }} />
       </ConversationContent>

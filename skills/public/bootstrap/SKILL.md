@@ -70,19 +70,23 @@ Once you have enough information:
 2. Generate the SOUL.md following the template structure exactly.
 3. Present it warmly and ask for confirmation. Frame it as "here's [Name] on paper — does this feel right?"
 4. Iterate until the user confirms.
-5. Call the `setup_agent` tool with the confirmed SOUL.md content and a one-line description:
+5. **REQUIRED — call `setup_agent` first.** This is the ONLY valid way to save the agent. Do NOT use `write_file`, `bash`, or any other tool to write SOUL.md:
    ```
    setup_agent(soul="<full SOUL.md content>", description="<one-line description>")
    ```
-   The tool will persist the SOUL.md and finalize the agent setup automatically.
-6. After the tool returns successfully, confirm: "✅ [Name] is officially real."
+   Wait for `setup_agent` to return success before proceeding. If it returns an error, report it and stop.
+6. **REQUIRED — after `setup_agent` succeeds**, call `save_memory_fact`:
+   ```
+   save_memory_fact(fact="Agent '[Name]' created. Description: <one-line description>. SOUL summary: <2-3 sentence summary of personality and purpose>.")
+   ```
+7. Only after both tools complete successfully, confirm: "✅ [Name] is officially real."
 
-**Generation rules:**
-- The final SOUL.md **must always be written in English**, regardless of the user's preferred language or conversation language.
+**⚠️ CRITICAL rules — violating any of these is a failure:**
+- **NEVER use `write_file` or `bash` to create SOUL.md** — always use `setup_agent`.
+- **NEVER call `save_memory_fact` before `setup_agent` succeeds** — order matters.
+- **NEVER claim the agent is created unless `setup_agent` returned successfully.**
+- The final SOUL.md **must always be written in English**, regardless of the user's preferred language.
 - Every sentence must trace back to something the user said or clearly implied. No generic filler.
 - Core Traits are **behavioral rules**, not adjectives. Write "argue position, push back, speak truth not comfort" — not "honest and brave."
-- Voice must match the user. Blunt user → blunt SOUL.md. Expressive user → let it breathe.
 - Total SOUL.md should be under 300 words. Density over length.
 - Growth section is mandatory and mostly fixed (see template).
-- You **must** call `setup_agent` — do not write the file manually with bash tools.
-- If `setup_agent` returns an error, report it to the user and do not claim success.

@@ -423,6 +423,9 @@ export function useThreads(
       return threads;
     },
     refetchOnWindowFocus: false,
+    // Show cached list instantly; revalidate silently in background every 30 s
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
   });
 }
 

@@ -1,7 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { FileIcon, Loader2Icon } from "lucide-react";
-import { useParams } from "next/navigation";
-import { memo, useMemo, type ImgHTMLAttributes } from "react";
+import { DownloadIcon, FileIcon, Loader2Icon, XIcon } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
 import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -34,15 +33,18 @@ import { cn } from "@/lib/utils";
 import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
+import { TokenUsageBadge } from "./token-usage-badge";
 
 export function MessageListItem({
   className,
   message,
   isLoading,
+  threadId,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId?: string;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -54,6 +56,7 @@ export function MessageListItem({
         className={isHuman ? "w-fit" : "w-full"}
         message={message}
         isLoading={isLoading}
+        threadId={threadId}
       />
       {!isLoading && (
         <MessageToolbar
@@ -62,7 +65,8 @@ export function MessageListItem({
             "absolute right-0 left-0 z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
           )}
         >
-          <div className="flex gap-1">
+          <div className="flex items-center gap-1">
+            <TokenUsageBadge message={message} />
             <CopyButton
               clipboardData={
                 extractContentFromMessage(message) ??
@@ -84,15 +88,20 @@ function MessageImage({
   src,
   alt,
   threadId,
-  maxWidth = "90%",
+  maxWidth = "45%",
   ...props
 }: React.ImgHTMLAttributes<HTMLImageElement> & {
   threadId: string;
   maxWidth?: string;
 }) {
+  const [open, setOpen] = useState(false);
+
   if (!src) return null;
 
-  const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
+  const imgClassName = cn(
+    "overflow-hidden rounded-lg cursor-zoom-in max-h-[360px] object-contain",
+    `max-w-[${maxWidth}]`,
+  );
 
   if (typeof src !== "string") {
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
@@ -101,9 +110,49 @@ function MessageImage({
   const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
 
   return (
-    <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
-    </a>
+    <>
+      <img
+        className={imgClassName}
+        src={url}
+        alt={alt}
+        onClick={() => setOpen(true)}
+        {...props}
+      />
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="relative max-h-[90vh] max-w-[90vw]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={url}
+              alt={alt}
+              className="max-h-[85vh] max-w-[88vw] rounded-lg object-contain shadow-2xl"
+            />
+            <div className="absolute right-2 top-2 flex gap-2">
+              <a
+                href={url}
+                download
+                className="flex size-8 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80"
+                onClick={(e) => e.stopPropagation()}
+                title="Скачать"
+              >
+                <DownloadIcon className="size-4" />
+              </a>
+              <button
+                className="flex size-8 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80"
+                onClick={() => setOpen(false)}
+              >
+                <XIcon className="size-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -111,21 +160,22 @@ function MessageContent_({
   className,
   message,
   isLoading = false,
+  threadId = "",
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
+  threadId?: string;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const { thread_id } = useParams<{ thread_id: string }>();
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={thread_id} maxWidth="90%" />
+        <MessageImage {...props} threadId={threadId} maxWidth="45%" />
       ),
     }),
-    [thread_id],
+    [threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -151,8 +201,8 @@ function MessageContent_({
   }, [rawContent, isHuman]);
 
   const filesList =
-    files && files.length > 0 && thread_id ? (
-      <RichFilesList files={files} threadId={thread_id} />
+    files && files.length > 0 && threadId ? (
+      <RichFilesList files={files} threadId={threadId} />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -297,6 +347,100 @@ function RichFilesList({
 }
 
 /**
+ * Image thumbnail with click-to-expand lightbox and download button
+ */
+function ImageFileCard({
+  fileUrl,
+  filename,
+}: {
+  fileUrl: string;
+  filename: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [errored, setErrored] = useState(false);
+  const retryCount = useRef(0);
+
+  // Auto-retry up to 3 times with exponential back-off to handle the brief
+  // window where thread_id transitions from "new" to the real UUID.
+  useEffect(() => {
+    if (!errored) return;
+    if (retryCount.current >= 3) return;
+    const delay = 500 * 2 ** retryCount.current; // 500ms, 1s, 2s
+    const timer = setTimeout(() => {
+      retryCount.current += 1;
+      setErrored(false);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [errored]);
+
+  if (errored && retryCount.current >= 3) {
+    return (
+      <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 shadow-sm">
+        <div className="flex items-start gap-2">
+          <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
+          <span
+            className="text-foreground truncate text-sm font-medium"
+            title={filename}
+          >
+            {filename}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div
+        className="group border-border/40 relative block cursor-zoom-in overflow-hidden rounded-lg border"
+        onClick={() => setOpen(true)}
+      >
+        <img
+          src={fileUrl}
+          alt={filename}
+          className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
+          onError={() => setErrored(true)}
+        />
+      </div>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="relative max-h-[90vh] max-w-[90vw]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={fileUrl}
+              alt={filename}
+              className="max-h-[85vh] max-w-[88vw] rounded-lg object-contain shadow-2xl"
+            />
+            <div className="absolute right-2 top-2 flex gap-2">
+              <a
+                href={fileUrl}
+                download={filename}
+                className="flex size-8 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80"
+                onClick={(e) => e.stopPropagation()}
+                title="Скачать"
+              >
+                <DownloadIcon className="size-4" />
+              </a>
+              <button
+                className="flex size-8 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80"
+                onClick={() => setOpen(false)}
+              >
+                <XIcon className="size-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
  * Single file card that handles FileInMessage (supports uploading state)
  */
 function RichFileCard({
@@ -342,20 +486,7 @@ function RichFileCard({
   const fileUrl = resolveArtifactURL(file.path, threadId);
 
   if (isImage) {
-    return (
-      <a
-        href={fileUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="group border-border/40 relative block overflow-hidden rounded-lg border"
-      >
-        <img
-          src={fileUrl}
-          alt={file.filename}
-          className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
-        />
-      </a>
-    );
+    return <ImageFileCard key={fileUrl} fileUrl={fileUrl} filename={file.filename} />;
   }
 
   return (

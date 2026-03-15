@@ -10,6 +10,7 @@ from src.gateway.routers import (
     agents,
     artifacts,
     channels,
+    image_tasks,
     mcp,
     memory,
     models,
@@ -175,6 +176,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Image tasks callback receiver and status poller
+    app.include_router(image_tasks.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

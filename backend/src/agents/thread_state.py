@@ -18,6 +18,15 @@ class ViewedImageData(TypedDict):
     mime_type: str
 
 
+class TokenUsageEntry(TypedDict):
+    """Represents token usage for a single background model invocation."""
+
+    process: str  # e.g. "title", "memory", "summarization"
+    input_tokens: int
+    output_tokens: int
+    timestamp: str  # ISO-8601
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -45,6 +54,15 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_token_usage(existing: list[TokenUsageEntry] | None, new: list[TokenUsageEntry] | None) -> list[TokenUsageEntry]:
+    """Reducer for token_usage list - appends new background-process entries."""
+    if existing is None:
+        return new or []
+    if new is None:
+        return existing
+    return existing + new
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -53,3 +71,4 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    token_usage: Annotated[list[TokenUsageEntry], merge_token_usage]  # background-process token tracking

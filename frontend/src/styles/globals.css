@@ -72,7 +72,7 @@
 
 @theme {
   --font-sans:
-    var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif,
+    var(--font-inter), ui-sans-serif, system-ui, sans-serif,
     "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 
   --animate-fade-in: fade-in 1.1s;
@@ -223,78 +223,120 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.9855 0.0098 87.47);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0.0098 87.47);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0.0098 87.47);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.9455 0.0098 87.47);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0.0098 87.47);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.94 0.0098 87.47);
-  --accent-foreground: oklch(0.205 0 0);
+  /* === Светлая тема: Bento UI / Soft UI === */
+  --radius: 1rem; /* 16px base → 24px xl, 32px 2xl */
+
+  /* Фон и поверхности */
+  --background: #F4F6F9;
+  --foreground: #111827;
+  --card: #FFFFFF;
+  --card-foreground: #111827;
+  --popover: #FFFFFF;
+  --popover-foreground: #111827;
+
+  /* Primary — Electric Blue #1C64F2 */
+  --primary: #1C64F2;
+  --primary-foreground: #FFFFFF;
+
+  /* Secondary / Muted */
+  --secondary: #EEF2FF;
+  --secondary-foreground: #1C64F2;
+  --muted: #F1F5F9;
+  --muted-foreground: #6B7280;
+
+  /* Accent */
+  --accent: #EEF2FF;
+  --accent-foreground: #1C64F2;
+
+  /* Destructive */
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0.0098 87.47);
-  --input: oklch(0.88 0.0098 87.47);
+
+  /* Borders & Input */
+  --border: #E5E7EB;
+  --input: #E5E7EB;
   --ring: transparent;
-  --chart-1: oklch(0.646 0.222 41.116);
+
+  /* Charts */
+  --chart-1: #1C64F2;
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.965 0.0098 87.47);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0.0098 87.47);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.925 0.0098 87.47);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0.0098 87.47);
-  --sidebar-ring: oklch(0.708 0 0);
+
+  /* Sidebar */
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #111827;
+  --sidebar-primary: #1C64F2;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #EEF2FF;
+  --sidebar-accent-foreground: #1C64F2;
+  --sidebar-border: #E5E7EB;
+  --sidebar-ring: #1C64F2;
+
+  /* Bento card shadow */
+  --shadow-card: 0px 2px 8px rgba(17, 24, 39, 0.06), 0px 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-card-hover: 0px 8px 24px rgba(17, 24, 39, 0.10), 0px 2px 4px rgba(17, 24, 39, 0.06);
 }
 
 .dark {
-  --background: oklch(0.24 0.0036 106.64);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.238 0.0036 106.64);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0.0036 106.64);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(1 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.3 0.0036 106.64);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0.0036 106.64);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.32 0.0036 106.64);
-  --accent-foreground: oklch(0.985 0 0);
+  /* === Тёмная тема: Deep Navy + Glassmorphism === */
+  --background: #0B0F19;
+  --foreground: #F9FAFB;
+  --card: rgba(255, 255, 255, 0.04);
+  --card-foreground: #F9FAFB;
+  --popover: #131929;
+  --popover-foreground: #F9FAFB;
+
+  /* Primary — Electric Blue (чуть ярче для тёмного фона) */
+  --primary: #3B82F6;
+  --primary-foreground: #FFFFFF;
+
+  /* Secondary / Muted */
+  --secondary: rgba(255, 255, 255, 0.08);
+  --secondary-foreground: #F9FAFB;
+  --muted: rgba(255, 255, 255, 0.05);
+  --muted-foreground: #9CA3AF;
+
+  /* Accent */
+  --accent: rgba(59, 130, 246, 0.15);
+  --accent-foreground: #93C5FD;
+
+  /* Destructive */
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0.191 22.216 / 10%);
-  --input: oklch(1 0 0 / 15%);
+
+  /* Borders & Input — glassmorphism */
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.10);
   --ring: transparent;
-  --chart-1: oklch(0.488 0.243 264.376);
+
+  /* Charts */
+  --chart-1: #3B82F6;
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.245 0.0036 106.64);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.29 0.0036 106.64);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+
+  /* Sidebar — glassmorphism */
+  --sidebar: rgba(255, 255, 255, 0.03);
+  --sidebar-foreground: #F9FAFB;
+  --sidebar-primary: #3B82F6;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: rgba(59, 130, 246, 0.15);
+  --sidebar-accent-foreground: #93C5FD;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: #3B82F6;
+
+  /* Glass shadows */
+  --shadow-card: 0px 4px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --shadow-card-hover: 0px 8px 32px rgba(59, 130, 246, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+
   font-weight: 300;
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
+    outline: none !important;
   }
   body {
     @apply bg-background text-foreground;
@@ -390,3 +432,93 @@
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
 }
+
+/* =============================================
+   BENTO UI / DESIGN SYSTEM
+   ============================================= */
+
+/* Bento card — базовая карточка */
+.bento-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem; /* 24px */
+  box-shadow: var(--shadow-card);
+  padding: 1.5rem;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.bento-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-2px);
+}
+
+/* Dark mode glassmorphism cards */
+.dark .bento-card {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Dark mode глубокий фон с радиальным свечением */
+.dark body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 10%, rgba(59, 130, 246, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 90%, rgba(99, 102, 241, 0.06) 0%, transparent 60%);
+}
+
+/* Primary button glow */
+.dark [data-slot="button"][data-variant="default"]:hover,
+.dark button.bg-primary:hover {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+}
+
+/* Sidebar glassmorphism в тёмной теме */
+.dark [data-slot="sidebar"] {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Скругления для input / chat bar */
+[data-slot="prompt-input"] {
+  border-radius: 1.5rem !important;
+}
+
+/* Типографика — Inter с правильными кернингами */
+h1 { font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; }
+h2 { font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; }
+h3 { font-weight: 600; letter-spacing: -0.005em; }
+body { font-feature-settings: "cv02", "cv03", "cv04", "cv11"; }
+
+/* Кнопки — pill shape для primary */
+[data-slot="button"][data-size="default"],
+[data-slot="button"][data-size="lg"] {
+  border-radius: 999px;
+}
+
+/* Card hover transition */
+[data-slot="card"] {
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  box-shadow: var(--shadow-card);
+}
+[data-slot="card"]:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Accent glow на активных элементах */
+.dark [data-state="active"],
+.dark [aria-selected="true"] {
+  background: rgba(59, 130, 246, 0.15) !important;
+  color: #93C5FD !important;
+}
+
+/* Скроллбар */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
