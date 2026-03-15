@@ -584,3 +584,40 @@
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
 }
+
+/* react-data-grid theme overrides */
+.table-viewer-panel .rdg {
+  --rdg-font-size: 13px;
+  --rdg-border-color: var(--border);
+  --rdg-background-color: var(--background);
+  --rdg-header-background-color: var(--muted);
+  --rdg-row-hover-background-color: var(--accent);
+  --rdg-row-selected-background-color: var(--accent);
+  --rdg-row-selected-hover-background-color: var(--accent);
+  --rdg-color: var(--foreground);
+  --rdg-selection-color: var(--ring);
+  block-size: 100%;
+  border: none;
+}
+
+.table-viewer-panel .rdg-row-num,
+.table-viewer-panel .rdg-row-num-header {
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  user-select: none;
+}
+
+.table-viewer-panel .rdg-wrap .rdg {
+  grid-template-rows: none !important;
+  grid-auto-rows: min-content !important;
+}
+
+.table-viewer-panel .rdg-wrap .rdg-cell {
+  white-space: normal !important;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  text-overflow: clip !important;
+  line-height: 1.4;
+  padding-block: 6px;
+}

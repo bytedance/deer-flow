@@ -32,6 +32,11 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { QuickActions } from "@/components/workspace/quick-actions";
 import { useRightPanel } from "@/components/workspace/right-panel-context";
 import { SessionUsageDisplay } from "@/components/workspace/session-usage-display";
+import {
+  TableViewerProvider,
+  useTableViewer,
+} from "@/components/workspace/table-viewer-context";
+import { TableViewerPanel } from "@/components/workspace/table-viewer-panel";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { Tooltip } from "@/components/workspace/tooltip";
@@ -42,6 +47,7 @@ import {
   useSubtaskContext,
 } from "@/core/tasks/context";
 import type { Todo } from "@/core/todos";
+import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth";
 import { authFetch } from "@/core/auth/fetch";
 import { getBackendBaseURL, useAppConfig } from "@/core/config";
@@ -266,9 +272,11 @@ function ChatInner() {
 
   const { selectedTaskId } = useSelectedSubtask();
 
+  const { isOpen: tableViewerOpen, closeTable } = useTableViewer();
+
   const splitPanelOpen = useMemo(
-    () => artifactPanelOpen || !!selectedTaskId,
-    [artifactPanelOpen, selectedTaskId],
+    () => artifactPanelOpen || !!selectedTaskId || tableViewerOpen,
+    [artifactPanelOpen, selectedTaskId, tableViewerOpen],
   );
 
   const [todoListCollapsed, setTodoListCollapsed] = useState(true);
@@ -569,8 +577,46 @@ function ChatInner() {
   }, [hasConversation, isNewThread]);
 
   const handleStop = useCallback(async () => {
+    // Eagerly remove the reconnect metadata from sessionStorage so that
+    // navigating away and back does NOT auto-rejoin a still-running backend
+    // run.  The SDK's stop() does this internally too, but there is a race
+    // between aborting the SSE stream and the onStop callback — if the user
+    // navigates before that callback fires, the key survives and
+    // reconnectOnMount picks it up on the next mount.
+    if (threadId) {
+      const reconnectKey = `lg:stream:${threadId}`;
+      const runId = sessionStorage.getItem(reconnectKey);
+      sessionStorage.removeItem(reconnectKey);
+
+      // Also cancel the backend run directly so it stops consuming resources.
+      if (runId) {
+        const client = getAPIClient();
+        client.runs.cancel(threadId, runId).catch(() => {
+          // Best-effort; the SDK's stop() will also attempt this.
+        });
+      }
+    }
+
     await thread.stop();
-  }, [thread]);
+
+    // The SDK's onFinish callback (which syncs the title to the sidebar
+    // thread cache) only fires on successful completion — not on stop.
+    // Propagate the current title so the sidebar reflects it immediately.
+    const currentTitle = thread.values?.title;
+    if (threadId && currentTitle) {
+      queryClient.setQueriesData(
+        { queryKey: ["threads", "search"], exact: false },
+        (oldData: Array<AgentThread>) => {
+          if (!oldData) return oldData;
+          return oldData.map((t) =>
+            t.thread_id === threadId
+              ? { ...t, values: { ...t.values, title: currentTitle } }
+              : t,
+          );
+        },
+      );
+    }
+  }, [thread, threadId, queryClient]);
 
   const setRightPanelWidthClamped = useCallback((nextWidth: number) => {
     const clamped = Math.min(
@@ -768,6 +814,7 @@ function ChatInner() {
                         onClick={() => {
                           setArtifactsOpen(true);
                           setSidebarOpen(false);
+                          closeTable();
                         }}
                       >
                         <FilesIcon />
@@ -899,6 +946,8 @@ function ChatInner() {
           >
             {selectedTaskId ? (
               <ChatAgentDetailPanel />
+            ) : tableViewerOpen ? (
+              <TableViewerPanel className="size-full" />
             ) : (
               <div className="size-full p-4">
                 {selectedArtifact ? (
@@ -1075,9 +1124,11 @@ export function Chat() {
   return (
     <>
       <UsageResetOnThreadChange threadId={threadId} />
+      <TableViewerProvider>
       <SubtasksProvider key={`subtasks-${threadId}-${remountCounter}`}>
         <ChatInner key={`${threadId}-${remountCounter}`} />
       </SubtasksProvider>
+      </TableViewerProvider>
     </>
   );
 }
