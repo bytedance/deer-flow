@@ -6,7 +6,7 @@
 
 ## 实现方式
 
-使用 `TitleMiddleware` 在 `after_agent` 钩子中：
+使用 `TitleMiddleware` 在 `after_model` 钩子中：
 1. 检测是否是首次对话（1个用户消息 + 1个助手回复）
 2. 检查 state 是否已有 title
 3. 调用 LLM 生成简洁的标题（默认最多6个词）

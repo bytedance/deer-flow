@@ -116,7 +116,10 @@ class TestTitleMiddlewareCoreLogic:
         prompt = fake_model.ainvoke.await_args.args[0]
         assert "请帮我总结这段代码" in prompt
         assert "好的，先看结构" in prompt
-        assert "type" not in prompt
+        # Ensure structured message dict/JSON reprs are not leaking into the prompt.
+        assert "{'type':" not in prompt
+        assert "'type':" not in prompt
+        assert '"type":' not in prompt
         assert title == "结构总结"
 
     def test_generate_title_fallback_when_model_fails(self, monkeypatch):
