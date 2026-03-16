@@ -11,6 +11,7 @@ from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpo
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.multi_tenant_config import MultiTenantConfig, load_multi_tenant_config_from_dict
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import load_subagents_config_from_dict
@@ -32,6 +33,7 @@ class AppConfig(BaseModel):
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
+    multi_tenant: MultiTenantConfig = Field(default_factory=lambda: MultiTenantConfig(), description="Multi-tenant authentication configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
 
@@ -104,6 +106,10 @@ class AppConfig(BaseModel):
         # Load checkpointer config if present
         if "checkpointer" in config_data:
             load_checkpointer_config_from_dict(config_data["checkpointer"])
+
+        # Load multi_tenant config if present
+        if "multi_tenant" in config_data:
+            load_multi_tenant_config_from_dict(config_data["multi_tenant"])
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()
