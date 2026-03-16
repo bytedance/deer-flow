@@ -198,11 +198,28 @@ export default function Galaxy({
   useEffect(() => {
     if (!ctnDom.current) return;
     const ctn = ctnDom.current;
-    const renderer = new Renderer({
-      alpha: transparent,
-      premultipliedAlpha: false,
-    });
+
+    let renderer;
+    try {
+      renderer = new Renderer({
+        alpha: transparent,
+        premultipliedAlpha: false,
+      });
+    } catch (error) {
+      console.warn(
+        "Galaxy: WebGL is not available. The galaxy background will not be rendered.",
+        error,
+      );
+      return;
+    }
+
     const gl = renderer.gl;
+    if (!gl) {
+      console.warn(
+        "Galaxy: WebGL context is null. The galaxy background will not be rendered.",
+      );
+      return;
+    }
 
     if (transparent) {
       gl.enable(gl.BLEND);
