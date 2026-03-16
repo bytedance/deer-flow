@@ -152,7 +152,7 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
         }
 
         # Write the configuration to file
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
