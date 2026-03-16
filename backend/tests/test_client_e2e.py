@@ -13,16 +13,18 @@ Tests that call the LLM are marked ``requires_llm`` and skipped in CI.
 File-management tests (upload/list/delete) don't need LLM and run everywhere.
 """
 
+import json
 import os
 import uuid
+import zipfile
 
 import pytest
 from dotenv import load_dotenv
 
-from src.client import DeerFlowClient, StreamEvent
-from src.config.app_config import AppConfig
-from src.config.model_config import ModelConfig
-from src.config.sandbox_config import SandboxConfig
+from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
 
 # Load .env from project root (for OPENAI_API_KEY etc.)
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -64,7 +66,7 @@ def _make_e2e_config() -> AppConfig:
                 supports_vision=False,
             )
         ],
-        sandbox=SandboxConfig(use="src.sandbox.local:LocalSandboxProvider"),
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
     )
 
 
@@ -84,46 +86,46 @@ def e2e_env(tmp_path, monkeypatch):
     """
     # 1. Filesystem isolation
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-    monkeypatch.setattr("src.config.paths._paths", None)
-    monkeypatch.setattr("src.sandbox.sandbox_provider._default_sandbox_provider", None)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
 
     # 2. Inject a clean AppConfig via the global singleton.
     #    Using set_app_config() ensures ALL callers of get_app_config() —
     #    regardless of which module imported it — see our config.
-    from src.config.app_config import set_app_config
+    from deerflow.config.app_config import set_app_config
 
     config = _make_e2e_config()
     set_app_config(config)
 
     # 3. Disable title generation (extra LLM call, non-deterministic)
-    from src.config.title_config import TitleConfig, set_title_config
+    from deerflow.config.title_config import TitleConfig, set_title_config
 
     set_title_config(TitleConfig(enabled=False))
 
     # 4. Disable memory queueing (avoids background threads & file writes)
-    from src.config.memory_config import MemoryConfig
+    from deerflow.config.memory_config import MemoryConfig
 
     monkeypatch.setattr(
-        "src.agents.middlewares.memory_middleware.get_memory_config",
+        "deerflow.agents.middlewares.memory_middleware.get_memory_config",
         lambda: MemoryConfig(enabled=False),
     )
 
     # 5. Ensure summarization is off (default, but be explicit)
-    from src.config.summarization_config import SummarizationConfig, set_summarization_config
+    from deerflow.config.summarization_config import SummarizationConfig, set_summarization_config
 
     set_summarization_config(SummarizationConfig(enabled=False))
 
     # 6. Exclude async-only middlewares from the chain.
     #    TitleMiddleware only implements aafter_model (async) with no sync
     #    counterpart, which crashes DeerFlowClient's synchronous stream().
-    from src.agents.lead_agent.agent import _build_middlewares as _original_build_middlewares
-    from src.agents.middlewares.title_middleware import TitleMiddleware
+    from deerflow.agents.lead_agent.agent import _build_middlewares as _original_build_middlewares
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
     def _sync_safe_build_middlewares(*args, **kwargs):
         mws = _original_build_middlewares(*args, **kwargs)
         return [m for m in mws if not isinstance(m, TitleMiddleware)]
 
-    monkeypatch.setattr("src.client._build_middlewares", _sync_safe_build_middlewares)
+    monkeypatch.setattr("deerflow.client._build_middlewares", _sync_safe_build_middlewares)
 
     return {"tmp_path": tmp_path}
 
@@ -266,7 +268,7 @@ class TestFileUploadIntegration:
         assert result["files"][0]["filename"] == "readme.txt"
 
         # Physically exists
-        from src.config.paths import get_paths
+        from deerflow.config.paths import get_paths
         assert (get_paths().sandbox_uploads_dir(tid) / "readme.txt").exists()
 
     def test_upload_duplicate_rename(self, e2e_env, tmp_path):
@@ -402,7 +404,7 @@ class TestMiddlewareChain:
 
         # ThreadDataMiddleware should have set paths in the state.
         # We verify the paths singleton can resolve the thread dir.
-        from src.config.paths import get_paths
+        from deerflow.config.paths import get_paths
         thread_dir = get_paths().thread_dir(tid)
         assert str(thread_dir).endswith(tid)
 
@@ -465,3 +467,310 @@ class TestErrorAndBoundary:
         events = list(client.stream(" "))
         types = [e.type for e in events]
         assert types[-1] == "end"
+
+
+# ---------------------------------------------------------------------------
+# Step 8: Artifact access (no LLM needed)
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactAccess:
+    """Read artifacts through get_artifact() with real filesystem."""
+
+    def test_get_artifact_happy_path(self, e2e_env):
+        """Write a file to outputs, then read it back via get_artifact()."""
+        from deerflow.config.paths import get_paths
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        tid = str(uuid.uuid4())
+
+        # Create an output file in the thread's outputs directory
+        outputs_dir = get_paths().sandbox_outputs_dir(tid)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / "result.txt").write_text("hello artifact")
+
+        data, mime = c.get_artifact(tid, "mnt/user-data/outputs/result.txt")
+        assert data == b"hello artifact"
+        assert "text" in mime
+
+    def test_get_artifact_nested_path(self, e2e_env):
+        """Artifacts in subdirectories are accessible."""
+        from deerflow.config.paths import get_paths
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        tid = str(uuid.uuid4())
+
+        outputs_dir = get_paths().sandbox_outputs_dir(tid)
+        sub = outputs_dir / "charts"
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "data.json").write_text('{"x": 1}')
+
+        data, mime = c.get_artifact(tid, "mnt/user-data/outputs/charts/data.json")
+        assert b'"x"' in data
+        assert "json" in mime
+
+    def test_get_artifact_nonexistent_raises(self, e2e_env):
+        """Reading a nonexistent artifact raises FileNotFoundError."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises(FileNotFoundError):
+            c.get_artifact("test-thread", "mnt/user-data/outputs/ghost.txt")
+
+    def test_get_artifact_traversal_within_prefix_blocked(self, e2e_env):
+        """Path traversal within the valid prefix is still blocked."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises((PermissionError, ValueError, FileNotFoundError)):
+            c.get_artifact("test-thread", "mnt/user-data/outputs/../../etc/passwd")
+
+
+# ---------------------------------------------------------------------------
+# Step 9: Skill installation (no LLM needed)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillInstallation:
+    """install_skill() with real ZIP handling and filesystem."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_skills_dir(self, tmp_path, monkeypatch):
+        """Redirect skill installation to a temp directory."""
+        skills_root = tmp_path / "skills"
+        (skills_root / "public").mkdir(parents=True)
+        (skills_root / "custom").mkdir(parents=True)
+        monkeypatch.setattr(
+            "deerflow.skills.installer.get_skills_root_path",
+            lambda: skills_root,
+        )
+        self._skills_root = skills_root
+
+    @staticmethod
+    def _make_skill_zip(tmp_path, skill_name="test-e2e-skill"):
+        """Create a minimal valid .skill archive."""
+        skill_dir = tmp_path / "build" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n"
+        )
+        archive_path = tmp_path / f"{skill_name}.skill"
+        with zipfile.ZipFile(archive_path, "w") as zf:
+            for file in skill_dir.rglob("*"):
+                zf.write(file, file.relative_to(tmp_path / "build"))
+        return archive_path
+
+    def test_install_skill_success(self, e2e_env, tmp_path):
+        """A valid .skill archive installs to the custom skills directory."""
+        archive = self._make_skill_zip(tmp_path)
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+
+        result = c.install_skill(archive)
+        assert result["success"] is True
+        assert result["skill_name"] == "test-e2e-skill"
+        assert (self._skills_root / "custom" / "test-e2e-skill" / "SKILL.md").exists()
+
+    def test_install_skill_duplicate_rejected(self, e2e_env, tmp_path):
+        """Installing the same skill twice raises ValueError."""
+        archive = self._make_skill_zip(tmp_path)
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+
+        c.install_skill(archive)
+        with pytest.raises(ValueError, match="already exists"):
+            c.install_skill(archive)
+
+    def test_install_skill_invalid_extension(self, e2e_env, tmp_path):
+        """A file without .skill extension is rejected."""
+        bad_file = tmp_path / "not_a_skill.zip"
+        bad_file.write_bytes(b"PK\x03\x04")  # ZIP magic bytes
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises(ValueError, match=".skill extension"):
+            c.install_skill(bad_file)
+
+    def test_install_skill_missing_frontmatter(self, e2e_env, tmp_path):
+        """A .skill archive without valid SKILL.md frontmatter is rejected."""
+        skill_dir = tmp_path / "build" / "bad-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("No frontmatter here.")
+
+        archive = tmp_path / "bad-skill.skill"
+        with zipfile.ZipFile(archive, "w") as zf:
+            for file in skill_dir.rglob("*"):
+                zf.write(file, file.relative_to(tmp_path / "build"))
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises(ValueError, match="Invalid skill"):
+            c.install_skill(archive)
+
+    def test_install_skill_nonexistent_file(self, e2e_env):
+        """Installing from a nonexistent path raises FileNotFoundError."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises(FileNotFoundError):
+            c.install_skill("/nonexistent/skill.skill")
+
+
+# ---------------------------------------------------------------------------
+# Step 10: Configuration management (no LLM needed)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigManagement:
+    """Config queries and updates through real code paths."""
+
+    def test_list_models_returns_injected_config(self, e2e_env):
+        """list_models() returns the model from the injected AppConfig."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.list_models()
+        assert "models" in result
+        assert len(result["models"]) == 1
+        assert result["models"][0]["name"] == "volcengine-ark"
+        assert result["models"][0]["display_name"] == "Volcengine ARK"
+
+    def test_get_model_found(self, e2e_env):
+        """get_model() returns the model when it exists."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        model = c.get_model("volcengine-ark")
+        assert model is not None
+        assert model["name"] == "volcengine-ark"
+        assert model["supports_thinking"] is False
+
+    def test_get_model_not_found(self, e2e_env):
+        """get_model() returns None for nonexistent model."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        assert c.get_model("nonexistent-model") is None
+
+    def test_list_skills_returns_list(self, e2e_env):
+        """list_skills() returns a dict with 'skills' key from real directory scan."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.list_skills()
+        assert "skills" in result
+        assert isinstance(result["skills"], list)
+        # The real skills/ directory should have some public skills
+        assert len(result["skills"]) > 0
+
+    def test_get_skill_found(self, e2e_env):
+        """get_skill() returns skill info for a known public skill."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        # 'deep-research' is a built-in public skill
+        skill = c.get_skill("deep-research")
+        if skill is not None:
+            assert skill["name"] == "deep-research"
+            assert "description" in skill
+            assert "enabled" in skill
+
+    def test_get_skill_not_found(self, e2e_env):
+        """get_skill() returns None for nonexistent skill."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        assert c.get_skill("nonexistent-skill-xyz") is None
+
+    def test_get_mcp_config_returns_dict(self, e2e_env):
+        """get_mcp_config() returns a dict with 'mcp_servers' key."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.get_mcp_config()
+        assert "mcp_servers" in result
+        assert isinstance(result["mcp_servers"], dict)
+
+    def test_update_mcp_config_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
+        """update_mcp_config() writes extensions_config.json and invalidates the agent."""
+        # Set up a writable extensions_config.json
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+
+        # Force reload so the singleton picks up our test file
+        from deerflow.config.extensions_config import reload_extensions_config
+        reload_extensions_config()
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        # Simulate a cached agent
+        c._agent = "fake-agent-placeholder"
+        c._agent_config_key = ("a", "b", "c", "d")
+
+        result = c.update_mcp_config({"test-server": {"enabled": True, "type": "stdio", "command": "echo"}})
+        assert "mcp_servers" in result
+
+        # Agent should be invalidated
+        assert c._agent is None
+        assert c._agent_config_key is None
+
+        # File should be written
+        written = json.loads(config_file.read_text())
+        assert "test-server" in written["mcpServers"]
+
+    def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
+        """update_skill() writes extensions_config.json and invalidates the agent."""
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+
+        from deerflow.config.extensions_config import reload_extensions_config
+        reload_extensions_config()
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        c._agent = "fake-agent-placeholder"
+        c._agent_config_key = ("a", "b", "c", "d")
+
+        # Use a real skill name from the public skills directory
+        skills = c.list_skills()
+        if not skills["skills"]:
+            pytest.skip("No skills available for testing")
+        skill_name = skills["skills"][0]["name"]
+
+        result = c.update_skill(skill_name, enabled=False)
+        assert result["name"] == skill_name
+        assert result["enabled"] is False
+
+        # Agent should be invalidated
+        assert c._agent is None
+        assert c._agent_config_key is None
+
+    def test_update_skill_nonexistent_raises(self, e2e_env, tmp_path, monkeypatch):
+        """update_skill() raises ValueError for nonexistent skill."""
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+
+        from deerflow.config.extensions_config import reload_extensions_config
+        reload_extensions_config()
+
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        with pytest.raises(ValueError, match="not found"):
+            c.update_skill("nonexistent-skill-xyz", enabled=True)
+
+
+# ---------------------------------------------------------------------------
+# Step 11: Memory access (no LLM needed)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryAccess:
+    """Memory system queries through real code paths."""
+
+    def test_get_memory_returns_dict(self, e2e_env):
+        """get_memory() returns a dict (may be empty initial state)."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.get_memory()
+        assert isinstance(result, dict)
+
+    def test_reload_memory_returns_dict(self, e2e_env):
+        """reload_memory() forces reload and returns a dict."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.reload_memory()
+        assert isinstance(result, dict)
+
+    def test_get_memory_config_fields(self, e2e_env):
+        """get_memory_config() returns expected config fields."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.get_memory_config()
+        assert "enabled" in result
+        assert "storage_path" in result
+        assert "debounce_seconds" in result
+        assert "max_facts" in result
+        assert "fact_confidence_threshold" in result
+        assert "injection_enabled" in result
+        assert "max_injection_tokens" in result
+
+    def test_get_memory_status_combines_config_and_data(self, e2e_env):
+        """get_memory_status() returns both 'config' and 'data' keys."""
+        c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
+        result = c.get_memory_status()
+        assert "config" in result
+        assert "data" in result
+        assert "enabled" in result["config"]
+        assert isinstance(result["data"], dict)

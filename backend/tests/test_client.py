@@ -17,6 +17,7 @@ from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
+from deerflow.config.paths import Paths
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -574,10 +575,7 @@ class TestSkillsManagement:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with (
-                patch("deerflow.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "my-skill")),
-            ):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
                 result = client.install_skill(archive_path)
 
             assert result["success"] is True
@@ -665,7 +663,7 @@ class TestUploads:
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files("thread-1", [src_file])
 
             assert result["success"] is True
@@ -721,7 +719,7 @@ class TestUploads:
                 return client.upload_files("thread-async", [first, second])
 
             with (
-                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
                 patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
                 patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor),
@@ -742,7 +740,7 @@ class TestUploads:
             (uploads_dir / "a.txt").write_text("a")
             (uploads_dir / "b.txt").write_text("bb")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.list_uploads("thread-1")
 
             assert result["count"] == 2
@@ -758,7 +756,7 @@ class TestUploads:
             uploads_dir = Path(tmp)
             (uploads_dir / "delete-me.txt").write_text("gone")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.delete_upload("thread-1", "delete-me.txt")
 
             assert result["success"] is True
@@ -767,14 +765,14 @@ class TestUploads:
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=Path(tmp)):
+            with patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)):
                 with pytest.raises(FileNotFoundError):
                     client.delete_upload("thread-1", "nope.txt")
 
     def test_delete_upload_path_traversal(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 with pytest.raises(PermissionError):
                     client.delete_upload("thread-1", "../../etc/passwd")
 
@@ -787,15 +785,12 @@ class TestUploads:
 class TestArtifacts:
     def test_get_artifact(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            outputs = user_data_dir / "outputs"
+            paths = Paths(base_dir=tmp)
+            outputs = paths.sandbox_outputs_dir("t1")
             outputs.mkdir(parents=True)
             (outputs / "result.txt").write_text("artifact content")
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("deerflow.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 content, mime = client.get_artifact("t1", "mnt/user-data/outputs/result.txt")
 
             assert content == b"artifact content"
@@ -803,13 +798,10 @@ class TestArtifacts:
 
     def test_get_artifact_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            user_data_dir.mkdir()
+            paths = Paths(base_dir=tmp)
+            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("deerflow.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(FileNotFoundError):
                     client.get_artifact("t1", "mnt/user-data/outputs/nope.txt")
 
@@ -819,13 +811,10 @@ class TestArtifacts:
 
     def test_get_artifact_path_traversal(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            user_data_dir.mkdir()
+            paths = Paths(base_dir=tmp)
+            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("deerflow.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(PermissionError):
                     client.get_artifact("t1", "mnt/user-data/../../../etc/passwd")
 
@@ -978,7 +967,7 @@ class TestScenarioFileLifecycle:
             (tmp_path / "report.txt").write_text("quarterly report data")
             (tmp_path / "data.csv").write_text("a,b,c\n1,2,3")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 # Step 1: Upload
                 result = client.upload_files(
                     "t-lifecycle",
@@ -1011,15 +1000,16 @@ class TestScenarioFileLifecycle:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
-            user_data_dir = tmp_path / "user-data"
-            outputs_dir = user_data_dir / "outputs"
+
+            paths = Paths(base_dir=tmp_path)
+            outputs_dir = paths.sandbox_outputs_dir("t-artifact")
             outputs_dir.mkdir(parents=True)
 
             # Upload phase
             src_file = tmp_path / "input.txt"
             src_file.write_text("raw data to process")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 uploaded = client.upload_files("t-artifact", [src_file])
                 assert len(uploaded["files"]) == 1
 
@@ -1027,10 +1017,7 @@ class TestScenarioFileLifecycle:
             (outputs_dir / "analysis.json").write_text('{"result": "processed"}')
 
             # Retrieve artifact
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("deerflow.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 content, mime = client.get_artifact("t-artifact", "mnt/user-data/outputs/analysis.json")
 
             assert json.loads(content) == {"result": "processed"}
@@ -1250,7 +1237,7 @@ class TestScenarioThreadIsolation:
             def get_dir(thread_id):
                 return uploads_a if thread_id == "thread-a" else uploads_b
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", side_effect=get_dir):
+            with patch("deerflow.client.get_uploads_dir", side_effect=get_dir):
                 client.upload_files("thread-a", [src_file])
 
                 files_a = client.list_uploads("thread-a")
@@ -1262,18 +1249,13 @@ class TestScenarioThreadIsolation:
     def test_artifacts_isolated_per_thread(self, client):
         """Artifacts in thread-A are not accessible from thread-B."""
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            paths = Paths(base_dir=tmp)
+            outputs_a = paths.sandbox_outputs_dir("thread-a")
+            outputs_a.mkdir(parents=True)
+            paths.sandbox_user_data_dir("thread-b").mkdir(parents=True)
+            (outputs_a / "result.txt").write_text("thread-a artifact")
 
-            data_a = tmp_path / "thread-a"
-            data_b = tmp_path / "thread-b"
-            (data_a / "outputs").mkdir(parents=True)
-            (data_b / "outputs").mkdir(parents=True)
-            (data_a / "outputs" / "result.txt").write_text("thread-a artifact")
-
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.side_effect = lambda tid: data_a if tid == "thread-a" else data_b
-
-            with patch("deerflow.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 content, _ = client.get_artifact("thread-a", "mnt/user-data/outputs/result.txt")
                 assert content == b"thread-a artifact"
 
@@ -1341,10 +1323,7 @@ class TestScenarioSkillInstallAndUse:
             (skills_root / "custom").mkdir(parents=True)
 
             # Step 1: Install
-            with (
-                patch("deerflow.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "my-analyzer")),
-            ):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
                 result = client.install_skill(archive)
             assert result["success"] is True
             assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
@@ -1476,7 +1455,7 @@ class TestScenarioEdgeCases:
             pdf_file.write_bytes(b"%PDF-1.4 fake content")
 
             with (
-                patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
                 patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=Exception("conversion failed")),
             ):
@@ -1574,9 +1553,7 @@ class TestGatewayConformance:
         with zipfile.ZipFile(archive, "w") as zf:
             zf.write(skill_dir / "SKILL.md", "my-skill/SKILL.md")
 
-        custom_dir = tmp_path / "custom"
-        custom_dir.mkdir()
-        with patch("deerflow.skills.loader.get_skills_root_path", return_value=tmp_path):
+        with patch("deerflow.skills.installer.get_skills_root_path", return_value=tmp_path):
             result = client.install_skill(archive)
 
         parsed = SkillInstallResponse(**result)
@@ -1640,7 +1617,7 @@ class TestGatewayConformance:
         src_file = tmp_path / "hello.txt"
         src_file.write_text("hello")
 
-        with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+        with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
             result = client.upload_files("t-conform", [src_file])
 
         parsed = UploadResponse(**result)
@@ -1710,18 +1687,29 @@ class TestInstallSkillSecurity:
     """Every security gate in install_skill() must have a red-line test."""
 
     def test_zip_bomb_rejected(self, client):
-        """Archives whose extracted size exceeds 100 MB are rejected."""
+        """Archives whose extracted size exceeds the limit are rejected."""
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "bomb.skill"
-            # 101 MB of zeros compresses to ~100 KB on disk but file_size = 101 MB.
-            data = b"\x00" * (101 * 1024 * 1024)
+            # Create a small archive that claims huge uncompressed size.
+            # Write 200 bytes but the safe_extract checks cumulative file_size.
+            data = b"\x00" * 200
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("big.bin", data)
 
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+            # Patch max_total_size to a small value to trigger the bomb check.
+            from deerflow.skills import installer as _installer
+            orig = _installer.safe_extract_skill_archive
+
+            def patched_extract(zf, dest, max_total_size=100):
+                return orig(zf, dest, max_total_size=100)
+
+            with (
+                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+                patch("deerflow.skills.installer.safe_extract_skill_archive", side_effect=patched_extract),
+            ):
                 with pytest.raises(ValueError, match="too large"):
                     client.install_skill(archive)
 
@@ -1735,8 +1723,8 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
-                with pytest.raises(ValueError, match="Unsafe path"):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
     def test_dotdot_path_in_archive_rejected(self, client):
@@ -1749,55 +1737,35 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
-                with pytest.raises(ValueError, match="Unsafe path"):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
+                with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
-    def test_symlinks_removed_after_extraction(self, client):
-        """Symlinks inside the archive are removed before installation."""
+    def test_symlinks_skipped_during_extraction(self, client):
+        """Symlink entries in the archive are skipped (never written to disk)."""
+        import stat as stat_mod
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
-            # Build a real directory with a symlink, then zip it.
-            src_dir = tmp_path / "src-skill"
-            src_dir.mkdir()
-            (src_dir / "SKILL.md").write_text("---\nname: sym-skill\ndescription: test\n---\nBody")
-            link = src_dir / "sneaky_link"
-            link.symlink_to("/etc/passwd")
-
             archive = tmp_path / "sym-skill.skill"
             with zipfile.ZipFile(archive, "w") as zf:
-                for p in src_dir.rglob("*"):
-                    if not p.is_symlink():
-                        zf.write(p, f"sym-skill/{p.relative_to(src_dir)}")
-                    # Symlinks can't be faithfully stored in standard ZIP;
-                    # test the cleanup path by patching extractall to create one.
+                zf.writestr("sym-skill/SKILL.md", "---\nname: sym-skill\ndescription: test\n---\nBody")
+                # Inject a symlink entry via ZipInfo with Unix symlink mode.
+                link_info = zipfile.ZipInfo("sym-skill/sneaky_link")
+                link_info.external_attr = (stat_mod.S_IFLNK | 0o777) << 16
+                zf.writestr(link_info, "/etc/passwd")
 
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            real_extractall = zipfile.ZipFile.extractall
-
-            def extractall_with_symlink(zf_self, path=None, members=None, pwd=None):
-                real_extractall(zf_self, path, members, pwd)
-                # Inject a symlink post-extraction to simulate a crafted archive.
-                extracted = Path(path)
-                for d in extracted.iterdir():
-                    if d.is_dir():
-                        (d / "injected_link").symlink_to("/etc/passwd")
-
-            with (
-                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "sym-skill")),
-                patch.object(zipfile.ZipFile, "extractall", extractall_with_symlink),
-            ):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
                 result = client.install_skill(archive)
 
             assert result["success"] is True
             installed = skills_root / "custom" / "sym-skill"
-            # Verify no symlinks survived into the installed directory.
-            for p in installed.rglob("*"):
-                assert not p.is_symlink(), f"Symlink not cleaned: {p}"
+            assert (installed / "SKILL.md").exists()
+            assert not (installed / "sneaky_link").exists()
 
     def test_invalid_skill_name_rejected(self, client):
         """Skill names containing special characters are rejected."""
@@ -1816,8 +1784,8 @@ class TestInstallSkillSecurity:
             (skills_root / "custom").mkdir(parents=True)
 
             with (
-                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
+                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill name"):
                     client.install_skill(archive)
@@ -1839,8 +1807,8 @@ class TestInstallSkillSecurity:
             (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
 
             with (
-                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
+                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
             ):
                 with pytest.raises(ValueError, match="already exists"):
                     client.install_skill(archive)
@@ -1855,7 +1823,7 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            with patch("src.skills.loader.get_skills_root_path", return_value=skills_root):
+            with patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root):
                 with pytest.raises(ValueError, match="empty"):
                     client.install_skill(archive)
 
@@ -1875,8 +1843,8 @@ class TestInstallSkillSecurity:
             (skills_root / "custom").mkdir(parents=True)
 
             with (
-                patch("src.skills.loader.get_skills_root_path", return_value=skills_root),
-                patch("src.gateway.routers.skills._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
+                patch("deerflow.skills.installer.get_skills_root_path", return_value=skills_root),
+                patch("deerflow.skills.installer._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill"):
                     client.install_skill(archive)
@@ -1958,7 +1926,7 @@ class TestAtomicWriteJson:
 class TestConfigUpdateErrors:
     def test_update_mcp_config_no_config_file(self, client):
         """FileNotFoundError when extensions_config.json cannot be located."""
-        with patch("src.client.ExtensionsConfig.resolve_config_path", return_value=None):
+        with patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=None):
             with pytest.raises(FileNotFoundError, match="Cannot locate"):
                 client.update_mcp_config({"server": {}})
 
@@ -1968,8 +1936,8 @@ class TestConfigUpdateErrors:
         skill.name = "some-skill"
 
         with (
-            patch("src.skills.loader.load_skills", return_value=[skill]),
-            patch("src.client.ExtensionsConfig.resolve_config_path", return_value=None),
+            patch("deerflow.skills.loader.load_skills", return_value=[skill]),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=None),
         ):
             with pytest.raises(FileNotFoundError, match="Cannot locate"):
                 client.update_skill("some-skill", enabled=False)
@@ -1988,10 +1956,10 @@ class TestConfigUpdateErrors:
             config_file.write_text("{}")
 
             with (
-                patch("src.skills.loader.load_skills", side_effect=[[skill], []]),
-                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("src.client.get_extensions_config", return_value=ext_config),
-                patch("src.client.reload_extensions_config"),
+                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], []]),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                patch("deerflow.client.reload_extensions_config"),
             ):
                 with pytest.raises(RuntimeError, match="disappeared"):
                     client.update_skill("ghost-skill", enabled=False)
@@ -2142,7 +2110,7 @@ class TestUploadDeleteSymlink:
             link = uploads_dir / "harmless.txt"
             link.symlink_to(outside)
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 # The resolved path of the symlink escapes uploads_dir,
                 # so path traversal check should catch it.
                 with pytest.raises(PermissionError):
@@ -2162,7 +2130,7 @@ class TestUploadDeleteSymlink:
             src_file = tmp_path / weird_name
             src_file.write_text("data")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files("thread-1", [src_file])
 
             assert result["success"] is True
@@ -2179,29 +2147,23 @@ class TestArtifactHardening:
     def test_artifact_directory_rejected(self, client):
         """get_artifact rejects paths that resolve to a directory."""
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            outputs = user_data_dir / "outputs" / "subdir"
-            outputs.mkdir(parents=True)
+            paths = Paths(base_dir=tmp)
+            subdir = paths.sandbox_outputs_dir("t1") / "subdir"
+            subdir.mkdir(parents=True)
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("src.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(ValueError, match="not a file"):
                     client.get_artifact("t1", "mnt/user-data/outputs/subdir")
 
     def test_artifact_leading_slash_stripped(self, client):
         """Paths with leading slash are handled correctly."""
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            outputs = user_data_dir / "outputs"
+            paths = Paths(base_dir=tmp)
+            outputs = paths.sandbox_outputs_dir("t1")
             outputs.mkdir(parents=True)
             (outputs / "file.txt").write_text("content")
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("src.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 content, _mime = client.get_artifact("t1", "/mnt/user-data/outputs/file.txt")
 
             assert content == b"content"
@@ -2235,7 +2197,7 @@ class TestUploadDuplicateFilenames:
             (dir_a / "data.txt").write_text("version A")
             (dir_b / "data.txt").write_text("version B")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files("t-dup", [dir_a / "data.txt", dir_b / "data.txt"])
 
             assert result["success"] is True
@@ -2268,7 +2230,7 @@ class TestUploadDuplicateFilenames:
                 d.mkdir()
                 (d / "report.csv").write_text(f"from {name}")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files(
                     "t-triple",
                     [tmp_path / "x" / "report.csv", tmp_path / "y" / "report.csv", tmp_path / "z" / "report.csv"],
@@ -2288,7 +2250,7 @@ class TestUploadDuplicateFilenames:
             (tmp_path / "a.txt").write_text("aaa")
             (tmp_path / "b.txt").write_text("bbb")
 
-            with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
                 result = client.upload_files("t-ok", [tmp_path / "a.txt", tmp_path / "b.txt"])
 
             assert result["success"] is True
@@ -2312,13 +2274,10 @@ class TestBugArtifactPrefixMatchTooLoose:
     def test_exact_prefix_without_subpath_accepted(self, client):
         """Bare 'mnt/user-data' is accepted (will later fail as directory, not at prefix)."""
         with tempfile.TemporaryDirectory() as tmp:
-            user_data_dir = Path(tmp) / "user-data"
-            user_data_dir.mkdir()
+            paths = Paths(base_dir=tmp)
+            paths.sandbox_user_data_dir("t1").mkdir(parents=True)
 
-            mock_paths = MagicMock()
-            mock_paths.sandbox_user_data_dir.return_value = user_data_dir
-
-            with patch("src.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.client.get_paths", return_value=paths):
                 # Accepted at prefix check, but fails because it's a directory.
                 with pytest.raises(ValueError, match="not a file"):
                     client.get_artifact("t1", "mnt/user-data")
@@ -2326,7 +2285,7 @@ class TestBugArtifactPrefixMatchTooLoose:
 
 class TestBugListUploadsDeadCode:
     """Regression: list_uploads works even when called on a fresh thread
-    (directory auto-created by _get_uploads_dir).
+    (directory auto-created by get_uploads_dir).
     """
 
     def test_list_uploads_on_fresh_thread(self, client):
@@ -2338,7 +2297,7 @@ class TestBugListUploadsDeadCode:
             mock_paths = MagicMock()
             mock_paths.sandbox_uploads_dir.return_value = non_existent
 
-            with patch("src.client.get_paths", return_value=mock_paths):
+            with patch("deerflow.uploads.manager.get_paths", return_value=mock_paths):
                 result = client.list_uploads("thread-fresh")
 
             assert non_existent.exists()
@@ -2365,9 +2324,9 @@ class TestBugAgentInvalidationInconsistency:
             config_file.write_text("{}")
 
             with (
-                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("src.client.get_extensions_config", return_value=current_config),
-                patch("src.client.reload_extensions_config", return_value=reloaded),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("deerflow.client.get_extensions_config", return_value=current_config),
+                patch("deerflow.client.reload_extensions_config", return_value=reloaded),
             ):
                 client.update_mcp_config({})
 
@@ -2397,10 +2356,10 @@ class TestBugAgentInvalidationInconsistency:
             config_file.write_text("{}")
 
             with (
-                patch("src.skills.loader.load_skills", side_effect=[[skill], [updated]]),
-                patch("src.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("src.client.get_extensions_config", return_value=ext_config),
-                patch("src.client.reload_extensions_config"),
+                patch("deerflow.skills.loader.load_skills", side_effect=[[skill], [updated]]),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+                patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                patch("deerflow.client.reload_extensions_config"),
             ):
                 client.update_skill("s1", enabled=False)
 
