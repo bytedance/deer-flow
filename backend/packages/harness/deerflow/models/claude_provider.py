@@ -6,9 +6,12 @@ Supports two authentication modes:
      - Detected by sk-ant-oat prefix
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
 
-Auto-loads credentials from:
+Auto-loads credentials from explicit runtime handoff:
   - $ANTHROPIC_API_KEY environment variable
-  - ~/.claude/.credentials.json (Claude Code CLI)
+  - $CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_AUTH_TOKEN
+  - $CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+  - $CLAUDE_CODE_CREDENTIALS_PATH
+  - ~/.claude/.credentials.json
 """
 
 import logging
@@ -64,14 +67,14 @@ class ClaudeChatModel(ChatAnthropic):
             else:
                 current_key = str(self.anthropic_api_key)
 
-        # Try to load from Claude Code CLI if no valid key
+        # Try the explicit Claude Code OAuth handoff sources if no valid key.
         if not current_key or current_key in ("your-anthropic-api-key",):
             cred = load_claude_code_credential()
             if cred:
                 current_key = cred.access_token
                 logger.info(f"Using Claude Code CLI credential (source: {cred.source})")
             else:
-                logger.warning("No Anthropic API key and no Claude Code CLI credentials found.")
+                logger.warning("No Anthropic API key or explicit Claude Code OAuth credential found.")
 
         # Detect OAuth token and configure Bearer auth
         if is_oauth_token(current_key):

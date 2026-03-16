@@ -1,9 +1,10 @@
 """Auto-load credentials from Claude Code CLI and Codex CLI.
 
 Implements two credential strategies:
-  1. Claude Code OAuth token from ~/.claude/.credentials.json
+  1. Claude Code OAuth token from explicit env vars or an exported credentials file
      - Uses Authorization: Bearer header (NOT x-api-key)
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
+     - Supports $CLAUDE_CODE_OAUTH_TOKEN, $CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, and $ANTHROPIC_AUTH_TOKEN
      - Override path with $CLAUDE_CODE_CREDENTIALS_PATH
   2. Codex CLI token from ~/.codex/auth.json
      - Uses chatgpt.com/backend-api/codex/responses endpoint
@@ -14,11 +15,8 @@ Implements two credential strategies:
 import json
 import logging
 import os
-import platform
-import subprocess
 import time
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -80,62 +78,31 @@ def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
         return None
 
 
-def _claude_code_oauth_file_suffix() -> str:
-    if os.getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL"):
-        return "-custom-oauth"
-    if os.getenv("USE_LOCAL_OAUTH") or os.getenv("LOCAL_BRIDGE"):
-        return "-local-oauth"
-    if os.getenv("USE_STAGING_OAUTH"):
-        return "-staging-oauth"
-    return ""
-
-
-def _claude_code_keychain_service_name() -> str:
-    service = f"Claude Code{_claude_code_oauth_file_suffix()}-credentials"
-    config_dir = os.getenv("CLAUDE_CONFIG_DIR")
-    if config_dir:
-        config_hash = sha256(str(Path(config_dir).expanduser()).encode()).hexdigest()[:8]
-        service = f"{service}-{config_hash}"
-    return service
-
-
-def _claude_code_keychain_account_name() -> str:
-    return os.getenv("USER") or "claude-code-user"
-
-
-def _load_claude_code_keychain_container() -> dict[str, Any] | None:
-    if platform.system() != "Darwin":
+def _read_secret_from_file_descriptor(env_var: str) -> str | None:
+    fd_value = os.getenv(env_var)
+    if not fd_value:
         return None
 
-    service = _claude_code_keychain_service_name()
-    account = _claude_code_keychain_account_name()
+    try:
+        fd = int(fd_value)
+    except ValueError:
+        logger.warning(f"{env_var} must be an integer file descriptor, got: {fd_value}")
+        return None
 
     try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", account, "-w", "-s", service],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        secret = Path(f"/dev/fd/{fd}").read_text().strip()
     except OSError as e:
-        logger.debug(f"Failed to invoke macOS security tool: {e}")
+        logger.warning(f"Failed to read {env_var}: {e}")
         return None
 
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        if stderr:
-            logger.debug(f"Claude Code credentials not available in Keychain: {stderr}")
-        return None
+    return secret or None
 
-    secret = (result.stdout or "").strip()
-    if not secret:
-        return None
 
-    try:
-        return json.loads(secret)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse Claude Code Keychain credentials: {e}")
+def _credential_from_direct_token(access_token: str, source: str) -> ClaudeCodeCredential | None:
+    token = access_token.strip()
+    if not token:
         return None
+    return ClaudeCodeCredential(access_token=token, source=source)
 
 
 def _extract_claude_code_credential(data: dict[str, Any], source: str) -> ClaudeCodeCredential | None:
@@ -160,9 +127,15 @@ def _extract_claude_code_credential(data: dict[str, Any], source: str) -> Claude
 
 
 def load_claude_code_credential() -> ClaudeCodeCredential | None:
-    """Load OAuth credential from Claude Code CLI.
+    """Load OAuth credential from explicit Claude Code handoff sources.
 
-    Reads ~/.claude/.credentials.json which contains:
+    Lookup order:
+      1. $CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_AUTH_TOKEN
+      2. $CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+      3. $CLAUDE_CODE_CREDENTIALS_PATH
+      4. ~/.claude/.credentials.json
+
+    Exported credentials files contain:
     {
       "claudeAiOauth": {
         "accessToken": "sk-ant-oat01-...",
@@ -173,6 +146,20 @@ def load_claude_code_credential() -> ClaudeCodeCredential | None:
       }
     }
     """
+    direct_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or os.getenv("ANTHROPIC_AUTH_TOKEN")
+    if direct_token:
+        cred = _credential_from_direct_token(direct_token, "claude-cli-env")
+        if cred:
+            logger.info("Loaded Claude Code OAuth credential from environment")
+        return cred
+
+    fd_token = _read_secret_from_file_descriptor("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")
+    if fd_token:
+        cred = _credential_from_direct_token(fd_token, "claude-cli-fd")
+        if cred:
+            logger.info("Loaded Claude Code OAuth credential from file descriptor")
+        return cred
+
     override_path = os.getenv("CLAUDE_CODE_CREDENTIALS_PATH")
     if override_path:
         data = _load_json_file(Path(override_path).expanduser(), "Claude Code credentials")
@@ -182,13 +169,6 @@ def load_claude_code_credential() -> ClaudeCodeCredential | None:
         if cred:
             logger.info(f"Loaded Claude Code OAuth credential from override path (expires_at={cred.expires_at})")
         return cred
-
-    keychain_data = _load_claude_code_keychain_container()
-    if keychain_data is not None:
-        cred = _extract_claude_code_credential(keychain_data, "claude-cli-keychain")
-        if cred:
-            logger.info(f"Loaded Claude Code OAuth credential from macOS Keychain (expires_at={cred.expires_at})")
-            return cred
 
     cred_path = _resolve_credential_path("CLAUDE_CODE_CREDENTIALS_PATH", ".claude/.credentials.json")
     data = _load_json_file(cred_path, "Claude Code credentials")
