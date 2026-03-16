@@ -25,6 +25,10 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 )
 
 
+def _path_variants(path: str) -> set[str]:
+    return {path, path.replace("\\", "/"), path.replace("/", "\\")}
+
+
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
     """Replace virtual /mnt/user-data paths with actual thread data paths.
 
@@ -101,15 +105,15 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
         raw_base = str(Path(actual_base))
         resolved_base = str(Path(actual_base).resolve())
-        for base in {raw_base, resolved_base}:
-            escaped_actual = re.escape(base)
-            pattern = re.compile(escaped_actual + r"(?:/[^\s\"';&|<>()]*)?")
+        for base in _path_variants(raw_base) | _path_variants(resolved_base):
+            escaped_actual = re.escape(base).replace(r"\\", r"[/\\]")
+            pattern = re.compile(escaped_actual + r"(?:[/\\][^\s\"';&|<>()]*)?")
 
             def replace_match(match: re.Match) -> str:
                 matched_path = match.group(0)
                 if matched_path == base:
                     return virtual_base
-                relative = matched_path[len(base) :].lstrip("/")
+                relative = matched_path[len(base) :].lstrip("/\\")
                 return f"{virtual_base}/{relative}" if relative else virtual_base
 
             result = pattern.sub(replace_match, result)

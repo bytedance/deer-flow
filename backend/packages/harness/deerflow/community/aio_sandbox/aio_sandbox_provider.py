@@ -401,7 +401,7 @@ class AioSandboxProvider(SandboxProvider):
         paths.ensure_thread_dirs(thread_id)
         lock_path = paths.thread_dir(thread_id) / f"{sandbox_id}.lock"
 
-        with open(lock_path, "a") as lock_file:
+        with open(lock_path, "a", encoding="utf-8") as lock_file:
             try:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
                 # Re-check in-process caches under the file lock in case another
