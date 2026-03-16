@@ -96,22 +96,12 @@ def _sync_artifact_to_storage(thread_id: str, virtual_path: str) -> None:
             logger.warning(f"Could not read artifact from sandbox: {virtual_path}")
             return
 
-        # Extract relative path from virtual path
-        # /mnt/user-data/outputs/report.md → outputs/report.md
-        prefix = VIRTUAL_PATH_PREFIX.lstrip("/") + "/"
-        stripped = virtual_path.lstrip("/")
-        if stripped.startswith(prefix):
-            relative = stripped[len(prefix):]  # e.g., "outputs/report.md"
-        else:
-            return
+        # Write to configured durable outputs backend
+        from src.storage import get_thread_file_backend
 
-        # Write to persistent storage
-        from src.storage import get_storage
-
-        storage = get_storage()
-        storage_key = f"threads/{thread_id}/{relative}"
-        storage.write(storage_key, data.encode("utf-8") if isinstance(data, str) else data)
-        logger.info(f"Synced artifact to storage: {storage_key}")
+        outputs_backend = get_thread_file_backend("outputs")
+        outputs_backend.put_virtual_file(thread_id, virtual_path, data.encode("utf-8") if isinstance(data, str) else data)
+        logger.info("Synced artifact to outputs backend: %s", virtual_path)
 
     except Exception as e:
         logger.warning(f"Failed to sync artifact to storage: {e}")

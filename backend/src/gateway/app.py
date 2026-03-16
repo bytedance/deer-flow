@@ -48,15 +48,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 2. Gateway and LangGraph Server are separate processes with independent caches
     # MCP tools are lazily initialized in LangGraph Server when first needed
 
-    # Pre-warm R2 storage client to eliminate ~10s SSL cold start on first upload
+    # Pre-warm thread-file R2 client to eliminate SSL cold start on first upload
     try:
-        from src.storage import get_storage
+        from src.storage import get_thread_file_backend
 
-        storage = get_storage()
-        if hasattr(storage, "warmup"):
+        uploads_backend = get_thread_file_backend("uploads")
+        if hasattr(uploads_backend, "warmup"):
             import threading
 
-            threading.Thread(target=storage.warmup, daemon=True).start()
+            threading.Thread(target=uploads_backend.warmup, daemon=True).start()
     except Exception:
         logger.debug("Storage warmup skipped (non-fatal)")
 

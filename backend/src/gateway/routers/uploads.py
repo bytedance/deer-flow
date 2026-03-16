@@ -1,10 +1,11 @@
 """Upload router for handling file uploads."""
 
+import asyncio
 import logging
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from src.config.paths import VIRTUAL_PATH_PREFIX, get_paths
@@ -58,6 +59,21 @@ class FinalizeReferencesResponse(BaseModel):
     message: str
 
 
+class PresignedUploadItem(BaseModel):
+    url: str
+    key: str
+    virtual_path: str
+    artifact_url: str
+    markdown_file: str | None = None
+    markdown_key: str | None = None
+    markdown_virtual_path: str | None = None
+    markdown_artifact_url: str | None = None
+
+
+class PresignUploadsResponse(BaseModel):
+    files: list[PresignedUploadItem]
+
+
 def _validate_reference_contract(thread_id: str, descriptor: TrustedAttachmentDescriptor) -> str:
     if descriptor.thread_id != thread_id:
         raise HTTPException(status_code=400, detail=f"Attachment thread_id mismatch for {descriptor.filename}")
@@ -78,6 +94,108 @@ def _validate_reference_contract(thread_id: str, descriptor: TrustedAttachmentDe
             raise HTTPException(status_code=400, detail=f"Invalid trusted_url for attachment: {safe_filename}")
 
     return expected_virtual_path
+
+
+def _safe_filename_or_none(filename: str) -> str | None:
+    safe_filename = Path(filename).name
+    if not safe_filename or safe_filename in {".", ".."}:
+        return None
+    if "/" in safe_filename or "\\" in safe_filename:
+        return None
+    return safe_filename
+
+
+@router.post("/presign", response_model=PresignUploadsResponse)
+async def presign_uploads(thread_id: str, filenames: list[str] = Query(...)) -> PresignUploadsResponse:
+    """Generate presigned PUT URLs for direct browser upload to R2."""
+    uploads_backend = get_thread_file_backend("uploads")
+
+    if not hasattr(uploads_backend, "generate_presigned_put_for_virtual_file"):
+        raise HTTPException(status_code=400, detail="Presigned uploads are unavailable for the configured uploads backend")
+
+    files: list[PresignedUploadItem] = []
+    for filename in filenames:
+        safe_filename = _safe_filename_or_none(filename)
+        if not safe_filename:
+            continue
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
+        content_type = "application/octet-stream"
+        try:
+            url = uploads_backend.generate_presigned_put_for_virtual_file(
+                thread_id,
+                virtual_path,
+                content_type=content_type,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to generate presigned URL for {safe_filename}: {e}") from e
+
+        item = PresignedUploadItem(
+            url=url,
+            key=virtual_path,
+            virtual_path=virtual_path,
+            artifact_url=f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
+        )
+
+        file_ext = Path(safe_filename).suffix.lower()
+        if file_ext in CONVERTIBLE_EXTENSIONS:
+            md_name = f"{Path(safe_filename).stem}.md"
+            md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_name}"
+            item.markdown_file = md_name
+            item.markdown_key = md_virtual_path
+            item.markdown_virtual_path = md_virtual_path
+            item.markdown_artifact_url = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_name}"
+
+        files.append(item)
+
+    return PresignUploadsResponse(files=files)
+
+
+@router.post("/confirm")
+async def confirm_uploads(thread_id: str, filenames: list[str] = Query(...)) -> dict:
+    """Finalize direct uploads by generating markdown sidecars for convertible files."""
+    uploads_dir = get_uploads_dir(thread_id)
+    uploads_backend = get_thread_file_backend("uploads")
+    sidecar_backend = get_thread_file_backend("upload_markdown_sidecars")
+
+    sandbox_provider = get_sandbox_provider()
+    sandbox_id = sandbox_provider.acquire(thread_id)
+    sandbox = sandbox_provider.get(sandbox_id)
+
+    converted: list[str] = []
+    for filename in filenames:
+        safe_filename = _safe_filename_or_none(filename)
+        if not safe_filename:
+            continue
+
+        file_ext = Path(safe_filename).suffix.lower()
+        if file_ext not in CONVERTIBLE_EXTENSIONS:
+            continue
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
+        if not uploads_backend.exists_virtual_file(thread_id, virtual_path):
+            continue
+
+        local_path = uploads_dir / safe_filename
+        try:
+            uploads_backend.materialize_virtual_file(thread_id, virtual_path, local_path)
+            md_path = await convert_file_to_markdown(local_path)
+            if not md_path:
+                continue
+
+            md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+            md_content = md_path.read_bytes()
+            sidecar_backend.put_virtual_file(thread_id, md_virtual_path, md_content)
+            evict_local_upload_cache(thread_id, keep_filenames={safe_filename, md_path.name})
+
+            if sandbox_id != "local" and sandbox is not None:
+                sandbox.update_file(md_virtual_path, md_content)
+
+            converted.append(md_path.name)
+        except Exception as e:
+            logger.warning("Failed to finalize upload %s: %s", safe_filename, e)
+
+    return {"success": True, "converted": converted}
 
 
 def get_uploads_dir(thread_id: str) -> Path:
@@ -118,6 +236,11 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
     except Exception as e:
         logger.error(f"Failed to convert {file_path.name} to markdown: {e}")
         return None
+
+
+def _convert_file_to_markdown_sync(file_path: Path) -> Path | None:
+    """Sync wrapper used by callers that run outside async contexts."""
+    return asyncio.run(convert_file_to_markdown(file_path))
 
 
 @router.post("", response_model=UploadResponse)

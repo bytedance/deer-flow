@@ -736,7 +736,7 @@ class DeerFlowClient:
         Raises:
             FileNotFoundError: If any file does not exist.
         """
-        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from src.gateway.routers.uploads import CONVERTIBLE_EXTENSIONS, _convert_file_to_markdown_sync
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
@@ -770,7 +770,7 @@ class DeerFlowClient:
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
         def _convert_in_thread(path: Path):
-            return asyncio.run(convert_file_to_markdown(path))
+            return _convert_file_to_markdown_sync(path)
 
         try:
             for src_path in resolved_files:
@@ -791,7 +791,7 @@ class DeerFlowClient:
                         if conversion_pool is not None:
                             md_path = conversion_pool.submit(_convert_in_thread, dest).result()
                         else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                            md_path = _convert_file_to_markdown_sync(dest)
                     except Exception:
                         logger.warning("Failed to convert %s to markdown", src_path.name, exc_info=True)
                         md_path = None

@@ -18,6 +18,15 @@ class ThreadUploadItem:
     modified: float
 
 
+@dataclass
+class ThreadFileItem:
+    filename: str
+    size: int
+    extension: str
+    modified: float
+    virtual_path: str
+
+
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs/"
 UPLOADS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/uploads/"
 
@@ -41,6 +50,9 @@ class ThreadFileBackend:
         raise NotImplementedError
 
     def list_uploads(self, thread_id: str) -> list[ThreadUploadItem]:
+        raise NotImplementedError
+
+    def list_virtual_files(self, thread_id: str, virtual_dir: str) -> list[ThreadFileItem]:
         raise NotImplementedError
 
     def materialize_virtual_file(self, thread_id: str, virtual_path: str, destination_path: str | Path) -> Path:
@@ -102,6 +114,33 @@ class LocalThreadFileBackend(ThreadFileBackend):
                     size=stat.st_size,
                     extension=path.suffix,
                     modified=stat.st_mtime,
+                )
+            )
+
+        return items
+
+    def list_virtual_files(self, thread_id: str, virtual_dir: str) -> list[ThreadFileItem]:
+        root = self._resolve(thread_id, virtual_dir)
+        if not root.exists() or not root.is_dir():
+            return []
+
+        normalized_dir = f"/{virtual_dir.lstrip('/')}".rstrip("/")
+        items: list[ThreadFileItem] = []
+        for file_path in sorted(root.rglob("*")):
+            if not file_path.is_file():
+                continue
+            try:
+                stat = file_path.stat()
+                rel = file_path.relative_to(root).as_posix()
+            except OSError:
+                continue
+            items.append(
+                ThreadFileItem(
+                    filename=file_path.name,
+                    size=stat.st_size,
+                    extension=file_path.suffix,
+                    modified=stat.st_mtime,
+                    virtual_path=f"{normalized_dir}/{rel}",
                 )
             )
 
@@ -218,6 +257,36 @@ class R2ThreadFileBackend(ThreadFileBackend):
         items.sort(key=lambda i: i.filename)
         return items
 
+    def list_virtual_files(self, thread_id: str, virtual_dir: str) -> list[ThreadFileItem]:
+        normalized_dir = f"/{virtual_dir.lstrip('/')}".rstrip("/")
+        prefix_key = self._object_key(thread_id, normalized_dir + "/")
+        resp = self._client.list_objects_v2(Bucket=self._bucket, Prefix=prefix_key)
+        contents = resp.get("Contents", [])
+        items: list[ThreadFileItem] = []
+
+        for obj in contents:
+            key = obj.get("Key") or ""
+            if key.endswith("/"):
+                continue
+            suffix = key[len(prefix_key) :]
+            if not suffix:
+                continue
+            filename = Path(suffix).name
+            last_modified = obj.get("LastModified")
+            modified = last_modified.timestamp() if isinstance(last_modified, datetime) else 0.0
+            items.append(
+                ThreadFileItem(
+                    filename=filename,
+                    size=int(obj.get("Size", 0)),
+                    extension=Path(filename).suffix,
+                    modified=modified,
+                    virtual_path=f"{normalized_dir}/{suffix}",
+                )
+            )
+
+        items.sort(key=lambda i: i.virtual_path)
+        return items
+
     def materialize_virtual_file(self, thread_id: str, virtual_path: str, destination_path: str | Path) -> Path:
         destination = Path(destination_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -225,6 +294,23 @@ class R2ThreadFileBackend(ThreadFileBackend):
             self._client.download_fileobj(self._bucket, self._object_key(thread_id, virtual_path), file_obj)
         destination.touch(exist_ok=True)
         return destination
+
+    def warmup(self) -> None:
+        try:
+            self._client.list_objects_v2(Bucket=self._bucket, MaxKeys=0)
+        except Exception:
+            pass
+
+    def generate_presigned_put_for_virtual_file(self, thread_id: str, virtual_path: str, *, content_type: str = "application/octet-stream", expires_in: int = 3600) -> str:
+        return self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": self._object_key(thread_id, virtual_path),
+                "ContentType": content_type,
+            },
+            ExpiresIn=expires_in,
+        )
 
 
 _backend_cache: dict[str, ThreadFileBackend] = {}

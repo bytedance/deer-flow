@@ -265,6 +265,33 @@ sandbox:
 #   provisioner_url: http://provisioner:8002
 
 # ============================================================================
+# Thread Files Configuration
+# ============================================================================
+# Durable thread-scoped storage used by uploads, outputs, workspace sync,
+# and artifact reads. For ephemeral pods, set all features to r2.
+
+thread_files:
+  features:
+    uploads:
+      backend: local
+    upload_markdown_sidecars:
+      backend: local
+    workspace:
+      backend: local
+    outputs:
+      backend: local
+    artifact_reads:
+      backend: local
+  r2:
+    bucket: ""
+    endpoint: ""
+    access_key_id: ""
+    secret_access_key: ""
+    region: auto
+    key_prefix: thread-files
+
+
+# ============================================================================
 # Subagents Configuration
 # ============================================================================
 # Configure timeouts for subagent execution

@@ -12,6 +12,7 @@ class ThreadFilesFeaturesConfig(BaseModel):
 
     uploads: ThreadFilesFeatureConfig = Field(default_factory=ThreadFilesFeatureConfig)
     upload_markdown_sidecars: ThreadFilesFeatureConfig = Field(default_factory=ThreadFilesFeatureConfig)
+    workspace: ThreadFilesFeatureConfig = Field(default_factory=ThreadFilesFeatureConfig)
     outputs: ThreadFilesFeatureConfig = Field(default_factory=ThreadFilesFeatureConfig)
     artifact_reads: ThreadFilesFeatureConfig = Field(default_factory=ThreadFilesFeatureConfig)
 
@@ -37,6 +38,7 @@ class ThreadFilesConfig(BaseModel):
         mapping = {
             "uploads": self.features.uploads.backend,
             "upload_markdown_sidecars": self.features.upload_markdown_sidecars.backend,
+            "workspace": self.features.workspace.backend,
             "outputs": self.features.outputs.backend,
             "artifact_reads": self.features.artifact_reads.backend,
         }
