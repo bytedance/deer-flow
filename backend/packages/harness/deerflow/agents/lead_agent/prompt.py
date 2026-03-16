@@ -291,18 +291,20 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 ## Sources
 
 ### Primary Sources
-- [citation:GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [citation:DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
+- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
+- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
 
 ### Media Coverage
-- [citation:AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
+- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
 ```
 
 **CRITICAL: Sources section format:**
 - Every item in the Sources section MUST be a clickable markdown link with URL
-- Use `[citation:Title](URL) - Description` format for each source
+- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
+- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
 - ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
-- ✅ RIGHT: `[citation:GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
+- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
+- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
 
 **WORKFLOW for Research Tasks:**
 1. Use web_search to find sources → Extract {{title, url, snippet}} from results
