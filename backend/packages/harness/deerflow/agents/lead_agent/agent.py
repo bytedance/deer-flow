@@ -8,6 +8,8 @@ from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.message_size_guard_middleware import MessageSizeGuardMiddleware
+from deerflow.agents.middlewares.ppt_enforcement_middleware import PptEnforcementMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -196,6 +198,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
+# MessageSizeGuardMiddleware truncates oversized historical messages before model call
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
 # SummarizationMiddleware should be early to reduce context before other processing
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
@@ -215,6 +218,8 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         List of middleware instances.
     """
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
+    # Keep this early so oversized historic messages are trimmed before the next model call.
+    middlewares.insert(3, MessageSizeGuardMiddleware())
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware()
@@ -226,6 +231,9 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
+
+    # Add PPT enforcement middleware (ensures PPTX artifact exists for PPT requests)
+    middlewares.append(PptEnforcementMiddleware())
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())

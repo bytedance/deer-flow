@@ -1,5 +1,18 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+const THINK_BLOCK_REGEX = /<think\b[^>]*>[\s\S]*?<\/think>/gi;
+const SYSTEM_BLOCK_REGEX = /<system\b[^>]*>[\s\S]*?<\/system>/gi;
+const STRAY_THINK_TAG_REGEX = /<\/?think\b[^>]*>/gi;
+const STRAY_SYSTEM_TAG_REGEX = /<\/?system\b[^>]*>/gi;
+
+export function sanitizeModelArtifacts(text: string): string {
+  return text
+    .replace(THINK_BLOCK_REGEX, "")
+    .replace(SYSTEM_BLOCK_REGEX, "")
+    .replace(STRAY_THINK_TAG_REGEX, "")
+    .replace(STRAY_SYSTEM_TAG_REGEX, "");
+}
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -127,23 +140,25 @@ export function groupMessages<T>(
 
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return message.content.trim();
+    return sanitizeModelArtifacts(message.content).trim();
   }
   if (Array.isArray(message.content)) {
-    return message.content
+    return sanitizeModelArtifacts(
+      message.content
       .map((content) => (content.type === "text" ? content.text : ""))
       .join("\n")
-      .trim();
+    ).trim();
   }
   return "";
 }
 
 export function extractContentFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return message.content.trim();
+    return sanitizeModelArtifacts(message.content).trim();
   }
   if (Array.isArray(message.content)) {
-    return message.content
+    return sanitizeModelArtifacts(
+      message.content
       .map((content) => {
         switch (content.type) {
           case "text":
@@ -156,7 +171,7 @@ export function extractContentFromMessage(message: Message) {
         }
       })
       .join("\n")
-      .trim();
+    ).trim();
   }
   return "";
 }

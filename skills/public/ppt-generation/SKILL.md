@@ -7,15 +7,23 @@ description: Use this skill when the user requests to generate, create, or make 
 
 ## Overview
 
-This skill generates professional PowerPoint presentations by creating AI-generated images for each slide and composing them into a PPTX file. The workflow includes planning the presentation structure with a consistent visual style, generating slide images sequentially (using the previous slide as a reference for style consistency), and assembling them into a final presentation.
+This skill generates professional PowerPoint presentations. It supports two generation paths:
+
+- **Path A — Image-based (default)**: Generates AI images for each slide using the `image-generation` skill, then composes them into a PPTX. Requires `GEMINI_API_KEY` to be configured.
+- **Path B — Text-based (fallback)**: Generates a styled PPTX directly using `python-pptx`. Does **not** require any external tools or API keys. Use this path when `GEMINI_API_KEY` is not available or when the user wants a clean text-only presentation.
+
+**How to choose:**
+1. Run `echo $GEMINI_API_KEY` (or check environment). If the key is set → use Path A.
+2. If the key is not set, or image generation fails → use Path B.
 
 ## Core Capabilities
 
 - Plan and structure multi-slide presentations with unified visual style
 - Support multiple presentation styles: Business, Academic, Minimal, Apple Keynote, Creative
-- Generate unique AI images for each slide using image-generation skill
-- Maintain visual consistency by using previous slide as reference image
-- Compose images into a professional PPTX file
+- Generate unique AI images for each slide using image-generation skill (Path A)
+- Generate clean text-based presentations using `python-pptx` without any API dependency (Path B)
+- Maintain visual consistency by using previous slide as reference image (Path A only)
+- Compose slides into a professional PPTX file
 
 ## Presentation Styles
 
@@ -33,6 +41,46 @@ Choose one of the following styles when creating the presentation plan:
 | **keynote** | Apple-inspired aesthetic with bold typography, dramatic imagery, high contrast, cinematic feel | Keynotes, product reveals, inspirational talks |
 
 ## Workflow
+
+### Step 0: Choose Generation Path
+
+**⚠️ STOP. Read this before anything else.**
+
+Check whether `GEMINI_API_KEY` is available:
+
+- **Path B (DEFAULT)** — No API key needed. Use this unless the user explicitly says `GEMINI_API_KEY` is set.
+- **Path A** — Requires `GEMINI_API_KEY`. Only use if the user has explicitly confirmed it is configured.
+
+**→ If in doubt, use Path B. Skip to the "Path B" section below and follow those steps.**
+
+---
+
+## Path B: Text-based Generation (Default)
+
+Use this path in all normal cases. **Call the `generate_ppt` tool directly — do NOT use bash commands.**
+
+### Path B: One step only
+
+Call the `generate_ppt` tool with the slide content. The tool handles everything and presents the file automatically.
+
+```
+generate_ppt(
+  title="Presentation Title",
+  output_filename="presentation.pptx",
+  slides=[
+    {"type": "title", "title": "Main Title", "subtitle": "Subtitle"},
+    {"type": "content", "title": "Slide Title", "key_points": ["Point 1", "Point 2", "Point 3"]}
+  ]
+)
+```
+
+**That's it. Do not use bash, do not write files, do not read scripts. Just call generate_ppt.**
+
+---
+
+## Path A: Image-based Generation (requires GEMINI_API_KEY)
+
+**Only use this path if the user has explicitly confirmed `GEMINI_API_KEY` is configured.**
 
 ### Step 1: Understand Requirements
 
@@ -414,8 +462,8 @@ python /mnt/skills/public/ppt-generation/scripts/generate.py \
 After generation:
 
 - The PPTX file is saved in `/mnt/user-data/outputs/`
-- Share the generated presentation with user using `present_files` tool
-- Also share the individual slide images if requested
+- The artifact viewer will render the slides inline using PPTXjs
+- Users can also download the `.pptx` file directly
 - Provide brief description of the presentation
 - Offer to iterate or regenerate specific slides if needed
 
