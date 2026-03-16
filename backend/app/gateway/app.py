@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.gateway.config import get_gateway_config
+from app.gateway.middleware import UserContextMiddleware
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -150,6 +151,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             },
         ],
     )
+
+    # Add user context middleware for multi-tenant isolation
+    app.add_middleware(UserContextMiddleware)
 
     # CORS is handled by nginx - no need for FastAPI middleware
 

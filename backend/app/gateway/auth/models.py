@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -16,7 +17,7 @@ class UserRole(StrEnum):
 class TokenData(BaseModel):
     """JWT token payload data."""
 
-    user_id: str = Field(..., description="User ID from token 'sub' claim")
+    user_id: str = Field(..., description="User ID from token 'sub' claim (UUID as string)")
     email: str | None = Field(default=None, description="User email from token")
     role: UserRole = Field(default=UserRole.USER, description="User role")
 
@@ -24,7 +25,7 @@ class TokenData(BaseModel):
 class User(BaseModel):
     """User model for authentication."""
 
-    user_id: str = Field(..., description="User ID")
+    user_id: UUID = Field(..., description="User ID (UUID primary key)")
     email: str = Field(..., description="User email")
     hashed_password: str = Field(..., description="Hashed password")
     role: UserRole = Field(default=UserRole.USER, description="User role")

@@ -31,6 +31,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.gateway.auth.models import UserRole
 from deerflow.config.paths import get_paths
@@ -83,7 +84,18 @@ class UserStore:
         """
         atomic_write_json(self._path, self._data)
 
-    def get_by_id(self, user_id: str) -> dict[str, Any] | None:
+    def get_by_id(self, user_id: UUID | str) -> dict[str, Any] | None:
+        """Get a user by ID.
+
+        Args:
+            user_id: The user's ID (UUID or string representation)
+
+        Returns:
+            User dict or None if not found
+        """
+        # Convert UUID to string for lookup
+        user_id_str = str(user_id) if isinstance(user_id, UUID) else user_id
+        return self._data["users"].get(user_id_str)
         """Get a user by ID.
 
         Args:
@@ -107,7 +119,7 @@ class UserStore:
 
     def create(
         self,
-        user_id: str,
+        user_id: UUID,
         email: str,
         hashed_password: str,
         role: UserRole = UserRole.USER,
@@ -116,7 +128,7 @@ class UserStore:
         """Create a new user.
 
         Args:
-            user_id: Unique user identifier
+            user_id: Unique user identifier (UUID)
             email: User's email address
             hashed_password: Hashed password
             role: User role ("user" or "admin")
@@ -129,13 +141,14 @@ class UserStore:
             ValueError: If user_id or email already exists
         """
         with self._lock:
-            if user_id in self._data["users"]:
-                raise ValueError(f"User ID {user_id} already exists")
+            user_id_str = str(user_id)
+            if user_id_str in self._data["users"]:
+                raise ValueError(f"User ID {user_id_str} already exists")
             if email in self._data["by_email"]:
                 raise ValueError(f"Email {email} already registered")
 
             user = {
-                "user_id": user_id,
+                "user_id": user_id_str,
                 "email": email,
                 "hashed_password": hashed_password,
                 "role": role,
@@ -143,16 +156,16 @@ class UserStore:
                 "quota_limits": quota_limits or self._get_default_quotas(role),
             }
 
-            self._data["users"][user_id] = user
+            self._data["users"][user_id_str] = user
             self._data["by_email"][email] = user
             self._save()
             return user
 
-    def update(self, user_id: str, **updates: Any) -> dict[str, Any]:
+    def update(self, user_id: UUID | str, **updates: Any) -> dict[str, Any]:
         """Update user fields.
 
         Args:
-            user_id: User ID to update
+            user_id: User ID to update (UUID or string)
             **updates: Fields to update
 
         Returns:
@@ -162,10 +175,11 @@ class UserStore:
             ValueError: If user_id not found
         """
         with self._lock:
-            if user_id not in self._data["users"]:
-                raise ValueError(f"User {user_id} not found")
+            user_id_str = str(user_id) if isinstance(user_id, UUID) else user_id
+            if user_id_str not in self._data["users"]:
+                raise ValueError(f"User {user_id_str} not found")
 
-            user = self._data["users"][user_id]
+            user = self._data["users"][user_id_str]
             old_email = user.get("email")
 
             # Handle email change (requires updating by_email index)
@@ -180,24 +194,25 @@ class UserStore:
             self._save()
             return user
 
-    def delete(self, user_id: str) -> None:
+    def delete(self, user_id: UUID | str) -> None:
         """Delete a user.
 
         Args:
-            user_id: User ID to delete
+            user_id: User ID to delete (UUID or string)
 
         Raises:
             ValueError: If user_id not found
         """
         with self._lock:
-            if user_id not in self._data["users"]:
-                raise ValueError(f"User {user_id} not found")
+            user_id_str = str(user_id) if isinstance(user_id, UUID) else user_id
+            if user_id_str not in self._data["users"]:
+                raise ValueError(f"User {user_id_str} not found")
 
-            user = self._data["users"][user_id]
+            user = self._data["users"][user_id_str]
             email = user.get("email")
             if email:
                 del self._data["by_email"][email]
-            del self._data["users"][user_id]
+            del self._data["users"][user_id_str]
             self._save()
 
     def list_users(

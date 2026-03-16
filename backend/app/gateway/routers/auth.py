@@ -6,10 +6,10 @@ When multi_tenant.enabled is false, these endpoints are still available
 but unauthenticated API requests use user_id="default".
 """
 
-import hashlib
 import logging
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.gateway.auth import UserRole, create_access_token, get_optional_user, hash_password, verify_password
@@ -18,7 +18,7 @@ from app.gateway.users import UserStore
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/auth", tags=["authentication"])
+router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 
 # Singleton user store
 _user_store: UserStore | None = None
@@ -71,7 +71,7 @@ class TokenResponse(BaseModel):
 
     access_token: str = Field(..., description="JWT access token")
     token_type: str = Field(default="bearer", description="Token type")
-    user_id: str = Field(..., description="User ID")
+    user_id: str = Field(..., description="User ID (UUID as string)")
     email: str = Field(..., description="User email")
     role: UserRole = Field(..., description="User role")
 
@@ -79,7 +79,7 @@ class TokenResponse(BaseModel):
 class UserInfoResponse(BaseModel):
     """Current user information."""
 
-    user_id: str = Field(..., description="User ID")
+    user_id: str = Field(..., description="User ID (UUID as string)")
     email: str = Field(..., description="User email")
     role: UserRole = Field(..., description="User role")
     quota_limits: dict = Field(..., description="Resource quota limits")
@@ -87,14 +87,16 @@ class UserInfoResponse(BaseModel):
 
 # Endpoints
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(req: RegisterRequest) -> TokenResponse:
+async def register(req: RegisterRequest, response: Response) -> TokenResponse:
     """Register a new user.
 
     Creates a new user account and returns a JWT access token.
     The password is hashed before storage.
+    Sets the JWT token in an HttpOnly cookie for enhanced security.
 
     Args:
         req: Registration request with email and password
+        response: FastAPI Response object for setting cookies
 
     Returns:
         TokenResponse with JWT token and user info
@@ -111,8 +113,8 @@ async def register(req: RegisterRequest) -> TokenResponse:
             detail="Email already registered",
         )
 
-    # Create user
-    user_id = hashlib.sha256(req.email.encode()).hexdigest()[:16]
+    # Create user with UUID as primary key
+    user_id = uuid4()
     hashed = hash_password(req.password)
 
     try:
@@ -128,24 +130,37 @@ async def register(req: RegisterRequest) -> TokenResponse:
     # Generate token
     token = create_token_for_user(user)
 
+    # Set HttpOnly cookie for enhanced security (RFC-001 compliant)
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=True,  # RFC-001 compliant: requires HTTPS in production
+        samesite="lax",
+        max_age=60 * 24 * 7,  # 7 days
+        path="/",
+    )
+
     logger.info("User registered: %s (%s)", user_id, req.email)
     return TokenResponse(
         access_token=token,
-        user_id=user_id,
+        user_id=str(user_id),
         email=req.email,
         role=user["role"],
     )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(req: LoginRequest) -> TokenResponse:
+async def login(req: LoginRequest, response: Response) -> TokenResponse:
     """Authenticate a user and return a JWT token.
 
     Validates the user's credentials and returns a JWT access token
     if authentication succeeds.
+    Sets the JWT token in an HttpOnly cookie for enhanced security.
 
     Args:
         req: Login request with email and password
+        response: FastAPI Response object for setting cookies
 
     Returns:
         TokenResponse with JWT token and user info
@@ -170,6 +185,17 @@ async def login(req: LoginRequest) -> TokenResponse:
 
     # Generate token
     token = create_token_for_user(user)
+
+    # Set HttpOnly cookie for enhanced security (RFC-001 compliant)
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=True,  # RFC-001 compliant: requires HTTPS in production
+        samesite="lax",
+        max_age=60 * 24 * 7,  # 7 days
+        path="/",
+    )
 
     logger.info("User logged in: %s (%s)", user["user_id"], req.email)
     return TokenResponse(
@@ -216,19 +242,30 @@ async def get_current_user_info(
 
 
 @router.post("/logout")
-async def logout(current_user: TokenData = Depends(get_optional_user)) -> dict[str, str]:
+async def logout(
+    response: Response,
+    current_user: TokenData = Depends(get_optional_user),
+) -> dict[str, str]:
     """Logout the current user.
 
+    Clears the HttpOnly cookie containing the JWT token.
     Note: Since JWT tokens are stateless, the token remains valid until
     it expires. This endpoint is provided for API completeness and client-side
     token cleanup. In production with token revocation, you would maintain
     a blacklist of revoked tokens.
 
     Args:
+        response: FastAPI Response object for clearing cookies
         current_user: Current user from JWT token
 
     Returns:
         Success message
     """
+    # Clear the HttpOnly cookie
+    response.delete_cookie(
+        key="access_token",
+        path="/",
+    )
+
     logger.info("User logged out: %s", current_user.user_id)
     return {"message": "Successfully logged out"}

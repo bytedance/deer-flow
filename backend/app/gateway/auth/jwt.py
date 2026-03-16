@@ -11,8 +11,6 @@ Tokens include:
 - exp: expiration time (unix timestamp)
 """
 
-import hashlib
-import hmac
 import os
 from datetime import datetime, timedelta
 
@@ -31,7 +29,7 @@ from deerflow.config.multi_tenant_config import get_multi_tenant_config
 # Token configuration defaults
 DEFAULT_SECRET_KEY = "change-this-secret-key-in-production"
 DEFAULT_ALGORITHM = "HS256"
-DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days (RFC-001 compliant)
 
 security = HTTPBearer()
 
@@ -227,35 +225,22 @@ def _get_default_user() -> TokenData:
 
 
 def hash_password(password: str) -> str:
-    """Hash a password using PBKDF2-HMAC-SHA256 with salt.
+    """Hash a password using bcrypt with passlib.
 
-    This uses Python's built-in hashlib for PBKDF2 key derivation,
-    which is more secure than plain SHA-256. For production use,
-    consider using bcrypt or argon2 libraries which provide even
-    better security against GPU/ASIC attacks.
+    This uses bcrypt (via passlib) for secure password hashing,
+    which is the industry standard for password storage and provides
+    excellent security against GPU/ASIC attacks.
 
     Args:
         password: Plain text password
 
     Returns:
-        Hex encoded hash with salt (format: salt:hash)
+        Bcrypt hash string for storage
     """
-    # Generate a random salt
-    salt = os.urandom(32)
+    from passlib.context import CryptContext
 
-    # Use PBKDF2-HMAC-SHA256 with 100,000 iterations
-    # This is a key derivation function designed to be slow
-    # to prevent brute force attacks
-    hash_bytes = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        100000,  # iterations - OWASP recommends 120,000 for SHA-256 as of 2023
-        dklen=32,  # derived key length
-    )
-
-    # Return salt:hash format for storage
-    return f"{salt.hex()}:{hash_bytes.hex()}"
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    return pwd_context.hash(password)
 
 
 def verify_password(password: str, hashed_password: str) -> bool:
@@ -263,24 +248,15 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
     Args:
         password: Plain text password
-        hashed_password: Stored password hash (format: salt:hash)
+        hashed_password: Stored bcrypt hash
 
     Returns:
         True if password matches hash
     """
-    try:
-        # Split salt and hash
-        salt_hex, hash_hex = hashed_password.split(":")
-        salt = bytes.fromhex(salt_hex)
-        stored_hash = bytes.fromhex(hash_hex)
+    from passlib.context import CryptContext
 
-        # Compute hash of provided password with the same salt
-        computed_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000, dklen=32)
-
-        # Compare in constant time to prevent timing attacks
-        return hmac.compare_digest(computed_hash, stored_hash)
-    except (ValueError, AttributeError):
-        return False
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    return pwd_context.verify(password, hashed_password)
 
 
 def reset_jwt_secret_cache() -> None:

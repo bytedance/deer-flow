@@ -28,7 +28,7 @@ class MultiTenantConfig(BaseModel):
         description="JWT secret key for token signing (or set DEER_FLOW_JWT_SECRET env var)",
     )
     token_expire_minutes: int = Field(
-        default=60 * 24,  # 24 hours
+        default=60 * 24 * 7,  # 7 days (RFC-001 compliant)
         description="JWT token expiration time in minutes",
     )
     algorithm: str = Field(default="HS256", description="JWT algorithm (HS256 or RS256)")
