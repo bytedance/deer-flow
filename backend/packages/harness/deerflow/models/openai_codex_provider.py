@@ -22,6 +22,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
+
 logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -64,10 +66,8 @@ class CodexChatModel(BaseChatModel):
 
         super().model_post_init(__context)
 
-    def _load_codex_auth(self) -> Any | None:
+    def _load_codex_auth(self) -> CodexCliCredential | None:
         """Load access_token and account_id from Codex CLI auth."""
-        from deerflow.models.credential_loader import load_codex_cli_credential
-
         return load_codex_cli_credential()
 
     def _convert_messages(self, messages: list[BaseMessage]) -> tuple[str, list[dict]]:
