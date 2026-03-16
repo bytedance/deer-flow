@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.channels.base import Channel
-from src.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.base import Channel
+from app.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttachment
 
 
 def _run(coro):
@@ -102,7 +102,7 @@ class TestOutboundMessageAttachments:
 class TestResolveAttachments:
     def test_resolves_existing_file(self, tmp_path):
         """Successfully resolves a virtual path to an existing file."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         # Create the directory structure: threads/{thread_id}/user-data/outputs/
         thread_id = "test-thread-123"
@@ -115,7 +115,7 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.return_value = test_file
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/report.pdf"])
 
         assert len(result) == 1
@@ -126,7 +126,7 @@ class TestResolveAttachments:
 
     def test_resolves_image_file(self, tmp_path):
         """Images are detected by MIME type."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         thread_id = "test-thread"
         outputs_dir = tmp_path / "threads" / thread_id / "user-data" / "outputs"
@@ -138,7 +138,7 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.return_value = img
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/chart.png"])
 
         assert len(result) == 1
@@ -147,7 +147,7 @@ class TestResolveAttachments:
 
     def test_skips_missing_file(self, tmp_path):
         """Missing files are skipped with a warning."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
@@ -156,30 +156,30 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.return_value = outputs_dir / "nonexistent.txt"
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", ["/mnt/user-data/outputs/nonexistent.txt"])
 
         assert result == []
 
     def test_skips_invalid_path(self):
         """Invalid paths (ValueError from resolve) are skipped."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         mock_paths = MagicMock()
         mock_paths.resolve_virtual_path.side_effect = ValueError("bad path")
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", ["/invalid/path"])
 
         assert result == []
 
     def test_rejects_uploads_path(self):
         """Paths under /mnt/user-data/uploads/ are rejected (security)."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         mock_paths = MagicMock()
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", ["/mnt/user-data/uploads/secret.pdf"])
 
         assert result == []
@@ -187,11 +187,11 @@ class TestResolveAttachments:
 
     def test_rejects_workspace_path(self):
         """Paths under /mnt/user-data/workspace/ are rejected (security)."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         mock_paths = MagicMock()
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", ["/mnt/user-data/workspace/config.py"])
 
         assert result == []
@@ -199,7 +199,7 @@ class TestResolveAttachments:
 
     def test_rejects_path_traversal_escape(self, tmp_path):
         """Paths that escape the outputs directory after resolution are rejected."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         thread_id = "t1"
         outputs_dir = tmp_path / "threads" / thread_id / "user-data" / "outputs"
@@ -213,14 +213,14 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.return_value = escaped_file
         mock_paths.sandbox_outputs_dir.return_value = outputs_dir
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments(thread_id, ["/mnt/user-data/outputs/../uploads/stolen.txt"])
 
         assert result == []
 
     def test_multiple_artifacts_partial_resolution(self, tmp_path):
         """Mixed valid/invalid artifacts: only valid ones are returned."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         thread_id = "t1"
         outputs_dir = tmp_path / "outputs"
@@ -238,7 +238,7 @@ class TestResolveAttachments:
 
         mock_paths.resolve_virtual_path.side_effect = resolve_side_effect
 
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments(
                 thread_id,
                 ["/mnt/user-data/outputs/data.csv", "/mnt/user-data/outputs/missing.txt"],
@@ -417,17 +417,17 @@ class TestBaseChannelOnOutbound:
 class TestManagerArtifactResolution:
     def test_handle_chat_populates_attachments(self):
         """Verify _resolve_attachments is importable and works with the manager module."""
-        from src.channels.manager import _resolve_attachments
+        from app.channels.manager import _resolve_attachments
 
         # Basic smoke test: empty artifacts returns empty list
         mock_paths = MagicMock()
-        with patch("src.config.paths.get_paths", return_value=mock_paths):
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", [])
         assert result == []
 
     def test_format_artifact_text_for_unresolved(self):
         """_format_artifact_text produces expected output."""
-        from src.channels.manager import _format_artifact_text
+        from app.channels.manager import _format_artifact_text
 
         assert "report.pdf" in _format_artifact_text(["/mnt/user-data/outputs/report.pdf"])
         result = _format_artifact_text(["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.txt"])

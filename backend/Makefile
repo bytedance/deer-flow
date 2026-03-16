@@ -5,7 +5,7 @@ dev:
 	uv run langgraph dev --no-browser --allow-blocking --no-reload
 
 gateway:
-	uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
 test:
 	PYTHONPATH=. uv run pytest tests/ -v

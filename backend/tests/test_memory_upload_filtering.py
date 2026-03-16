@@ -9,8 +9,8 @@ persisting in long-term memory:
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.agents.memory.updater import _strip_upload_mentions_from_memory
-from src.agents.middlewares.memory_middleware import _filter_messages_for_memory
+from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
+from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory
 
 # ---------------------------------------------------------------------------
 # Helpers

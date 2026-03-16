@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -8,6 +8,12 @@ resolution-markers = [
     "python_full_version == '3.13.*' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform != 'win32'",
+]
+
+[manifest]
+members = [
+    "deer-flow",
+    "deerflow-harness",
 ]
 
 [[package]]
@@ -643,11 +649,55 @@ name = "deer-flow"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "deerflow-harness" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "langgraph-sdk" },
+    { name = "lark-oapi" },
+    { name = "markdown-to-mrkdwn" },
+    { name = "python-multipart" },
+    { name = "python-telegram-bot" },
+    { name = "slack-sdk" },
+    { name = "sse-starlette" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "deerflow-harness", editable = "packages/harness" },
+    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "langgraph-sdk", specifier = ">=0.1.51" },
+    { name = "lark-oapi", specifier = ">=1.4.0" },
+    { name = "markdown-to-mrkdwn", specifier = ">=0.3.1" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "python-telegram-bot", specifier = ">=21.0" },
+    { name = "slack-sdk", specifier = ">=3.33.0" },
+    { name = "sse-starlette", specifier = ">=2.1.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "ruff", specifier = ">=0.14.11" },
+]
+
+[[package]]
+name = "deerflow-harness"
+version = "0.1.0"
+source = { editable = "packages/harness" }
+dependencies = [
     { name = "agent-sandbox" },
     { name = "ddgs" },
     { name = "dotenv" },
     { name = "duckdb" },
-    { name = "fastapi" },
     { name = "firecrawl-py" },
     { name = "httpx" },
     { name = "kubernetes" },
@@ -663,26 +713,13 @@ dependencies = [
     { name = "langgraph-cli" },
     { name = "langgraph-runtime-inmem" },
     { name = "langgraph-sdk" },
-    { name = "lark-oapi" },
-    { name = "markdown-to-mrkdwn" },
     { name = "markdownify" },
     { name = "markitdown", extra = ["all", "xlsx"] },
     { name = "pydantic" },
-    { name = "python-multipart" },
-    { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "readabilipy" },
-    { name = "slack-sdk" },
-    { name = "sse-starlette" },
     { name = "tavily-python" },
     { name = "tiktoken" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -691,7 +728,6 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.10.0" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "duckdb", specifier = ">=1.4.4" },
-    { name = "fastapi", specifier = ">=0.115.0" },
     { name = "firecrawl-py", specifier = ">=1.15.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "kubernetes", specifier = ">=30.0.0" },
@@ -707,26 +743,13 @@ requires-dist = [
     { name = "langgraph-cli", specifier = ">=0.4.14" },
     { name = "langgraph-runtime-inmem", specifier = ">=0.22.1" },
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
-    { name = "lark-oapi", specifier = ">=1.4.0" },
-    { name = "markdown-to-mrkdwn", specifier = ">=0.3.1" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
     { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "python-multipart", specifier = ">=0.0.20" },
-    { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "readabilipy", specifier = ">=0.3.0" },
-    { name = "slack-sdk", specifier = ">=3.33.0" },
-    { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
     { name = "tiktoken", specifier = ">=0.8.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0.0" },
-    { name = "ruff", specifier = ">=0.14.11" },
 ]
 
 [[package]]
@@ -2850,11 +2873,11 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.10.1"
+version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e7/46/bd74733ff231675599650d3e47f361794b22ef3e3770998dda30d3b63726/pyjwt-2.10.1.tar.gz", hash = "sha256:3cc5772eb20009233caf06e9d8a0577824723b44e6648ee0a2aedb6cf9381953", size = 87785, upload-time = "2024-11-28T03:43:29.933Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/10/e8192be5f38f3e8e7e046716de4cae33d56fd5ae08927a823bb916be36c1/pyjwt-2.12.0.tar.gz", hash = "sha256:2f62390b667cd8257de560b850bb5a883102a388829274147f1d724453f8fb02", size = 102511, upload-time = "2026-03-12T17:15:30.831Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/ad/689f02752eeec26aed679477e80e632ef1b682313be70793d798c1d5fc8f/PyJWT-2.10.1-py3-none-any.whl", hash = "sha256:dcdd193e30abefd5debf142f9adfcdd2b58004e644f25406ffaebd50bd98dacb", size = 22997, upload-time = "2024-11-28T03:43:27.893Z" },
+    { url = "https://files.pythonhosted.org/packages/15/70/70f895f404d363d291dcf62c12c85fdd47619ad9674ac0f53364d035925a/pyjwt-2.12.0-py3-none-any.whl", hash = "sha256:9bb459d1bdd0387967d287f5656bf7ec2b9a26645d1961628cda1764e087fd6e", size = 29700, upload-time = "2026-03-12T17:15:29.257Z" },
 ]
 
 [package.optional-dependencies]
