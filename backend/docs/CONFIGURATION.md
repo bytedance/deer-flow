@@ -36,7 +36,33 @@ models:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
+- Claude Code OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
+- Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider
+
+CLI-backed provider examples:
+
+```yaml
+models:
+  - name: gpt-5.4
+    display_name: GPT-5.4 (Codex CLI)
+    use: deerflow.models.openai_codex_provider:CodexChatModel
+    model: gpt-5.4
+    supports_thinking: true
+    supports_reasoning_effort: true
+
+  - name: claude-sonnet-4.6
+    display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+    use: deerflow.models.claude_provider:ClaudeChatModel
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    supports_thinking: true
+```
+
+**Auth behavior for CLI-backed providers**:
+- `CodexChatModel` loads Codex CLI auth from `~/.codex/auth.json`
+- `ClaudeChatModel` accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
+- On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
 
 For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
 
