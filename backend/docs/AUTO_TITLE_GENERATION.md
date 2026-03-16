@@ -12,6 +12,8 @@
 3. 调用 LLM 生成简洁的标题（默认最多6个词）
 4. 将 title 存储到 `ThreadState` 中（会被 checkpointer 持久化）
 
+TitleMiddleware 会先把 LangChain message content 里的结构化 block/list 内容归一化为纯文本，再拼到 title prompt 里，避免把 Python/JSON 的原始 repr 泄漏到标题生成模型。
+
 ## ⚠️ 重要：存储机制
 
 ### Title 存储位置
