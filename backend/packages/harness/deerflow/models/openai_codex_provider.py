@@ -54,35 +54,21 @@ class CodexChatModel(BaseChatModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Auto-load Codex CLI credentials."""
-        cred_data = self._load_codex_auth()
-        if cred_data:
-            self._access_token = cred_data["access_token"]
-            self._account_id = cred_data["account_id"]
+        cred = self._load_codex_auth()
+        if cred:
+            self._access_token = cred.access_token
+            self._account_id = cred.account_id
             logger.info(f"Using Codex CLI credential (account: {self._account_id[:8]}...)")
         else:
             logger.warning("No Codex CLI credentials found in ~/.codex/auth.json")
 
         super().model_post_init(__context)
 
-    def _load_codex_auth(self) -> dict | None:
-        """Load access_token and account_id from ~/.codex/auth.json."""
-        import json
-        from pathlib import Path
+    def _load_codex_auth(self) -> Any | None:
+        """Load access_token and account_id from Codex CLI auth."""
+        from deerflow.models.credential_loader import load_codex_cli_credential
 
-        auth_path = Path.home() / ".codex" / "auth.json"
-        if not auth_path.exists():
-            return None
-        try:
-            data = json.loads(auth_path.read_text())
-            tokens = data.get("tokens", {})
-            access_token = tokens.get("access_token", "")
-            account_id = tokens.get("account_id", "")
-            if not access_token:
-                return None
-            return {"access_token": access_token, "account_id": account_id}
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to read Codex auth: {e}")
-            return None
+        return load_codex_cli_credential()
 
     def _convert_messages(self, messages: list[BaseMessage]) -> tuple[str, list[dict]]:
         """Convert LangChain messages to Responses API format.

@@ -69,9 +69,19 @@ services:
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
       # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
-      # CLI credential files for auto-auth (Claude Code + Codex CLI)
-      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
     working_dir: /app
     environment:
       - CI=true
@@ -105,9 +115,19 @@ services:
       - ../backend/.langgraph_api:/app/backend/.langgraph_api
       # DooD: same as gateway
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
-      # CLI credential files for auto-auth (Claude Code + Codex CLI)
-      - ${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro
-      - ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
