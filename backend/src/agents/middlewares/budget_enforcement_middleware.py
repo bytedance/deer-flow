@@ -26,20 +26,19 @@ _DEFAULT_FORCE_FRACTION = 0.95  # Strip tool calls, force final answer
 
 _WARN_MSG = (
     "[BUDGET WARNING] You have used {used} of {total} allowed turns. "
-    "Start wrapping up. Save your key findings via `save_finding` tool now, "
-    "then produce your final answer."
+    "Start wrapping up. Consolidate your key findings now and "
+    "begin producing your final answer."
 )
 
 _URGENT_MSG = (
     "[BUDGET CRITICAL] You have used {used} of {total} turns — only {remaining} left! "
-    "STOP exploring. Call `save_finding` for any unsaved results, then immediately "
-    "produce your final summary with everything you have found so far."
+    "STOP exploring. Immediately produce your final summary with "
+    "everything you have found so far."
 )
 
 _FORCE_MSG = (
     "[BUDGET EXHAUSTED] Turn limit nearly reached ({used}/{total}). "
-    "Producing final answer with all results collected so far. "
-    "Check the scratchpad via `read_findings` for your saved work."
+    "Producing final answer with all results collected so far."
 )
 
 
@@ -70,8 +69,8 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         # Each model call consumes ~8 graph steps (model node + tools node +
         # middleware nodes).  Estimate effective model calls from recursion_limit.
         # Derive effective_calls directly from max_turns // 8 without inflating
-        # the budget, but ensure at least 1 to avoid zero thresholds.
-        effective_calls = max(max_turns // 8, 1)
+        # the budget, but ensure at least 4 to avoid degenerate thresholds.
+        effective_calls = max(max_turns // 8, 4)
         # Compute thresholds from fractions, then clamp them into [1, effective_calls]
         # so they fire within the actual budget without overstating it.
         self.warn_at = max(1, min(int(effective_calls * warn_fraction), effective_calls))
@@ -90,7 +89,7 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
         thread_id = self._get_thread_id(runtime)
         self._call_count[thread_id] += 1
         turns_used = self._call_count[thread_id]
-        effective_total = max(self.max_turns // 8, 10)
+        effective_total = max(self.max_turns // 8, 4)
         logger.debug(f"Budget check: {turns_used}/{effective_total} model calls (warn={self.warn_at}, urgent={self.urgent_at}, force={self.force_at})")
         warned = self._warned[thread_id]
 
@@ -151,7 +150,7 @@ class BudgetEnforcementMiddleware(AgentMiddleware[AgentState]):
             len(tool_calls),
             extra={"thread_id": thread_id, "turns_used": turns_used},
         )
-        effective_total = max(self.max_turns // 8, 10)
+        effective_total = max(self.max_turns // 8, 4)
         # Safely handle content that may be a list (multimodal) or a string
         existing_content = last_msg.content
         if isinstance(existing_content, list):

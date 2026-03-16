@@ -142,7 +142,7 @@ class TestBudgetEnforcementMiddleware:
 
     def test_custom_fractions(self):
         mw = BudgetEnforcementMiddleware(max_turns=80, warn_fraction=0.5, urgent_fraction=0.75, force_fraction=0.9)
-        # effective_calls = max(80 // 8, 10) = 10
+        # effective_calls = max(80 // 8, 4) = 10
         assert mw.warn_at == 5    # int(10 * 0.5)
         assert mw.urgent_at == 7  # int(10 * 0.75)
         assert mw.force_at == 9   # int(10 * 0.9)
