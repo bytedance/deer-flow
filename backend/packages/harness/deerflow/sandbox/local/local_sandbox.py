@@ -180,7 +180,7 @@ class LocalSandbox(Sandbox):
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
         try:
-            with open(resolved_path) as f:
+            with open(resolved_path, encoding="utf-8") as f:
                 return f.read()
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
@@ -193,7 +193,7 @@ class LocalSandbox(Sandbox):
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
             mode = "a" if append else "w"
-            with open(resolved_path, mode) as f:
+            with open(resolved_path, mode, encoding="utf-8") as f:
                 f.write(content)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
