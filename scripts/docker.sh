@@ -234,7 +234,7 @@ restart() {
     echo -e "${GREEN}✓ Docker services restarted${NC}"
     echo ""
     echo "  🌐 Application: http://localhost:2026"
-    echo "  📋 View logs: make docker-dev-logs"
+    echo "  📋 View logs: make docker-logs"
     echo ""
 }
 
