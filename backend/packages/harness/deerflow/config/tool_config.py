@@ -6,15 +6,17 @@ _DEFAULT_MAX_CONTENT_CHARS = 8192
 
 
 def get_max_content_chars(tool_name: str = "web_fetch") -> int:
-    """Read ``max_content_chars`` from the tool config in config.yaml.
+    """Read ``max_content_chars`` from the tool config in *config.yaml*.
 
-    Falls back to 8 192 when the key is absent or the tool is not configured.
+    The value is looked up under ``tools -> <tool_name> -> max_content_chars``.
+    Falls back to 8 192 when the key is absent, the tool is not configured,
+    or the stored value cannot be converted to a positive integer.
     """
     from .app_config import get_app_config
 
     config = get_app_config().get_tool_config(tool_name)
-    extra = config.model_extra if config is not None else None
-    if extra and "max_content_chars" in extra:
+    extra = (config.model_extra or {}) if config is not None else {}
+    if "max_content_chars" in extra:
         try:
             value = int(extra["max_content_chars"])
             return max(value, 1)

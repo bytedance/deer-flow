@@ -66,6 +66,18 @@ class TestGetMaxContentChars:
         with patch("src.config.app_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
+    def test_clamps_zero_to_one(self):
+        """A zero value should be clamped to 1."""
+        app_config = self._mock_app_config_with_extra({"max_content_chars": 0})
+        with patch("src.config.app_config.get_app_config", return_value=app_config):
+            assert get_max_content_chars() == 1
+
+    def test_clamps_negative_to_one(self):
+        """A negative value should be clamped to 1."""
+        app_config = self._mock_app_config_with_extra({"max_content_chars": -100})
+        with patch("src.config.app_config.get_app_config", return_value=app_config):
+            assert get_max_content_chars() == 1
+
     def test_respects_tool_name_parameter(self):
         """get_tool_config is called with the provided tool_name."""
         app_config = MagicMock()
@@ -73,6 +85,15 @@ class TestGetMaxContentChars:
         with patch("src.config.app_config.get_app_config", return_value=app_config):
             get_max_content_chars("custom_fetcher")
             app_config.get_tool_config.assert_called_once_with("custom_fetcher")
+
+    def test_handles_none_model_extra(self):
+        """model_extra can be None in Pydantic v2 — should not crash."""
+        app_config = MagicMock()
+        tool = MagicMock()
+        tool.model_extra = None
+        app_config.get_tool_config.return_value = tool
+        with patch("src.config.app_config.get_app_config", return_value=app_config):
+            assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
 
 # ---------------------------------------------------------------------------

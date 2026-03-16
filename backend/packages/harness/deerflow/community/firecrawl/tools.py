@@ -10,7 +10,8 @@ def _get_firecrawl_client() -> FirecrawlApp:
     config = get_app_config().get_tool_config("web_search")
     api_key = None
     if config is not None:
-        api_key = config.model_extra.get("api_key")
+        extra = config.model_extra or {}
+        api_key = extra.get("api_key")
     return FirecrawlApp(api_key=api_key)  # type: ignore[arg-type]
 
 
@@ -25,7 +26,8 @@ def web_search_tool(query: str) -> str:
         config = get_app_config().get_tool_config("web_search")
         max_results = 5
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            extra = config.model_extra or {}
+            max_results = extra.get("max_results", max_results)
 
         client = _get_firecrawl_client()
         result = client.search(query, limit=max_results)
