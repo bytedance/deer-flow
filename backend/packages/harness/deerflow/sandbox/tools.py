@@ -29,6 +29,62 @@ def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
 
 
+def _get_skills_container_prefix() -> str:
+    """Get the skills container path prefix from config, defaulting to /mnt/skills."""
+    try:
+        from deerflow.config import get_app_config
+
+        return get_app_config().skills.container_path
+    except (ImportError, AttributeError, OSError):
+        return "/mnt/skills"
+
+
+def _get_skills_local_path() -> Path | None:
+    """Get the resolved local skills directory path from config."""
+    try:
+        from deerflow.config import get_app_config
+
+        skills_path = get_app_config().skills.get_skills_path()
+        if skills_path.exists():
+            return skills_path
+    except (ImportError, AttributeError, OSError):
+        pass
+    return None
+
+
+def _is_skills_path(path: str) -> bool:
+    """Check if path is under the skills virtual mount."""
+    prefix = _get_skills_container_prefix()
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+def resolve_local_skills_path(path: str) -> str:
+    """Resolve and validate a local-sandbox skills path (read-only).
+
+    Only paths under the skills container prefix are allowed.
+    Must be called only after _is_skills_path() returns True.
+    Raises PermissionError on path traversal or invalid prefix.
+    """
+    prefix = _get_skills_container_prefix()
+    if not (path == prefix or path.startswith(f"{prefix}/")):
+        raise PermissionError(f"Only paths under {prefix}/ are allowed")
+
+    skills_local = _get_skills_local_path()
+    if skills_local is None:
+        raise SandboxRuntimeError("Skills directory not configured or not found")
+
+    relative = path[len(prefix) :].lstrip("/")
+    allowed_root = skills_local.resolve()
+    resolved = (allowed_root / relative).resolve() if relative else allowed_root
+
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        raise PermissionError("Access denied: path traversal detected")
+
+    return str(resolved)
+
+
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
     """Replace virtual /mnt/user-data paths with actual thread data paths.
 
@@ -402,8 +458,11 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         ensure_thread_directories_exist(runtime)
         requested_path = path
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            if _is_skills_path(path):
+                path = resolve_local_skills_path(path)
+            else:
+                thread_data = get_thread_data(runtime)
+                path = resolve_local_tool_path(path, thread_data)
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -439,8 +498,11 @@ def read_file_tool(
         ensure_thread_directories_exist(runtime)
         requested_path = path
         if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            if _is_skills_path(path):
+                path = resolve_local_skills_path(path)
+            else:
+                thread_data = get_thread_data(runtime)
+                path = resolve_local_tool_path(path, thread_data)
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
