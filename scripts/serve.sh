@@ -92,6 +92,7 @@ cleanup() {
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     pkill -f "next start" 2>/dev/null || true
+    pkill -f "next-server" 2>/dev/null || true
     # Kill nginx using the captured PID first (most reliable),
     # then fall back to pkill/killall for any stray nginx workers.
     if [ -n "${NGINX_PID:-}" ] && kill -0 "$NGINX_PID" 2>/dev/null; then

@@ -235,6 +235,8 @@ You: "Deploying to staging..." [proceed]
 
 {skills_section}
 
+{deferred_tools_section}
+
 {subagent_section}
 
 <working_directory existed="true">
@@ -257,15 +259,66 @@ You: "Deploying to staging..." [proceed]
 </response_style>
 
 <citations>
-- When to Use: After web_search, include citations if applicable
-- Format: Use Markdown link format `[citation:TITLE](URL)`
-- Example: 
+**CRITICAL: Always include citations when using web search results**
+
+- **When to Use**: MANDATORY after web_search, web_fetch, or any external information source
+- **Format**: Use Markdown link format `[citation:TITLE](URL)` immediately after the claim
+- **Placement**: Inline citations should appear right after the sentence or claim they support
+- **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
+
+**Example - Inline Citations:**
 ```markdown
 The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
 [citation:AI Trends 2026](https://techcrunch.com/ai-trends).
 Recent breakthroughs in language models have also accelerated progress
 [citation:OpenAI Research](https://openai.com/research).
 ```
+
+**Example - Deep Research Report with Citations:**
+```markdown
+## Executive Summary
+
+DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
+[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
+providing a production-ready agent system with sandbox execution and memory management
+[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
+
+## Key Analysis
+
+### Architecture Design
+
+The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
+combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
+
+## Sources
+
+### Primary Sources
+- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
+- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
+
+### Media Coverage
+- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
+```
+
+**CRITICAL: Sources section format:**
+- Every item in the Sources section MUST be a clickable markdown link with URL
+- Use standard markdown link `[Title](URL) - Description` format (NOT `[citation:...]` format)
+- The `[citation:Title](URL)` format is ONLY for inline citations within the report body
+- ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
+- ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
+- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
+
+**WORKFLOW for Research Tasks:**
+1. Use web_search to find sources → Extract {{title, url, snippet}} from results
+2. Write content with inline citations: `claim [citation:Title](url)`
+3. Collect all citations in a "Sources" section at the end
+4. NEVER write claims without citations when sources are available
+
+**CRITICAL RULES:**
+- ❌ DO NOT write research content without citations
+- ❌ DO NOT forget to extract URLs from search results
+- ✅ ALWAYS add `[citation:Title](URL)` after claims from external sources
+- ✅ ALWAYS include a "Sources" section listing all references
 </citations>
 
 <critical_reminders>
@@ -366,6 +419,31 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
+def get_deferred_tools_prompt_section() -> str:
+    """Generate <available-deferred-tools> block for the system prompt.
+
+    Lists only deferred tool names so the agent knows what exists
+    and can use tool_search to load them.
+    Returns empty string when tool_search is disabled or no tools are deferred.
+    """
+    from deerflow.tools.builtins.tool_search import get_deferred_registry
+
+    try:
+        from deerflow.config import get_app_config
+
+        if not get_app_config().tool_search.enabled:
+            return ""
+    except FileNotFoundError:
+        return ""
+
+    registry = get_deferred_registry()
+    if not registry:
+        return ""
+
+    names = "\n".join(e.name for e in registry.entries)
+    return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -395,11 +473,15 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills)
 
+    # Get deferred tools section (tool_search)
+    deferred_tools_section = get_deferred_tools_prompt_section()
+
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
+        deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
