@@ -335,6 +335,15 @@ export function useThreadStream({
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
+              reasoning_effort:
+                context.reasoning_effort ??
+                (context.mode === "ultra"
+                  ? "xhigh"
+                  : context.mode === "pro"
+                    ? "high"
+                    : context.mode === "thinking"
+                      ? "medium"
+                      : undefined),
               thread_id: threadId,
             },
           },
