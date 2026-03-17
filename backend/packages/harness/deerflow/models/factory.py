@@ -65,6 +65,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     from deerflow.models.openai_codex_provider import CodexChatModel
 
     if issubclass(model_class, CodexChatModel):
+        # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
+        model_settings_from_config.pop("max_tokens", None)
+
         # Use explicit reasoning_effort from frontend if provided (low/medium/high)
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:

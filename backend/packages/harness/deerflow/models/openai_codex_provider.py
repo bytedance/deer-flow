@@ -37,12 +37,10 @@ class CodexChatModel(BaseChatModel):
         - name: gpt-5.4
           use: deerflow.models.openai_codex_provider:CodexChatModel
           model: gpt-5.4
-          max_tokens: 100000
           reasoning_effort: medium
     """
 
     model: str = "gpt-5.4"
-    max_tokens: int = 100000
     reasoning_effort: str = "medium"
     retry_max_attempts: int = MAX_RETRIES
     _access_token: str = ""
@@ -195,20 +193,67 @@ class CodexChatModel(BaseChatModel):
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
-                    if line.startswith("data: "):
-                        data = json.loads(line[6:])
-                        if data.get("type") == "response.completed":
-                            completed_response = data["response"]
+                    data = self._parse_sse_data_line(line)
+                    if data and data.get("type") == "response.completed":
+                        completed_response = data["response"]
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")
 
         return completed_response
 
+    @staticmethod
+    def _parse_sse_data_line(line: str) -> dict[str, Any] | None:
+        """Parse a data line from the SSE stream, skipping terminal markers."""
+        if not line.startswith("data:"):
+            return None
+
+        raw_data = line[5:].strip()
+        if not raw_data or raw_data == "[DONE]":
+            return None
+
+        try:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError:
+            logger.debug(f"Skipping non-JSON Codex SSE frame: {raw_data}")
+            return None
+
+        return data if isinstance(data, dict) else None
+
+    def _parse_tool_call_arguments(self, output_item: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Parse function-call arguments, surfacing malformed payloads safely."""
+        raw_arguments = output_item.get("arguments", "{}")
+        if isinstance(raw_arguments, dict):
+            return raw_arguments, None
+
+        normalized_arguments = raw_arguments or "{}"
+        try:
+            parsed_arguments = json.loads(normalized_arguments)
+        except (TypeError, json.JSONDecodeError) as exc:
+            return None, {
+                "type": "invalid_tool_call",
+                "name": output_item.get("name"),
+                "args": str(raw_arguments),
+                "id": output_item.get("call_id"),
+                "error": f"Failed to parse tool arguments: {exc}",
+            }
+
+        if not isinstance(parsed_arguments, dict):
+            return None, {
+                "type": "invalid_tool_call",
+                "name": output_item.get("name"),
+                "args": str(raw_arguments),
+                "id": output_item.get("call_id"),
+                "error": "Tool arguments must decode to a JSON object.",
+            }
+
+        return parsed_arguments, None
+
     def _parse_response(self, response: dict) -> ChatResult:
         """Parse Codex Responses API response into LangChain ChatResult."""
         content = ""
         tool_calls = []
+        invalid_tool_calls = []
         reasoning_content = ""
 
         for output_item in response.get("output", []):
@@ -224,10 +269,15 @@ class CodexChatModel(BaseChatModel):
                     if part.get("type") == "output_text":
                         content += part.get("text", "")
             elif output_item.get("type") == "function_call":
+                parsed_arguments, invalid_tool_call = self._parse_tool_call_arguments(output_item)
+                if invalid_tool_call:
+                    invalid_tool_calls.append(invalid_tool_call)
+                    continue
+
                 tool_calls.append(
                     {
                         "name": output_item["name"],
-                        "args": json.loads(output_item.get("arguments", "{}")),
+                        "args": parsed_arguments or {},
                         "id": output_item.get("call_id", ""),
                         "type": "tool_call",
                     }
@@ -241,6 +291,7 @@ class CodexChatModel(BaseChatModel):
         message = AIMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else [],
+            invalid_tool_calls=invalid_tool_calls,
             additional_kwargs=additional_kwargs,
             response_metadata={
                 "model": response.get("model", self.model),

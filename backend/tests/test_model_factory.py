@@ -31,6 +31,7 @@ def _make_model(
     supports_reasoning_effort: bool = False,
     when_thinking_enabled: dict | None = None,
     thinking: dict | None = None,
+    max_tokens: int | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         name=name,
@@ -38,6 +39,7 @@ def _make_model(
         description=None,
         use=use,
         model=name,
+        max_tokens=max_tokens,
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
         when_thinking_enabled=when_thinking_enabled,
@@ -568,3 +570,24 @@ def test_codex_provider_defaults_reasoning_effort_to_medium(monkeypatch):
     factory_module.create_chat_model(name="codex", thinking_enabled=True)
 
     assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "medium"
+
+
+def test_codex_provider_strips_unsupported_max_tokens(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                max_tokens=4096,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True)
+
+    assert "max_tokens" not in FakeChatModel.captured_kwargs

@@ -246,7 +246,7 @@ class ClaudeChatModel(ChatAnthropic):
 
     @staticmethod
     def _calc_backoff_ms(attempt: int, error: Exception) -> int:
-        """Exponential backoff with jitter."""
+        """Exponential backoff with a fixed 20% buffer."""
         backoff_ms = 2000 * (1 << (attempt - 1))
         jitter_ms = int(backoff_ms * 0.2)
         total_ms = backoff_ms + jitter_ms

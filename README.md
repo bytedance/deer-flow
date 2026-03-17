@@ -125,6 +125,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
    - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
 

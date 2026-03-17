@@ -338,11 +338,11 @@ export function useThreadStream({
               reasoning_effort:
                 context.reasoning_effort ??
                 (context.mode === "ultra"
-                  ? "xhigh"
+                  ? "high"
                   : context.mode === "pro"
-                    ? "high"
+                    ? "medium"
                     : context.mode === "thinking"
-                      ? "medium"
+                      ? "low"
                       : undefined),
               thread_id: threadId,
             },
