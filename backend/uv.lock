@@ -702,6 +702,7 @@ dependencies = [
     { name = "langgraph-cli", extra = ["inmem"] },
     { name = "markdownify" },
     { name = "markitdown", extra = ["all", "xlsx"] },
+    { name = "olefile" },
     { name = "openpyxl" },
     { name = "pdf2image" },
     { name = "pillow" },
@@ -715,6 +716,7 @@ dependencies = [
 >>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "xlrd" },
 ]
 
 [package.dev-dependencies]
@@ -754,6 +756,7 @@ requires-dist = [
     { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.15" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
+    { name = "olefile", specifier = ">=0.45" },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pdf2image", specifier = ">=1.15.0" },
     { name = "pillow", specifier = ">=11.0.0" },
@@ -767,6 +770,7 @@ requires-dist = [
 >>>>>>> b202d4a (deerflow-2026-3-11-12.33)
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+    { name = "xlrd", specifier = ">=2.0.0" },
 ]
 
 [package.metadata.requires-dev]

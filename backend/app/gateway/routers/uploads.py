@@ -64,8 +64,17 @@ def detect_images_in_document(file_path: Path) -> dict:
 
     if ext == '.pdf':
         return detect_images_in_pdf(file_path)
-    elif ext in ['.docx', '.pptx']:
+    elif ext in ['.docx', '.pptx', '.xlsx']:
         return detect_images_in_office(file_path, ext)
+    elif ext in ['.doc', '.ppt', '.xls']:
+        # 旧版Office格式无法直接检测图片数量
+        # 返回保守估计，让后续流程创建占位符
+        logger.warning(f"Legacy Office format {ext} detected, cannot accurately detect images")
+        return {
+            'has_images': True,  # 假设有图片
+            'image_count': -1,   # -1 表示未知数量
+            'metadata': {'file_type': ext[1:], 'legacy_format': True}
+        }
     else:
         return {'has_images': False, 'image_count': 0}
 
@@ -133,6 +142,7 @@ def detect_images_in_office(file_path: Path, ext: str) -> dict:
 
         elif ext == '.pptx':
             from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
             prs = Presentation(file_path)
 
             image_count = 0
@@ -141,8 +151,15 @@ def detect_images_in_office(file_path: Path, ext: str) -> dict:
             for slide_num, slide in enumerate(prs.slides, 1):
                 slide_images = 0
                 for shape in slide.shapes:
-                    if shape.shape_type == 13:  # Picture type
-                        slide_images += 1
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            # 尝试访问图片，捕获JPEG错误
+                            _ = shape.image
+                            slide_images += 1
+                        except (AttributeError, ValueError):
+                            # JPEG bug 或链接图片，仍然计数
+                            slide_images += 1
+                            logger.warning(f"Slide {slide_num}: 图片访问有问题，但已计数")
 
                 if slide_images > 0:
                     pages_with_images.append(slide_num)
@@ -157,10 +174,47 @@ def detect_images_in_office(file_path: Path, ext: str) -> dict:
                     'file_type': 'pptx'
                 }
             }
+        
+        elif ext == '.xlsx':
+            from openpyxl import load_workbook
+            wb = load_workbook(file_path, data_only=True)
+
+            image_count = 0
+            sheets_with_images = []
+
+            for sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                sheet_images = 0
+
+                # openpyxl 检测图片的方式
+                if hasattr(sheet, '_images') and sheet._images:
+                    sheet_images = len(sheet._images)
+                elif hasattr(sheet, 'images') and sheet.images:
+                    sheet_images = len(sheet.images)
+
+                if sheet_images > 0:
+                    sheets_with_images.append(sheet_name)
+                    image_count += sheet_images
+
+            return {
+                'has_images': image_count > 0,
+                'image_count': image_count,
+                'pages_with_images': sheets_with_images,  # 实际上是sheet名称
+                'metadata': {
+                    'total_sheets': len(wb.sheetnames),
+                    'file_type': 'xlsx'
+                }
+            }
 
     except Exception as e:
         logger.warning(f"Failed to detect images in {ext} {file_path.name}: {e}")
-        return {'has_images': False, 'image_count': 0}
+        # 出错时返回保守估计
+        return {
+            'has_images': True,
+            'image_count': -1,
+            'metadata': {'file_type': ext[1:], 'error': str(e)}
+        }
+
 
 
 async def convert_file_to_markdown(file_path: Path) -> Path | None:
@@ -173,7 +227,7 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
     """
     # Check file size
     file_size = file_path.stat().st_size
-    max_size = 10 * 1024 * 1024  # 10MB
+    max_size = 512 * 1024 * 1024  # 512MB
     if file_size > max_size:
         logger.warning(f"File too large: {file_path.name} ({file_size} bytes)")
         return None
@@ -202,12 +256,21 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
             return create_pdf_with_images_placeholder(file_path, image_info)
 
     # For Office docs with images
-    elif ext in ['.docx', '.pptx'] and image_info['has_images']:
+    elif ext in ['.docx', '.pptx', '.xlsx'] and image_info['has_images']:
         logger.info(
             f"Office doc with images: {file_path.name} "
             f"({image_info['image_count']} images)"
         )
         return create_office_with_images_placeholder(file_path, image_info)
+    
+    # For legacy Office formats (.doc, .ppt, .xls)
+    elif ext in ['.doc', '.ppt', '.xls']:
+        logger.info(f"Legacy Office format: {file_path.name}, creating placeholder")
+        return create_office_with_images_placeholder(file_path, {
+            'has_images': True,
+            'image_count': -1,
+            'metadata': {'file_type': ext[1:], 'legacy_format': True}
+        })
 
     # For docs without images, use markitdown
     try:
@@ -229,6 +292,21 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 
         logger.info(f"Converted {file_path.name} to markdown (no images)")
         return md_path
+    
+    except AttributeError as e:
+        if "'Part' object has no attribute 'image'" in str(e):
+            logger.warning(f"markitdown JPEG bug for {file_path.name}: {e}")
+            # 创建占位符，延迟处理
+            return create_office_with_images_placeholder(file_path, {
+                'has_images': True,
+                'image_count': image_info.get('image_count', -1),
+                'metadata': {
+                    'file_type': ext[1:],
+                    'error': 'markitdown_jpeg_bug'
+                }
+            })
+        logger.error(f"AttributeError converting {file_path.name}: {e}")
+        return None
 
     except Exception as e:
         logger.error(f"Failed to convert {file_path.name}: {e}")
@@ -343,19 +421,39 @@ The full content including image analysis will be loaded when you use the `read_
 def create_office_with_images_placeholder(file_path: Path, image_info: dict) -> Path:
     """Create placeholder for Office documents with images."""
     file_type = image_info.get('metadata', {}).get('file_type', 'document')
+    is_legacy = image_info.get('metadata', {}).get('legacy_format', False)
+    has_error = image_info.get('metadata', {}).get('error', '')
 
     placeholder = f"""# 📄 {file_type.upper()} Document with Images
 
 **File**: `{file_path.name}`
+**Type**: {'Legacy ' if is_legacy else ''}{file_type.upper()} format
 **Total Images**: {image_info['image_count']}
 """
 
+    # 图片数量显示
+    image_count = image_info.get('image_count', 0)
+    if image_count == -1:
+        placeholder += "**Images**: Unknown (legacy format or detection failed)\n"
+    else:
+        placeholder += f"**Total Images**: {image_count}\n"
+
+    # 特殊错误提示
+    if has_error == 'markitdown_jpeg_bug':
+        placeholder += "\n> ⚠️ **Note**: This file contains JPEG images that caused conversion issues. "
+        placeholder += "The content will be extracted using AI when you read this file.\n"
+
+    if is_legacy:
+        placeholder += "\n> ⚠️ **Note**: This is a legacy Office format (pre-2007). "
+        placeholder += "Full content extraction requires special handling.\n"
+
+    # 根据文件类型添加特定信息
     if file_type == 'pptx':
         total_slides = image_info.get('metadata', {}).get('total_slides', 'N/A')
         slides_with_images = image_info.get('pages_with_images', [])
 
         placeholder += f"""**Total Slides**: {total_slides}
-**Slides with Images**: {', '.join(map(str, slides_with_images))}
+**Slides with Images**: {', '.join(map(str, slides_with_images)) if slides_with_images else 'N/A'}
 """
 
         placeholder += """
@@ -372,6 +470,15 @@ This presentation contains images. When you read this file, the AI will provide:
             for slide_num in slides_with_images:
                 placeholder += f"- **Slide {slide_num}**: Contains images\n"
 
+    elif file_type == 'ppt':
+        placeholder += """
+This is a legacy PowerPoint presentation (.ppt). When you read this file:
+1. Text content will be extracted if possible
+2. Images will be analyzed using AI vision models
+3. Some content may require manual review
+
+"""
+
     elif file_type == 'docx':
         placeholder += """
 This document contains images. When you read this file, the AI will provide:
@@ -379,6 +486,29 @@ This document contains images. When you read this file, the AI will provide:
 2. Detailed analysis of each embedded image
 3. Understanding of figures, screenshots, charts
 4. Contextual integration of visual elements
+
+"""
+
+    elif file_type == 'doc':
+        placeholder += """
+This is a legacy Word document (.doc). When you read this file:
+1. Text content will be extracted if possible
+2. Images will be analyzed using AI vision models
+3. Some content may require manual review
+
+"""
+
+    elif file_type in ['xlsx', 'xls']:
+        total_sheets = image_info.get('metadata', {}).get('total_sheets', 'N/A')
+        sheets_with_images = image_info.get('pages_with_images', [])
+        placeholder += f"""**Total Sheets**: {total_sheets}
+**Sheets with Images**: {', '.join(sheets_with_images) if sheets_with_images else 'N/A'}
+
+This Excel file contains images. When you read this file, the AI will provide:
+1. Sheet content and data analysis
+2. Image descriptions and understanding
+3. Chart and graph interpretation
+4. Table data extraction
 
 """
 
@@ -392,8 +522,8 @@ This document contains images. When you read this file, the AI will provide:
     # Save metadata
     save_file_metadata(file_path, {
         'type': f'{file_type}_with_images',
-        'needs_image_analysis': True,
-        'image_count': image_info['image_count']
+        'image_count': image_count,
+        'metadata': image_info.get('metadata', {})
     })
 
     return md_path

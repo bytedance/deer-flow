@@ -36,6 +36,8 @@ dependencies = [
     "pdf2image>=1.15.0",
     "Pillow>=11.0.0",
     "openpyxl>=3.1.0",
+    "xlrd>=2.0.0",
+    "olefile>=0.45",
 ]
 
 [dependency-groups]

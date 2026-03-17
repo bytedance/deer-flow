@@ -11,6 +11,8 @@ import re
 from typing import Any
 
 import chardet
+import tempfile
+import uuid
 
 from src.sandbox.local.list_dir import list_dir
 from src.sandbox.sandbox import Sandbox
@@ -340,7 +342,7 @@ class LocalSandbox(Sandbox):
             return await self._handle_markdown_file(resolved_path, metadata)
         elif ext == '.pdf':
             return await self._handle_pdf_file(resolved_path, metadata)
-        elif ext in ['.docx', '.pptx', '.xlsx']:
+        elif ext in ['.docx', '.pptx', '.xlsx','.doc', '.ppt', '.xls']:
             return await self._handle_office_file(resolved_path, metadata)
         elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif']:
             return await self._handle_image_file(resolved_path)
@@ -564,7 +566,8 @@ class LocalSandbox(Sandbox):
             # Analyze each image
             analyses = await understand_multiple_images(
                 images,
-                context=f"Scanned PDF document: {pdf_path.name}"
+                context=f"Scanned PDF document: {pdf_path.name}",
+                language="zh"  # 或从配置读取
             )
 
             return sanitize_analysis_output(analyses, max_length=500000)
@@ -588,6 +591,14 @@ class LocalSandbox(Sandbox):
             return await self._process_docx_with_images(file_path, metadata)
         elif ext == '.pptx':
             return await self._process_pptx_with_images(file_path, metadata)
+        elif ext == '.xlsx':
+            return await self._process_xlsx_with_images(file_path, metadata)
+        elif ext == '.xls':
+            return await self._process_xls_with_images(file_path, metadata)
+        elif ext == '.doc':
+            return await self._process_doc_with_images(file_path, metadata)
+        elif ext == '.ppt':
+            return await self._process_ppt_with_images(file_path, metadata)
         else:
             return await self._convert_office_with_markitdown(file_path)
 
@@ -632,7 +643,8 @@ class LocalSandbox(Sandbox):
             if images_to_analyze:
                 image_analysis = await understand_multiple_images(
                     images_to_analyze,
-                    context=f"Images from PDF: {pdf_path.name}"
+                    context=f"Images from PDF: {pdf_path.name}",
+                    language="zh"  # 或从配置读取
                 )
             else:
                 image_analysis = ""
@@ -660,7 +672,10 @@ class LocalSandbox(Sandbox):
         """Process DOCX with images: extract text + analyze images."""
         try:
             from docx import Document
-            from src.tools.builtins.image_understanding import understand_multiple_images
+            from src.tools.builtins.image_understanding import (
+            understand_multiple_images,
+            extract_docx_images_safe,
+            )
             from PIL import Image
 
             logger = __import__('logging').getLogger(__name__)
@@ -673,26 +688,46 @@ class LocalSandbox(Sandbox):
             for para in doc.paragraphs:
                 if para.text.strip():
                     text_parts.append(para.text)
+            # 提取表格文本
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_parts.append(' | '.join(row_text))
 
             text_content = '\n\n'.join(text_parts)
 
-            # Extract images
-            image_data_list = []
-            for rel in doc.part.rels.values():
-                if "image" in rel.target_ref:
-                    image = rel.target_part
-                    image_bytes = image.blob
-                    img = Image.open(io.BytesIO(image_bytes))
-                    image_data_list.append(img)
-
-            # Analyze images
+            # Extract images - 使用 image_understanding.py 的安全提取方法
+            extracted_image_paths = await extract_docx_images_safe(docx_path)
+            
+            # 分析提取的图片
             image_analysis = ""
-            if image_data_list:
-                logger.info(f"Analyzing {len(image_data_list)} images...")
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
                 image_analysis = await understand_multiple_images(
-                    image_data_list,
-                    context=f"Images from document: {docx_path.name}"
+                    extracted_image_paths,
+                    context=f"Images from document: {docx_path.name}",
+                    language="zh"  # 或从配置读取
                 )
+                
+                # 清理临时文件
+                for img_path in extracted_image_paths:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+                # 清理空目录
+                try:
+                    if extracted_image_paths:
+                        parent = extracted_image_paths[0].parent
+                        shutil.rmtree(parent, ignore_errors=True)
+                except:
+                    pass
+            else:
+                image_analysis = "未能提取到任何图片（可能是链接图片、OLE对象或格式不支持）"
 
             # Combine
             result = f"""# 📄 Document: {docx_path.name}
@@ -717,7 +752,11 @@ class LocalSandbox(Sandbox):
         """Process PPTX with images: extract text + analyze images."""
         try:
             from pptx import Presentation
-            from src.tools.builtins.image_understanding import understand_multiple_images
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            from src.tools.builtins.image_understanding import (
+            understand_multiple_images,
+            extract_ppt_images_safe,
+            )
             from PIL import Image
 
             logger = __import__('logging').getLogger(__name__)
@@ -736,23 +775,36 @@ class LocalSandbox(Sandbox):
 
             text_content = '\n\n'.join(text_parts)
 
-            # Extract images
-            image_data_list = []
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if shape.shape_type == 13:  # Picture type
-                        image_bytes = shape.image.blob
-                        img = Image.open(io.BytesIO(image_bytes))
-                        image_data_list.append(img)
+            # Extract images - 使用 image_understanding.py 的安全提取方法
+            from src.tools.builtins.image_understanding import extract_ppt_images_safe
+            
+            extracted_image_paths = await extract_ppt_images_safe(pptx_path)
 
-            # Analyze images
+            # 分析提取的图片
             image_analysis = ""
-            if image_data_list:
-                logger.info(f"Analyzing {len(image_data_list)} images...")
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
                 image_analysis = await understand_multiple_images(
-                    image_data_list,
-                    context=f"Images from presentation: {pptx_path.name}"
+                    extracted_image_paths,
+                    context=f"Images from presentation: {pptx_path.name}",
+                    language="zh"  # 或从配置读取
                 )
+                
+                # 清理临时文件
+                for img_path in extracted_image_paths:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+                # 清理空目录
+                try:
+                    if extracted_image_paths:
+                        parent = extracted_image_paths[0].parent
+                        shutil.rmtree(parent, ignore_errors=True)
+                except:
+                    pass
+            else:
+                image_analysis = "未能提取到任何图片（可能是链接图片、OLE对象或格式不支持）"
 
             # Combine
             result = f"""# 📊 Presentation: {pptx_path.name}
@@ -772,6 +824,433 @@ class LocalSandbox(Sandbox):
             logger = __import__('logging').getLogger(__name__)
             logger.error(f"Failed to process PPTX: {e}")
             return f"Error: {e}"
+        
+    async def _process_xlsx_with_images(self, xlsx_path: Path, metadata: dict) -> str:
+        """Process Excel with images: extract data + analyze images."""
+        try:
+            from openpyxl import load_workbook
+            from src.tools.builtins.image_understanding import (
+                understand_multiple_images,
+                extract_xlsx_images_safe,
+            )
+
+            logger = __import__('logging').getLogger(__name__)
+            logger.info("Processing Excel with images...")
+
+            # Extract data
+            wb = load_workbook(xlsx_path, data_only=True)
+            data_parts = []
+
+            for sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                sheet_data = f"### Sheet: {sheet_name}\n\n"
+
+                # 提取表格数据（前20行）
+                row_count = 0
+                for row in sheet.iter_rows(values_only=True):
+                    if row_count >= 20:
+                        sheet_data += "... (truncated)\n"
+                        break
+                    # 过滤None值
+                    row_values = [str(cell) if cell is not None else "" for cell in row]
+                    if any(row_values):  # 只添加非空行
+                        sheet_data += " | ".join(row_values) + "\n"
+                    row_count += 1
+
+                data_parts.append(sheet_data)
+
+            data_content = '\n\n'.join(data_parts)
+
+            # Extract images - 使用 image_understanding.py 的安全提取方法
+            extracted_image_paths = await extract_xlsx_images_safe(xlsx_path)
+            
+            # 分析提取的图片
+            image_analysis = ""
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
+                image_analysis = await understand_multiple_images(
+                    extracted_image_paths,
+                    context=f"Images from Excel: {xlsx_path.name}",
+                    language="zh"  # 或从配置读取
+                )
+                
+                # 清理临时文件
+                for img_path in extracted_image_paths:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+                # 清理空目录
+                try:
+                    if extracted_image_paths:
+                        parent = extracted_image_paths[0].parent
+                        shutil.rmtree(parent, ignore_errors=True)
+                except:
+                    pass
+            else:
+                image_analysis = "未能提取到任何图片（Excel可能不包含嵌入图片或格式不支持）"
+
+            # Combine
+            result = f"""# 📊 Spreadsheet: {xlsx_path.name}
+
+    ## Data Content
+
+    {data_content}
+
+    ## Image Analysis
+
+    {image_analysis}
+    """
+
+            return self._sanitize_markdown_content(result, max_length=500000)
+
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Failed to process Excel: {e}")
+            return f"Error processing Excel: {e}"
+
+    async def _process_xls_with_images(self, xls_path: Path, metadata: dict) -> str:
+        """Process legacy .xls with images."""
+        try:
+            import xlrd
+            from src.tools.builtins.image_understanding import (
+                understand_multiple_images,
+                extract_xls_images_safe,
+            )
+
+            logger = __import__('logging').getLogger(__name__)
+            logger.info("Processing legacy .xls with images...")
+
+            # Extract data
+            book = xlrd.open_workbook(xls_path)
+            data_parts = []
+
+            for sheet_idx in range(book.nsheets):
+                sheet = book.sheet_by_index(sheet_idx)
+                sheet_data = f"### Sheet: {sheet.name}\n\n"
+
+                # 提取前20行
+                for row_idx in range(min(20, sheet.nrows)):
+                    row_values = [str(sheet.cell_value(row_idx, col_idx)) 
+                                for col_idx in range(sheet.ncols)]
+                    if any(row_values):
+                        sheet_data += " | ".join(row_values) + "\n"
+
+                if sheet.nrows > 20:
+                    sheet_data += "... (truncated)\n"
+
+                data_parts.append(sheet_data)
+
+            data_content = '\n\n'.join(data_parts)
+
+            # 尝试提取图片
+            extracted_image_paths = await extract_xls_images_safe(xls_path)
+            
+            image_analysis = ""
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
+                image_analysis = await understand_multiple_images(
+                    extracted_image_paths,
+                    context=f"Images from Excel: {xls_path.name}",
+                    language="zh"  # 或从配置读取
+                )
+                
+                # 清理临时文件
+                for img_path in extracted_image_paths:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+            else:
+                image_analysis = "旧版.xls格式的图片提取受限（需要Windows环境或特殊库支持）"
+
+            # Combine
+            result = f"""# 📊 Legacy Spreadsheet: {xls_path.name}
+
+    ## Data Content
+
+    {data_content}
+
+    ## Image Analysis
+
+    {image_analysis}
+
+    > Note: This is a legacy .xls format (Excel 97-2003). Some features may be limited.
+    """
+
+            return self._sanitize_markdown_content(result, max_length=500000)
+
+        except ImportError:
+            return "Error: xlrd not installed. Install with: pip install xlrd"
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Failed to process .xls: {e}")
+            return f"Error processing .xls: {e}"
+
+    async def _process_doc_with_images(self, doc_path: Path, metadata: dict) -> str:
+        """Process legacy .doc with images."""
+        try:
+            import olefile
+            from src.tools.builtins.image_understanding import understand_multiple_images
+
+            logger = __import__('logging').getLogger(__name__)
+            logger.info("Processing legacy .doc with images...")
+
+            # .doc 是 OLE 格式，尝试提取文本和图片
+            text_content = ""
+            extracted_image_paths = []
+
+            try:
+                # 尝试使用 olefile 打开
+                ole = olefile.OleFileIO(str(doc_path))
+                
+                # 提取文本（从 WordDocument 流）
+                if ole.exists('WordDocument'):
+                    word_stream = ole.openstream('WordDocument')
+                    # 这里需要复杂的解析，暂时返回提示
+                    text_content = "[Legacy .doc format text extraction requires special handling]"
+                
+                # 尝试提取图片（从 Data 流或特定存储）
+                # 这是一个简化的实现，实际提取需要更复杂的 OLE 解析
+                for entry in ole.listdir():
+                    entry_name = '/'.join(entry)
+                    if 'Data' in entry_name or 'Pict' in entry_name:
+                        try:
+                            data = ole.openstream(entry).read()
+                            if len(data) > 1000:  # 假设图片至少1KB
+                                # 尝试保存为图片
+                                temp_dir = Path(tempfile.mkdtemp())
+                                img_path = temp_dir / f"doc_image_{uuid.uuid4().hex}.bin"
+                                img_path.write_bytes(data)
+                                extracted_image_paths.append(img_path)
+                        except:
+                            pass
+                
+                ole.close()
+            except Exception as e:
+                logger.warning(f"OLE parsing failed: {e}")
+                text_content = "[Unable to extract text from legacy .doc format]"
+
+            # 分析提取的图片
+            image_analysis = ""
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
+                # 过滤掉非图片文件
+                valid_images = []
+                for img_path in extracted_image_paths:
+                    try:
+                        from PIL import Image
+                        Image.open(img_path)
+                        valid_images.append(img_path)
+                    except:
+                        # 不是有效图片，删除
+                        try:
+                            img_path.unlink()
+                        except:
+                            pass
+                
+                if valid_images:
+                    image_analysis = await understand_multiple_images(
+                        valid_images,
+                        context=f"Images from legacy Word document: {doc_path.name}",
+                        language="zh"  # 或从配置读取
+                    )
+                
+                # 清理临时文件
+                for img_path in valid_images:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+                try:
+                    if valid_images:
+                        shutil.rmtree(valid_images[0].parent, ignore_errors=True)
+                except:
+                    pass
+            else:
+                image_analysis = "未能从旧版.doc格式中提取到图片（需要Windows环境或特殊库支持）"
+
+            # Combine
+            result = f"""# 📄 Legacy Word Document: {doc_path.name}
+
+            ## Text Content
+
+            {text_content}
+
+            ## Image Analysis
+
+            {image_analysis}
+
+            > Note: This is a legacy .doc format (Word 97-2003). Full content extraction requires Windows with Microsoft Office or specialized tools.
+            > 
+            > For better compatibility, consider converting to .docx format.
+
+            ## Alternative Solutions
+
+            1. **Convert to .docx**: Open in Microsoft Word and save as .docx format
+            2. **Use Online Converter**: Convert using online tools before uploading
+            3. **Extract Manually**: Copy content and images manually
+            """
+
+            return self._sanitize_markdown_content(result, max_length=500000)
+
+        except ImportError:
+            return """Error: olefile not installed. Install with: pip install olefile
+
+                Note: Legacy .doc format requires special handling. Consider converting to .docx format for better compatibility."""
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Failed to process .doc: {e}")
+            return f"""Error processing .doc: {e}
+
+                    This is a legacy Word 97-2003 format (.doc) which requires special handling.
+
+                    **Recommendations:**
+                    1. Convert to .docx format using Microsoft Word
+                    2. Use online conversion tools
+                    3. Copy content manually"""
+
+    async def _process_ppt_with_images(self, ppt_path: Path, metadata: dict) -> str:
+        """Process legacy .ppt with images."""
+        try:
+            import olefile
+            from src.tools.builtins.image_understanding import understand_multiple_images
+
+            logger = __import__('logging').getLogger(__name__)
+            logger.info("Processing legacy .ppt with images...")
+
+            # .ppt 是 OLE 格式，提取有限
+            text_content = ""
+            extracted_image_paths = []
+
+            try:
+                # 尝试使用 olefile 打开
+                ole = olefile.OleFileIO(str(ppt_path))
+                
+                # PowerPoint OLE 结构复杂，这里做基本处理
+                text_parts = []
+                
+                # 列出所有流
+                for entry in ole.listdir():
+                    entry_name = '/'.join(entry)
+                    
+                    # 尝试提取文本（从 PowerPoint Document 流）
+                    if 'PowerPoint Document' in entry_name:
+                        try:
+                            stream = ole.openstream(entry)
+                            data = stream.read()
+                            # 从二进制数据中提取文本（简化处理）
+                            # 实际提取需要解析 PowerPoint 二进制格式
+                            text_parts.append("[Slide content - legacy format]")
+                        except:
+                            pass
+                    
+                    # 尝试提取图片
+                    if 'Pictures' in entry_name or entry_name.endswith(('.jpg', '.jpeg', '.png')):
+                        try:
+                            data = ole.openstream(entry).read()
+                            if len(data) > 1000:
+                                temp_dir = Path(tempfile.mkdtemp())
+                                # 尝试确定扩展名
+                                ext = '.bin'
+                                if data[:2] == b'\xff\xd8':
+                                    ext = '.jpg'
+                                elif data[:4] == b'\x89PNG':
+                                    ext = '.png'
+                                
+                                img_path = temp_dir / f"ppt_image_{uuid.uuid4().hex}{ext}"
+                                img_path.write_bytes(data)
+                                extracted_image_paths.append(img_path)
+                        except:
+                            pass
+                
+                ole.close()
+                
+                text_content = '\n\n'.join(text_parts) if text_parts else "[Legacy .ppt format text extraction requires special handling]"
+                
+            except Exception as e:
+                logger.warning(f"OLE parsing failed: {e}")
+                text_content = "[Unable to extract text from legacy .ppt format]"
+
+            # 分析提取的图片
+            image_analysis = ""
+            if extracted_image_paths:
+                logger.info(f"Analyzing {len(extracted_image_paths)} images...")
+                # 过滤掉非图片文件
+                valid_images = []
+                for img_path in extracted_image_paths:
+                    try:
+                        from PIL import Image
+                        Image.open(img_path)
+                        valid_images.append(img_path)
+                    except:
+                        try:
+                            img_path.unlink()
+                        except:
+                            pass
+                
+                if valid_images:
+                    image_analysis = await understand_multiple_images(
+                        valid_images,
+                        context=f"Images from legacy PowerPoint presentation: {ppt_path.name}",
+                        language="zh"  # 或从配置读取
+                    )
+                
+                # 清理临时文件
+                for img_path in valid_images:
+                    try:
+                        img_path.unlink(missing_ok=True)
+                    except:
+                        pass
+                try:
+                    if valid_images:
+                        shutil.rmtree(valid_images[0].parent, ignore_errors=True)
+                except:
+                    pass
+            else:
+                image_analysis = "未能从旧版.ppt格式中提取到图片（需要Windows环境或特殊库支持）"
+
+            # Combine
+            result = f"""# 📊 Legacy PowerPoint Presentation: {ppt_path.name}
+
+                ## Slide Content
+
+                {text_content}
+
+                ## Image Analysis
+
+                {image_analysis}
+
+                > Note: This is a legacy .ppt format (PowerPoint 97-2003). Full content extraction requires Windows with Microsoft Office or specialized tools.
+                >
+                > For better compatibility, consider converting to .pptx format.
+
+                ## Alternative Solutions
+
+                1. **Convert to .pptx**: Open in Microsoft PowerPoint and save as .pptx format
+                2. **Use Online Converter**: Convert using online tools before uploading
+                3. **Export as PDF**: Save as PDF and upload the PDF file
+                4. **Extract Manually**: Copy slides and images manually
+                """
+
+            return self._sanitize_markdown_content(result, max_length=500000)
+
+        except ImportError:
+            return """Error: olefile not installed. Install with: pip install olefile
+
+                Note: Legacy .ppt format requires special handling. Consider converting to .pptx format for better compatibility."""
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Failed to process .ppt: {e}")
+            return f"""Error processing .ppt: {e}
+
+                This is a legacy PowerPoint 97-2003 format (.ppt) which requires special handling.
+
+                **Recommendations:**
+                1. Convert to .pptx format using Microsoft PowerPoint
+                2. Use online conversion tools
+                3. Export as PDF and upload
+                4. Copy content manually"""
 
     async def _convert_office_with_markitdown(self, file_path: Path) -> str:
         """Convert Office file using markitdown."""

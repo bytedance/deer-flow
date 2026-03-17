@@ -18,6 +18,12 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
+from src.agents.middlewares.context_compression_middleware import (
+    create_context_compression_middleware,
+)
+from src.agents.middlewares.incremental_summarization_middleware import (
+    create_incremental_summarization_middleware,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +223,19 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     middlewares = build_lead_runtime_middlewares(lazy_init=True)
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware()
-    if summarization_middleware is not None:
-        middlewares.append(summarization_middleware)
+    # summarization_middleware = _create_summarization_middleware()
+    # if summarization_middleware is not None:
+    #     middlewares.append(summarization_middleware)
+    compression_middleware = create_context_compression_middleware()
+    if compression_middleware is not None:
+        middlewares.append(compression_middleware)
+        logger.info("Context compression middleware enabled (history preserved)")
+
+    # 使用增量总结中间件
+    incremental_middleware = create_incremental_summarization_middleware()
+    if incremental_middleware is not None:
+        middlewares.append(incremental_middleware)
+        logger.info("Incremental summarization middleware enabled")
 
     # Add TodoList middleware if plan mode is enabled
     is_plan_mode = config.get("configurable", {}).get("is_plan_mode", False)

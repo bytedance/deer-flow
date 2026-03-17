@@ -45,6 +45,14 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+
+class SummaryState(TypedDict):
+    """State for incremental summarization."""
+    summary_text: NotRequired[str | None]
+    summary_messages_count: NotRequired[int | None]
+    summary_generated_at: NotRequired[str | None]
+    last_messages_hash: NotRequired[str | None]
+    
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -53,3 +61,6 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    summary: NotRequired[SummaryState | None]  # 新增：总结状态
+
+

@@ -7,6 +7,14 @@ import logging
 import requests
 from pathlib import Path
 from typing import Any, Union
+
+import tempfile
+import uuid
+import zipfile
+import shutil
+
+import contextlib
+from typing import List
  
 from langchain_core.messages import HumanMessage
 
@@ -15,6 +23,15 @@ import asyncio
  
 # Type alias for image input
 ImagePathOrImage = Union[Path, 'PIL.Image.Image']
+
+DEFAULT_LANGUAGE = "zh"  # 默认语言：zh(中文) 或 en(英文)
+def get_language() -> str:
+    """
+    获取当前配置的语言
+    可以通过环境变量或配置文件修改
+    """
+    import os
+    return os.getenv("IMAGE_UNDERSTANDING_LANG", DEFAULT_LANGUAGE)
  
 def setup_image_logger():
     log_dir = Path(__file__).parent.parent.parent / "logs"
@@ -40,12 +57,435 @@ def setup_image_logger():
     return logger
 
 logger = setup_image_logger()
- 
+
+@contextlib.asynccontextmanager
+async def temp_image_manager(image_paths: List[Path]):
+    """
+    上下文管理器：确保临时图片文件被清理
+    """
+    try:
+        yield image_paths
+    finally:
+        # 清理所有临时文件
+        for img_path in image_paths:
+            if isinstance(img_path, Path) and img_path.exists():
+                try:
+                    # 检查是否是临时目录中的文件
+                    if str(img_path).startswith(tempfile.gettempdir()):
+                        img_path.unlink(missing_ok=True)
+                        logger.info(f"Cleaned up temp file: {img_path.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup {img_path}: {e}")
+        
+        # 清理空目录
+        if image_paths:
+            try:
+                parent = image_paths[0].parent
+                if str(parent).startswith(tempfile.gettempdir()) and parent.exists():
+                    # 检查目录是否为空
+                    if not any(parent.iterdir()):
+                        shutil.rmtree(parent, ignore_errors=True)
+                        logger.info(f"Cleaned up temp dir: {parent}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp dir: {e}")
+
+async def extract_ppt_images_safe(pptx_path: Path) -> list[Path]:
+    """
+    安全提取PPT图片，处理python-pptx的各种bug
+    """
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    
+    temp_dir = Path(tempfile.mkdtemp())
+    extracted_images = []
+    failed_extractions = []
+    processed_hashes = set()  # 用于去重
+
+    def get_image_hash(image_bytes: bytes) -> str:
+        """计算图片内容的哈希值用于去重"""
+        import hashlib
+        return hashlib.md5(image_bytes).hexdigest()
+    
+    def add_image_if_unique(image_bytes: bytes, img_path: Path) -> bool:
+        """如果图片未重复则添加"""
+        img_hash = get_image_hash(image_bytes)
+        if img_hash in processed_hashes:
+            logger.info(f"跳过重复图片: {img_path.name}")
+            return False
+        processed_hashes.add(img_hash)
+        img_path.write_bytes(image_bytes)
+        extracted_images.append(img_path)
+        return True
+    
+    try:
+        prs = Presentation(pptx_path)
+        total_shapes = 0
+        picture_shapes = 0
+        actual_images = 0
+        
+        for slide_num, slide in enumerate(prs.slides, 1):
+            for shape in slide.shapes:
+                total_shapes += 1
+                
+                # 更严格的图片检测
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    picture_shapes += 1
+                    
+                    # 检查是否有有效的 blip 元素
+                    try:
+                        if not hasattr(shape, '_pic') or shape._pic is None:
+                            logger.debug(f"Slide {slide_num}: 形状无 _pic 属性，跳过")
+                            continue
+                        
+                        blip = shape._pic.spPr.blipFill.blip
+                        if blip is None:
+                            logger.debug(f"Slide {slide_num}: blip 为空，跳过")
+                            continue
+                        
+                        # 检查是否是嵌入图片（不是链接）
+                        embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        if not embed:
+                            logger.debug(f"Slide {slide_num}: 链接图片，跳过")
+                            continue
+                        
+                    except Exception as e:
+                        logger.debug(f"Slide {slide_num}: 图片检测失败: {e}")
+                        continue
+                    
+                    # 尝试提取
+                    try:
+                        image = shape.image
+                        image_bytes = image.blob
+                        
+                        if not image_bytes or len(image_bytes) < 100:  # 过滤太小的文件
+                            logger.warning(f"Slide {slide_num}: 图片内容太小或为空")
+                            continue
+                        
+                        ext = image.ext if image.ext else 'png'
+                        img_path = temp_dir / f"slide{slide_num}_{uuid.uuid4().hex}.{ext}"
+                        
+                        if add_image_if_unique(image_bytes, img_path):
+                            actual_images += 1
+                            logger.info(f"成功提取图片: {img_path.name} ({len(image_bytes)} bytes)")
+                        
+                    except AttributeError as e:
+                        if "'Part' object has no attribute 'image'" in str(e):
+                            logger.warning(f"Slide {slide_num}: JPEG/python-pptx bug")
+                            failed_extractions.append({'slide': slide_num, 'reason': 'jpeg_bug'})
+                        else:
+                            logger.warning(f"Slide {slide_num}: 属性错误 - {e}")
+                    except Exception as e:
+                        logger.warning(f"Slide {slide_num}: 提取失败 - {type(e).__name__}: {e}")
+        
+        logger.info(f"PPT分析完成: 总形状={total_shapes}, 图片形状={picture_shapes}, "
+                   f"成功提取={len(extracted_images)}, 失败={len(failed_extractions)}")
+        
+        # 如果python-pptx没有提取到所有图片，尝试zipfile方法
+        if len(extracted_images) < picture_shapes:
+            logger.info(f"尝试使用zipfile直接提取图片... "
+                       f"(已提取{len(extracted_images)}/{picture_shapes})")
+            zip_images = await extract_images_via_zip(pptx_path, temp_dir)
+            # 去重：避免重复提取已成功的图片
+            existing_names = {p.name for p in extracted_images}
+            for img_path in zip_images:
+                if img_path.name not in existing_names:
+                    extracted_images.append(img_path)
+                    logger.info(f"zipfile补充提取: {img_path.name}")
+        
+    except Exception as e:
+        logger.error(f"解析PPT失败: {e}")
+        extracted_images = await extract_images_via_zip(pptx_path, temp_dir)
+    
+    logger.info(f"最终提取图片数量: {len(extracted_images)}")
+    return extracted_images
+
+async def extract_docx_images_safe(docx_path: Path) -> list[Path]:
+    """
+    安全提取DOCX图片，处理各种格式问题
+    """
+    from docx import Document
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    
+    temp_dir = Path(tempfile.mkdtemp())
+    extracted_images = []
+    
+    try:
+        doc = Document(docx_path)
+        
+        # 方法1：通过关系提取
+        for rel in doc.part.rels.values():
+            if "image" in rel.target_ref:
+                try:
+                    image_part = rel.target_part
+                    if not hasattr(image_part, 'blob'):
+                        logger.warning(f"关系 {rel.target_ref} 不是图片 part，跳过")
+                        continue
+                    
+                    image_bytes = image_part.blob
+                    if not image_bytes:
+                        logger.warning(f"图片 {rel.target_ref} 内容为空，跳过")
+                        continue
+                    
+                    # 尝试确定图片格式
+                    try:
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(image_bytes))
+                        ext = img.format.lower() if img.format else 'png'
+                    except:
+                        ext = 'png'
+                    
+                    img_path = temp_dir / f"docx_image_{uuid.uuid4().hex}.{ext}"
+                    img_path.write_bytes(image_bytes)
+                    extracted_images.append(img_path)
+                    logger.info(f"成功提取DOCX图片: {img_path.name}")
+                    
+                except AttributeError as e:
+                    logger.warning(f"提取图片 {rel.target_ref} 属性错误: {e}")
+                except Exception as e:
+                    logger.warning(f"提取图片 {rel.target_ref} 失败: {type(e).__name__}: {e}")
+        
+        # 方法2：如果方法1没有提取到图片，尝试zipfile
+        if not extracted_images:
+            logger.info("尝试使用zipfile直接提取DOCX图片...")
+            extracted_images = await extract_docx_images_via_zip(docx_path, temp_dir)
+            
+    except Exception as e:
+        logger.error(f"解析DOCX失败: {e}")
+        # 尝试zipfile作为备用
+        extracted_images = await extract_docx_images_via_zip(docx_path, temp_dir)
+    
+    return extracted_images
+
+
+async def extract_docx_images_via_zip(docx_path: Path, output_dir: Path) -> list[Path]:
+    """
+    使用zipfile直接解压DOCX中的图片（备用方法）
+    """
+    extracted = []
+    supported_ext = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.emf', '.wmf', '.tiff'}
+    
+    try:
+        with zipfile.ZipFile(docx_path, 'r') as z:
+            for name in z.namelist():
+                if name.startswith('word/media/'):
+                    ext = Path(name).suffix.lower()
+                    if ext in supported_ext:
+                        try:
+                            data = z.read(name)
+                            if data:
+                                out_path = output_dir / f"{uuid.uuid4().hex}{ext}"
+                                out_path.write_bytes(data)
+                                extracted.append(out_path)
+                                logger.info(f"zipfile提取DOCX图片: {out_path.name}")
+                        except Exception as e:
+                            logger.warning(f"提取 {name} 失败: {e}")
+    except Exception as e:
+        logger.error(f"zipfile提取DOCX图片失败: {e}")
+    
+    return extracted
+
+async def extract_xlsx_images_safe(xlsx_path: Path) -> list[Path]:
+    """
+    安全提取Excel图片，处理各种格式问题
+    """
+    from openpyxl import load_workbook
+    
+    temp_dir = Path(tempfile.mkdtemp())
+    extracted_images = []
+    
+    try:
+        wb = load_workbook(xlsx_path, data_only=True)
+        
+        # 方法1：通过openpyxl提取（适用于.xlsx）
+        for sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
+            
+            # 检查不同版本的openpyxl API
+            images_to_process = []
+            
+            if hasattr(sheet, '_images') and sheet._images:
+                images_to_process = sheet._images
+            elif hasattr(sheet, 'images') and sheet.images:
+                images_to_process = sheet.images
+            
+            for img_idx, image in enumerate(images_to_process):
+                try:
+                    # 尝试获取图片数据
+                    if hasattr(image, '_data'):
+                        image_bytes = image._data
+                    elif hasattr(image, 'data'):
+                        image_bytes = image.data
+                    elif hasattr(image, 'blob'):
+                        image_bytes = image.blob
+                    else:
+                        logger.warning(f"Sheet {sheet_name} 图片 {img_idx}: 无法获取图片数据")
+                        continue
+                    
+                    if not image_bytes:
+                        logger.warning(f"Sheet {sheet_name} 图片 {img_idx}: 内容为空")
+                        continue
+                    
+                    # 尝试确定图片格式
+                    try:
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(image_bytes))
+                        ext = img.format.lower() if img.format else 'png'
+                    except:
+                        ext = 'png'
+                    
+                    img_path = temp_dir / f"xlsx_{sheet_name}_img{img_idx}_{uuid.uuid4().hex}.{ext}"
+                    img_path.write_bytes(image_bytes)
+                    extracted_images.append(img_path)
+                    logger.info(f"成功提取Excel图片: {img_path.name}")
+                    
+                except Exception as e:
+                    logger.warning(f"提取Sheet {sheet_name} 图片 {img_idx} 失败: {type(e).__name__}: {e}")
+        
+        # 方法2：如果方法1没有提取到图片，尝试zipfile
+        if not extracted_images:
+            logger.info("尝试使用zipfile直接提取Excel图片...")
+            extracted_images = await extract_xlsx_images_via_zip(xlsx_path, temp_dir)
+            
+    except Exception as e:
+        logger.error(f"解析Excel失败: {e}")
+        # 尝试zipfile作为备用
+        extracted_images = await extract_xlsx_images_via_zip(xlsx_path, temp_dir)
+    
+    return extracted_images
+
+
+async def extract_xlsx_images_via_zip(xlsx_path: Path, output_dir: Path) -> list[Path]:
+    """
+    使用zipfile直接解压Excel中的图片（备用方法）
+    """
+    extracted = []
+    # Excel图片可能在xl/media/或xl/drawings/
+    supported_ext = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.emf', '.wmf'}
+    
+    try:
+        with zipfile.ZipFile(xlsx_path, 'r') as z:
+            for name in z.namelist():
+                # Excel图片通常在 xl/media/ 目录下
+                if name.startswith('xl/media/') or name.startswith('xl/drawings/media/'):
+                    ext = Path(name).suffix.lower()
+                    if ext in supported_ext:
+                        try:
+                            data = z.read(name)
+                            if data:
+                                out_path = output_dir / f"{uuid.uuid4().hex}{ext}"
+                                out_path.write_bytes(data)
+                                extracted.append(out_path)
+                                logger.info(f"zipfile提取Excel图片: {out_path.name} (from {name})")
+                        except Exception as e:
+                            logger.warning(f"提取 {name} 失败: {e}")
+    except Exception as e:
+        logger.error(f"zipfile提取Excel图片失败: {e}")
+    
+    return extracted
+
+
+async def extract_xls_images_safe(xls_path: Path) -> list[Path]:
+    """
+    提取旧版.xls格式的图片
+    注意：.xls是二进制格式，需要特殊处理
+    """
+    temp_dir = Path(tempfile.mkdtemp())
+    extracted_images = []
+    
+    try:
+        # 尝试使用xlrd提取
+        import xlrd
+        book = xlrd.open_workbook(xls_path, formatting_info=True)
+        
+        # xlrd不直接支持图片提取，尝试其他方法
+        logger.warning(f".xls格式 {xls_path.name} 图片提取受限，尝试备用方法...")
+        
+        # 尝试使用zipfile（虽然.xls不是zip格式，但某些情况下可能有效）
+        # 实际上.xls是OLE格式，不是zip
+        logger.info(".xls是二进制OLE格式，无法使用zipfile提取")
+        
+    except ImportError:
+        logger.warning("xlrd未安装，无法处理.xls文件")
+    except Exception as e:
+        logger.error(f"解析.xls失败: {e}")
+    
+    # .xls格式通常需要Windows COM或特殊库来处理图片
+    # 这里返回空列表，但记录日志
+    if not extracted_images:
+        logger.warning(f".xls文件 {xls_path.name} 的图片提取需要特殊处理（OLE格式）")
+    
+    return extracted_images
+
+
+def is_linked_picture(shape) -> bool:
+    """
+    检查图片是否是链接图片（非嵌入）
+    """
+    try:
+        from pptx.oxml.ns import qn
+        blip = shape._pic.spPr.blipFill.blip
+        return blip is not None and blip.get(qn('r:link')) is not None
+    except:
+        return False
+
+
+async def extract_images_via_zip(pptx_path: Path, output_dir: Path, existing_hashes: set = None, existing_images: list = None) -> list[Path]:
+    """
+    使用zipfile直接解压PPT中的图片（绕过python-pptx的bug）
+    """
+    import hashlib
+
+    if existing_hashes is None:
+        existing_hashes = set()
+    if existing_images is None:
+        existing_images = []
+    
+    extracted = []
+    supported_ext = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+    
+    try:
+        with zipfile.ZipFile(pptx_path, 'r') as z:
+            # 只处理 ppt/media/ 目录下的文件
+            media_files = [
+                name for name in z.namelist() 
+                if name.startswith('ppt/media/') and 
+                Path(name).suffix.lower() in supported_ext
+            ]
+            
+            logger.info(f"zipfile 发现 {len(media_files)} 个媒体文件")
+            
+            for name in media_files:
+                try:
+                    data = z.read(name)
+                    if not data or len(data) < 100:  # 过滤空文件和小文件
+                        continue
+                    
+                    # 计算哈希去重
+                    img_hash = hashlib.md5(data).hexdigest()
+                    if img_hash in existing_hashes:
+                        logger.debug(f"zipfile 跳过重复: {name}")
+                        continue
+                    
+                    existing_hashes.add(img_hash)
+                    
+                    ext = Path(name).suffix.lower()
+                    out_path = output_dir / f"zip_{uuid.uuid4().hex}{ext}"
+                    out_path.write_bytes(data)
+                    extracted.append(out_path)
+                    logger.info(f"zipfile提取: {out_path.name} ({len(data)} bytes)")
+                    
+                except Exception as e:
+                    logger.warning(f"提取 {name} 失败: {e}")
+    except Exception as e:
+        logger.error(f"zipfile提取失败: {e}")
+    
+    return extracted
  
 async def understand_image(
     image: ImagePathOrImage,
     context: str = "",
-    detail_level: str = "high"
+    detail_level: str = "high",
+    language: str = None  # 添加语言参数
 ) -> str:
     """
     Understand an image with multimodal LLM, extracting both text and meaning.
@@ -59,7 +499,28 @@ async def understand_image(
         Detailed description of image in Markdown format
     """
     from PIL import Image
+
+    # 处理PPT文件 - 提取其中的图片
+    if isinstance(image, Path) and image.suffix.lower() == '.pptx':
+        logger.info(f"检测到PPT文件，开始提取图片: {image.name}")
+        try:
+            extracted_images = await extract_ppt_images_safe(image)
+            if not extracted_images:
+                logger.warning("未能提取到任何图片，可能是链接图片、OLE对象或不支持的格式")
+                return "该PPT中没有可提取的嵌入图片（可能包含链接图片、OLE对象或不支持的格式）"
+            # 如果有多个图片，使用 understand_multiple_images 处理
+            if len(extracted_images) == 1:
+                image = extracted_images[0]
+            else:
+                return await understand_multiple_images(
+                    extracted_images, 
+                    context=f"{context} (来自PPT: {image.name})"
+                )
+        except Exception as e:
+            logger.error(f"提取PPT图片失败: {e}")
+            return f"Error: 无法提取PPT中的图片 - {e}"
     
+
     # Handle both Path and PIL.Image
     if isinstance(image, Path):
         # From file path
@@ -91,13 +552,13 @@ async def understand_image(
     
     # Get vision model
     model_config = get_vision_model_config()
-    result = await asyncio.to_thread(test_siliconflow_api_config)
-    logger.info(f"SiliconFlow API test result: {result}")
+    # result = await asyncio.to_thread(test_siliconflow_api_config)
+    # logger.info(f"SiliconFlow API test result: {result}")
     if not model_config:
         return "Error: No vision-capable model configured"
     
     # Build prompt
-    prompt = build_analysis_prompt(detail_level, context)
+    prompt = build_analysis_prompt(detail_level, context, language)
     
     try:
         logger.info(f"Analyzing image: {image_name} (model: {model_config.name})")
@@ -190,15 +651,52 @@ async def call_siliconflow_vision_api(
     
     loop = asyncio.get_event_loop()
     
-    def make_request():
-        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
-        
-        # 添加这行：立即打印原始响应
-        logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response body: {response.text[:1000]}")
+    # ========== 带重试的请求 ==========
+    max_retries = 3
+    timeout_seconds = 60
+    
+    for attempt in range(max_retries):
+        try:
+            def make_request():
+                response = requests.post(
+                    api_url, 
+                    json=payload, 
+                    headers=headers, 
+                    timeout=timeout_seconds
+                )
+                logger.info(f"Response status: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"Response error: {response.text[:500]}")
+                # logger.info(f"Response body: {response.text[:1000]}")
+                response.raise_for_status()
+                return response.json()
 
-        response.raise_for_status()
-        return response.json()
+            result = await loop.run_in_executor(None, make_request)
+            
+            # 成功，跳出重试循环
+            break
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Request timeout (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                # 使用 asyncio.sleep 在异步上下文中等待
+                await asyncio.sleep(3 ** attempt)  # 指数退避：2, 4, 8秒
+                continue
+            else:
+                raise Exception(f"API request timed out after {max_retries} attempts")  # 最后一次重试失败，抛出异常
+                
+        except requests.exceptions.HTTPError as e:
+            # HTTP错误不重试，直接处理
+            logger.error(f"HTTP error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3 ** attempt)
+                continue
+            else:
+                raise
+    # ==================================
     
     try:
         result = await loop.run_in_executor(None, make_request)
@@ -339,56 +837,173 @@ async def call_standard_vision_model(
         return f"Error: {e}"
  
  
-def build_analysis_prompt(detail_level: str, context: str) -> str:
-    """Build analysis prompt based on detail level."""
-    if detail_level == "high":
-        return f"""Analyze this image in detail and provide:
+# def build_analysis_prompt(detail_level: str, context: str) -> str:
+#     """Build analysis prompt based on detail level."""
+#     if detail_level == "high":
+#         return f"""Analyze this image in detail and provide:
  
+# 1. **Type of Image**: (photo, chart, graph, diagram, screenshot, document scan, etc.)
+ 
+# 2. **Content Summary**: Brief overview of what the image shows
+ 
+# 3. **Text Content**: Extract ALL visible text, word-for-word. Preserve formatting and structure as much as possible.
+ 
+# 4. **Key Elements**: 
+#    - For charts/graphs: List axes, labels, data points, trends
+#    - For diagrams: Explain components and relationships
+#    - For documents: Describe layout, sections, formatting
+#    - For photos: Describe main subjects, actions, setting
+ 
+# 5. **Data Extraction** (if applicable):
+#    - Tables: Convert to Markdown table format
+#    - Charts: Describe data and insights
+#    - Forms: List all fields and their values
+ 
+# 6. **Context & Meaning**: Explain the significance of this image in the document.
+ 
+# {f"Additional Context: {context}" if context else ""}
+ 
+# Provide the response in Markdown format with proper formatting. Be thorough and precise."""
+    
+#     elif detail_level == "medium":
+#         return f"""Analyze this image and provide:
+ 
+# 1. **Image Type**: What kind of image is this?
+ 
+# 2. **Text Content**: Extract all visible text accurately.
+ 
+# 3. **Main Content**: Brief description of what the image shows.
+ 
+# 4. **Key Information**: Highlight important data, insights, or elements.
+ 
+# {f"Context: {context}" if context else ""}
+ 
+# Provide in Markdown format."""
+    
+#     else:  # low
+#         return f"""Describe this image in detail. Extract any text content. Provide a clear, concise description."""
+
+def build_analysis_prompt(detail_level: str, context: str, language: str = None) -> str:
+    """
+    Build analysis prompt based on detail level and language.
+    
+    Args:
+        detail_level: 'low', 'medium', or 'high'
+        context: Optional context about the image
+        language: 'zh' for Chinese, 'en' for English, None for auto-detect from config
+    
+    Returns:
+        Prompt string in the specified language
+    """
+    # 如果未指定语言，使用配置
+    if language is None:
+        language = get_language()
+    
+    # 定义双语提示词模板
+    PROMPTS = {
+        "zh": {
+            "high": """请详细分析这张图片并提供：
+
+1. **图片类型**：(照片、图表、图形、示意图、截图、文档扫描等)
+
+2. **内容摘要**：简要概述图片显示的内容
+
+3. **文本内容**：提取所有可见文本，逐字提取。尽可能保留格式和结构。
+
+4. **关键元素**：
+   - 对于图表/图形：列出坐标轴、标签、数据点、趋势
+   - 对于示意图：解释组件和关系
+   - 对于文档：描述布局、章节、格式
+   - 对于照片：描述主要主体、动作、场景
+
+5. **数据提取**（如适用）：
+   - 表格：转换为Markdown表格格式
+   - 图表：描述数据和洞察
+   - 表单：列出所有字段及其值
+
+6. **上下文与意义**：解释这张图片在文档中的重要性。
+
+{f"额外上下文：{context}" if context else ""}
+
+请用Markdown格式提供回复，格式规范。请详尽而准确。""",
+
+            "medium": """分析这张图片并提供：
+
+1. **图片类型**：这是什么类型的图片？
+
+2. **文本内容**：准确提取所有可见文本。
+
+3. **主要内容**：简要描述图片显示的内容。
+
+4. **关键信息**：突出重要的数据、洞察或元素。
+
+{f"上下文：{context}" if context else ""}
+
+请用Markdown格式提供回复。""",
+
+            "low": """详细描述这张图片。提取任何文本内容。提供清晰、简洁的描述。"""
+        },
+        "en": {
+            "high": """Analyze this image in detail and provide:
+
 1. **Type of Image**: (photo, chart, graph, diagram, screenshot, document scan, etc.)
- 
+
 2. **Content Summary**: Brief overview of what the image shows
- 
+
 3. **Text Content**: Extract ALL visible text, word-for-word. Preserve formatting and structure as much as possible.
- 
+
 4. **Key Elements**: 
    - For charts/graphs: List axes, labels, data points, trends
    - For diagrams: Explain components and relationships
    - For documents: Describe layout, sections, formatting
    - For photos: Describe main subjects, actions, setting
- 
+
 5. **Data Extraction** (if applicable):
    - Tables: Convert to Markdown table format
    - Charts: Describe data and insights
    - Forms: List all fields and their values
- 
+
 6. **Context & Meaning**: Explain the significance of this image in the document.
- 
+
 {f"Additional Context: {context}" if context else ""}
- 
-Provide the response in Markdown format with proper formatting. Be thorough and precise."""
-    
-    elif detail_level == "medium":
-        return f"""Analyze this image and provide:
- 
+
+Provide the response in Markdown format with proper formatting. Be thorough and precise.""",
+
+            "medium": """Analyze this image and provide:
+
 1. **Image Type**: What kind of image is this?
- 
+
 2. **Text Content**: Extract all visible text accurately.
- 
+
 3. **Main Content**: Brief description of what the image shows.
- 
+
 4. **Key Information**: Highlight important data, insights, or elements.
- 
+
 {f"Context: {context}" if context else ""}
- 
-Provide in Markdown format."""
+
+Provide in Markdown format.""",
+
+            "low": """Describe this image in detail. Extract any text content. Provide a clear, concise description."""
+        }
+    }
     
-    else:  # low
-        return f"""Describe this image in detail. Extract any text content. Provide a clear, concise description."""
- 
+    # 验证语言参数
+    if language not in PROMPTS:
+        logger.warning(f"Unsupported language: {language}, falling back to {DEFAULT_LANGUAGE}")
+        language = DEFAULT_LANGUAGE
+    
+    # 验证 detail_level
+    if detail_level not in ["high", "medium", "low"]:
+        detail_level = "high"
+    
+    return PROMPTS[language][detail_level]
+
  
 async def understand_multiple_images(
     images: list[ImagePathOrImage],
-    context: str = ""
+    context: str = "",
+    detail_level: str = "high",
+    language: str = None  # 添加语言参数
 ) -> str:
     """
     Understand multiple images with context awareness.
@@ -402,27 +1017,35 @@ async def understand_multiple_images(
     """
     analyses = []
     
-    for i, img in enumerate(images, 1):
-        # Get image name
-        if isinstance(img, Path):
-            img_name = img.name
-        else:
-            img_name = f"image_{i}.png"
-        
-        logger.info(f"Processing image {i}/{len(images)}: {img_name}")
-        
-        analysis = await understand_image(
-            img,
-            context=f"{context} (Image {i} of {len(images)})",
-            detail_level="medium"
-        )
-        
-        analyses.append(f"### Image {i}: {img_name}\n\n{analysis}")
-        
-        # Small delay to avoid rate limiting
-        import asyncio
-        await asyncio.sleep(0.5)
-    
+    async with temp_image_manager([img for img in images if isinstance(img, Path)]):
+        for i, img in enumerate(images, 1):
+            # Get image name
+            if isinstance(img, Path):
+                img_name = img.name
+            else:
+                img_name = f"image_{i}.png"
+
+            logger.info(f"Processing image {i}/{len(images)}: {img_name}")
+
+            try:
+                analysis = await understand_image(
+                    img,
+                    context=f"{context} (Image {i} of {len(images)})",
+                    detail_level=detail_level,
+                    language=language  # 传递语言参数
+                )
+                # 根据语言选择标题
+                if language == "en" or (language is None and get_language() == "en"):
+                    analyses.append(f"### Image {i}: {img_name}\n\n{analysis}")
+                else:
+                    analyses.append(f"### 图片 {i}: {img_name}\n\n{analysis}")
+            except Exception as e:
+                logger.error(f"Failed to analyze image {img_name}: {e}")
+                analyses.append(f"### Image {i}: {img_name}\n\nError analyzing image: {e}")
+
+            # Small delay to avoid rate limiting
+            await asyncio.sleep(0.5)
+
     return '\n\n---\n\n'.join(analyses)
  
  
@@ -441,7 +1064,7 @@ def get_vision_model_config():
         # Priority order: SiliconFlow models first
         preferred_models = [
             'siliconflow-deepseek-ocr',
-            'paddleocr',
+            'siliconflow-paddle-ocr',
             'qwen-vl',
             'gpt-4o',
             'gpt-4-turbo',
