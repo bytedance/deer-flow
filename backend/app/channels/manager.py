@@ -157,7 +157,7 @@ def _accumulate_stream_text(
     """Convert a ``messages-tuple`` event into the latest displayable AI text."""
     payload = event_data
     metadata: Any = None
-    if isinstance(event_data, (list, tuple)):
+    if isinstance(event_data, list | tuple):
         if event_data:
             payload = event_data[0]
         if len(event_data) > 1:
@@ -566,7 +566,7 @@ class ChannelManager:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
-                elif event == "values" and isinstance(data, (dict, list)):
+                elif event == "values" and isinstance(data, dict | list):
                     last_values = data
                     snapshot_text = _extract_response_text(data)
                     if snapshot_text:
