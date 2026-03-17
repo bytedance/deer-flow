@@ -158,7 +158,7 @@ Middlewares execute in strict order in `packages/harness/deerflow/agents/lead_ag
 4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption)
 5. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
 6. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
-7. **TitleMiddleware** - Auto-generates thread title after first complete exchange
+7. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
 8. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 9. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
 10. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if subagent_enabled)

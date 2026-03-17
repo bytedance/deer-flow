@@ -21,6 +21,25 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     state_schema = TitleMiddlewareState
 
+    def _normalize_content(self, content: object) -> str:
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts = [self._normalize_content(item) for item in content]
+            return "\n".join(part for part in parts if part)
+
+        if isinstance(content, dict):
+            text_value = content.get("text")
+            if isinstance(text_value, str):
+                return text_value
+
+            nested_content = content.get("content")
+            if nested_content is not None:
+                return self._normalize_content(nested_content)
+
+        return ""
+
     def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
         """Check if we should generate a title for this thread."""
         config = get_title_config()
@@ -52,9 +71,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg_content = next((m.content for m in messages if m.type == "human"), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
-        # Ensure content is string (LangChain messages can have list content)
-        user_msg = str(user_msg_content) if user_msg_content else ""
-        assistant_msg = str(assistant_msg_content) if assistant_msg_content else ""
+        user_msg = self._normalize_content(user_msg_content)
+        assistant_msg = self._normalize_content(assistant_msg_content)
 
         # Use a lightweight model to generate title
         model = create_chat_model(thinking_enabled=False)
@@ -67,8 +85,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         try:
             response = await model.ainvoke(prompt)
-            # Ensure response content is string
-            title_content = str(response.content) if response.content else ""
+            title_content = self._normalize_content(response.content)
             title = title_content.strip().strip('"').strip("'")
             # Limit to max characters
             return title[: config.max_chars] if len(title) > config.max_chars else title
