@@ -16,15 +16,14 @@ _cache_initialized = False
 # (each call creates its own event loop), so asyncio.Lock across loops causes deadlocks.
 _initialization_lock = threading.Lock()
 _config_mtime: float | None = None  # Track config file modification time
+_init_future: concurrent.futures.Future | None = None  # Shared in-flight future for initialization
 
 # Maximum time (seconds) to wait for ALL enabled MCP servers to load their tools.
 MCP_INIT_TIMEOUT = 30
 
 # Shared executor for MCP initialization to avoid blocking timeout behavior
 # and prevent thread leakage if multiple initializations are triggered.
-_mcp_init_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="mcp-init-"
-)
+_mcp_init_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-init-")
 
 
 def _get_config_mtime() -> float | None:
@@ -109,17 +108,17 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # Already inside a running event loop (e.g. LangGraph server).
-                # Run initialization in a dedicated thread with its own event loop.
-                future = _mcp_init_executor.submit(asyncio.run, initialize_mcp_tools())
+                # Reuse a shared in-flight future so that concurrent callers
+                # and post-timeout retries don't submit redundant jobs.
+                global _init_future
+                if _init_future is None or _init_future.done():
+                    _init_future = _mcp_init_executor.submit(asyncio.run, initialize_mcp_tools())
+                future = _init_future
                 try:
                     future.result(timeout=MCP_INIT_TIMEOUT)
                 except concurrent.futures.TimeoutError:
-                    logger.error(
-                        f"MCP tools initialization timed out after {MCP_INIT_TIMEOUT}s. "
-                        "Check that all configured MCP servers are reachable."
-                    )
-                    # We don't shutdown the shared executor, but we do return early.
-                    # The worker thread will continue in the background and eventually 
+                    logger.error(f"MCP tools initialization timed out after {MCP_INIT_TIMEOUT}s. Check that all configured MCP servers are reachable.")
+                    # The worker thread will continue in the background and eventually
                     # update the cache when it finishes.
                     return []
             else:
@@ -145,8 +144,9 @@ def reset_mcp_tools_cache() -> None:
     Does NOT acquire _initialization_lock — callers that need atomicity
     must hold the lock themselves.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_mtime, _init_future
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+    _init_future = None
     logger.info("MCP tools cache reset")

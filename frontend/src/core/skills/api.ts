@@ -63,6 +63,10 @@ export async function installSkill(
 
 export async function getSkillsConfig() {
   const response = await fetch(`${getBackendBaseURL()}/api/skills/config`);
+  if (!response.ok) {
+    const err = (await response.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail ?? `Failed to load skills config: ${response.statusText}`);
+  }
   return response.json() as Promise<{ allowExternalSkills: boolean }>;
 }
 
@@ -74,5 +78,9 @@ export async function updateSkillsConfig(allowExternalSkills: boolean) {
     },
     body: JSON.stringify({ allowExternalSkills }),
   });
+  if (!response.ok) {
+    const err = (await response.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail ?? `Failed to update skills config: ${response.statusText}`);
+  }
   return response.json();
 }

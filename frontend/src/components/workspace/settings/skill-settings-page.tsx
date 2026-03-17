@@ -25,8 +25,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { useEnableSkill, useSkills, useSkillsConfig, useUpdateSkillsConfig } from "@/core/skills/hooks";
 import { loadSkills } from "@/core/skills";
+import { useEnableSkill, useSkills, useSkillsConfig, useUpdateSkillsConfig } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
@@ -110,6 +110,7 @@ function SkillSettingsList({
             </span>
             <Switch
               checked={config?.allowExternalSkills ?? false}
+              disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
               onCheckedChange={(checked) => updateConfig(checked)}
             />
           </div>

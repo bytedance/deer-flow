@@ -138,7 +138,6 @@ class SkillsConfigUpdateRequest(BaseModel):
     allow_external_skills: bool = Field(..., alias="allowExternalSkills")
 
 
-
 def _should_ignore_archive_entry(path: Path) -> bool:
     return path.name.startswith(".") or path.name == "__MACOSX"
 
@@ -238,7 +237,7 @@ async def update_skills_config(request: SkillsConfigUpdateRequest) -> SkillsConf
 
         # Save the updated config
         config_data = config.model_dump(by_alias=True, exclude_none=True)
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
 
         reload_extensions_config()
