@@ -6,45 +6,84 @@ import pytest
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _is_skills_path,
+    _reject_path_traversal,
+    _resolve_and_validate_user_data_path,
+    _resolve_skills_path,
     mask_local_paths_in_output,
     replace_virtual_path,
+    replace_virtual_paths_in_command,
     validate_local_bash_command_paths,
     validate_local_tool_path,
 )
-
-
-def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
-    thread_data = {
-        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
-        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
-        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
-    }
-
-    assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", thread_data)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
-    assert Path(replace_virtual_path("/mnt/user-data", thread_data)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
-
-
-def test_mask_local_paths_in_output_hides_host_paths() -> None:
-    thread_data = {
-        "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
-        "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
-        "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
-    }
-
-    output = "Created: /tmp/deer-flow/threads/t1/user-data/workspace/result.txt"
-    masked = mask_local_paths_in_output(output, thread_data)
-
-    assert "/tmp/deer-flow/threads/t1/user-data" not in masked
-    assert "/mnt/user-data/workspace/result.txt" in masked
-
-
-# ---------- validate_local_tool_path tests ----------
 
 _THREAD_DATA = {
     "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+# ---------- replace_virtual_path ----------
+
+
+def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
+    assert (
+        Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix()
+        == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
+    )
+    assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
+
+
+# ---------- mask_local_paths_in_output ----------
+
+
+def test_mask_local_paths_in_output_hides_host_paths() -> None:
+    output = "Created: /tmp/deer-flow/threads/t1/user-data/workspace/result.txt"
+    masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+    assert "/tmp/deer-flow/threads/t1/user-data" not in masked
+    assert "/mnt/user-data/workspace/result.txt" in masked
+
+
+def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
+    """Skills host paths in bash output should be masked to virtual paths."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        output = "Reading: /home/user/deer-flow/skills/public/bootstrap/SKILL.md"
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+        assert "/home/user/deer-flow/skills" not in masked
+        assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+
+
+# ---------- _reject_path_traversal ----------
+
+
+def test_reject_path_traversal_blocks_dotdot() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        _reject_path_traversal("/mnt/user-data/workspace/../../etc/passwd")
+
+
+def test_reject_path_traversal_blocks_dotdot_at_start() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        _reject_path_traversal("../etc/passwd")
+
+
+def test_reject_path_traversal_blocks_backslash_dotdot() -> None:
+    with pytest.raises(PermissionError, match="path traversal"):
+        _reject_path_traversal("/mnt/user-data/workspace\\..\\..\\etc\\passwd")
+
+
+def test_reject_path_traversal_allows_normal_paths() -> None:
+    # Should not raise
+    _reject_path_traversal("/mnt/user-data/workspace/file.txt")
+    _reject_path_traversal("/mnt/skills/public/bootstrap/SKILL.md")
+    _reject_path_traversal("/mnt/user-data/workspace/sub/dir/file.py")
+
+
+# ---------- validate_local_tool_path ----------
 
 
 def test_validate_local_tool_path_rejects_non_virtual_path() -> None:
@@ -70,7 +109,120 @@ def test_validate_local_tool_path_allows_user_data_write() -> None:
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
 
 
-# ---------- validate_local_bash_command_paths tests ----------
+def test_validate_local_tool_path_rejects_traversal_in_user_data() -> None:
+    """Path traversal via .. in user-data paths must be rejected."""
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_tool_path_rejects_traversal_in_skills() -> None:
+    """Path traversal via .. in skills paths must be rejected."""
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_tool_path("/mnt/skills/../../etc/passwd", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_rejects_none_thread_data() -> None:
+    """Missing thread_data should raise SandboxRuntimeError."""
+    from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+    with pytest.raises(SandboxRuntimeError):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", None)
+
+
+# ---------- _resolve_skills_path ----------
+
+
+def test_resolve_skills_path_resolves_correctly() -> None:
+    """Skills virtual path should resolve to host path."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        resolved = _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+        assert resolved == "/home/user/deer-flow/skills/public/bootstrap/SKILL.md"
+
+
+def test_resolve_skills_path_resolves_root() -> None:
+    """Skills container root should resolve to host skills directory."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        resolved = _resolve_skills_path("/mnt/skills")
+        assert resolved == "/home/user/deer-flow/skills"
+
+
+def test_resolve_skills_path_raises_when_not_configured() -> None:
+    """Should raise FileNotFoundError when skills directory is not available."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=None),
+    ):
+        with pytest.raises(FileNotFoundError, match="Skills directory not available"):
+            _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+
+
+# ---------- _resolve_and_validate_user_data_path ----------
+
+
+def test_resolve_and_validate_user_data_path_resolves_correctly(tmp_path: Path) -> None:
+    """Resolved path should land inside the correct thread directory."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    resolved = _resolve_and_validate_user_data_path("/mnt/user-data/workspace/hello.txt", thread_data)
+    assert resolved == str(workspace / "hello.txt")
+
+
+def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) -> None:
+    """Even after resolution, path must stay within allowed roots."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(tmp_path / "uploads"),
+        "outputs_path": str(tmp_path / "outputs"),
+    }
+    # This path resolves outside the allowed roots
+    with pytest.raises(PermissionError):
+        _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
+
+
+# ---------- replace_virtual_paths_in_command ----------
+
+
+def test_replace_virtual_paths_in_command_replaces_skills_paths() -> None:
+    """Skills virtual paths in commands should be resolved to host paths."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        cmd = "cat /mnt/skills/public/bootstrap/SKILL.md"
+        result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
+        assert "/mnt/skills" not in result
+        assert "/home/user/deer-flow/skills/public/bootstrap/SKILL.md" in result
+
+
+def test_replace_virtual_paths_in_command_replaces_both() -> None:
+    """Both user-data and skills paths should be replaced in the same command."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/skills"),
+    ):
+        cmd = "cat /mnt/skills/public/SKILL.md > /mnt/user-data/workspace/out.txt"
+        result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
+        assert "/mnt/skills" not in result
+        assert "/mnt/user-data" not in result
+        assert "/home/user/skills/public/SKILL.md" in result
+        assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
+
+
+# ---------- validate_local_bash_command_paths ----------
 
 
 def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
@@ -83,6 +235,25 @@ def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> 
         "/bin/echo ok > /mnt/user-data/workspace/out.txt && cat /dev/null",
         _THREAD_DATA,
     )
+
+
+def test_validate_local_bash_command_paths_blocks_traversal_in_user_data() -> None:
+    """Bash commands with traversal in user-data paths should be blocked."""
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths(
+            "cat /mnt/user-data/workspace/../../etc/passwd",
+            _THREAD_DATA,
+        )
+
+
+def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
+    """Bash commands with traversal in skills paths should be blocked."""
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths(
+                "cat /mnt/skills/../../etc/passwd",
+                _THREAD_DATA,
+            )
 
 
 # ---------- Skills path tests ----------
