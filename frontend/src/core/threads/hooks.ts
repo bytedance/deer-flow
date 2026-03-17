@@ -33,6 +33,8 @@ export type ThreadStreamOptions = {
 };
 
 const BACKGROUND_THREAD_SYNC_MS = 5000;
+const EMPTY_MESSAGES: Message[] = [];
+const EMPTY_ARTIFACTS: string[] = [];
 
 function shouldSyncInBackground() {
   if (typeof document === "undefined") {
@@ -148,14 +150,44 @@ function pickLatestThreadState(
 
 function normalizeThreadState(
   values: Partial<AgentThreadState> | null | undefined,
-  fallbackMessages: Message[] = [],
+  fallbackMessages: Message[] = EMPTY_MESSAGES,
 ): AgentThreadState {
+  const title = typeof values?.title === "string" ? values.title : "";
+  const messages = Array.isArray(values?.messages)
+    ? values.messages
+    : fallbackMessages;
+  const artifacts = Array.isArray(values?.artifacts)
+    ? values.artifacts
+    : EMPTY_ARTIFACTS;
+  const todos = Array.isArray(values?.todos) ? values.todos : undefined;
+
+  if (
+    values?.title === title &&
+    values?.messages === messages &&
+    values?.artifacts === artifacts &&
+    values?.todos === todos
+  ) {
+    return values as AgentThreadState;
+  }
+
   return {
-    title: typeof values?.title === "string" ? values.title : "",
-    messages: Array.isArray(values?.messages) ? values.messages : fallbackMessages,
-    artifacts: Array.isArray(values?.artifacts) ? values.artifacts : [],
-    todos: Array.isArray(values?.todos) ? values.todos : undefined,
+    title,
+    messages,
+    artifacts,
+    todos,
   };
+}
+
+function shouldOverrideThreadValues(
+  current: AgentThreadState,
+  next: AgentThreadState,
+) {
+  return (
+    current.title !== next.title ||
+    current.messages !== next.messages ||
+    current.artifacts !== next.artifacts ||
+    current.todos !== next.todos
+  );
 }
 
 export function useThreadStream({
@@ -609,23 +641,35 @@ export function useThreadStream({
     [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
-  // Merge server-pushed state with optimistic messages for display.
+  // Only wrap the SDK thread when the displayed values/messages differ from
+  // the stream snapshot. This avoids extra object churn when no override is
+  // needed while still letting background sync and optimistic UI win.
+  const normalizedThreadValues = normalizeThreadState(
+    thread.values,
+    thread.messages,
+  );
   const latestThreadValues = pickLatestThreadState(
-    normalizeThreadState(thread.values, thread.messages),
+    normalizedThreadValues,
     syncedThreadState,
   );
-  const mergedThread =
+  const mergedMessages =
     optimisticMessages.length > 0
+      ? [...latestThreadValues.messages, ...optimisticMessages]
+      : latestThreadValues.messages;
+
+  const shouldOverrideValues = shouldOverrideThreadValues(
+    thread.values,
+    latestThreadValues,
+  );
+  const shouldOverrideMessages = thread.messages !== mergedMessages;
+  const mergedThread =
+    shouldOverrideValues || shouldOverrideMessages
       ? ({
           ...thread,
           values: latestThreadValues,
-          messages: [...latestThreadValues.messages, ...optimisticMessages],
+          messages: mergedMessages,
         } as typeof thread)
-      : ({
-          ...thread,
-          values: latestThreadValues,
-          messages: latestThreadValues.messages,
-        } as typeof thread);
+      : thread;
 
   return [mergedThread, sendMessage] as const;
 }

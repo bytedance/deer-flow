@@ -1,5 +1,6 @@
 """Cron tool for scheduling reminders and recurring tasks."""
 
+import atexit
 import os
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -9,9 +10,9 @@ from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadState
-from src.cron.types import CronPayload, CronSchedule
 
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
+_CRON_API_CLIENT: httpx.Client | None = None
 
 
 def _parse_time_to_ms(time_str: str) -> int | None:
@@ -126,14 +127,32 @@ def _get_gateway_url() -> str:
     return DEFAULT_GATEWAY_URL
 
 
+def _close_cron_api_client() -> None:
+    """Close the shared cron API client during interpreter shutdown."""
+    global _CRON_API_CLIENT
+    if _CRON_API_CLIENT is not None and not _CRON_API_CLIENT.is_closed:
+        _CRON_API_CLIENT.close()
+    _CRON_API_CLIENT = None
+
+
+def _get_cron_api_client() -> httpx.Client:
+    """Reuse a shared client so cron tool requests benefit from keep-alive pooling."""
+    global _CRON_API_CLIENT
+    if _CRON_API_CLIENT is None or _CRON_API_CLIENT.is_closed:
+        _CRON_API_CLIENT = httpx.Client(timeout=10)
+    return _CRON_API_CLIENT
+
+
+atexit.register(_close_cron_api_client)
+
+
 def _cron_api_request(method: str, path: str, *, params: dict[str, Any] | None = None, json_body: dict[str, Any] | None = None) -> Any:
     """Perform a request to the cron API and return decoded JSON."""
     url = f"{_get_gateway_url()}{path}"
     try:
-        with httpx.Client(timeout=10) as client:
-            response = client.request(method, url, params=params, json=json_body)
-            response.raise_for_status()
-            return response.json()
+        response = _get_cron_api_client().request(method, url, params=params, json=json_body)
+        response.raise_for_status()
+        return response.json()
     except httpx.HTTPStatusError as exc:
         try:
             detail = exc.response.json().get("detail")
@@ -212,20 +231,50 @@ def _format_jobs(jobs: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _payload_to_api_dict(payload: CronPayload) -> dict[str, Any]:
-    """Serialize a payload for the gateway API."""
+def _build_schedule_dict(
+    *,
+    kind: Literal["at", "every", "cron"],
+    at_ms: int | None = None,
+    every_ms: int | None = None,
+    expr: str | None = None,
+    tz: str | None = None,
+) -> dict[str, Any]:
+    """Build the gateway schedule payload without importing backend-only types."""
     return {
-        "kind": payload.kind,
-        "message": payload.message,
-        "deliver": payload.deliver,
-        "channel": payload.channel,
-        "to": payload.to,
-        "thread_ts": payload.thread_ts,
-        "thread_id": payload.thread_id,
-        "assistant_id": payload.assistant_id,
-        "agent_name": payload.agent_name,
-        "thinking_enabled": payload.thinking_enabled,
-        "subagent_enabled": payload.subagent_enabled,
+        "kind": kind,
+        "at_ms": at_ms,
+        "every_ms": every_ms,
+        "expr": expr,
+        "tz": tz,
+    }
+
+
+def _build_payload_dict(
+    *,
+    message: str,
+    deliver: bool,
+    channel: str | None,
+    to: str | None,
+    thread_ts: str | None,
+    thread_id: str | None,
+    assistant_id: str | None,
+    agent_name: str | None,
+    thinking_enabled: bool | None,
+    subagent_enabled: bool | None,
+) -> dict[str, Any]:
+    """Build the gateway execution payload without importing backend-only types."""
+    return {
+        "kind": "agent_turn",
+        "message": message,
+        "deliver": deliver,
+        "channel": channel,
+        "to": to,
+        "thread_ts": thread_ts,
+        "thread_id": thread_id,
+        "assistant_id": assistant_id,
+        "agent_name": agent_name,
+        "thinking_enabled": thinking_enabled,
+        "subagent_enabled": subagent_enabled,
     }
 
 
@@ -279,19 +328,19 @@ def cron_tool(
         if not name:
             name = message[:50] + ("..." if len(message) > 50 else "")
 
-        schedule: CronSchedule | None = None
+        schedule: dict[str, Any] | None = None
         if at:
             at_ms = _parse_time_to_ms(at)
             if at_ms is None:
                 return f"Error: Could not parse time '{at}'. Use ISO format or relative time like 'in 5 minutes'"
-            schedule = CronSchedule(kind="at", at_ms=at_ms)
+            schedule = _build_schedule_dict(kind="at", at_ms=at_ms)
         elif every:
             every_ms = _parse_interval_to_ms(every)
             if every_ms is None:
                 return f"Error: Could not parse interval '{every}'. Use format like '5 minutes' or '1h'"
-            schedule = CronSchedule(kind="every", every_ms=every_ms)
+            schedule = _build_schedule_dict(kind="every", every_ms=every_ms)
         elif cron_expr:
-            schedule = CronSchedule(kind="cron", expr=cron_expr, tz=timezone)
+            schedule = _build_schedule_dict(kind="cron", expr=cron_expr, tz=timezone)
         else:
             return "Error: Must specify one of 'at', 'every', or 'cron_expr'"
 
@@ -299,7 +348,7 @@ def cron_tool(
         assistant_id, agent_name, thinking_enabled, subagent_enabled = _get_run_settings(runtime)
         channel_name, chat_id, thread_ts = _get_delivery_target(runtime)
 
-        payload = CronPayload(
+        payload = _build_payload_dict(
             message=message,
             deliver=deliver,
             channel=channel_name if deliver else None,
@@ -317,16 +366,10 @@ def cron_tool(
             "/api/cron",
             json_body={
                 "name": name,
-                "schedule": {
-                    "kind": schedule.kind,
-                    "at_ms": schedule.at_ms,
-                    "every_ms": schedule.every_ms,
-                    "expr": schedule.expr,
-                    "tz": schedule.tz,
-                },
-                "payload": _payload_to_api_dict(payload),
+                "schedule": schedule,
+                "payload": payload,
                 "enabled": True,
-                "delete_after_run": schedule.kind == "at",
+                "delete_after_run": schedule["kind"] == "at",
             },
         )
 

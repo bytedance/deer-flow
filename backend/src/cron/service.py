@@ -15,7 +15,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -128,11 +128,7 @@ class CronStore:
     """Storage container for cron jobs."""
 
     version: int = 1
-    jobs: list[CronJob] = None  # type: ignore
-
-    def __post_init__(self):
-        if self.jobs is None:
-            self.jobs = []
+    jobs: list[CronJob] = field(default_factory=list)
 
 
 @dataclass
