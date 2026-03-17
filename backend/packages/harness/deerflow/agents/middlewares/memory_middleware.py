@@ -95,14 +95,16 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None):
+    def __init__(self, agent_name: str | None = None, user_id: str | None = None):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            user_id: If provided, memory is stored per-user. If None, uses global memory.
         """
         super().__init__()
         self._agent_name = agent_name
+        self._user_id = user_id
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
@@ -125,6 +127,15 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             print("MemoryMiddleware: No thread_id in context, skipping memory update")
             return None
 
+        # Get user_id from configurable metadata (thread metadata)
+        # Priority: runtime configurable > middleware instance variable
+        user_id = self._user_id
+        configurable = runtime.context.get("configurable", {})
+        if isinstance(configurable, dict):
+            metadata = configurable.get("metadata", {})
+            if isinstance(metadata, dict):
+                user_id = metadata.get("user_id", user_id)
+
         # Get messages from state
         messages = state.get("messages", [])
         if not messages:
@@ -144,6 +155,6 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Queue the filtered conversation for memory update
         queue = get_memory_queue()
-        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name)
+        queue.add(thread_id=thread_id, messages=filtered_messages, agent_name=self._agent_name, user_id=user_id)
 
         return None

@@ -282,11 +282,12 @@ Recent breakthroughs in language models have also accelerated progress
 """
 
 
-def _get_memory_context(agent_name: str | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, user_id: str | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        user_id: If provided, loads per-user memory. Takes priority over agent_name for isolation.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -299,7 +300,8 @@ def _get_memory_context(agent_name: str | None = None) -> str:
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data(agent_name)
+        # Priority: user_id > agent_name > global memory
+        memory_data = get_memory_data(agent_name=agent_name, user_id=user_id)
         memory_content = format_memory_for_injection(memory_data, max_tokens=config.max_injection_tokens)
 
         if not memory_content.strip():

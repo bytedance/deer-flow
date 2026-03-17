@@ -454,7 +454,16 @@ class ChannelManager:
 
     async def _create_thread(self, client, msg: InboundMessage) -> str:
         """Create a new thread on the LangGraph Server and store the mapping."""
-        thread = await client.threads.create()
+        from deerflow.agents.thread_metadata import get_thread_metadata
+
+        # Inject user_id into thread metadata for multi-tenant isolation
+        metadata = get_thread_metadata(user_id=msg.user_id)
+
+        thread = await client.threads.create(
+            config={
+                "metadata": metadata
+            }
+        )
         thread_id = thread["thread_id"]
         self.store.set_thread_id(
             msg.channel_name,
@@ -637,8 +646,17 @@ class ChannelManager:
 
         if command == "new":
             # Create a new thread on the LangGraph Server
+            from deerflow.agents.thread_metadata import get_thread_metadata
+
+            # Inject user_id into thread metadata for multi-tenant isolation
+            metadata = get_thread_metadata(user_id=msg.user_id)
+
             client = self._get_client()
-            thread = await client.threads.create()
+            thread = await client.threads.create(
+                config={
+                    "metadata": metadata
+                }
+            )
             new_thread_id = thread["thread_id"]
             self.store.set_thread_id(
                 msg.channel_name,
