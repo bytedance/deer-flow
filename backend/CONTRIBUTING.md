@@ -227,7 +227,7 @@ Example test:
 
 ```python
 import pytest
-from src.models.factory import create_chat_model
+from deerflow.models.factory import create_chat_model
 
 def test_create_chat_model_with_valid_name():
     """Test that a valid model name creates a model instance."""
@@ -269,10 +269,10 @@ Include in your PR description:
 
 ### Adding New Tools
 
-1. Create tool in `src/tools/builtins/` or `src/community/`:
+1. Create tool in `packages/harness/deerflow/tools/builtins/` or `packages/harness/deerflow/community/`:
 
 ```python
-# src/tools/builtins/my_tool.py
+# packages/harness/deerflow/tools/builtins/my_tool.py
 from langchain_core.tools import tool
 
 @tool
@@ -294,15 +294,15 @@ def my_tool(param: str) -> str:
 tools:
   - name: my_tool
     group: my_group
-    use: src.tools.builtins.my_tool:my_tool
+    use: deerflow.tools.builtins.my_tool:my_tool
 ```
 
 ### Adding New Middleware
 
-1. Create middleware in `src/agents/middlewares/`:
+1. Create middleware in `packages/harness/deerflow/agents/middlewares/`:
 
 ```python
-# src/agents/middlewares/my_middleware.py
+# packages/harness/deerflow/agents/middlewares/my_middleware.py
 from langchain.agents.middleware import BaseMiddleware
 from langchain_core.runnables import RunnableConfig
 
@@ -315,7 +315,7 @@ class MyMiddleware(BaseMiddleware):
         return state
 ```
 
-2. Register in `src/agents/lead_agent/agent.py`:
+2. Register in `packages/harness/deerflow/agents/lead_agent/agent.py`:
 
 ```python
 middlewares = [
@@ -329,10 +329,10 @@ middlewares = [
 
 ### Adding New API Endpoints
 
-1. Create router in `src/gateway/routers/`:
+1. Create router in `app/gateway/routers/`:
 
 ```python
-# src/gateway/routers/my_router.py
+# app/gateway/routers/my_router.py
 from fastapi import APIRouter
 
 router = APIRouter(prefix="/my-endpoint", tags=["my-endpoint"])
@@ -348,10 +348,10 @@ async def create_item(data: dict):
     return {"created": data}
 ```
 
-2. Register in `src/gateway/app.py`:
+2. Register in `app/gateway/app.py`:
 
 ```python
-from src.gateway.routers import my_router
+from app.gateway.routers import my_router
 
 app.include_router(my_router.router)
 ```
@@ -360,7 +360,7 @@ app.include_router(my_router.router)
 
 When adding new configuration options:
 
-1. Update `src/config/app_config.py` with new fields
+1. Update `packages/harness/deerflow/config/app_config.py` with new fields
 2. Add default values in `config.example.yaml`
 3. Document in `docs/CONFIGURATION.md`
 

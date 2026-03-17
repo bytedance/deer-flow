@@ -1,5 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
-import type { UseStream } from "@langchain/langgraph-sdk/react";
+import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import {
   Conversation,
@@ -34,19 +33,18 @@ export function MessageList({
   className,
   threadId,
   thread,
-  messages,
   paddingBottom = 160,
 }: {
   className?: string;
   threadId: string;
-  thread: UseStream<AgentThreadState>;
-  messages: Message[];
+  thread: BaseStream<AgentThreadState>;
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
-  if (thread.isThreadLoading) {
+  const messages = thread.messages;
+  if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
   return (
@@ -56,13 +54,15 @@ export function MessageList({
       <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-12">
         {groupMessages(messages, (group) => {
           if (group.type === "human" || group.type === "assistant") {
-            return (
-              <MessageListItem
-                key={group.id}
-                message={group.messages[0]!}
-                isLoading={thread.isLoading}
-              />
-            );
+            return group.messages.map((msg) => {
+              return (
+                <MessageListItem
+                  key={`${group.id}/${msg.id}`}
+                  message={msg}
+                  isLoading={thread.isLoading}
+                />
+              );
+            });
           } else if (group.type === "assistant:clarification") {
             const message = group.messages[0];
             if (message && hasContent(message)) {

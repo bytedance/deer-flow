@@ -1,10 +1,14 @@
 {
   "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.12",
   "dependencies": [
     "."
   ],
   "env": ".env",
   "graphs": {
-    "lead_agent": "src.agents:make_lead_agent"
+    "lead_agent": "deerflow.agents:make_lead_agent"
+  },
+  "checkpointer": {
+    "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
   }
 }

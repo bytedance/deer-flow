@@ -1,4 +1,4 @@
-import type { UseStream } from "@langchain/langgraph-sdk/react";
+import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import type { AgentThreadState } from "../threads";
 
@@ -7,15 +7,17 @@ import { urlOfArtifact } from "./utils";
 export async function loadArtifactContent({
   filepath,
   threadId,
+  isMock,
 }: {
   filepath: string;
   threadId: string;
+  isMock?: boolean;
 }) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
     enhancedFilepath = filepath + "/SKILL.md";
   }
-  const url = urlOfArtifact({ filepath: enhancedFilepath, threadId });
+  const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url);
   const text = await response.text();
   return text;
@@ -26,7 +28,7 @@ export function loadArtifactContentFromToolCall({
   thread,
 }: {
   url: string;
-  thread: UseStream<AgentThreadState>;
+  thread: BaseStream<AgentThreadState>;
 }) {
   const url = new URL(urlString);
   const toolCallId = url.searchParams.get("tool_call_id");
