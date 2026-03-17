@@ -157,6 +157,7 @@ export function useThreadStream({
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const sendInFlightRef = useRef(false);
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 
@@ -176,6 +177,11 @@ export function useThreadStream({
       message: PromptInputMessage,
       extraContext?: Record<string, unknown>,
     ) => {
+      if (sendInFlightRef.current) {
+        return;
+      }
+      sendInFlightRef.current = true;
+
       const text = message.text.trim();
 
       // Capture current count before showing optimistic messages
@@ -348,6 +354,8 @@ export function useThreadStream({
         setOptimisticMessages([]);
         setIsUploading(false);
         throw error;
+      } finally {
+        sendInFlightRef.current = false;
       }
     },
     [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
@@ -358,15 +366,11 @@ export function useThreadStream({
     optimisticMessages.length > 0
       ? ({
           ...thread,
-          isUploading,
           messages: [...thread.messages, ...optimisticMessages],
         } as typeof thread)
-      : ({
-          ...thread,
-          isUploading,
-        } as typeof thread);
+      : thread;
 
-  return [mergedThread, sendMessage] as const;
+  return [mergedThread, sendMessage, isUploading] as const;
 }
 
 export function useThreads(
