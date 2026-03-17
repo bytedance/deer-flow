@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -23,6 +24,25 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/opt/homebrew/bin/",
     "/dev/",
 )
+
+_DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+
+
+@lru_cache(maxsize=1)
+def _get_skills_container_path() -> str:
+    """Get the skills container path from config, with fallback to default."""
+    try:
+        from deerflow.config import get_app_config
+
+        return get_app_config().skills.container_path
+    except Exception:
+        return _DEFAULT_SKILLS_CONTAINER_PATH
+
+
+def _is_skills_path(path: str) -> bool:
+    """Check if a path is under the skills container path."""
+    skills_prefix = _get_skills_container_path()
+    return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
 def _path_variants(path: str) -> set[str]:
@@ -121,41 +141,41 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     return result
 
 
-def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> str:
-    """Resolve and validate a local-sandbox tool path.
+def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
+    """Validate that a virtual path is allowed for local-sandbox access.
 
-    Only virtual paths under /mnt/user-data are allowed in local mode.
+    This function is a pure security gate — it checks whether *path* may be
+    accessed and raises on violation.  It does **not** resolve the virtual
+    path to a host path; that is the sandbox implementation's responsibility
+    (``LocalSandbox._resolve_path``).
+
+    Allowed virtual-path families:
+      - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/skills/*``     — allowed only when *read_only* is True
+
+    Args:
+        path: The virtual path to validate.
+        thread_data: Thread data (must be present for local sandbox).
+        read_only: When True, skills paths are permitted.
+
+    Raises:
+        SandboxRuntimeError: If thread data is missing.
+        PermissionError: If the path is not allowed.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
-    if not path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ are allowed")
+    # Skills paths — read-only access only
+    if _is_skills_path(path):
+        if not read_only:
+            raise PermissionError(f"Write access to skills path is not allowed: {path}")
+        return
 
-    resolved_path = replace_virtual_path(path, thread_data)
-    resolved = Path(resolved_path).resolve()
+    # User-data paths
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        return
 
-    allowed_roots = [
-        Path(p).resolve()
-        for p in (
-            thread_data.get("workspace_path"),
-            thread_data.get("uploads_path"),
-            thread_data.get("outputs_path"),
-        )
-        if p is not None
-    ]
-
-    if not allowed_roots:
-        raise SandboxRuntimeError("No allowed local sandbox directories configured")
-
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root)
-            return str(resolved)
-        except ValueError:
-            continue
-
-    raise PermissionError("Access denied: path traversal detected")
+    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ or {_get_skills_container_path()}/ are allowed")
 
 
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
@@ -172,6 +192,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+            continue
+
+        # Allow skills container path (read-only access via sandbox path mappings)
+        if _is_skills_path(absolute_path):
             continue
 
         if any(
@@ -325,8 +349,9 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
     """Ensure thread data directories (workspace, uploads, outputs) exist.
 
     This function is called lazily when any sandbox tool is first used.
-    For local sandbox, it creates the directories on the filesystem.
-    For other sandboxes (like aio), directories are already mounted in the container.
+    For local sandbox, it creates the directories on the filesystem and
+    injects the per-thread user-data path mappings into the sandbox so
+    that all virtual-path resolution is handled uniformly by the sandbox.
 
     Args:
         runtime: Tool runtime containing state and context.
@@ -354,6 +379,19 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
         if path:
             os.makedirs(path, exist_ok=True)
 
+    # Inject per-thread user-data path mappings into the sandbox so that
+    # _resolve_path / _reverse_resolve_paths_in_output handle all virtual
+    # paths uniformly (user-data AND skills).
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+    sandbox_state = runtime.state.get("sandbox")
+    if sandbox_state is not None:
+        sandbox_id = sandbox_state.get("sandbox_id")
+        if sandbox_id is not None:
+            sandbox = get_sandbox_provider().get(sandbox_id)
+            if isinstance(sandbox, LocalSandbox):
+                sandbox.update_path_mappings(_thread_virtual_to_actual_mappings(thread_data))
+
     # Mark as created to avoid redundant operations
     runtime.state["thread_directories_created"] = True
 
@@ -377,9 +415,6 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         thread_data = get_thread_data(runtime)
         if is_local_sandbox(runtime):
             validate_local_bash_command_paths(command, thread_data)
-            command = replace_virtual_paths_in_command(command, thread_data)
-            output = sandbox.execute_command(command)
-            return mask_local_paths_in_output(output, thread_data)
         return sandbox.execute_command(command)
     except SandboxError as e:
         return f"Error: {e}"
@@ -403,7 +438,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data, read_only=True)
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -440,7 +475,7 @@ def read_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data, read_only=True)
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
@@ -480,7 +515,7 @@ def write_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data)
         sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
@@ -520,7 +555,7 @@ def str_replace_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data)
         content = sandbox.read_file(path)
         if not content:
             return "OK"

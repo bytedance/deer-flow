@@ -20,6 +20,13 @@ class LocalSandbox(Sandbox):
         super().__init__(id)
         self.path_mappings = path_mappings or {}
 
+    def update_path_mappings(self, mappings: dict[str, str]) -> None:
+        """Merge additional path mappings (e.g. per-thread user-data paths).
+
+        Existing keys are overwritten with the new values.
+        """
+        self.path_mappings.update(mappings)
+
     def _resolve_path(self, path: str) -> str:
         """
         Resolve container path to actual local path using mappings.
