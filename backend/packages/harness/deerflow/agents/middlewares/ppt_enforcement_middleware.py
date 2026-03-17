@@ -91,12 +91,69 @@ class PptEnforcementMiddleware(AgentMiddleware[PptEnforcementMiddlewareState]):
         lowered = text.lower()
         return any(keyword in lowered for keyword in self._PPT_KEYWORDS)
 
+    def _assistant_intends_ppt_generation(self, text: str) -> bool:
+        """Detect explicit assistant intent to generate a PPT in this turn."""
+        if not text:
+            return False
+        lowered = text.lower()
+        if not self._is_ppt_request(lowered):
+            return False
+
+        # Positive intent cues: "will create/generate/make PPT".
+        positive = (
+            "create",
+            "generate",
+            "make",
+            "build",
+            "\u521b\u5efa",  # 创建
+            "\u751f\u6210",  # 生成
+            "\u5236\u4f5c",  # 制作
+            "\u505a",  # 做
+        )
+        has_positive = any(token in lowered for token in positive)
+        if not has_positive:
+            return False
+
+        # Negative cues: "cannot/failed to generate PPT".
+        negative = (
+            "can't",
+            "cannot",
+            "unable",
+            "failed",
+            "error",
+            "\u4e0d\u80fd",  # 不能
+            "\u65e0\u6cd5",  # 无法
+            "\u5931\u8d25",  # 失败
+            "\u9519\u8bef",  # 错误
+        )
+        return not any(token in lowered for token in negative)
+
     @staticmethod
     def _find_last_user_index(messages: list) -> int | None:
         for idx in range(len(messages) - 1, -1, -1):
             if getattr(messages[idx], "type", None) == "human":
                 return idx
         return None
+
+    def _recent_user_requested_ppt(self, messages: list, last_user_index: int, lookback_humans: int = 3) -> bool:
+        """Check a few prior user turns for PPT intent (for option-like replies such as '1')."""
+        checked = 0
+        for idx in range(last_user_index - 1, -1, -1):
+            if getattr(messages[idx], "type", None) != "human":
+                continue
+            checked += 1
+            text = self._message_text(getattr(messages[idx], "content", ""))
+            if self._is_ppt_request(text):
+                return True
+            if checked >= lookback_humans:
+                break
+        return False
+
+    def _last_ai_text(self, messages: list) -> str:
+        for idx in range(len(messages) - 1, -1, -1):
+            if getattr(messages[idx], "type", None) == "ai":
+                return self._message_text(getattr(messages[idx], "content", ""))
+        return ""
 
     def _has_ppt_generated_in_current_turn(self, messages: list, last_user_index: int) -> bool:
         """Detect whether this turn already produced a PPT via tool execution."""
@@ -241,7 +298,14 @@ class PptEnforcementMiddleware(AgentMiddleware[PptEnforcementMiddlewareState]):
 
         last_user = messages[last_user_index]
         user_text = self._message_text(getattr(last_user, "content", ""))
-        if not self._is_ppt_request(user_text):
+        ai_text = self._last_ai_text(messages)
+
+        should_enforce = (
+            self._is_ppt_request(user_text)
+            or self._recent_user_requested_ppt(messages, last_user_index)
+            or self._assistant_intends_ppt_generation(ai_text)
+        )
+        if not should_enforce:
             return None
 
         # Only skip fallback when the current turn has already generated a PPT.
