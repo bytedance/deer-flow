@@ -1,5 +1,4 @@
 import re
-from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -28,30 +27,46 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
 
-@lru_cache(maxsize=1)
 def _get_skills_container_path() -> str:
-    """Get the skills container path from config, with fallback to default."""
+    """Get the skills container path from config, with fallback to default.
+
+    Result is cached after the first successful config load.  If config loading
+    fails the default is returned *without* caching so that a later call can
+    pick up the real value once the config is available.
+    """
+    cached = getattr(_get_skills_container_path, "_cached", None)
+    if cached is not None:
+        return cached
     try:
         from deerflow.config import get_app_config
 
-        return get_app_config().skills.container_path
+        value = get_app_config().skills.container_path
+        _get_skills_container_path._cached = value  # type: ignore[attr-defined]
+        return value
     except Exception:
         return _DEFAULT_SKILLS_CONTAINER_PATH
 
 
-@lru_cache(maxsize=1)
 def _get_skills_host_path() -> str | None:
     """Get the skills host filesystem path from config.
 
-    Returns None if the skills directory does not exist or config cannot be loaded.
+    Returns None if the skills directory does not exist or config cannot be
+    loaded.  Only successful lookups are cached; failures are retried on the
+    next call so that a transiently unavailable skills directory does not
+    permanently disable skills access.
     """
+    cached = getattr(_get_skills_host_path, "_cached", None)
+    if cached is not None:
+        return cached
     try:
         from deerflow.config import get_app_config
 
         config = get_app_config()
         skills_path = config.skills.get_skills_path()
         if skills_path.exists():
-            return str(skills_path)
+            value = str(skills_path)
+            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
+            return value
     except Exception:
         pass
     return None
@@ -89,6 +104,20 @@ def _resolve_skills_path(path: str) -> str:
 
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
+
+
+def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
+    """Sanitize an error message to avoid leaking host filesystem paths.
+
+    In local-sandbox mode, resolved host paths in the error string are masked
+    back to their virtual equivalents so that user-visible output never exposes
+    the host directory layout.
+    """
+    msg = f"{type(error).__name__}: {error}"
+    if runtime is not None and is_local_sandbox(runtime):
+        thread_data = get_thread_data(runtime)
+        msg = mask_local_paths_in_output(msg, thread_data)
+    return msg
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -538,7 +567,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
     except PermissionError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error executing command: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
 @tool("ls", parse_docstring=True)
@@ -571,7 +600,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
 @tool("read_file", parse_docstring=True)
@@ -616,7 +645,7 @@ def read_file_tool(
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error reading file: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
 @tool("write_file", parse_docstring=True)
@@ -651,9 +680,9 @@ def write_file_tool(
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except OSError as e:
-        return f"Error: Failed to write file '{requested_path}': {e}"
+        return f"Error: Failed to write file '{requested_path}': {_sanitize_error(e, runtime)}"
     except Exception as e:
-        return f"Error: Unexpected error writing file: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error writing file: {_sanitize_error(e, runtime)}"
 
 
 @tool("str_replace", parse_docstring=True)
@@ -701,4 +730,4 @@ def str_replace_tool(
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error replacing string: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
