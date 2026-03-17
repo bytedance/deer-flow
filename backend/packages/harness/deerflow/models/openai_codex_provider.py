@@ -74,6 +74,34 @@ class CodexChatModel(BaseChatModel):
         """Load access_token and account_id from Codex CLI auth."""
         return load_codex_cli_credential()
 
+    @classmethod
+    def _normalize_content(cls, content: Any) -> str:
+        """Flatten LangChain content blocks into plain text for Codex."""
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts = [cls._normalize_content(item) for item in content]
+            return "\n".join(part for part in parts if part)
+
+        if isinstance(content, dict):
+            for key in ("text", "output"):
+                value = content.get(key)
+                if isinstance(value, str):
+                    return value
+            nested_content = content.get("content")
+            if nested_content is not None:
+                return cls._normalize_content(nested_content)
+            try:
+                return json.dumps(content, ensure_ascii=False)
+            except TypeError:
+                return str(content)
+
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except TypeError:
+            return str(content)
+
     def _convert_messages(self, messages: list[BaseMessage]) -> tuple[str, list[dict]]:
         """Convert LangChain messages to Responses API format.
 
@@ -84,15 +112,15 @@ class CodexChatModel(BaseChatModel):
 
         for msg in messages:
             if isinstance(msg, SystemMessage):
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                content = self._normalize_content(msg.content)
                 if content:
                     instructions_parts.append(content)
             elif isinstance(msg, HumanMessage):
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                content = self._normalize_content(msg.content)
                 input_items.append({"role": "user", "content": content})
             elif isinstance(msg, AIMessage):
                 if msg.content:
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    content = self._normalize_content(msg.content)
                     input_items.append({"role": "assistant", "content": content})
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
@@ -109,7 +137,7 @@ class CodexChatModel(BaseChatModel):
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": msg.content if isinstance(msg.content, str) else str(msg.content),
+                        "output": self._normalize_content(msg.content),
                     }
                 )
 

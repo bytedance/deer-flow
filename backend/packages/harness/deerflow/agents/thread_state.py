@@ -18,6 +18,15 @@ class ViewedImageData(TypedDict):
     mime_type: str
 
 
+def merge_unique_strings(existing: list[str] | None, new: list[str] | None) -> list[str]:
+    """Reducer for string lists - merges and deduplicates values."""
+    if existing is None:
+        return new or []
+    if new is None:
+        return existing
+    return list(dict.fromkeys(existing + new))
+
+
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
     """Reducer for artifacts list - merges and deduplicates artifacts."""
     if existing is None:
@@ -50,6 +59,7 @@ class ThreadState(AgentState):
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
+    loaded_deferred_tools: Annotated[list[str], merge_unique_strings]
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
