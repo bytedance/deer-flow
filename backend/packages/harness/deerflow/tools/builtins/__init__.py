@@ -1,4 +1,5 @@
 from .clarification_tool import ask_clarification_tool
+from .generate_ppt_tool import generate_ppt_tool
 from .present_file_tool import present_file_tool
 from .setup_agent_tool import setup_agent
 from .task_tool import task_tool
@@ -10,4 +11,5 @@ __all__ = [
     "ask_clarification_tool",
     "view_image_tool",
     "task_tool",
+    "generate_ppt_tool",
 ]
