@@ -6,6 +6,7 @@ from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from src.agents.memory.queue import get_memory_queue
@@ -107,6 +108,80 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         """
         super().__init__()
         self._agent_name = agent_name
+
+    def _latest_user_query(self, messages: list[Any]) -> str:
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) != "human":
+                continue
+            if (getattr(msg, "additional_kwargs", {}) or {}).get("deerflow_injected"):
+                continue
+            content = getattr(msg, "content", "")
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                text = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict)).strip()
+            else:
+                text = str(content).strip()
+            if text:
+                return text
+        return ""
+
+    def _already_injected_long_horizon(self, messages: list[Any]) -> bool:
+        for msg in reversed(messages[-8:]):
+            if getattr(msg, "type", None) != "human":
+                continue
+            if (getattr(msg, "additional_kwargs", {}) or {}).get("deerflow_injected") == "long_horizon_memory":
+                return True
+        return False
+
+    def _inject_long_horizon_memory(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        config = get_memory_config()
+        if not config.enabled or not config.long_horizon_enabled or not config.long_horizon_injection_enabled:
+            return None
+
+        messages = state.get("messages", [])
+        if not messages or self._already_injected_long_horizon(messages):
+            return None
+
+        query = self._latest_user_query(messages)
+        if not query:
+            return None
+
+        thread_id = get_thread_id_from_runtime(runtime)
+        if not thread_id:
+            return None
+
+        try:
+            from src.agents.memory.long_horizon_store import (
+                format_long_horizon_injection,
+                query_long_horizon_memory,
+            )
+
+            entries = query_long_horizon_memory(query, thread_id=thread_id)
+            if not entries:
+                return None
+            content = format_long_horizon_injection(entries)
+            if not content:
+                return None
+            return {
+                "messages": [
+                    HumanMessage(
+                        content=content,
+                        additional_kwargs={"deerflow_injected": "long_horizon_memory"},
+                    )
+                ]
+            }
+        except Exception as e:
+            logger.warning("MemoryMiddleware: Failed to inject long-horizon memory: %s", e)
+            return None
+
+    @override
+    def before_model(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        return self._inject_long_horizon_memory(state, runtime)
+
+    @override
+    async def abefore_model(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        return self._inject_long_horizon_memory(state, runtime)
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:

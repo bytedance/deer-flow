@@ -2,6 +2,7 @@ import logging
 from datetime import datetime
 
 from src.config.agents_config import load_agent_soul
+from src.research_writing.prompt_pack import get_prompt_pack_metadata
 from src.skills import load_skills
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,12 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 **Available Subagents:**
 - **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.
 - **bash**: For command execution (git, build, test, deploy operations)
+- **experiment-designer**: Experimental design specialist (power analysis + sample size + control/ablation matrix).
+- **data-scientist**: Reproducible scientific figure generation from analysis artifacts (exports plotting code + SVG/PDF).
+- **facs-auditor**: Audit agent for FACS/flow cytometry figures (prefers raw FCS via `analyze_fcs` when available).
+- **blot-auditor**: Audit agent for Western blot figures (uses evidence artifacts + `analyze_densitometry_csv` when available).
+- **tsne-auditor**: Audit agent for t-SNE/UMAP plots (prefers `analyze_embedding_csv` when available).
+- **spectrum-auditor**: Audit agent for spectrum figures (prefers `analyze_spectrum_csv` when available).
 
 **Your Orchestration Strategy:**
 
@@ -157,6 +164,7 @@ You are {agent_name}, an open-source super agent.
 
 {soul}
 {memory_context}
+{prompt_layer_context}
 
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
@@ -359,7 +367,7 @@ After completing any task, suggest the logical next step: "Results are ready. Sh
 
 When transitioning between skills, pass concrete artifact FILES — not just concepts:
 
-- **Literature → Writing**: `references.bib` + `related_work.md` + `research_gaps.md` → academic-writing reads BibTeX for `\cite{{}}`, inserts Related Work, uses gaps for Introduction Move 2
+- **Literature → Writing**: `references.bib` + `related_work.md` + `research_gaps.md` → academic-writing reads BibTeX for `\\cite{{}}`, inserts Related Work, uses gaps for Introduction Move 2
 - **Analysis → Writing**: `statistical_report.md` (APA text) + `figures/*.png` + `results.json` → embed APA sentences into Results, reference figures as "Fig. X", format numbers into tables
 - **Writing → PPT**: manuscript `.md/.tex` → extract Abstract→subtitle, Contributions→assertion titles, Figures→slide figures, References→bibliography slide
 - **Code → Writing**: algorithm implementation + `results.json` + `configs/*.yaml` → generate Method from code structure, Experiments from configs/results
@@ -582,7 +590,9 @@ Example: t(48) = 2.31, p = .025, d = 0.66, 95% CI [0.08, 1.23]
 In addition to general-purpose and bash subagents, you have access to:
 - `literature-reviewer`: Specialized for academic literature search, citation chain analysis, and related work synthesis using Semantic Scholar, CrossRef, and arXiv APIs. Returns structured findings with BibTeX entries.
 - `statistical-analyst`: Specialized for statistical analysis, hypothesis testing, data quality audit, and publication-ready APA-formatted reporting. Uses scipy, statsmodels, pingouin in sandbox.
+- `experiment-designer`: Specialized for experiment design with quantitative planning output (power analysis, sample-size table, control/ablation matrix, and go/no-go criteria).
 - `code-reviewer`: Specialized for research code review — reproducibility, numerical stability, test coverage, and paper-code alignment checks.
+- `data-scientist`: Specialized for reproducible scientific visualization — converts analysis artifacts into plotting code + vector figures (SVG/PDF) with metadata and execution logs.
 </academic_research>
 
 <citations>
@@ -736,6 +746,41 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
+def _get_prompt_layer_context() -> str:
+    """Provide layered prompt version snapshot for traceable behavior."""
+    try:
+        metadata = get_prompt_pack_metadata()
+    except Exception as e:
+        logger.debug("Could not load prompt-pack metadata for lead prompt: %s", e)
+        return ""
+    layers = metadata.get("prompt_layers")
+    if not isinstance(layers, list):
+        layers = []
+    rows: list[str] = []
+    for row in layers:
+        if not isinstance(row, dict):
+            continue
+        layer_id = str(row.get("layer_id") or "").strip()
+        active = str(row.get("active_version") or "").strip()
+        rollback = str(row.get("rollback_version") or "").strip()
+        if not layer_id:
+            continue
+        rows.append(f"- {layer_id}: active={active}, rollback={rollback}")
+    if not rows:
+        return ""
+    pack_id = str(metadata.get("prompt_pack_id") or "").strip()
+    pack_hash = str(metadata.get("prompt_pack_hash") or "").strip()
+    body = "\n".join(rows)
+    return (
+        "<prompt_pack_context>\n"
+        f"- prompt_pack_id: {pack_id or 'unknown'}\n"
+        f"- prompt_pack_hash: {pack_hash or 'unknown'}\n"
+        "- layered_versions:\n"
+        f"{body}\n"
+        "</prompt_pack_context>\n"
+    )
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -771,6 +816,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
         memory_context=memory_context,
+        prompt_layer_context=_get_prompt_layer_context(),
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,

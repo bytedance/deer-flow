@@ -1,0 +1,60 @@
+{
+  "metadata": {
+    "source_name": "real-top-tier-corpus",
+    "domain": "biomed"
+  },
+  "records": [
+    {
+      "manuscript_id": "MS-2026-0001",
+      "decision": "accepted",
+      "venue": "Nature",
+      "generated_citations": ["10.1000/demoA", "10.1000/demoB"],
+      "verified_citations": ["10.1000/demoA", "10.1000/demoB"],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "Lead author email is alice@example.com and ORCID 0000-0002-1825-0097."
+        }
+      ],
+      "abstract_numbers": [0.91, 2.3],
+      "body_numbers": [0.91, 2.3],
+      "reviewer_comments": [{"id": "R1"}, {"id": "R2"}],
+      "addressed_comment_ids": ["R1", "R2"],
+      "acceptance_checklist": ["ethics", "controls"],
+      "satisfied_checklist": ["ethics", "controls"],
+      "cross_modal_expected": 2,
+      "cross_modal_used": 2,
+      "revision_terms": [["causal", "assay"], ["causal", "assay"]],
+      "revision_numbers": [[0.91], [0.91]]
+    },
+    {
+      "manuscript_id": "MS-2026-0002",
+      "outcome": "rejected",
+      "journal": "Cell",
+      "generated_citations": ["10.1000/demoX"],
+      "ground_truth_citations": ["10.1000/demoY"],
+      "claim_annotations": [
+        {
+          "claim_type": "strong",
+          "evidence": false,
+          "citation": false,
+          "text": "Contact me at bob@lab.org for private data."
+        }
+      ],
+      "failure_modes": ["overclaim", "numeric_drift"],
+      "manuscript_text": "This manuscript claims broad causal superiority without adequate ethics details.",
+      "abstract_text": "Reported effect is 8.7 while baseline is 2.1",
+      "body_text": "Observed effect is 6.0",
+      "reviewer_comment_ids": ["R1", "R2", "R3"],
+      "rebuttal_addressed_ids": ["R2"],
+      "venue_checklist_items": ["ethics", "data availability", "controls"],
+      "venue_satisfied_items": ["controls"],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 1,
+      "revision_terms": [["causal", "validation"], ["validation"]],
+      "revision_numbers": [[8.7], [6.0]]
+    }
+  ]
+}

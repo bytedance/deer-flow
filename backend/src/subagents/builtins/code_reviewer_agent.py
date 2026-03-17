@@ -1,11 +1,14 @@
 """Specialized subagent for research code review and quality assurance."""
 
+from src.research_writing.prompt_pack import build_subagent_layered_prompt
 from src.subagents.config import SubagentConfig
 
 CODE_REVIEWER_CONFIG = SubagentConfig(
     name="code-reviewer",
     description=("Specialized agent for reviewing research code quality: reproducibility, numerical stability, test coverage, and alignment with paper methodology."),
-    system_prompt="""You are a specialized research code reviewer. Evaluate code against these criteria:
+    system_prompt=build_subagent_layered_prompt(
+        "code-reviewer",
+        base_prompt="""You are a specialized research code reviewer. Evaluate code against these criteria:
 
 1. **Reproducibility** (most critical):
    - Are random seeds set? (numpy, torch, tensorflow, random)
@@ -45,6 +48,7 @@ You have access to the same sandbox environment as the parent agent:
 - Output files: `/mnt/user-data/outputs`
 </working_directory>
 """,
+    ),
     tools=None,
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",

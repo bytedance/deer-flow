@@ -1,0 +1,600 @@
+{
+  "metadata": {
+    "suite_version": "academic_offline_benchmark_suite.v1",
+    "layer": "domain_split",
+    "source_name": "deerflow-offline-benchmark-domain-biomed",
+    "domain": "biomed",
+    "note": "Domain slice for biomed weighting profile."
+  },
+  "records": [
+    {
+      "manuscript_id": "nat-acc-01",
+      "decision": "accepted",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/na1",
+        "10.1000/na2"
+      ],
+      "verified_citations": [
+        "10.1000/na1",
+        "10.1000/na2",
+        "10.1000/na3"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        0.93,
+        12.4
+      ],
+      "body_numbers": [
+        0.93,
+        12.4,
+        11.8
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 3,
+      "revision_terms": [
+        [
+          "control",
+          "cohort",
+          "effect"
+        ],
+        [
+          "control",
+          "cohort",
+          "effect"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.93,
+          12.4
+        ],
+        [
+          0.93,
+          12.4
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "cell-acc-01",
+      "decision": "accepted",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/ca1",
+        "10.1000/ca2"
+      ],
+      "verified_citations": [
+        "10.1000/ca1",
+        "10.1000/ca2"
+      ],
+      "claims": [
+        {
+          "type": "result",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        0.81
+      ],
+      "body_numbers": [
+        0.81
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay",
+          "replicate"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.81
+        ],
+        [
+          0.81
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "nat-rej-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/nr1",
+        "10.1000/nrX"
+      ],
+      "verified_citations": [
+        "10.1000/nr1"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        4.2
+      ],
+      "body_numbers": [
+        3.7
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "controls"
+      ],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "effect",
+          "cohort"
+        ],
+        [
+          "effect"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          4.2
+        ],
+        [
+          3.7
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "cell-rej-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/cr1"
+      ],
+      "verified_citations": [
+        "10.1000/cr1",
+        "10.1000/cr2"
+      ],
+      "claims": [
+        {
+          "type": "result",
+          "has_evidence": true,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        0.74
+      ],
+      "body_numbers": [
+        0.74
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.74
+        ],
+        [
+          0.74
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "fm-citation-hallucination-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/real-1",
+        "10.9999/not-real-doi"
+      ],
+      "verified_citations": [
+        "10.1000/real-1"
+      ],
+      "claims": [
+        {
+          "type": "method",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "The method is grounded to validated evidence."
+        }
+      ],
+      "abstract_numbers": [
+        0.81
+      ],
+      "body_numbers": [
+        0.81
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "controls",
+          "cohort"
+        ],
+        [
+          "controls",
+          "cohort"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.81
+        ],
+        [
+          0.81
+        ]
+      ],
+      "failure_modes": [
+        "citation_hallucination"
+      ]
+    },
+    {
+      "manuscript_id": "fm-numeric-drift-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/nd-1"
+      ],
+      "verified_citations": [
+        "10.1000/nd-1"
+      ],
+      "claims": [
+        {
+          "type": "numeric",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "The numerical trend is internally consistent."
+        }
+      ],
+      "abstract_numbers": [
+        0.93,
+        12.0
+      ],
+      "body_numbers": [
+        0.71,
+        8.9
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay",
+          "replicate"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.93,
+          12.0
+        ],
+        [
+          0.71,
+          8.9
+        ]
+      ],
+      "failure_modes": [
+        "numeric_drift"
+      ]
+    },
+    {
+      "manuscript_id": "fm-style-mismatch-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/sm-1"
+      ],
+      "verified_citations": [
+        "10.1000/sm-1"
+      ],
+      "claims": [
+        {
+          "type": "method",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "The writing omits venue rhythm and checklist structure."
+        }
+      ],
+      "abstract_numbers": [
+        0.79
+      ],
+      "body_numbers": [
+        0.79
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls",
+        "limitations"
+      ],
+      "venue_satisfied_items": [
+        "controls"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "discussion",
+          "limitations"
+        ],
+        [
+          "discussion",
+          "limitations"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.79
+        ],
+        [
+          0.79
+        ]
+      ],
+      "failure_modes": [
+        "style_mismatch"
+      ]
+    },
+    {
+      "manuscript_id": "fm-ethics-gap-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/eg-1"
+      ],
+      "verified_citations": [
+        "10.1000/eg-1"
+      ],
+      "claims": [
+        {
+          "type": "weak",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "Observed pattern may be associated with the intervention."
+        }
+      ],
+      "abstract_numbers": [
+        0.66
+      ],
+      "body_numbers": [
+        0.66
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "reproducibility",
+        "data availability"
+      ],
+      "venue_satisfied_items": [
+        "data availability"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "cohort",
+          "bias"
+        ],
+        [
+          "cohort",
+          "bias"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.66
+        ],
+        [
+          0.66
+        ]
+      ],
+      "failure_modes": [
+        "ethics_gap"
+      ],
+      "manuscript_text": "This single-center manuscript reports preliminary findings. The cohort is limited and no formal governance statement is provided."
+    },
+    {
+      "manuscript_id": "fm-control-clean-02",
+      "decision": "accepted",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/okb-1"
+      ],
+      "verified_citations": [
+        "10.1000/okb-1"
+      ],
+      "claims": [
+        {
+          "type": "method",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "Methodological claims are explicitly grounded to evidence and references."
+        }
+      ],
+      "abstract_numbers": [
+        0.58
+      ],
+      "body_numbers": [
+        0.58
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "ethics",
+        "resources",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "assay",
+          "controls"
+        ],
+        [
+          "assay",
+          "controls"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.58
+        ],
+        [
+          0.58
+        ]
+      ],
+      "failure_modes": [],
+      "manuscript_text": "All analyses follow approved protocol and ethics governance with IRB oversight. Data provenance, reproducibility protocol, and code availability statements are included."
+    }
+  ]
+}

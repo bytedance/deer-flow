@@ -1,0 +1,73 @@
+{
+  "metadata": {
+    "source_name": "your-top-tier-corpus",
+    "domain": "ai_cs",
+    "note": "可选：用于批量导入时的默认元信息。"
+  },
+  "records": [
+    {
+      "manuscript_id": "MS-YYYY-0001",
+      "decision": "accepted",
+      "venue": "NeurIPS",
+      "generated_citations": [
+        "10.1000/example-a",
+        "10.1000/example-b"
+      ],
+      "verified_citations": [
+        "10.1000/example-a",
+        "10.1000/example-b",
+        "10.1000/example-c"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "可选原始文本；若开启 anonymize 会自动脱敏邮箱/URL/DOI/ORCID。"
+        }
+      ],
+      "abstract_numbers": [0.91, 2.3],
+      "body_numbers": [0.91, 2.3, 2.2],
+      "reviewer_comment_ids": ["R1", "R2"],
+      "rebuttal_addressed_ids": ["R1", "R2"],
+      "venue_checklist_items": ["ablation", "baseline", "reproducibility"],
+      "venue_satisfied_items": ["ablation", "baseline", "reproducibility"],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [
+        ["introduction", "causal", "discussion", "mechanism"],
+        ["introduction", "causal", "discussion", "mechanism"]
+      ],
+      "revision_numbers": [[0.91, 2.3], [0.91, 2.3]]
+    },
+    {
+      "manuscript_id": "MS-YYYY-0002",
+      "outcome": "rejected",
+      "journal": "Nature",
+      "output_citations": ["10.1000/example-x"],
+      "ground_truth_citations": ["10.1000/example-y"],
+      "claim_annotations": [
+        {
+          "claim_type": "strong",
+          "evidence": false,
+          "citation": false,
+          "text": "支持别名字段：claim_annotations / evidence / citation"
+        }
+      ],
+      "abstract_text": "可直接给文本，系统会提取数字，例如 8.7 与 2.1。",
+      "body_text": "正文文本同样可提取数字，例如 6.0。",
+      "reviewer_comments": [
+        {"id": "R1"},
+        {"id": "R2"},
+        {"id": "R3"}
+      ],
+      "addressed_comment_ids": ["R1"],
+      "acceptance_checklist": ["ethics", "data availability", "controls"],
+      "satisfied_checklist": ["controls"],
+      "cross_modal_expected": 3,
+      "cross_modal_used": 1,
+      "revision_terms": [["introduction", "cohort"], ["cohort"]],
+      "revision_numbers": [[8.7], [6.0]]
+    }
+  ]
+}

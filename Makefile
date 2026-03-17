@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config check install dev stop clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway import-academic-eval build-academic-offline-benchmark-suite run-academic-offline-regression run-academic-online-regression
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -19,6 +19,12 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo ""
+	@echo "Academic Eval Import:"
+	@echo "  make import-academic-eval RAW_DATA=<file_or_dir> DATASET_NAME=<name> [DATASET_VERSION=v1] [AUTOFIX=1] [AUTOFIX_LEVEL=balanced] [ANONYMIZE=1] [STRICT=0] [VALIDATE_ONLY=0] [FAIL_ON_VALIDATION_ERRORS=0]"
+	@echo "  make build-academic-offline-benchmark-suite [CORE_DATASET=top_tier_accept_reject_v1] [FAILURE_MODE_DATASET=failure_mode_library_v1] [OUTPUT_DIR=src/evals/academic/templates/offline_benchmark_suite] [OVERWRITE=1]"
+	@echo "  make run-academic-offline-regression [INPUT_DIR=src/evals/academic/templates/offline_benchmark_suite] [OUTPUT_DIR=src/evals/academic/datasets/offline_regression] [STRICT_GATE=1]"
+	@echo "  make run-academic-online-regression [INPUT_DIR=src/evals/academic/templates/offline_benchmark_suite] [OUTPUT_DIR=src/evals/academic/datasets/online_regression] [STRICT_GATE=1] [BRANCH=<name>] [COMMIT_SHA=<sha>]"
 
 config:
 	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
@@ -189,3 +195,57 @@ docker-logs-frontend:
 	@./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@./scripts/docker.sh logs --gateway
+
+# Import raw accept/reject datasets into normalized eval datasets
+import-academic-eval:
+	@if [ -z "$(RAW_DATA)" ] || [ -z "$(DATASET_NAME)" ]; then \
+		echo "Usage: make import-academic-eval RAW_DATA=<file_or_dir> DATASET_NAME=<name> [DATASET_VERSION=v1] [AUTOFIX=1] [AUTOFIX_LEVEL=balanced] [ANONYMIZE=1] [STRICT=0] [VALIDATE_ONLY=0] [FAIL_ON_VALIDATION_ERRORS=0] [BATCH_PATTERN=*.json] [OUTPUT_DIR=src/evals/academic/datasets]"; \
+		exit 1; \
+	fi
+	@AUTOFIX_FLAG=""; if [ "$(AUTOFIX)" = "1" ]; then AUTOFIX_FLAG="--autofix"; fi; \
+	ANON_FLAG=""; if [ "$(ANONYMIZE)" = "0" ]; then ANON_FLAG="--no-anonymize"; else ANON_FLAG="--anonymize"; fi; \
+	STRICT_FLAG=""; if [ "$(STRICT)" = "1" ]; then STRICT_FLAG="--strict"; fi; \
+	VALIDATE_ONLY_FLAG=""; if [ "$(VALIDATE_ONLY)" = "1" ]; then VALIDATE_ONLY_FLAG="--validate-only"; fi; \
+	FAIL_VALIDATION_FLAG=""; if [ "$(FAIL_ON_VALIDATION_ERRORS)" = "1" ]; then FAIL_VALIDATION_FLAG="--fail-on-validation-errors"; fi; \
+	cd backend && uv run python scripts/import_academic_eval_dataset.py \
+		--input "$(abspath $(RAW_DATA))" \
+		--dataset-name "$(DATASET_NAME)" \
+		--dataset-version "$(if $(DATASET_VERSION),$(DATASET_VERSION),v1)" \
+		--autofix-level "$(if $(AUTOFIX_LEVEL),$(AUTOFIX_LEVEL),balanced)" \
+		--batch-pattern "$(if $(BATCH_PATTERN),$(BATCH_PATTERN),*.json)" \
+		--output-dir "$(if $(OUTPUT_DIR),$(OUTPUT_DIR),src/evals/academic/datasets)" \
+		$$AUTOFIX_FLAG $$ANON_FLAG $$STRICT_FLAG $$VALIDATE_ONLY_FLAG $$FAIL_VALIDATION_FLAG $(if $(SOURCE_NAME),--source-name "$(SOURCE_NAME)",) $(if $(BENCHMARK_SPLIT),--benchmark-split "$(BENCHMARK_SPLIT)",)
+
+# Build layered offline benchmark raw templates (core/failure-mode/domain-splits)
+build-academic-offline-benchmark-suite:
+	@OVERWRITE_FLAG=""; if [ "$(OVERWRITE)" = "1" ]; then OVERWRITE_FLAG="--overwrite"; fi; \
+	cd backend && uv run python scripts/build_academic_offline_benchmark_suite.py \
+		--core-dataset "$(if $(CORE_DATASET),$(CORE_DATASET),top_tier_accept_reject_v1)" \
+		--failure-mode-dataset "$(if $(FAILURE_MODE_DATASET),$(FAILURE_MODE_DATASET),failure_mode_library_v1)" \
+		--output-dir "$(if $(OUTPUT_DIR),$(OUTPUT_DIR),src/evals/academic/templates/offline_benchmark_suite)" \
+		$$OVERWRITE_FLAG
+
+# Run layered offline benchmark regression (core calibration + red-team + domain splits)
+run-academic-offline-regression:
+	@STRICT_FLAG=""; if [ "$(STRICT_GATE)" = "1" ]; then STRICT_FLAG="--strict-gate"; fi; \
+	OVERWRITE_FLAG=""; if [ "$(OVERWRITE)" = "1" ]; then OVERWRITE_FLAG="--overwrite"; fi; \
+	cd backend && uv run python scripts/run_academic_offline_regression.py \
+		--input-dir "$(if $(INPUT_DIR),$(INPUT_DIR),src/evals/academic/templates/offline_benchmark_suite)" \
+		--output-dir "$(if $(OUTPUT_DIR),$(OUTPUT_DIR),src/evals/academic/datasets/offline_regression)" \
+		--dataset-version "$(if $(DATASET_VERSION),$(DATASET_VERSION),v1)" \
+		$$STRICT_FLAG $$OVERWRITE_FLAG
+
+# Run online regression drift checks (commit-to-commit + week-to-week)
+run-academic-online-regression:
+	@STRICT_FLAG=""; if [ "$(STRICT_GATE)" = "1" ]; then STRICT_FLAG="--strict-gate"; fi; \
+	OVERWRITE_FLAG=""; if [ "$(OVERWRITE)" = "1" ]; then OVERWRITE_FLAG="--overwrite"; fi; \
+	BRANCH_ARG=""; if [ -n "$(BRANCH)" ]; then BRANCH_ARG="--branch \"$(BRANCH)\""; fi; \
+	COMMIT_ARG=""; if [ -n "$(COMMIT_SHA)" ]; then COMMIT_ARG="--commit-sha \"$(COMMIT_SHA)\""; fi; \
+	RUN_LABEL_ARG=""; if [ -n "$(RUN_LABEL)" ]; then RUN_LABEL_ARG="--run-label \"$(RUN_LABEL)\""; fi; \
+	cd backend && uv run python scripts/run_academic_online_regression.py \
+		--input-dir "$(if $(INPUT_DIR),$(INPUT_DIR),src/evals/academic/templates/offline_benchmark_suite)" \
+		--output-dir "$(if $(OUTPUT_DIR),$(OUTPUT_DIR),src/evals/academic/datasets/online_regression)" \
+		--history-file "$(if $(HISTORY_FILE),$(HISTORY_FILE),online-regression-history.json)" \
+		--dataset-version "$(if $(DATASET_VERSION),$(DATASET_VERSION),v1)" \
+		$$BRANCH_ARG $$COMMIT_ARG $$RUN_LABEL_ARG \
+		$$STRICT_FLAG $$OVERWRITE_FLAG

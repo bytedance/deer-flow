@@ -10,9 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from src.config.extensions_config import ExtensionsConfig
+from src.config.failure_mode_gate_config import load_failure_mode_gate_config_from_dict
+from src.config.journal_style_config import load_journal_style_config_from_dict
+from src.config.latex_config import load_latex_config_from_dict
 from src.config.memory_config import load_memory_config_from_dict
 from src.config.model_config import ModelConfig
+from src.config.reviewer2_strategy_config import load_reviewer2_strategy_config_from_dict
 from src.config.sandbox_config import SandboxConfig
+from src.config.scientific_data_config import load_scientific_data_config_from_dict
+from src.config.scientific_vision_config import load_scientific_vision_config_from_dict
 from src.config.skills_config import SkillsConfig
 from src.config.subagents_config import load_subagents_config_from_dict
 from src.config.summarization_config import load_summarization_config_from_dict
@@ -99,6 +105,30 @@ class AppConfig(BaseModel):
         # Load subagents config if present
         if "subagents" in config_data:
             load_subagents_config_from_dict(config_data["subagents"])
+
+        # Load scientific vision config if present
+        if "scientific_vision" in config_data:
+            load_scientific_vision_config_from_dict(config_data["scientific_vision"])
+
+        # Load scientific data config if present
+        if "scientific_data" in config_data:
+            load_scientific_data_config_from_dict(config_data["scientific_data"])
+
+        # Load journal style config if present
+        if "journal_style" in config_data:
+            load_journal_style_config_from_dict(config_data["journal_style"])
+
+        # Load reviewer2 strategy config if present
+        if "reviewer2_strategy" in config_data:
+            load_reviewer2_strategy_config_from_dict(config_data["reviewer2_strategy"])
+
+        # Load latex config if present
+        if "latex" in config_data:
+            load_latex_config_from_dict(config_data["latex"])
+
+        # Load failure mode gate config if present
+        if "failure_mode_gate" in config_data:
+            load_failure_mode_gate_config_from_dict(config_data["failure_mode_gate"])
 
         # Load checkpointer config if present
         if "checkpointer" in config_data:

@@ -2,6 +2,21 @@
 
 from src.subagents.builtins import BUILTIN_SUBAGENTS
 
+EXPECTED_SUBAGENT_NAMES = {
+    "general-purpose",
+    "bash",
+    "literature-reviewer",
+    "statistical-analyst",
+    "code-reviewer",
+    "data-scientist",
+    "experiment-designer",
+    "facs-auditor",
+    "blot-auditor",
+    "tsne-auditor",
+    "spectrum-auditor",
+    "writer-agent",
+}
+
 
 def test_literature_reviewer_registered():
     assert "literature-reviewer" in BUILTIN_SUBAGENTS
@@ -23,8 +38,8 @@ def test_bash_registered():
     assert "bash" in BUILTIN_SUBAGENTS
 
 
-def test_all_builtin_subagents_count():
-    assert len(BUILTIN_SUBAGENTS) == 5
+def test_all_builtin_subagents_set():
+    assert set(BUILTIN_SUBAGENTS.keys()) == EXPECTED_SUBAGENT_NAMES
 
 
 def test_all_subagents_have_valid_name():

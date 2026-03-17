@@ -1,7 +1,7 @@
 """Task tool for delegating work to subagents."""
 
-import asyncio
 import logging
+import time
 import uuid
 from dataclasses import replace
 from typing import Annotated, Literal
@@ -19,11 +19,24 @@ logger = logging.getLogger(__name__)
 
 
 @tool("task", parse_docstring=True)
-async def task_tool(
+def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
-    subagent_type: Literal["general-purpose", "bash", "literature-reviewer", "statistical-analyst", "code-reviewer"],
+    subagent_type: Literal[
+        "general-purpose",
+        "bash",
+        "literature-reviewer",
+        "statistical-analyst",
+        "experiment-designer",
+        "code-reviewer",
+        "data-scientist",
+        "facs-auditor",
+        "blot-auditor",
+        "tsne-auditor",
+        "spectrum-auditor",
+        "writer-agent",
+    ],
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_turns: int | None = None,
 ) -> str:
@@ -46,8 +59,17 @@ async def task_tool(
     - **statistical-analyst**: Specialized for statistical analysis, hypothesis testing,
       data quality audit, and publication-ready APA-formatted reporting. Uses
       scipy, statsmodels, pingouin in sandbox.
+    - **experiment-designer**: Specialized for experiment design with mandatory power analysis,
+      sample-size planning, and control/ablation matrix outputs.
     - **code-reviewer**: Specialized for research code review — reproducibility,
       numerical stability, test coverage, and paper-code alignment checks.
+    - **data-scientist**: Generates reproducible publication-ready figures (SVG/PDF)
+      with preserved plotting code and metadata from analysis artifacts.
+    - **writer-agent**: Scientific manuscript drafting specialist for evidence-aware narrative and claim calibration.
+    - **facs-auditor**: Audit-grade flow cytometry analysis from raw FCS (gating + sensitivity + reproducibility).
+    - **blot-auditor**: Audit-grade Western Blot analysis (densitometry tables + normalization + artifacts).
+    - **tsne-auditor**: Audit-grade t-SNE/UMAP analysis from embedding CSV (batch mixing + separation metrics).
+    - **spectrum-auditor**: Audit-grade spectrum analysis from CSV (peaks + SNR + reproducibility).
 
     When to use this tool:
     - Complex tasks requiring multiple steps or tools
@@ -68,7 +90,11 @@ async def task_tool(
     # Get subagent configuration
     config = get_subagent_config(subagent_type)
     if config is None:
-        return f"Error: Unknown subagent type '{subagent_type}'. Available: general-purpose, bash, literature-reviewer, statistical-analyst, code-reviewer"
+        return (
+            f"Error: Unknown subagent type '{subagent_type}'. Available: "
+            "general-purpose, bash, literature-reviewer, statistical-analyst, experiment-designer, code-reviewer, data-scientist, "
+            "facs-auditor, blot-auditor, tsne-auditor, spectrum-auditor, writer-agent"
+        )
 
     # Build config overrides
     overrides: dict = {}
@@ -107,6 +133,20 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
+
+    # Inject mined self-play hard-trajectory few-shots into writer-agent L3 contract.
+    if subagent_type == "writer-agent" and thread_id:
+        try:
+            from src.research_writing.runtime_service import get_writer_l3_few_shot_addendum
+
+            few_shot_addendum = get_writer_l3_few_shot_addendum(thread_id, top_k=3)
+        except Exception:
+            few_shot_addendum = None
+        if isinstance(few_shot_addendum, str) and few_shot_addendum.strip():
+            config = replace(
+                config,
+                system_prompt=f"{config.system_prompt}\n\n{few_shot_addendum.strip()}",
+            )
 
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency
@@ -193,7 +233,7 @@ async def task_tool(
             return f"Task timed out. Error: {result.error}"
 
         # Still running, yield control while waiting
-        await asyncio.sleep(5)
+        time.sleep(5)
         poll_count += 1
 
         # Polling timeout as a safety net (in case thread pool timeout doesn't work)

@@ -746,6 +746,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "fastapi" },
     { name = "firecrawl-py" },
+    { name = "flowio" },
     { name = "httpx" },
     { name = "kubernetes" },
     { name = "langchain" },
@@ -801,6 +802,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "firecrawl-py", specifier = ">=1.15.0" },
+    { name = "flowio", specifier = ">=1.4.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "kubernetes", specifier = ">=30.0.0" },
     { name = "langchain", specifier = ">=1.2.3" },
@@ -991,6 +993,15 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", hash = "sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4", size = 26661, upload-time = "2025-12-19T23:16:13.622Z" },
 ]
+
+[[package]]
+name = "flowio"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/67/61/5af8df9c7c2c96bd1a2cb758b278d467300e5f4714769ba70e4351da1a4f/flowio-1.4.0.tar.gz", hash = "sha256:c205efcecd1da7da29a1a55c30e09daa7fc132b997cd88910ef06a490755ecf7", size = 19638, upload-time = "2025-05-09T01:28:35.428Z" }
 
 [[package]]
 name = "fonttools"

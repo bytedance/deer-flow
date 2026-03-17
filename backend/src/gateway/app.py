@@ -16,6 +16,8 @@ from src.gateway.routers import (
     mcp,
     memory,
     models,
+    reports,
+    research_writing,
     skills,
     suggestions,
     uploads,
@@ -143,6 +145,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "research",
+                "description": "Research-writing runtime workflows and academic evaluations",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -189,6 +195,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Reports API is mounted at /api/threads/{thread_id}/reports
+    app.include_router(reports.router)
+
+    # Research-writing API is mounted at /api/threads/{thread_id}/research
+    app.include_router(research_writing.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

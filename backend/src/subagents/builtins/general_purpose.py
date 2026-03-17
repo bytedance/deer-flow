@@ -1,5 +1,6 @@
 """General-purpose subagent configuration."""
 
+from src.research_writing.prompt_pack import build_subagent_layered_prompt
 from src.subagents.config import SubagentConfig
 
 GENERAL_PURPOSE_CONFIG = SubagentConfig(
@@ -13,7 +14,9 @@ Use this subagent when:
 - The task would benefit from isolated context management
 
 Do NOT use for simple, single-step operations.""",
-    system_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
+    system_prompt=build_subagent_layered_prompt(
+        "general-purpose",
+        base_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
 
 <guidelines>
 - Focus on completing the delegated task efficiently
@@ -40,6 +43,7 @@ You have access to the same sandbox environment as the parent agent:
 - Output files: `/mnt/user-data/outputs`
 </working_directory>
 """,
+    ),
     tools=None,  # Inherit all tools from parent
     disallowed_tools=["task", "ask_clarification", "present_files"],  # Prevent nesting and clarification
     model="inherit",

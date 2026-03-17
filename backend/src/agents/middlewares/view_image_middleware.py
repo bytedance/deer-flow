@@ -35,6 +35,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
     state_schema = ViewImageMiddlewareState
 
+    def __init__(self, model_name: str | None = None):
+        super().__init__()
+        self._model_name = model_name
+
     def _get_last_assistant_message(self, messages: list) -> AIMessage | None:
         """Get the last assistant message from the message list.
 
@@ -62,6 +66,24 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return False
 
         return any(tool_call.get("name") == "view_image" for tool_call in message.tool_calls)
+
+    def _extract_view_image_paths(self, message: AIMessage) -> list[str]:
+        """Extract image paths from view_image tool calls in an assistant message."""
+        tool_calls = getattr(message, "tool_calls", None)
+        if not tool_calls:
+            return []
+
+        paths: list[str] = []
+        for tool_call in tool_calls:
+            if tool_call.get("name") != "view_image":
+                continue
+            args = tool_call.get("args")
+            if not isinstance(args, dict):
+                continue
+            image_path = args.get("image_path")
+            if isinstance(image_path, str) and image_path:
+                paths.append(image_path)
+        return paths
 
     def _all_tools_completed(self, messages: list, assistant_msg: AIMessage) -> bool:
         """Check if all tool calls in the assistant message have been completed.
@@ -94,23 +116,67 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Check if all tool calls have been completed
         return tool_call_ids.issubset(completed_tool_ids)
 
-    def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
+    def _create_image_details_message(
+        self,
+        state: ViewImageMiddlewareState,
+        runtime: Runtime,
+        image_paths: list[str] | None = None,
+    ) -> list[str | dict]:
         """Create a formatted message with all viewed image details.
 
         Args:
             state: Current state containing viewed_images
+            runtime: Runtime context
 
         Returns:
             List of content blocks (text and images) for the HumanMessage
         """
-        viewed_images = state.get("viewed_images", {})
-        if not viewed_images:
+        viewed_images = state.get("viewed_images") or {}
+        if not isinstance(viewed_images, dict) or not viewed_images:
             return ["No images have been viewed."]
 
-        # Build the message with image information
-        content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
+        # Conditionally add vision prompt if configured
+        vision_prompt = None
+        model_name = self._model_name
+        if model_name is None and hasattr(runtime, "context") and runtime.context and hasattr(runtime.context, "get"):
+            configurable = runtime.context.get("configurable") or {}
+            if isinstance(configurable, dict):
+                model_name = configurable.get("model_name") or configurable.get("model")
 
-        for image_path, image_data in viewed_images.items():
+        if model_name:
+            from src.config import get_app_config
+
+            app_config = get_app_config()
+            model_config = app_config.get_model_config(model_name)
+            if model_config and model_config.vision_prompt:
+                vision_prompt = model_config.vision_prompt
+
+        default_prompt = (
+            "Here are the images you've viewed. "
+            "As an expert scientific data analyst, please deeply analyze these scientific images "
+            "(e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.). "
+            "Do not just describe them superficially. You must:\n"
+            "1. Extract quantitative trends and structural patterns directly from the visual data.\n"
+            "2. Identify key features, anomalies, and control group comparisons.\n"
+            "3. Draw rigorous scientific conclusions based on the visual evidence."
+        )
+
+        # Build the message with image information
+        content_blocks: list[str | dict] = [
+            {
+                "type": "text",
+                "text": vision_prompt or default_prompt,
+            }
+        ]
+
+        if image_paths:
+            image_items = [(p, viewed_images.get(p)) for p in image_paths if viewed_images.get(p)]
+        else:
+            image_items = list(viewed_images.items())
+
+        for image_path, image_data in image_items:
+            if not isinstance(image_data, dict):
+                continue
             mime_type = image_data.get("mime_type", "unknown")
             base64_data = image_data.get("base64", "")
 
@@ -159,18 +225,23 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
+                injected = (msg.additional_kwargs or {}).get("deerflow_injected")
+                if injected == "view_image":
+                    # Already added, don't add again
+                    return False
                 content_str = str(msg.content)
                 if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
-                    # Already added, don't add again
+                    # Backward-compatible fallback for existing conversations
                     return False
 
         return True
 
-    def _inject_image_message(self, state: ViewImageMiddlewareState) -> dict | None:
+    def _inject_image_message(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
         """Internal helper to inject image details message.
 
         Args:
             state: Current state
+            runtime: Runtime context
 
         Returns:
             State update with additional human message, or None if no update needed
@@ -178,11 +249,18 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         if not self._should_inject_image_message(state):
             return None
 
+        messages = state.get("messages", [])
+        last_assistant_msg = self._get_last_assistant_message(messages)
+        image_paths: list[str] | None = None
+        if last_assistant_msg is not None:
+            extracted = self._extract_view_image_paths(last_assistant_msg)
+            image_paths = extracted or None
+
         # Create the image details message with text and image content
-        image_content = self._create_image_details_message(state)
+        image_content = self._create_image_details_message(state, runtime, image_paths=image_paths)
 
         # Create a new human message with mixed content (text + images)
-        human_msg = HumanMessage(content=image_content)
+        human_msg = HumanMessage(content=image_content, additional_kwargs={"deerflow_injected": "view_image"})
 
         logger.debug("Injecting image details message with images before LLM call")
 
@@ -204,7 +282,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         Returns:
             State update with additional human message, or None if no update needed
         """
-        return self._inject_image_message(state)
+        return self._inject_image_message(state, runtime)
 
     @override
     async def abefore_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
@@ -221,4 +299,4 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         Returns:
             State update with additional human message, or None if no update needed
         """
-        return self._inject_image_message(state)
+        return self._inject_image_message(state, runtime)

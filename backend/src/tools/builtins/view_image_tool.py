@@ -20,9 +20,15 @@ def view_image_tool(
 ) -> Command:
     """Read an image file.
 
-    Use this tool to read an image file and make it available for display.
+    Use this tool to read an image file and make it available for downstream analysis.
+
+    If `scientific_vision.enabled` is turned on in config, DeerFlow will automatically
+    generate an `<image_report>` (structured JSON) after this tool finishes, using the
+    configured scientific vision model. The main agent will then use that report to
+    reason and write scientific conclusions (even if the main model is text-only).
 
     When to use the view_image tool:
+    - When you need to analyze a scientific figure (e.g., Western Blot, t-SNE/UMAP, FACS, spectra, microscopy).
     - When you need to view an image file.
 
     When NOT to use the view_image tool:
@@ -30,7 +36,7 @@ def view_image_tool(
     - For multiple files at once (use present_files instead)
 
     Args:
-        image_path: Absolute path to the image file. Common formats supported: jpg, jpeg, png, webp.
+        image_path: Absolute path to the image file. Supported formats: jpg, jpeg, png, webp, gif, bmp, svg.
     """
     # Replace virtual path with actual path
     # /mnt/user-data/* paths are mapped to thread-specific directories
@@ -57,7 +63,7 @@ def view_image_tool(
         )
 
     # Validate image extension
-    valid_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    valid_extensions = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg"}
     if path.suffix.lower() not in valid_extensions:
         return Command(
             update={"messages": [ToolMessage(f"Error: Unsupported image format: {path.suffix}. Supported formats: {', '.join(valid_extensions)}", tool_call_id=tool_call_id)]},
@@ -72,6 +78,9 @@ def view_image_tool(
             ".jpeg": "image/jpeg",
             ".png": "image/png",
             ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".svg": "image/svg+xml",
         }
         mime_type = extension_to_mime.get(path.suffix.lower(), "application/octet-stream")
 

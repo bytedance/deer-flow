@@ -3,14 +3,34 @@ import logging
 from langchain.tools import BaseTool
 
 from src.config import get_app_config
+from src.config.scientific_data_config import get_scientific_data_config
+from src.config.scientific_vision_config import get_scientific_vision_config
 from src.reflection import resolve_variable
-from src.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
+from src.tools.builtins import (
+    academic_eval_tool,
+    analyze_densitometry_csv_tool,
+    analyze_embedding_csv_tool,
+    analyze_fcs_tool,
+    analyze_spectrum_csv_tool,
+    ask_clarification_tool,
+    cross_modal_consistency_tool,
+    generate_reproducible_figure_tool,
+    image_evidence_tool,
+    present_file_tool,
+    research_fulltext_ingest_tool,
+    research_project_tool,
+    task_tool,
+    view_image_tool,
+)
 
 logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
+    research_project_tool,
+    research_fulltext_ingest_tool,
+    academic_eval_tool,
 ]
 
 SUBAGENT_TOOLS = [
@@ -77,8 +97,27 @@ def get_available_tools(
 
     # Add view_image_tool only if the model supports vision
     model_config = config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
+    scientific_vision = get_scientific_vision_config()
+    if (model_config is not None and model_config.supports_vision) or scientific_vision.enabled:
         builtin_tools.append(view_image_tool)
-        logger.info("Including view_image_tool for model '%s' (supports_vision=True)", model_name)
+        logger.info(
+            "Including view_image_tool for model '%s' (supports_vision=%s, scientific_vision.enabled=%s)",
+            model_name,
+            bool(model_config and model_config.supports_vision),
+            scientific_vision.enabled,
+        )
+    if scientific_vision.enabled:
+        builtin_tools.append(image_evidence_tool)
+        logger.info("Including image_evidence_tool (scientific_vision.enabled=%s)", scientific_vision.enabled)
+
+    scientific_data = get_scientific_data_config()
+    if scientific_data.enabled or scientific_vision.enabled:
+        builtin_tools.append(analyze_fcs_tool)
+        builtin_tools.append(analyze_embedding_csv_tool)
+        builtin_tools.append(analyze_spectrum_csv_tool)
+        builtin_tools.append(analyze_densitometry_csv_tool)
+        builtin_tools.append(cross_modal_consistency_tool)
+        builtin_tools.append(generate_reproducible_figure_tool)
+        logger.info("Including raw-data CSV analysis tools (scientific_data.enabled=%s, scientific_vision.enabled=%s)", scientific_data.enabled, scientific_vision.enabled)
 
     return loaded_tools + builtin_tools + mcp_tools

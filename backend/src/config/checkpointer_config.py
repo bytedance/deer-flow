@@ -27,6 +27,7 @@ class CheckpointerConfig(BaseModel):
 
 # Global configuration instance — None means no checkpointer is configured.
 _checkpointer_config: CheckpointerConfig | None = None
+_checkpointer_config_initialized: bool = False
 
 
 def get_checkpointer_config() -> CheckpointerConfig | None:
@@ -34,13 +35,25 @@ def get_checkpointer_config() -> CheckpointerConfig | None:
     return _checkpointer_config
 
 
+def is_checkpointer_config_initialized() -> bool:
+    """Whether the checkpointer config was explicitly set/loaded.
+
+    This is used to distinguish between:
+    - not yet loaded (e.g. app_config not read from config.yaml), and
+    - explicitly set to None (meaning: intentionally unconfigured).
+    """
+    return _checkpointer_config_initialized
+
+
 def set_checkpointer_config(config: CheckpointerConfig | None) -> None:
     """Set the checkpointer configuration."""
-    global _checkpointer_config
+    global _checkpointer_config, _checkpointer_config_initialized
     _checkpointer_config = config
+    _checkpointer_config_initialized = True
 
 
 def load_checkpointer_config_from_dict(config_dict: dict) -> None:
     """Load checkpointer configuration from a dictionary."""
-    global _checkpointer_config
+    global _checkpointer_config, _checkpointer_config_initialized
     _checkpointer_config = CheckpointerConfig(**config_dict)
+    _checkpointer_config_initialized = True

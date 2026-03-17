@@ -66,6 +66,27 @@ class MemoryConfigResponse(BaseModel):
     fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
+    long_horizon_enabled: bool = Field(default=True, description="Whether long-horizon summary memory is enabled")
+    long_horizon_storage_path: str = Field(default="", description="Long-horizon summary storage path")
+    long_horizon_max_entries: int = Field(default=500, description="Maximum long-horizon summary entries")
+    long_horizon_summary_chars: int = Field(default=900, description="Maximum characters per long-horizon summary")
+    long_horizon_injection_enabled: bool = Field(default=True, description="Whether long-horizon retrieval is injected before model calls")
+    long_horizon_top_k: int = Field(default=5, description="Top-k long-horizon summaries for injection")
+    long_horizon_min_similarity: float = Field(default=0.12, description="Minimum similarity threshold for long-horizon retrieval")
+    long_horizon_injection_max_chars: int = Field(default=2400, description="Maximum characters for long-horizon injection block")
+    long_horizon_embedding_dim: int = Field(default=256, description="Dense embedding dimension for long-horizon memory retrieval")
+    long_horizon_cross_thread_enabled: bool = Field(default=True, description="Whether long-horizon retrieval can include entries from other threads")
+    long_horizon_topic_memory_enabled: bool = Field(default=True, description="Whether topic-level aggregated memory is enabled")
+    long_horizon_topic_top_k: int = Field(default=2, description="Top-k topic-level memory entries to inject")
+    long_horizon_project_memory_enabled: bool = Field(default=True, description="Whether project-level aggregated memory is enabled")
+    long_horizon_project_top_k: int = Field(default=2, description="Top-k project-level memory entries to inject")
+    long_horizon_current_thread_boost: float = Field(default=0.08, description="Similarity boost for same-thread entries")
+    long_horizon_project_boost: float = Field(default=0.12, description="Similarity boost for same-project entries")
+    long_horizon_topic_overlap_boost: float = Field(default=0.03, description="Per-topic overlap bonus for long-horizon retrieval")
+    long_horizon_hypothesis_memory_enabled: bool = Field(default=True, description="Whether hypothesis-validation memory retrieval is enabled")
+    long_horizon_hypothesis_top_k: int = Field(default=2, description="Top-k hypothesis-validation memories to inject")
+    long_horizon_hypothesis_max_entries: int = Field(default=400, description="Maximum retained hypothesis-validation memory entries")
+    long_horizon_hypothesis_failure_boost: float = Field(default=0.08, description="Retrieval boost for failed/reopened hypothesis memories")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -173,13 +194,34 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     """
     config = get_memory_config()
     return MemoryConfigResponse(
-        enabled=config.enabled,
-        storage_path=config.storage_path,
-        debounce_seconds=config.debounce_seconds,
-        max_facts=config.max_facts,
-        fact_confidence_threshold=config.fact_confidence_threshold,
-        injection_enabled=config.injection_enabled,
-        max_injection_tokens=config.max_injection_tokens,
+        enabled=getattr(config, "enabled", True),
+        storage_path=getattr(config, "storage_path", ""),
+        debounce_seconds=getattr(config, "debounce_seconds", 30),
+        max_facts=getattr(config, "max_facts", 100),
+        fact_confidence_threshold=getattr(config, "fact_confidence_threshold", 0.7),
+        injection_enabled=getattr(config, "injection_enabled", True),
+        max_injection_tokens=getattr(config, "max_injection_tokens", 2000),
+        long_horizon_enabled=getattr(config, "long_horizon_enabled", True),
+        long_horizon_storage_path=getattr(config, "long_horizon_storage_path", ""),
+        long_horizon_max_entries=getattr(config, "long_horizon_max_entries", 500),
+        long_horizon_summary_chars=getattr(config, "long_horizon_summary_chars", 900),
+        long_horizon_injection_enabled=getattr(config, "long_horizon_injection_enabled", True),
+        long_horizon_top_k=getattr(config, "long_horizon_top_k", 5),
+        long_horizon_min_similarity=getattr(config, "long_horizon_min_similarity", 0.12),
+        long_horizon_injection_max_chars=getattr(config, "long_horizon_injection_max_chars", 2400),
+        long_horizon_embedding_dim=getattr(config, "long_horizon_embedding_dim", 256),
+        long_horizon_cross_thread_enabled=getattr(config, "long_horizon_cross_thread_enabled", True),
+        long_horizon_topic_memory_enabled=getattr(config, "long_horizon_topic_memory_enabled", True),
+        long_horizon_topic_top_k=getattr(config, "long_horizon_topic_top_k", 2),
+        long_horizon_project_memory_enabled=getattr(config, "long_horizon_project_memory_enabled", True),
+        long_horizon_project_top_k=getattr(config, "long_horizon_project_top_k", 2),
+        long_horizon_current_thread_boost=getattr(config, "long_horizon_current_thread_boost", 0.08),
+        long_horizon_project_boost=getattr(config, "long_horizon_project_boost", 0.12),
+        long_horizon_topic_overlap_boost=getattr(config, "long_horizon_topic_overlap_boost", 0.03),
+        long_horizon_hypothesis_memory_enabled=getattr(config, "long_horizon_hypothesis_memory_enabled", True),
+        long_horizon_hypothesis_top_k=getattr(config, "long_horizon_hypothesis_top_k", 2),
+        long_horizon_hypothesis_max_entries=getattr(config, "long_horizon_hypothesis_max_entries", 400),
+        long_horizon_hypothesis_failure_boost=getattr(config, "long_horizon_hypothesis_failure_boost", 0.08),
     )
 
 
@@ -200,13 +242,34 @@ async def get_memory_status() -> MemoryStatusResponse:
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
-            enabled=config.enabled,
-            storage_path=config.storage_path,
-            debounce_seconds=config.debounce_seconds,
-            max_facts=config.max_facts,
-            fact_confidence_threshold=config.fact_confidence_threshold,
-            injection_enabled=config.injection_enabled,
-            max_injection_tokens=config.max_injection_tokens,
+            enabled=getattr(config, "enabled", True),
+            storage_path=getattr(config, "storage_path", ""),
+            debounce_seconds=getattr(config, "debounce_seconds", 30),
+            max_facts=getattr(config, "max_facts", 100),
+            fact_confidence_threshold=getattr(config, "fact_confidence_threshold", 0.7),
+            injection_enabled=getattr(config, "injection_enabled", True),
+            max_injection_tokens=getattr(config, "max_injection_tokens", 2000),
+            long_horizon_enabled=getattr(config, "long_horizon_enabled", True),
+            long_horizon_storage_path=getattr(config, "long_horizon_storage_path", ""),
+            long_horizon_max_entries=getattr(config, "long_horizon_max_entries", 500),
+            long_horizon_summary_chars=getattr(config, "long_horizon_summary_chars", 900),
+            long_horizon_injection_enabled=getattr(config, "long_horizon_injection_enabled", True),
+            long_horizon_top_k=getattr(config, "long_horizon_top_k", 5),
+            long_horizon_min_similarity=getattr(config, "long_horizon_min_similarity", 0.12),
+            long_horizon_injection_max_chars=getattr(config, "long_horizon_injection_max_chars", 2400),
+            long_horizon_embedding_dim=getattr(config, "long_horizon_embedding_dim", 256),
+            long_horizon_cross_thread_enabled=getattr(config, "long_horizon_cross_thread_enabled", True),
+            long_horizon_topic_memory_enabled=getattr(config, "long_horizon_topic_memory_enabled", True),
+            long_horizon_topic_top_k=getattr(config, "long_horizon_topic_top_k", 2),
+            long_horizon_project_memory_enabled=getattr(config, "long_horizon_project_memory_enabled", True),
+            long_horizon_project_top_k=getattr(config, "long_horizon_project_top_k", 2),
+            long_horizon_current_thread_boost=getattr(config, "long_horizon_current_thread_boost", 0.08),
+            long_horizon_project_boost=getattr(config, "long_horizon_project_boost", 0.12),
+            long_horizon_topic_overlap_boost=getattr(config, "long_horizon_topic_overlap_boost", 0.03),
+            long_horizon_hypothesis_memory_enabled=getattr(config, "long_horizon_hypothesis_memory_enabled", True),
+            long_horizon_hypothesis_top_k=getattr(config, "long_horizon_hypothesis_top_k", 2),
+            long_horizon_hypothesis_max_entries=getattr(config, "long_horizon_hypothesis_max_entries", 400),
+            long_horizon_hypothesis_failure_boost=getattr(config, "long_horizon_hypothesis_failure_boost", 0.08),
         ),
         data=MemoryResponse(**memory_data),
     )

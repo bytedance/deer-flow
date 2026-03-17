@@ -1,0 +1,175 @@
+{
+  "metadata": {
+    "suite_version": "academic_offline_benchmark_suite.v1",
+    "layer": "domain_split",
+    "source_name": "deerflow-offline-benchmark-domain-cross",
+    "domain": "cross_discipline",
+    "note": "Cross-disciplinary synthetic slice for mixed-venue robustness."
+  },
+  "records": [
+    {
+      "manuscript_id": "cross-acc-01",
+      "decision": "accepted",
+      "domain": "cross_discipline",
+      "venue": "NeurIPS+Nature",
+      "generated_citations": [
+        "10.2000/na1",
+        "10.2000/na2",
+        "10.1000/na1",
+        "10.1000/na2"
+      ],
+      "verified_citations": [
+        "10.2000/na1",
+        "10.2000/na2",
+        "10.1000/na1",
+        "10.1000/na2",
+        "10.1000/na3"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true
+        },
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        2.6,
+        0.93
+      ],
+      "body_numbers": [
+        2.6,
+        0.93
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "reproducibility",
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "ablation",
+        "baseline",
+        "reproducibility",
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "cross_modal_items_expected": 5,
+      "cross_modal_items_used": 5,
+      "revision_terms": [
+        [
+          "ablation",
+          "robustness"
+        ],
+        [
+          "control",
+          "cohort",
+          "effect"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          2.6
+        ],
+        [
+          0.93,
+          12.4
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "cross-rej-01",
+      "decision": "rejected",
+      "domain": "cross_discipline",
+      "venue": "NeurIPS+Nature",
+      "generated_citations": [
+        "10.2000/nr1",
+        "10.2000/nr2",
+        "10.1000/nr1",
+        "10.1000/nrX"
+      ],
+      "verified_citations": [
+        "10.2000/nr1",
+        "10.1000/nr1"
+      ],
+      "claims": [
+        {
+          "type": "comparative",
+          "has_evidence": true,
+          "has_citation": false
+        },
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        3.1,
+        4.2
+      ],
+      "body_numbers": [
+        2.5,
+        3.7
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R2",
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "reproducibility",
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "baseline",
+        "controls"
+      ],
+      "cross_modal_items_expected": 5,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "ablation",
+          "generalization"
+        ],
+        [
+          "effect",
+          "cohort"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          3.1
+        ],
+        [
+          4.2
+        ]
+      ],
+      "failure_modes": []
+    }
+  ]
+}

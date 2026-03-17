@@ -5,9 +5,11 @@ from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from src.agents.lead_agent.prompt import apply_prompt_template
+from src.agents.middlewares.auto_scientific_closure_middleware import AutoScientificClosureMiddleware
 from src.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from src.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from src.agents.middlewares.memory_middleware import MemoryMiddleware
+from src.agents.middlewares.scientific_image_report_middleware import ScientificImageReportMiddleware
 from src.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from src.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from src.agents.middlewares.title_middleware import TitleMiddleware
@@ -204,6 +206,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # TitleMiddleware generates title after first exchange
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
+# AutoScientificClosureMiddleware runs after model calls to auto-trigger scientific closure tools
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
 def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
     """Build middleware chain based on runtime configuration.
@@ -239,7 +242,13 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
-        middlewares.append(ViewImageMiddleware())
+        middlewares.append(ViewImageMiddleware(model_name=model_name))
+
+    # Optional: scientific vision pre-analysis (ImageReport injection).
+    # This middleware can run even when the runtime model does NOT support vision,
+    # as long as `view_image` tool is available and scientific_vision is enabled.
+    middlewares.append(ScientificImageReportMiddleware())
+    middlewares.append(AutoScientificClosureMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)

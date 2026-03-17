@@ -36,6 +36,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_enabled",
             "thinking",
             "supports_vision",
+            "vision_prompt",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
@@ -56,7 +57,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             # For most providers (DeepSeek, etc.), omitting 'thinking' is sufficient to disable it.
             # Explicitly sending 'disabled' can cause "Unknown parameter" errors if the provider
             # doesn't support the Anthropic-style 'disabled' type.
-            # kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
+            kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
             kwargs.update({"reasoning_effort": "minimal"})
         elif effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter

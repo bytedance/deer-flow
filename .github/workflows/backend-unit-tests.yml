@@ -40,6 +40,77 @@ jobs:
           uv run pytest tests/ -v --tb=short --co -q 2>/dev/null | tail -1 || true
           uv run pytest tests/ -v --tb=short
 
+      - name: Long-horizon consistency regression gate
+        working-directory: backend
+        run: |
+          uv run pytest tests/evals/test_long_horizon_regression_ci.py -v --tb=short
+
+      - name: Restore offline regression baseline cache
+        uses: actions/cache@v4
+        with:
+          path: backend/.ci/academic-offline-regression/offline-baseline.json
+          key: offline-regression-${{ github.head_ref || github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            offline-regression-${{ github.head_ref || github.ref_name }}-
+
+      - name: Academic offline regression drift gate
+        working-directory: backend
+        run: |
+          mkdir -p .ci/academic-offline-regression/reports
+          uv run python scripts/run_academic_offline_regression.py \
+            --input-dir src/evals/academic/templates/offline_benchmark_suite \
+            --output-dir .ci/academic-offline-regression/reports \
+            --dataset-version "${{ github.sha }}" \
+            --baseline-report .ci/academic-offline-regression/offline-baseline.json \
+            --max-hallucination-rate-increase 0.0 \
+            --max-ece-increase 0.0 \
+            --max-brier-increase 0.0 \
+            --strict-gate \
+            --overwrite
+          cp .ci/academic-offline-regression/reports/offline-benchmark-regression.json .ci/academic-offline-regression/offline-baseline.json
+
+      - name: Upload offline regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: academic-offline-regression-${{ github.run_id }}
+          path: |
+            backend/.ci/academic-offline-regression/reports/offline-benchmark-regression.json
+            backend/.ci/academic-offline-regression/reports/offline-benchmark-regression.md
+            backend/.ci/academic-offline-regression/reports/offline-benchmark-drift.json
+            backend/.ci/academic-offline-regression/reports/offline-benchmark-drift.md
+
+      - name: Restore online regression history cache
+        uses: actions/cache@v4
+        with:
+          path: backend/.ci/academic-online-regression/online-regression-history.json
+          key: online-regression-${{ github.head_ref || github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            online-regression-${{ github.head_ref || github.ref_name }}-
+
+      - name: Academic online regression drift gate
+        working-directory: backend
+        run: |
+          mkdir -p .ci/academic-online-regression/reports
+          uv run python scripts/run_academic_online_regression.py \
+            --input-dir src/evals/academic/templates/offline_benchmark_suite \
+            --output-dir .ci/academic-online-regression/reports \
+            --history-file .ci/academic-online-regression/online-regression-history.json \
+            --branch "${{ github.head_ref || github.ref_name }}" \
+            --commit-sha "${{ github.sha }}" \
+            --strict-gate \
+            --overwrite
+
+      - name: Upload online regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: academic-online-regression-${{ github.run_id }}
+          path: |
+            backend/.ci/academic-online-regression/reports/online-regression-current.json
+            backend/.ci/academic-online-regression/reports/online-regression-drift.json
+            backend/.ci/academic-online-regression/reports/online-regression-drift.md
+
       - name: Check test coverage
         working-directory: backend
         run: |

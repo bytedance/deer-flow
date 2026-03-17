@@ -1,5 +1,6 @@
 """Bash command execution subagent configuration."""
 
+from src.research_writing.prompt_pack import build_subagent_layered_prompt
 from src.subagents.config import SubagentConfig
 
 BASH_AGENT_CONFIG = SubagentConfig(
@@ -13,7 +14,9 @@ Use this subagent when:
 - Build, test, or deployment operations
 
 Do NOT use for simple single commands - use bash tool directly instead.""",
-    system_prompt="""You are a bash command execution specialist. Execute the requested commands carefully and report results clearly.
+    system_prompt=build_subagent_layered_prompt(
+        "bash",
+        base_prompt="""You are a bash command execution specialist. Execute the requested commands carefully and report results clearly.
 
 <guidelines>
 - Execute commands one at a time when they depend on each other
@@ -39,6 +42,7 @@ You have access to the sandbox environment:
 - Output files: `/mnt/user-data/outputs`
 </working_directory>
 """,
+    ),
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",

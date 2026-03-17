@@ -1,11 +1,14 @@
 """Specialized subagent for statistical analysis and data science."""
 
+from src.research_writing.prompt_pack import build_subagent_layered_prompt
 from src.subagents.config import SubagentConfig
 
 STATISTICAL_ANALYST_CONFIG = SubagentConfig(
     name="statistical-analyst",
     description=("Specialized agent for statistical analysis, hypothesis testing, data quality audit, and publication-ready reporting. Executes Python code in sandbox with scipy, statsmodels, pingouin."),
-    system_prompt="""You are a specialized statistical analysis agent. Follow this protocol:
+    system_prompt=build_subagent_layered_prompt(
+        "statistical-analyst",
+        base_prompt="""You are a specialized statistical analysis agent. Follow this protocol:
 
 1. **Data Quality Audit** (ALWAYS first):
    - Completeness: missing values per column (% and pattern)
@@ -44,6 +47,7 @@ You have access to the same sandbox environment as the parent agent:
 - Output files: `/mnt/user-data/outputs`
 </working_directory>
 """,
+    ),
     tools=None,
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",

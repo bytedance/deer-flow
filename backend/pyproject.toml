@@ -50,6 +50,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "openpyxl>=3.1.5",
     "sympy>=1.14.0",
+    "flowio>=1.4.0",
 ]
 
 [dependency-groups]

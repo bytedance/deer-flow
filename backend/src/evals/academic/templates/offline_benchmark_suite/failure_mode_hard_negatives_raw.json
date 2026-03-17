@@ -1,0 +1,338 @@
+{
+  "metadata": {
+    "suite_version": "academic_offline_benchmark_suite.v1",
+    "layer": "failure_mode",
+    "source_name": "deerflow-offline-benchmark-failure-mode",
+    "domain": "mixed",
+    "note": "Hard negatives covering citation hallucination, overclaim, numeric drift, evidence chain break, and ethics gap."
+  },
+  "records": [
+    {
+      "manuscript_id": "fm-citation-hallucination-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/real-1",
+        "10.9999/not-real-doi"
+      ],
+      "verified_citations": [
+        "10.1000/real-1"
+      ],
+      "claims": [
+        {
+          "type": "method",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "The method is grounded to validated evidence."
+        }
+      ],
+      "abstract_numbers": [
+        0.81
+      ],
+      "body_numbers": [
+        0.81
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "controls",
+          "cohort"
+        ],
+        [
+          "controls",
+          "cohort"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.81
+        ],
+        [
+          0.81
+        ]
+      ],
+      "failure_modes": [
+        "citation_hallucination"
+      ]
+    },
+    {
+      "manuscript_id": "fm-overclaim-01",
+      "decision": "rejected",
+      "domain": "ai_cs",
+      "venue": "NeurIPS",
+      "generated_citations": [
+        "10.2000/oc-1"
+      ],
+      "verified_citations": [
+        "10.2000/oc-1"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": false,
+          "text": "Our preliminary study demonstrates causal superiority over all baselines."
+        }
+      ],
+      "abstract_numbers": [
+        2.1
+      ],
+      "body_numbers": [
+        2.1
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "ablation",
+        "baseline",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "ablation",
+          "baseline"
+        ],
+        [
+          "ablation",
+          "baseline"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          2.1
+        ],
+        [
+          2.1
+        ]
+      ],
+      "failure_modes": [
+        "overclaim"
+      ]
+    },
+    {
+      "manuscript_id": "fm-numeric-drift-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/nd-1"
+      ],
+      "verified_citations": [
+        "10.1000/nd-1"
+      ],
+      "claims": [
+        {
+          "type": "numeric",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "The numerical trend is internally consistent."
+        }
+      ],
+      "abstract_numbers": [
+        0.93,
+        12.0
+      ],
+      "body_numbers": [
+        0.71,
+        8.9
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay",
+          "replicate"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.93,
+          12.0
+        ],
+        [
+          0.71,
+          8.9
+        ]
+      ],
+      "failure_modes": [
+        "numeric_drift"
+      ]
+    },
+    {
+      "manuscript_id": "fm-evidence-chain-break-01",
+      "decision": "rejected",
+      "domain": "ai_cs",
+      "venue": "ICML",
+      "generated_citations": [
+        "10.2000/ec-1"
+      ],
+      "verified_citations": [
+        "10.2000/ec-1"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": true,
+          "text": "We claim robust gains with explicit grounding id.",
+          "data_id": "ev-missing-404",
+          "references_missing_id": true
+        }
+      ],
+      "abstract_numbers": [
+        1.6
+      ],
+      "body_numbers": [
+        1.6
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "baseline",
+        "failure cases"
+      ],
+      "venue_satisfied_items": [
+        "baseline",
+        "failure cases"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "robustness",
+          "error analysis"
+        ],
+        [
+          "robustness",
+          "error analysis"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          1.6
+        ],
+        [
+          1.6
+        ]
+      ],
+      "failure_modes": [
+        "evidence_chain_break"
+      ]
+    },
+    {
+      "manuscript_id": "fm-ethics-gap-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/eg-1"
+      ],
+      "verified_citations": [
+        "10.1000/eg-1"
+      ],
+      "claims": [
+        {
+          "type": "weak",
+          "has_evidence": true,
+          "has_citation": true,
+          "text": "Observed pattern may be associated with the intervention."
+        }
+      ],
+      "abstract_numbers": [
+        0.66
+      ],
+      "body_numbers": [
+        0.66
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "reproducibility",
+        "data availability"
+      ],
+      "venue_satisfied_items": [
+        "data availability"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "cohort",
+          "bias"
+        ],
+        [
+          "cohort",
+          "bias"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.66
+        ],
+        [
+          0.66
+        ]
+      ],
+      "failure_modes": [
+        "ethics_gap"
+      ],
+      "manuscript_text": "This single-center manuscript reports preliminary findings. The cohort is limited and no formal governance statement is provided."
+    }
+  ]
+}

@@ -1,0 +1,524 @@
+{
+  "metadata": {
+    "suite_version": "academic_offline_benchmark_suite.v1",
+    "layer": "core",
+    "source_name": "deerflow-offline-benchmark-core",
+    "domain": "mixed",
+    "note": "Top venue accept/reject cases for AUC/ECE/Brier calibration."
+  },
+  "records": [
+    {
+      "manuscript_id": "nat-acc-01",
+      "decision": "accepted",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/na1",
+        "10.1000/na2"
+      ],
+      "verified_citations": [
+        "10.1000/na1",
+        "10.1000/na2",
+        "10.1000/na3"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        0.93,
+        12.4
+      ],
+      "body_numbers": [
+        0.93,
+        12.4,
+        11.8
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 3,
+      "revision_terms": [
+        [
+          "control",
+          "cohort",
+          "effect"
+        ],
+        [
+          "control",
+          "cohort",
+          "effect"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.93,
+          12.4
+        ],
+        [
+          0.93,
+          12.4
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "cell-acc-01",
+      "decision": "accepted",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/ca1",
+        "10.1000/ca2"
+      ],
+      "verified_citations": [
+        "10.1000/ca1",
+        "10.1000/ca2"
+      ],
+      "claims": [
+        {
+          "type": "result",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        0.81
+      ],
+      "body_numbers": [
+        0.81
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay",
+          "replicate"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.81
+        ],
+        [
+          0.81
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "neurips-acc-01",
+      "decision": "accepted",
+      "domain": "ai_cs",
+      "venue": "NeurIPS",
+      "generated_citations": [
+        "10.2000/na1",
+        "10.2000/na2"
+      ],
+      "verified_citations": [
+        "10.2000/na1",
+        "10.2000/na2"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        2.6
+      ],
+      "body_numbers": [
+        2.6,
+        2.5
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "ablation",
+        "baseline",
+        "reproducibility"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [
+        [
+          "ablation",
+          "robustness"
+        ],
+        [
+          "ablation",
+          "robustness"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          2.6
+        ],
+        [
+          2.6
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "icml-acc-01",
+      "decision": "accepted",
+      "domain": "ai_cs",
+      "venue": "ICML",
+      "generated_citations": [
+        "10.2000/ia1"
+      ],
+      "verified_citations": [
+        "10.2000/ia1"
+      ],
+      "claims": [
+        {
+          "type": "method",
+          "has_evidence": true,
+          "has_citation": true
+        }
+      ],
+      "abstract_numbers": [
+        1.3
+      ],
+      "body_numbers": [
+        1.3
+      ],
+      "reviewer_comment_ids": [
+        "R1"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "baseline",
+        "failure cases"
+      ],
+      "venue_satisfied_items": [
+        "baseline",
+        "failure cases"
+      ],
+      "cross_modal_items_expected": 1,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "proof",
+          "assumption"
+        ],
+        [
+          "proof",
+          "assumption"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          1.3
+        ],
+        [
+          1.3
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "nat-rej-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Nature",
+      "generated_citations": [
+        "10.1000/nr1",
+        "10.1000/nrX"
+      ],
+      "verified_citations": [
+        "10.1000/nr1"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        4.2
+      ],
+      "body_numbers": [
+        3.7
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ethics",
+        "data availability",
+        "controls"
+      ],
+      "venue_satisfied_items": [
+        "controls"
+      ],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "effect",
+          "cohort"
+        ],
+        [
+          "effect"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          4.2
+        ],
+        [
+          3.7
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "cell-rej-01",
+      "decision": "rejected",
+      "domain": "biomed",
+      "venue": "Cell",
+      "generated_citations": [
+        "10.1000/cr1"
+      ],
+      "verified_citations": [
+        "10.1000/cr1",
+        "10.1000/cr2"
+      ],
+      "claims": [
+        {
+          "type": "result",
+          "has_evidence": true,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        0.74
+      ],
+      "body_numbers": [
+        0.74
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1",
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "resources",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "resources"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "assay",
+          "replicate"
+        ],
+        [
+          "assay"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          0.74
+        ],
+        [
+          0.74
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "neurips-rej-01",
+      "decision": "rejected",
+      "domain": "ai_cs",
+      "venue": "NeurIPS",
+      "generated_citations": [
+        "10.2000/nr1",
+        "10.2000/nr2"
+      ],
+      "verified_citations": [
+        "10.2000/nr1"
+      ],
+      "claims": [
+        {
+          "type": "comparative",
+          "has_evidence": true,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        3.1
+      ],
+      "body_numbers": [
+        2.5
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "rebuttal_addressed_ids": [
+        "R2"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "reproducibility"
+      ],
+      "venue_satisfied_items": [
+        "baseline"
+      ],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 0,
+      "revision_terms": [
+        [
+          "ablation",
+          "generalization"
+        ],
+        [
+          "generalization"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          3.1
+        ],
+        [
+          2.5
+        ]
+      ],
+      "failure_modes": []
+    },
+    {
+      "manuscript_id": "icml-rej-01",
+      "decision": "rejected",
+      "domain": "ai_cs",
+      "venue": "ICML",
+      "generated_citations": [
+        "10.2000/ir1"
+      ],
+      "verified_citations": [
+        "10.2000/ir1"
+      ],
+      "claims": [
+        {
+          "type": "strong",
+          "has_evidence": false,
+          "has_citation": false
+        }
+      ],
+      "abstract_numbers": [
+        8.4
+      ],
+      "body_numbers": [
+        7.2
+      ],
+      "reviewer_comment_ids": [
+        "R1",
+        "R2"
+      ],
+      "rebuttal_addressed_ids": [
+        "R1"
+      ],
+      "venue_checklist_items": [
+        "ablation",
+        "baseline",
+        "failure cases"
+      ],
+      "venue_satisfied_items": [
+        "baseline"
+      ],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 1,
+      "revision_terms": [
+        [
+          "failure",
+          "robustness"
+        ],
+        [
+          "failure"
+        ]
+      ],
+      "revision_numbers": [
+        [
+          8.4
+        ],
+        [
+          7.2
+        ]
+      ],
+      "failure_modes": []
+    }
+  ]
+}

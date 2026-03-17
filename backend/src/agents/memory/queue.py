@@ -119,6 +119,12 @@ class MemoryUpdateQueue:
                         agent_name=context.agent_name,
                     )
                     if success:
+                        try:
+                            from src.agents.memory.long_horizon_store import update_long_horizon_memory
+
+                            update_long_horizon_memory(context.thread_id, context.messages)
+                        except Exception:
+                            logger.exception("Long-horizon memory update failed for thread %s", context.thread_id)
                         logger.info("Memory updated successfully for thread %s", context.thread_id)
                     else:
                         logger.debug("Memory update skipped/failed for thread %s", context.thread_id)

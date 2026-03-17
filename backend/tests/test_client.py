@@ -4,6 +4,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,25 @@ from src.client import DeerFlowClient
 from src.gateway.routers.mcp import McpConfigResponse
 from src.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from src.gateway.routers.models import ModelResponse, ModelsListResponse
+from src.gateway.routers.reports import (
+    ImageReportPdfResponse,
+    LatexDiagnosticsMarkdownResponse,
+)
+from src.gateway.routers.research_writing import (
+    CapabilityAssessmentResponse,
+    CapabilityCatalogResponse,
+    EvalAcademicResponse,
+    FulltextIngestResponse,
+    HitlDecisionsResponse,
+    HypothesisGenerateResponse,
+    LatexCompileResponse,
+    NarrativePlanResponse,
+    PeerReviewLoopResponse,
+    ProjectResponse,
+    ProjectsListResponse,
+    ReviewSimulateResponse,
+    SectionCompileResponse,
+)
 from src.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from src.gateway.routers.uploads import UploadResponse
 
@@ -734,6 +754,375 @@ class TestArtifacts:
             with patch("src.client.get_paths", return_value=mock_paths):
                 with pytest.raises(PermissionError):
                     client.get_artifact("t1", "mnt/user-data/../../../etc/passwd")
+
+
+class TestReports:
+    def test_export_image_report_pdf_from_payload(self, client):
+        fake_index = {"thread_id": "t1", "reports": []}
+        with (
+            patch("src.config.scientific_vision_config.get_scientific_vision_config", return_value=SimpleNamespace(artifact_subdir="scientific-vision/image-reports")),
+            patch("src.utils.image_report_pdf.generate_image_report_pdf", return_value="/mnt/user-data/outputs/scientific-vision/image-reports/pdfs/report.pdf"),
+        ):
+            result = client.export_image_report_pdf("t1", index_payload=fake_index)
+
+        assert result["pdf_path"].endswith(".pdf")
+
+    def test_export_image_report_pdf_requires_index(self, client):
+        with pytest.raises(ValueError, match="Either index_path or index_payload"):
+            client.export_image_report_pdf("t1")
+
+    def test_export_latex_diagnostics_markdown(self, client):
+        from src.config.paths import Paths
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "src.client.get_paths",
+            return_value=Paths(base_dir=tmp),
+        ):
+            result = client.export_latex_diagnostics_markdown(
+                "t1",
+                title="Latex diag",
+                compile_status="failed",
+                compile_log_path="/mnt/user-data/outputs/research-writing/latex/p1.compile.log",
+                issue_clusters=[
+                    {
+                        "id": "missing-package",
+                        "title": "Missing package",
+                        "severity": "error",
+                        "match_count": 1,
+                        "matched_lines": ["L31: ! LaTeX Error: File `booktabs.sty' not found."],
+                        "suggestions": ["tlmgr install booktabs"],
+                    }
+                ],
+                output_filename="diag.md",
+            )
+        assert result["report_path"].endswith("/research-writing/latex/reports/diag.md")
+
+
+class TestResearchRuntime:
+    def test_research_upsert_and_get_project(self, client):
+        project_payload = {
+            "project_id": "p1",
+            "title": "Structured Research Project",
+            "discipline": "ai_cs",
+            "sections": [{"section_id": "intro", "section_name": "Introduction"}],
+        }
+        with (
+            patch("src.research_writing.runtime_service.upsert_project", return_value=SimpleNamespace(model_dump=lambda: project_payload)),
+            patch("src.research_writing.runtime_service.get_project", return_value=SimpleNamespace(model_dump=lambda: project_payload)),
+        ):
+            upsert_result = client.research_upsert_project("t1", project_payload)
+            get_result = client.research_get_project("t1", "p1")
+        assert upsert_result["project"]["project_id"] == "p1"
+        assert get_result is not None
+        assert get_result["project"]["title"] == "Structured Research Project"
+
+    def test_research_ingest_compile_review_eval(self, client):
+        with (
+            patch(
+                "src.research_writing.runtime_service.ingest_fulltext_evidence",
+                return_value={
+                    "record": {"source": "arxiv", "external_id": "2501.00001"},
+                    "evidence_count": 2,
+                    "persisted_evidence_ids": ["arxiv:2501.00001:p1"],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/artifacts/ingest-arxiv-2501.00001.json",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.compile_project_section",
+                return_value={
+                    "section_id": "intro",
+                    "compiled_text": "Compiled section content",
+                    "issues": [],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/compiled/p1-intro.md",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.simulate_review_and_plan",
+                return_value={
+                    "venue": "NeurIPS",
+                    "overall_assessment": "minor revision",
+                    "comments": [],
+                    "actions": [],
+                    "rebuttal_letter": "Response to reviewers.",
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/review/review-neurips.json",
+                    "letter_path": "/mnt/user-data/outputs/research-writing/review/review-neurips.md",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.evaluate_academic_and_persist",
+                return_value={
+                    "case_count": 1,
+                    "average_overall_score": 0.8,
+                    "average_citation_fidelity": 0.9,
+                    "average_claim_grounding": 0.8,
+                    "average_abstract_body_consistency": 0.7,
+                    "average_reviewer_rebuttal_completeness": 0.8,
+                    "average_venue_fit": 0.8,
+                    "average_cross_modality_synthesis": 0.9,
+                    "average_long_horizon_consistency": 0.7,
+                    "results": [],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/evals/eval.json",
+                },
+            ),
+        ):
+            ingest = client.research_ingest_fulltext("t1", source="arxiv", external_id="2501.00001")
+            compiled = client.research_compile_section("t1", project_id="p1", section_id="intro")
+            review = client.research_simulate_review("t1", venue_name="NeurIPS", manuscript_text="A complete manuscript text.")
+            eval_result = client.research_evaluate_academic(
+                "t1",
+                cases=[
+                    {
+                        "case_id": "c1",
+                        "domain": "ai_cs",
+                        "venue": "NeurIPS",
+                        "generated_citations": [],
+                        "verified_citations": [],
+                        "claims": [],
+                        "abstract_numbers": [],
+                        "body_numbers": [],
+                        "reviewer_comment_ids": [],
+                        "rebuttal_addressed_ids": [],
+                        "venue_checklist_items": [],
+                        "venue_satisfied_items": [],
+                        "cross_modal_items_expected": 0,
+                        "cross_modal_items_used": 0,
+                        "revision_terms": [],
+                        "revision_numbers": [],
+                    }
+                ],
+            )
+        assert ingest["evidence_count"] == 2
+        assert compiled["section_id"] == "intro"
+        assert review["venue"] == "NeurIPS"
+        assert eval_result["case_count"] == 1
+
+    def test_research_peer_review_loop_and_hypothesis_generation(self, client):
+        with (
+            patch(
+                "src.research_writing.runtime_service.simulate_peer_review_cycle",
+                return_value={
+                    "venue": "NeurIPS",
+                    "section_id": "discussion",
+                    "red_team_agents": ["reviewer_agent", "area_chair_agent"],
+                    "blue_team_agents": ["author_agent"],
+                    "rounds": [],
+                    "final_text": "revised",
+                    "final_decision": "accept",
+                    "unresolved_issue_count": 0,
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/review/peer-loop-neurips.json",
+                    "final_text_path": "/mnt/user-data/outputs/research-writing/review/peer-loop-neurips.md",
+                },
+            ) as peer_mock,
+            patch(
+                "src.research_writing.runtime_service.generate_project_hypotheses",
+                return_value={
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "feature_summary": ["Evidence coverage: 2 units."],
+                    "hypotheses": [{"hypothesis_id": "H1"}],
+                    "synthesis_paragraph": "Top-ranked hypothesis ...",
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/hypotheses/hypothesis-p1-discussion.json",
+                },
+            ),
+        ):
+            peer = client.research_simulate_peer_review_loop(
+                "t1",
+                venue_name="NeurIPS",
+                manuscript_text="draft",
+                section_id="discussion",
+                reviewer2_styles=["statistical_tyrant", "domain_traditionalist"],
+                peer_review_ab_variant="B",
+            )
+            hypothesis = client.research_generate_hypotheses(
+                "t1",
+                project_id="p1",
+                section_id="discussion",
+            )
+
+        assert peer["final_decision"] == "accept"
+        assert hypothesis["project_id"] == "p1"
+        _, peer_kwargs = peer_mock.call_args
+        assert peer_kwargs["reviewer2_styles"] == ["statistical_tyrant", "domain_traditionalist"]
+        assert peer_kwargs["peer_review_ab_variant"] == "B"
+
+    def test_research_compile_latex(self, client):
+        with patch(
+            "src.research_writing.runtime_service.build_latex_manuscript",
+            return_value={
+                "project_id": "p1",
+                "section_ids": ["discussion"],
+                "title": "Paper",
+                "source_markdown_path": "/mnt/user-data/outputs/research-writing/latex/p1.source.md",
+                "tex_path": "/mnt/user-data/outputs/research-writing/latex/p1.tex",
+                "pdf_path": "/mnt/user-data/outputs/research-writing/latex/p1.pdf",
+                "compile_log_path": "/mnt/user-data/outputs/research-writing/latex/p1.compile.log",
+                "compile_status": "success",
+                "compiler": "latexmk",
+                "engine_requested": "auto",
+                "compile_pdf_requested": True,
+                "citation_keys": ["10.1000/demo"],
+                "citation_count": 1,
+                "warning": None,
+                "artifact_path": "/mnt/user-data/outputs/research-writing/latex/p1.tex",
+                "summary_artifact_path": "/mnt/user-data/outputs/research-writing/latex/p1.json",
+            },
+        ):
+            latex = client.research_compile_latex("t1", project_id="p1", section_ids=["discussion"], compile_pdf=True)
+        assert latex["compile_status"] == "success"
+        assert latex["pdf_path"].endswith(".pdf")
+
+    def test_research_plan_narrative(self, client):
+        with patch(
+            "src.research_writing.runtime_service.plan_project_section_narrative",
+            return_value={
+                "project_id": "p1",
+                "section_id": "intro",
+                "section_name": "Introduction",
+                "planner_version": "deerflow.narrative_plan.v1",
+                "takeaway_message": "Takeaway",
+                "gap_statement": "Gap",
+                "disruption_statement": "Disruption",
+                "logical_flow": ["f1", "f2"],
+                "figure_storyboard": [{"figure_id": "F1"}],
+                "self_questioning": [{"round_index": 1}],
+                "introduction_hook": "hook",
+                "discussion_pivot": "pivot",
+                "self_question_rounds": 3,
+                "include_storyboard": True,
+                "artifact_path": "/mnt/user-data/outputs/research-writing/narrative-plans/p1-intro.json",
+            },
+        ):
+            payload = client.research_plan_narrative("t1", project_id="p1", section_id="intro", self_question_rounds=3)
+        assert payload["planner_version"] == "deerflow.narrative_plan.v1"
+        assert payload["self_question_rounds"] == 3
+
+    def test_research_hitl_decisions_roundtrip(self, client):
+        with (
+            patch(
+                "src.research_writing.runtime_service.upsert_project_hitl_decisions",
+                return_value={
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "decisions": [
+                        {
+                            "action_id": "peer-r1-abc",
+                            "source": "Peer Loop Round 1",
+                            "label": "Add ablation",
+                            "decision": "approved",
+                            "section_id": "discussion",
+                            "updated_at": "2026-03-16T00:00:00Z",
+                            "metadata": {},
+                        }
+                    ],
+                    "total_count": 1,
+                    "updated_at": "2026-03-16T00:00:00Z",
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/hitl/hitl-decisions-p1.json",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.get_project_hitl_decisions",
+                return_value={
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "decisions": [
+                        {
+                            "action_id": "peer-r1-abc",
+                            "source": "Peer Loop Round 1",
+                            "label": "Add ablation",
+                            "decision": "approved",
+                            "section_id": "discussion",
+                            "updated_at": "2026-03-16T00:00:00Z",
+                            "metadata": {},
+                        }
+                    ],
+                    "total_count": 1,
+                    "updated_at": "2026-03-16T00:00:00Z",
+                },
+            ),
+        ):
+            upserted = client.research_upsert_hitl_decisions(
+                "t1",
+                project_id="p1",
+                section_id="discussion",
+                decisions=[
+                    {
+                        "action_id": "peer-r1-abc",
+                        "source": "Peer Loop Round 1",
+                        "label": "Add ablation",
+                        "decision": "approved",
+                    }
+                ],
+            )
+            fetched = client.research_get_hitl_decisions(
+                "t1",
+                project_id="p1",
+                section_id="discussion",
+            )
+
+        assert upserted["total_count"] == 1
+        assert fetched["total_count"] == 1
+        assert fetched["decisions"][0]["decision"] == "approved"
+
+    def test_research_policy_snapshot_and_compliance_and_self_play(self, client):
+        with (
+            patch(
+                "src.research_writing.runtime_service.get_project_policy_snapshot",
+                return_value={
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "policy_snapshot": {"signal_count": 2, "recommended_tone": "conservative"},
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/policy/policy-p1-discussion.json",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.audit_project_section_compliance",
+                return_value={
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "compliance_audit": {"risk_level": "high"},
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/compliance/audit-p1-discussion.json",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.run_peer_self_play_training",
+                return_value={
+                    "schema_version": "deerflow.self_play_training.v1",
+                    "generated_at": "2026-03-16T00:00:00Z",
+                    "run_name": "peer-self-play",
+                    "total_episodes": 1,
+                    "accepted_episodes": 0,
+                    "hard_negative_count": 1,
+                    "hard_negative_rate": 1.0,
+                    "episodes": [{"episode_id": "ep-1"}],
+                    "hard_negatives": [{"hard_negative_id": "hn-1"}],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/self-play/run.json",
+                    "hard_negatives_artifact_path": "/mnt/user-data/outputs/research-writing/self-play/run.hard-negatives.json",
+                },
+            ),
+            patch(
+                "src.research_writing.runtime_service.get_weekly_academic_leaderboard",
+                return_value={
+                    "schema_version": "deerflow.academic_leaderboard.v1",
+                    "cadence": "weekly",
+                    "updated_at": "2026-03-16T00:00:00Z",
+                    "buckets": [{"discipline": "ai_cs", "venue": "NeurIPS", "entries": []}],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/evals/leaderboard/weekly.json",
+                },
+            ),
+        ):
+            policy = client.research_get_policy_snapshot("t1", project_id="p1", section_id="discussion")
+            compliance = client.research_audit_compliance("t1", project_id="p1", section_id="discussion")
+            self_play = client.research_run_self_play_training(
+                "t1",
+                episodes=[{"episode_id": "ep-1", "manuscript_text": "draft"}],
+                max_rounds=2,
+            )
+            leaderboard = client.research_get_academic_leaderboard("t1")
+
+        assert policy["policy_snapshot"]["signal_count"] == 2
+        assert compliance["compliance_audit"]["risk_level"] == "high"
+        assert self_play["hard_negative_count"] == 1
+        assert leaderboard["schema_version"] == "deerflow.academic_leaderboard.v1"
 
 
 # ===========================================================================
@@ -1562,6 +1951,23 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.long_horizon_storage_path = ".deer-flow/long-horizon-memory.json"
+        mem_cfg.long_horizon_enabled = True
+        mem_cfg.long_horizon_max_entries = 500
+        mem_cfg.long_horizon_summary_chars = 900
+        mem_cfg.long_horizon_injection_enabled = True
+        mem_cfg.long_horizon_top_k = 5
+        mem_cfg.long_horizon_min_similarity = 0.12
+        mem_cfg.long_horizon_injection_max_chars = 2400
+        mem_cfg.long_horizon_embedding_dim = 256
+        mem_cfg.long_horizon_cross_thread_enabled = True
+        mem_cfg.long_horizon_topic_memory_enabled = True
+        mem_cfg.long_horizon_topic_top_k = 2
+        mem_cfg.long_horizon_project_memory_enabled = True
+        mem_cfg.long_horizon_project_top_k = 2
+        mem_cfg.long_horizon_current_thread_boost = 0.08
+        mem_cfg.long_horizon_project_boost = 0.12
+        mem_cfg.long_horizon_topic_overlap_boost = 0.03
 
         with patch("src.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -1579,6 +1985,23 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.long_horizon_storage_path = ".deer-flow/long-horizon-memory.json"
+        mem_cfg.long_horizon_enabled = True
+        mem_cfg.long_horizon_max_entries = 500
+        mem_cfg.long_horizon_summary_chars = 900
+        mem_cfg.long_horizon_injection_enabled = True
+        mem_cfg.long_horizon_top_k = 5
+        mem_cfg.long_horizon_min_similarity = 0.12
+        mem_cfg.long_horizon_injection_max_chars = 2400
+        mem_cfg.long_horizon_embedding_dim = 256
+        mem_cfg.long_horizon_cross_thread_enabled = True
+        mem_cfg.long_horizon_topic_memory_enabled = True
+        mem_cfg.long_horizon_topic_top_k = 2
+        mem_cfg.long_horizon_project_memory_enabled = True
+        mem_cfg.long_horizon_project_top_k = 2
+        mem_cfg.long_horizon_current_thread_boost = 0.08
+        mem_cfg.long_horizon_project_boost = 0.12
+        mem_cfg.long_horizon_topic_overlap_boost = 0.03
 
         memory_data = {
             "version": "1.0",
@@ -1605,3 +2028,411 @@ class TestGatewayConformance:
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
         assert parsed.data.version == "1.0"
+
+    def test_export_image_report_pdf(self, client):
+        with (
+            patch("src.config.scientific_vision_config.get_scientific_vision_config", return_value=SimpleNamespace(artifact_subdir="scientific-vision/image-reports")),
+            patch("src.utils.image_report_pdf.generate_image_report_pdf", return_value="/mnt/user-data/outputs/scientific-vision/image-reports/pdfs/report.pdf"),
+        ):
+            result = client.export_image_report_pdf("thread-1", index_payload={"thread_id": "thread-1", "reports": []})
+
+        parsed = ImageReportPdfResponse(**result)
+        assert parsed.pdf_path.endswith(".pdf")
+
+    def test_export_latex_diagnostics_markdown(self, client):
+        from src.config.paths import Paths
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "src.client.get_paths",
+            return_value=Paths(base_dir=tmp),
+        ):
+            result = client.export_latex_diagnostics_markdown(
+                "thread-1",
+                title="Latex diag",
+                compile_status="failed",
+                compile_log_path="/mnt/user-data/outputs/research-writing/latex/p1.compile.log",
+                issue_clusters=[
+                    {
+                        "id": "missing-package",
+                        "title": "Missing package",
+                        "severity": "error",
+                        "match_count": 1,
+                        "matched_lines": ["L31: ! LaTeX Error: File `booktabs.sty' not found."],
+                        "suggestions": ["tlmgr install booktabs"],
+                    }
+                ],
+                output_filename="diag.md",
+            )
+        parsed = LatexDiagnosticsMarkdownResponse(**result)
+        assert parsed.report_path.endswith("/research-writing/latex/reports/diag.md")
+
+    def test_research_upsert_project(self, client):
+        payload = {
+            "project_id": "p1",
+            "title": "Conformance Project",
+            "discipline": "ai_cs",
+            "sections": [],
+        }
+        with patch("src.research_writing.runtime_service.upsert_project", return_value=SimpleNamespace(model_dump=lambda: payload)):
+            result = client.research_upsert_project("thread-1", payload)
+        parsed = ProjectResponse(**result)
+        assert parsed.project["project_id"] == "p1"
+
+    def test_research_list_projects(self, client):
+        with patch(
+            "src.research_writing.runtime_service.list_projects",
+            return_value=[SimpleNamespace(model_dump=lambda: {"project_id": "p1", "title": "P1"})],
+        ):
+            result = client.research_list_projects("thread-1")
+        parsed = ProjectsListResponse(**result)
+        assert len(parsed.projects) == 1
+
+    def test_research_ingest_fulltext(self, client):
+        with patch(
+            "src.research_writing.runtime_service.ingest_fulltext_evidence",
+            return_value={
+                "record": {"source": "arxiv", "external_id": "2501.00001"},
+                "evidence_count": 2,
+                "persisted_evidence_ids": ["id-1"],
+                "artifact_path": "/mnt/user-data/outputs/research-writing/artifacts/ingest.json",
+            },
+        ):
+            result = client.research_ingest_fulltext("thread-1", source="arxiv", external_id="2501.00001")
+        parsed = FulltextIngestResponse(**result)
+        assert parsed.evidence_count == 2
+
+    def test_research_compile_section(self, client):
+        with patch(
+            "src.research_writing.runtime_service.compile_project_section",
+            return_value={
+                "section_id": "intro",
+                "compiled_text": "Compiled",
+                "issues": [],
+                "artifact_path": "/mnt/user-data/outputs/research-writing/compiled/intro.md",
+            },
+        ) as compile_mock:
+            result = client.research_compile_section(
+                "thread-1",
+                project_id="p1",
+                section_id="intro",
+                reviewer2_styles=["statistical_tyrant"],
+                peer_review_ab_variant="A",
+            )
+        parsed = SectionCompileResponse(**result)
+        assert parsed.section_id == "intro"
+        _, kwargs = compile_mock.call_args
+        assert kwargs["reviewer2_styles"] == ["statistical_tyrant"]
+        assert kwargs["peer_review_ab_variant"] == "A"
+
+    def test_research_plan_narrative(self, client):
+        with patch(
+            "src.research_writing.runtime_service.plan_project_section_narrative",
+            return_value={
+                "project_id": "p1",
+                "section_id": "intro",
+                "section_name": "Introduction",
+                "planner_version": "deerflow.narrative_plan.v1",
+                "takeaway_message": "Takeaway",
+                "gap_statement": "Gap",
+                "disruption_statement": "Disruption",
+                "logical_flow": ["f1", "f2"],
+                "figure_storyboard": [{"figure_id": "F1"}],
+                "self_questioning": [{"round_index": 1}],
+                "introduction_hook": "hook",
+                "discussion_pivot": "pivot",
+                "self_question_rounds": 3,
+                "include_storyboard": True,
+                "artifact_path": "/mnt/user-data/outputs/research-writing/narrative-plans/p1-intro.json",
+            },
+        ):
+            result = client.research_plan_narrative("thread-1", project_id="p1", section_id="intro")
+        parsed = NarrativePlanResponse(**result)
+        assert parsed.section_id == "intro"
+
+    def test_research_compile_latex(self, client):
+        with patch(
+            "src.research_writing.runtime_service.build_latex_manuscript",
+            return_value={
+                "project_id": "p1",
+                "section_ids": ["discussion"],
+                "title": "Paper",
+                "source_markdown_path": "/mnt/user-data/outputs/research-writing/latex/p1.source.md",
+                "tex_path": "/mnt/user-data/outputs/research-writing/latex/p1.tex",
+                "pdf_path": "/mnt/user-data/outputs/research-writing/latex/p1.pdf",
+                "compile_log_path": "/mnt/user-data/outputs/research-writing/latex/p1.compile.log",
+                "compile_status": "success",
+                "compiler": "latexmk",
+                "engine_requested": "auto",
+                "compile_pdf_requested": True,
+                "citation_keys": ["10.1000/demo"],
+                "citation_count": 1,
+                "warning": None,
+                "artifact_path": "/mnt/user-data/outputs/research-writing/latex/p1.tex",
+                "summary_artifact_path": "/mnt/user-data/outputs/research-writing/latex/p1.json",
+            },
+        ):
+            result = client.research_compile_latex("thread-1", project_id="p1", section_ids=["discussion"], compile_pdf=True)
+        parsed = LatexCompileResponse(**result)
+        assert parsed.compile_status == "success"
+
+    def test_research_simulate_review(self, client):
+        with patch(
+            "src.research_writing.runtime_service.simulate_review_and_plan",
+            return_value={
+                "venue": "NeurIPS",
+                "overall_assessment": "major revision",
+                "comments": [],
+                "actions": [],
+                "rebuttal_letter": "Letter",
+                "artifact_path": "/mnt/user-data/outputs/research-writing/review/review.json",
+                "letter_path": "/mnt/user-data/outputs/research-writing/review/review.md",
+            },
+        ):
+            result = client.research_simulate_review("thread-1", venue_name="NeurIPS", manuscript_text="Draft")
+        parsed = ReviewSimulateResponse(**result)
+        assert parsed.venue == "NeurIPS"
+
+    def test_research_simulate_peer_review_loop(self, client):
+        with patch(
+            "src.research_writing.runtime_service.simulate_peer_review_cycle",
+            return_value={
+                "venue": "NeurIPS",
+                "section_id": "discussion",
+                "red_team_agents": ["reviewer_agent", "area_chair_agent"],
+                "blue_team_agents": ["author_agent"],
+                "rounds": [],
+                "final_text": "Revised text",
+                "final_decision": "accept",
+                "unresolved_issue_count": 0,
+                "artifact_path": "/mnt/user-data/outputs/research-writing/review/peer-loop-neurips.json",
+                "final_text_path": "/mnt/user-data/outputs/research-writing/review/peer-loop-neurips.md",
+            },
+        ) as peer_mock:
+            result = client.research_simulate_peer_review_loop(
+                "thread-1",
+                venue_name="NeurIPS",
+                manuscript_text="Draft",
+                section_id="discussion",
+                max_rounds=3,
+                reviewer2_styles=["methodology_fundamentalist"],
+                peer_review_ab_variant="A",
+            )
+        parsed = PeerReviewLoopResponse(**result)
+        assert parsed.final_decision == "accept"
+        _, kwargs = peer_mock.call_args
+        assert kwargs["reviewer2_styles"] == ["methodology_fundamentalist"]
+        assert kwargs["peer_review_ab_variant"] == "A"
+
+    def test_research_get_peer_review_ab_metrics(self, client):
+        with patch(
+            "src.research_writing.runtime_service.get_peer_review_ab_metrics",
+            return_value={
+                "metrics_schema_version": "deerflow.peer_review_ab_metrics.v1",
+                "thread_id": "thread-1",
+                "total_runs": 2,
+                "window_size": 2,
+                "by_variant_total": {},
+                "by_variant_window": {},
+                "recent_runs": [],
+                "strategy_config": {},
+                "artifact_path": "/mnt/user-data/outputs/research-writing/review/peer-review-ab-metrics.json",
+            },
+        ) as metrics_mock:
+            result = client.research_get_peer_review_ab_metrics("thread-1")
+        assert result["thread_id"] == "thread-1"
+        assert result["total_runs"] == 2
+        metrics_mock.assert_called_once_with(thread_id="thread-1")
+
+    def test_research_get_engineering_gates_metrics(self, client):
+        with patch(
+            "src.research_writing.runtime_service.get_engineering_gates_metrics",
+            return_value={
+                "metrics_schema_version": "deerflow.engineering_gates_runtime_metrics.v1",
+                "thread_id": "thread-1",
+                "project_id": "p1",
+                "run_limit": 80,
+                "updated_at": "2026-03-17T00:00:00+00:00",
+                "compile_runs": [],
+                "latex_runs": [],
+                "compile_summary": {"run_count": 0},
+                "latex_summary": {"run_count": 0},
+                "thresholds": {},
+                "alerts": [],
+                "status": "pass",
+                "counters": {},
+                "artifacts": {},
+            },
+        ) as metrics_mock:
+            result = client.research_get_engineering_gates_metrics(
+                "thread-1",
+                project_id="p1",
+                run_limit=80,
+                max_constraint_violation_rate=0.15,
+                max_safety_valve_trigger_rate=0.25,
+                max_hitl_block_rate=0.2,
+                min_traceability_coverage_rate=0.85,
+                min_delivery_completeness_rate=1.0,
+                min_latex_success_rate=0.9,
+            )
+        assert result["thread_id"] == "thread-1"
+        assert result["project_id"] == "p1"
+        assert result["run_limit"] == 80
+        metrics_mock.assert_called_once_with(
+            thread_id="thread-1",
+            project_id="p1",
+            run_limit=80,
+            max_constraint_violation_rate=0.15,
+            max_safety_valve_trigger_rate=0.25,
+            max_hitl_block_rate=0.2,
+            min_traceability_coverage_rate=0.85,
+            min_delivery_completeness_rate=1.0,
+            min_latex_success_rate=0.9,
+        )
+
+    def test_research_generate_hypotheses(self, client):
+        with patch(
+            "src.research_writing.runtime_service.generate_project_hypotheses",
+            return_value={
+                "project_id": "p1",
+                "section_id": "discussion",
+                "feature_summary": ["Evidence coverage: 2 units."],
+                "hypotheses": [{"hypothesis_id": "H1"}],
+                "synthesis_paragraph": "Top-ranked hypothesis ...",
+                "artifact_path": "/mnt/user-data/outputs/research-writing/hypotheses/hypothesis-p1-discussion.json",
+            },
+        ):
+            result = client.research_generate_hypotheses(
+                "thread-1",
+                project_id="p1",
+                section_id="discussion",
+                max_hypotheses=5,
+            )
+        parsed = HypothesisGenerateResponse(**result)
+        assert parsed.project_id == "p1"
+
+    def test_research_capability_catalog_and_assessment(self, client):
+        with (
+            patch(
+                "src.research_writing.runtime_service.get_capability_catalog",
+                return_value={
+                    "catalog_schema_version": "deerflow.capability_catalog.v1",
+                    "generated_at": "2026-03-17T00:00:00Z",
+                    "capabilities": [{"capability_id": "claim_engineering"}],
+                },
+            ) as catalog_mock,
+            patch(
+                "src.research_writing.runtime_service.assess_project_capabilities",
+                return_value={
+                    "schema_version": "deerflow.capability_assessment.v1",
+                    "generated_at": "2026-03-17T00:00:00Z",
+                    "project_id": "p1",
+                    "section_id": "discussion",
+                    "catalog": {"schema_version": "deerflow.capability_catalog.v1", "capabilities": []},
+                    "assessment": {"overall_score": 0.77, "status": "pass", "scorecards": []},
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/capabilities/assessment-p1-discussion.json",
+                },
+            ) as assess_mock,
+        ):
+            catalog = client.research_get_capability_catalog("thread-1")
+            assessment = client.research_assess_capabilities("thread-1", project_id="p1", section_id="discussion")
+        parsed_catalog = CapabilityCatalogResponse(**catalog)
+        parsed_assessment = CapabilityAssessmentResponse(**assessment)
+        assert parsed_catalog.catalog_schema_version == "deerflow.capability_catalog.v1"
+        assert parsed_assessment.assessment["overall_score"] == 0.77
+        catalog_mock.assert_called_once_with("thread-1")
+        assess_mock.assert_called_once_with(thread_id="thread-1", project_id="p1", section_id="discussion")
+
+    def test_research_hitl_decisions(self, client):
+        hitl_payload = {
+            "project_id": "p1",
+            "section_id": "discussion",
+            "decisions": [
+                {
+                    "action_id": "peer-r1-abc",
+                    "source": "Peer Loop Round 1",
+                    "label": "Add ablation",
+                    "decision": "approved",
+                    "section_id": "discussion",
+                    "updated_at": "2026-03-16T00:00:00Z",
+                    "metadata": {},
+                }
+            ],
+            "total_count": 1,
+            "updated_at": "2026-03-16T00:00:00Z",
+            "artifact_path": "/mnt/user-data/outputs/research-writing/hitl/hitl-decisions-p1.json",
+        }
+        with (
+            patch(
+                "src.research_writing.runtime_service.upsert_project_hitl_decisions",
+                return_value=hitl_payload,
+            ),
+            patch(
+                "src.research_writing.runtime_service.get_project_hitl_decisions",
+                return_value={**hitl_payload, "artifact_path": None},
+            ),
+        ):
+            upserted = client.research_upsert_hitl_decisions(
+                "thread-1",
+                project_id="p1",
+                section_id="discussion",
+                decisions=[
+                    {
+                        "action_id": "peer-r1-abc",
+                        "source": "Peer Loop Round 1",
+                        "label": "Add ablation",
+                        "decision": "approved",
+                    }
+                ],
+            )
+            fetched = client.research_get_hitl_decisions(
+                "thread-1",
+                project_id="p1",
+                section_id="discussion",
+            )
+        parsed_upsert = HitlDecisionsResponse(**upserted)
+        parsed_get = HitlDecisionsResponse(**fetched)
+        assert parsed_upsert.total_count == 1
+        assert parsed_get.total_count == 1
+
+    def test_research_evaluate_academic(self, client):
+        with patch(
+            "src.research_writing.runtime_service.evaluate_academic_and_persist",
+            return_value={
+                "case_count": 1,
+                "average_overall_score": 0.8,
+                "average_citation_fidelity": 0.8,
+                "average_claim_grounding": 0.8,
+                "average_abstract_body_consistency": 0.8,
+                "average_reviewer_rebuttal_completeness": 0.8,
+                "average_venue_fit": 0.8,
+                "average_cross_modality_synthesis": 0.8,
+                "average_long_horizon_consistency": 0.8,
+                "results": [],
+                "artifact_path": "/mnt/user-data/outputs/research-writing/evals/eval.json",
+            },
+        ):
+            result = client.research_evaluate_academic(
+                "thread-1",
+                cases=[
+                    {
+                        "case_id": "c1",
+                        "domain": "ai_cs",
+                        "venue": "NeurIPS",
+                        "generated_citations": [],
+                        "verified_citations": [],
+                        "claims": [],
+                        "abstract_numbers": [],
+                        "body_numbers": [],
+                        "reviewer_comment_ids": [],
+                        "rebuttal_addressed_ids": [],
+                        "venue_checklist_items": [],
+                        "venue_satisfied_items": [],
+                        "cross_modal_items_expected": 0,
+                        "cross_modal_items_used": 0,
+                        "revision_terms": [],
+                        "revision_numbers": [],
+                    }
+                ],
+            )
+        parsed = EvalAcademicResponse(**result)
+        assert parsed.case_count == 1

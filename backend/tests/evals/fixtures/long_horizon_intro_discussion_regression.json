@@ -1,0 +1,87 @@
+{
+  "metadata": {
+    "benchmark_split": "long_horizon_intro_discussion_regression_v1",
+    "source_name": "ci-regression-suite"
+  },
+  "cases": [
+    {
+      "case_id": "lh-acc-01",
+      "domain": "ai_cs",
+      "venue": "NeurIPS",
+      "decision": "accepted",
+      "generated_citations": ["10.3000/a1"],
+      "verified_citations": ["10.3000/a1"],
+      "claims": [{"type": "strong", "has_evidence": true, "has_citation": true}],
+      "abstract_numbers": [1.2],
+      "body_numbers": [1.2],
+      "reviewer_comment_ids": ["R1"],
+      "rebuttal_addressed_ids": ["R1"],
+      "venue_checklist_items": ["ablation", "baseline"],
+      "venue_satisfied_items": ["ablation", "baseline"],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [
+        ["introduction", "causal", "discussion", "mechanism"],
+        ["introduction", "causal", "discussion", "mechanism"]
+      ],
+      "revision_numbers": [[1.2, 0.8], [1.2, 0.8]]
+    },
+    {
+      "case_id": "lh-acc-02",
+      "domain": "biomed",
+      "venue": "Nature",
+      "decision": "accepted",
+      "generated_citations": ["10.3000/a2"],
+      "verified_citations": ["10.3000/a2"],
+      "claims": [{"type": "result", "has_evidence": true, "has_citation": true}],
+      "abstract_numbers": [0.92],
+      "body_numbers": [0.92],
+      "reviewer_comment_ids": ["R1", "R2"],
+      "rebuttal_addressed_ids": ["R1", "R2"],
+      "venue_checklist_items": ["ethics", "controls"],
+      "venue_satisfied_items": ["ethics", "controls"],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 2,
+      "revision_terms": [["hypothesis", "introduction"], ["hypothesis", "introduction"]],
+      "revision_numbers": [[0.92], [0.92]]
+    },
+    {
+      "case_id": "lh-rej-01",
+      "domain": "ai_cs",
+      "venue": "ICML",
+      "decision": "rejected",
+      "generated_citations": ["10.3000/r1"],
+      "verified_citations": ["10.3000/r1"],
+      "claims": [{"type": "strong", "has_evidence": false, "has_citation": false}],
+      "abstract_numbers": [3.0],
+      "body_numbers": [2.0],
+      "reviewer_comment_ids": ["R1", "R2"],
+      "rebuttal_addressed_ids": ["R2"],
+      "venue_checklist_items": ["ablation", "failure cases"],
+      "venue_satisfied_items": ["ablation"],
+      "cross_modal_items_expected": 2,
+      "cross_modal_items_used": 1,
+      "revision_terms": [["introduction", "mechanism"], ["limitations"]],
+      "revision_numbers": [[3.0], [2.0]]
+    },
+    {
+      "case_id": "lh-rej-02",
+      "domain": "biomed",
+      "venue": "Cell",
+      "decision": "rejected",
+      "generated_citations": ["10.3000/r2"],
+      "verified_citations": ["10.3000/r2"],
+      "claims": [{"type": "result", "has_evidence": true, "has_citation": false}],
+      "abstract_numbers": [5.6],
+      "body_numbers": [4.1],
+      "reviewer_comment_ids": ["R1", "R2", "R3"],
+      "rebuttal_addressed_ids": ["R1"],
+      "venue_checklist_items": ["ethics", "data availability", "controls"],
+      "venue_satisfied_items": ["controls"],
+      "cross_modal_items_expected": 3,
+      "cross_modal_items_used": 1,
+      "revision_terms": [["introduction", "cohort", "discussion"], ["cohort"]],
+      "revision_numbers": [[5.6], [4.1]]
+    }
+  ]
+}

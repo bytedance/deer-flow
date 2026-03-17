@@ -20,6 +20,10 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is enabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    vision_prompt: str | None = Field(
+        default_factory=lambda: None,
+        description="Custom prompt to use when injecting images into the conversation. If not provided, a default scientific analysis prompt is used.",
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

@@ -137,6 +137,54 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert events[-1]["result"] == "all done"
 
 
+def test_task_tool_injects_writer_l3_fewshot_addendum(monkeypatch):
+    runtime = _make_runtime()
+    events = []
+    captured = {}
+    writer_config = SubagentConfig(
+        name="writer-agent",
+        description="Writer helper",
+        system_prompt="Writer base prompt",
+        max_turns=50,
+        timeout_seconds=10,
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: writer_config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="writer done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr("src.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        "src.research_writing.runtime_service.get_writer_l3_few_shot_addendum",
+        lambda thread_id, top_k=3: "L3 FEWSHOT ADDENDUM",
+    )
+
+    output = task_tool_module.task_tool.func(
+        runtime=runtime,
+        description="写作子任务",
+        prompt="draft rebuttal section",
+        subagent_type="writer-agent",
+        tool_call_id="tc-writer-addendum",
+    )
+
+    assert output == "Task Succeeded. Result: writer done"
+    assert "L3 FEWSHOT ADDENDUM" in captured["executor_kwargs"]["config"].system_prompt
+
+
 def test_task_tool_returns_failed_message(monkeypatch):
     config = _make_subagent_config()
     events = []

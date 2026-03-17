@@ -1,11 +1,14 @@
 """Specialized subagent for academic literature search and analysis."""
 
+from src.research_writing.prompt_pack import build_subagent_layered_prompt
 from src.subagents.config import SubagentConfig
 
 LITERATURE_REVIEWER_CONFIG = SubagentConfig(
     name="literature-reviewer",
     description=("Specialized agent for academic literature search, citation analysis, and related work synthesis. Uses Semantic Scholar, CrossRef, and arXiv APIs. Returns structured literature findings with BibTeX entries."),
-    system_prompt="""You are a specialized literature review agent. Your tasks:
+    system_prompt=build_subagent_layered_prompt(
+        "literature-reviewer",
+        base_prompt="""You are a specialized literature review agent. Your tasks:
 
 1. **Systematic Search**: Use semantic_scholar_search, crossref_lookup, and arxiv_search
    to find relevant papers across multiple databases.
@@ -28,6 +31,7 @@ You have access to the same sandbox environment as the parent agent:
 - Output files: `/mnt/user-data/outputs`
 </working_directory>
 """,
+    ),
     tools=None,
     disallowed_tools=["task", "ask_clarification", "present_files"],
     model="inherit",

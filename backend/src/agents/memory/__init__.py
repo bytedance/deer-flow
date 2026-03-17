@@ -12,6 +12,13 @@ from src.agents.memory.prompt import (
     format_conversation_for_update,
     format_memory_for_injection,
 )
+from src.agents.memory.long_horizon_store import (
+    format_long_horizon_injection,
+    query_hypothesis_validation_memory,
+    query_long_horizon_memory,
+    record_hypothesis_validation_result,
+    update_long_horizon_memory,
+)
 from src.agents.memory.queue import (
     ConversationContext,
     MemoryUpdateQueue,
@@ -41,4 +48,10 @@ __all__ = [
     "get_memory_data",
     "reload_memory_data",
     "update_memory_from_conversation",
+    # Long-horizon summaries
+    "update_long_horizon_memory",
+    "query_long_horizon_memory",
+    "query_hypothesis_validation_memory",
+    "record_hypothesis_validation_result",
+    "format_long_horizon_injection",
 ]

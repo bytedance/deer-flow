@@ -23,6 +23,12 @@ models:
   #   supports_thinking: true
   #   supports_vision: true
   #   supports_reasoning_effort: true
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -37,6 +43,12 @@ models:
   #   max_tokens: 4096
   #   temperature: 0.7
   #   supports_vision: true # Enable vision support for view_image tool
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet
@@ -46,6 +58,12 @@ models:
   #   api_key: $ANTHROPIC_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true  # Enable vision support for view_image tool
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
   #   when_thinking_enabled:
   #     thinking:
   #       type: enabled
@@ -58,6 +76,12 @@ models:
   #   google_api_key: $GOOGLE_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -83,6 +107,12 @@ models:
   #   max_tokens: 32768
   #   supports_thinking: true
   #   supports_vision: true  # Check your specific model's capabilities
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -101,6 +131,12 @@ models:
   #   temperature: 0.7
   #   supports_thinking: true
   #   supports_vision: true
+  #   vision_prompt: |
+  #     Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+  #     Do not just describe them superficially. You must:
+  #     1. Extract quantitative trends and structural patterns directly from the visual data.
+  #     2. Identify key features, anomalies, and control group comparisons.
+  #     3. Draw rigorous scientific conclusions based on the visual evidence.
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -334,6 +370,159 @@ summarization:
   summary_prompt: null
 
 # ============================================================================
+# Scientific Vision (ImageReport) Configuration
+# ============================================================================
+# Optional pre-analysis step for scientific figures.
+#
+# When enabled:
+# - `view_image` tool is available even for text-only main models.
+# - After `view_image` completes, DeerFlow calls a (vision-capable) scientific vision model to generate a structured
+#   `<image_report>` (JSON) and injects it into the main conversation for downstream reasoning and writing.
+scientific_vision:
+  enabled: false
+  # Injection mode:
+  # - index: inject references + summaries (recommended; token-efficient, audit-friendly)
+  # - full:  inject full JSON payload (token-heavy)
+  inject_mode: index
+  # Model to use for scientific vision pre-analysis (null = use the current runtime model)
+  # Recommended: a vision-capable model that is strong at scientific figures.
+  model_name: null
+  # Where to store audit artifacts (relative to /mnt/user-data/outputs)
+  artifact_subdir: scientific-vision/image-reports
+  # Reuse existing artifacts when available (cache hit = skip vision model call)
+  cache_enabled: true
+  # Maximum images per report generation (to control latency/cost)
+  max_images: 4
+  # Custom prompt template (null = use default ImageReport prompt)
+  prompt_template: null
+  # Write batch-level artifact (parsed output + provenance)
+  write_batch_artifact: true
+  # Include raw model output text in batch artifact (for audit/debugging)
+  include_raw_model_output_in_batch: true
+  # Write injection index artifact (references per-image reports)
+  write_index_artifact: true
+  # Optional: run type-specific evidence parsers (ROI-based quantification) and persist evidence tables/overlays
+  evidence_enabled: false
+  evidence_parsers: ["western_blot", "facs", "tsne", "spectrum"]
+  evidence_write_csv: true
+  evidence_write_overlay: true
+  # If true, clears viewed_images after report generation to reduce context size
+  clear_viewed_images_after_report: false
+
+# ============================================================================
+# Scientific Data Configuration
+# ============================================================================
+# Controls raw scientific data analysis tools independent of image-report flow.
+# When enabled, tools like analyze_fcs/analyze_embedding_csv/analyze_spectrum_csv/
+# analyze_densitometry_csv are available even if scientific_vision is disabled.
+# Also enables:
+# - audit_cross_modal_consistency (textual claim vs figure/raw-data consistency audit)
+# - generate_reproducible_figure (code-level reproducible SVG/PDF figure generation)
+scientific_data:
+  enabled: false
+
+# ============================================================================
+# Journal Style Alignment Configuration
+# ============================================================================
+# Collect venue-specific recent high-impact papers as few-shot exemplars before
+# manuscript generation/compilation.
+journal_style:
+  enabled: false
+  # Number of few-shot samples to collect (recommended: 5)
+  sample_size: 5
+  # Search window in recent years (e.g., 5 years)
+  recent_year_window: 5
+  # Cache TTL to avoid repeated remote requests
+  cache_ttl_hours: 24
+  # OpenAlex request timeout
+  request_timeout_seconds: 12
+  # Max abstract excerpt chars included in prompt material
+  max_excerpt_chars: 420
+
+# ============================================================================
+# Reviewer2 Adversarial Strategy Configuration
+# ============================================================================
+# Controls automatic Reviewer2 persona defaults and A/B preset strategy switch
+# used by peer-review runtime (`simulate_peer_review_loop` / `compile_section`).
+reviewer2_strategy:
+  # Global fallback persona set when venue mapping misses
+  default_styles:
+    - statistical_tyrant
+    - methodology_fundamentalist
+
+  # Venue-specific defaults (key is case-insensitive)
+  venue_style_overrides:
+    nature:
+      - methodology_fundamentalist
+      - domain_traditionalist
+    cell:
+      - methodology_fundamentalist
+      - domain_traditionalist
+    neurips:
+      - statistical_tyrant
+      - methodology_fundamentalist
+    icml:
+      - statistical_tyrant
+      - methodology_fundamentalist
+
+  # A/B switch for combined round-count + persona-combo strategy experiments
+  ab_enabled: true
+  # off | A | B
+  ab_default_variant: off
+
+  # Auto traffic split by thread_id hash (for online/offline comparative evaluation)
+  # When enabled and request doesn't force A/B/off, variant is assigned by:
+  # hash(thread_id + ab_auto_split_salt) < ab_auto_split_ratio_a => A, else B.
+  ab_auto_split_enabled: false
+  ab_auto_split_ratio_a: 0.5
+  ab_auto_split_salt: reviewer2-ab-v1
+
+  # Arm A: conservative attack budget
+  ab_variant_a_max_rounds: 2
+  ab_variant_a_styles:
+    - statistical_tyrant
+    - methodology_fundamentalist
+
+  # Arm B: aggressive attack budget
+  ab_variant_b_max_rounds: 4
+  ab_variant_b_styles:
+    - statistical_tyrant
+    - methodology_fundamentalist
+    - domain_traditionalist
+
+  # Persist and aggregate A/B outcome metrics
+  ab_metrics_enabled: true
+  ab_metrics_max_recent_runs: 120
+
+# ============================================================================
+# Failure Mode Gate Configuration
+# ============================================================================
+# Thresholds for academic red-team failure-mode gating.
+# Useful for CI tightening by branch/stage (e.g., release branch uses stricter values).
+failure_mode_gate:
+  citation_fidelity_max: 0.75
+  overclaim_claim_grounding_max: 0.65
+  numeric_drift_abstract_body_max: 0.8
+  evidence_chain_claim_grounding_max: 0.55
+  style_mismatch_venue_fit_max: 0.7
+  superficial_rebuttal_completeness_max: 0.7
+  min_target_recall: 0.95
+  max_control_false_positive_rate: 0.2
+
+# ============================================================================
+# Native LaTeX Manuscript Pipeline
+# ============================================================================
+# Build `.tex` directly from manuscript markdown and optionally compile PDF via
+# local TeX engine (latexmk / pdflatex / xelatex).
+latex:
+  enabled: true
+  # auto | none | latexmk | pdflatex | xelatex
+  default_engine: auto
+  compile_pdf_by_default: true
+  compile_timeout_seconds: 120
+  artifact_subdir: research-writing/latex
+
+# ============================================================================
 # Memory Configuration
 # ============================================================================
 # Global memory mechanism
@@ -347,6 +536,30 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  # Long-horizon summary memory (vector retrieval for research writing continuity)
+  long_horizon_enabled: true
+  long_horizon_storage_path: .deer-flow/memory_long_horizon.json
+  long_horizon_max_entries: 500
+  long_horizon_summary_chars: 900
+  long_horizon_injection_enabled: true
+  long_horizon_top_k: 5
+  long_horizon_min_similarity: 0.12
+  long_horizon_injection_max_chars: 2400
+  # Dense embedding + cross-thread project/topic memory
+  long_horizon_embedding_dim: 256
+  long_horizon_cross_thread_enabled: true
+  long_horizon_topic_memory_enabled: true
+  long_horizon_topic_top_k: 2
+  long_horizon_project_memory_enabled: true
+  long_horizon_project_top_k: 2
+  long_horizon_current_thread_boost: 0.08
+  long_horizon_project_boost: 0.12
+  long_horizon_topic_overlap_boost: 0.03
+  # Hypothesis-validation trajectory memory (failed attempts -> future intuition)
+  long_horizon_hypothesis_memory_enabled: true
+  long_horizon_hypothesis_top_k: 2
+  long_horizon_hypothesis_max_entries: 400
+  long_horizon_hypothesis_failure_boost: 0.08
 
 
 # ============================================================================
