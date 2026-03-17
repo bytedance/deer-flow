@@ -218,6 +218,49 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+#### Academic Eval Offline Benchmark Suite
+
+If you are building an academic-eval regression loop, DeerFlow includes layered offline raw templates:
+
+- `Core`: top-venue accept/reject cases (for `AUC / ECE / Brier`)
+- `Failure-mode`: hard negatives (`citation_hallucination`, `overclaim`, `numeric_drift`, `evidence_chain_break`, `ethics_gap`)
+- `Domain split`: `ai_cs`, `biomed`, `cross_discipline`
+
+Generate the suite:
+
+```bash
+make build-academic-offline-benchmark-suite OVERWRITE=1
+```
+
+Then import all layers into normalized datasets:
+
+```bash
+make import-academic-eval \
+  RAW_DATA=backend/src/evals/academic/templates/offline_benchmark_suite \
+  DATASET_NAME=offline_benchmark \
+  DATASET_VERSION=2026_03
+```
+
+The import output is written under `backend/src/evals/academic/datasets/` and can be used directly by `research/evals/academic`.
+
+Run an offline regression gate report (JSON + Markdown):
+
+```bash
+make run-academic-offline-regression STRICT_GATE=1 OVERWRITE=1
+```
+
+Run online regression drift automation (commit-to-commit + week-to-week):
+
+```bash
+make run-academic-online-regression \
+  STRICT_GATE=1 \
+  OVERWRITE=1 \
+  BRANCH=$(git rev-parse --abbrev-ref HEAD) \
+  COMMIT_SHA=$(git rev-parse HEAD)
+```
+
+Outputs include current snapshot, drift report, and reusable history baseline under `backend/src/evals/academic/datasets/online_regression/`.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
@@ -400,6 +443,16 @@ Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output.
 
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
+
+### Academic Research-Writing Runtime
+
+For manuscript workflows, DeerFlow provides a grounded research-writing runtime with explicit evidence contracts:
+
+- **Claim Map first, prose second**: section drafting starts with a structured claim map (`Claim ID | Core Claim | Data IDs | Citation IDs | Caveat`) before paragraph generation.
+- **Hard grounding checks**: conclusion-like sentences are validated for evidence bindings (`[data:*]`, `[citation:*]`), and safety-valve downgrade is triggered when bindings are missing.
+- **Narrative planning primitives**: section planning emits structured CARS introduction moves, paragraph-level MEAL outline, and 5-layer discussion stack (findings -> mechanisms -> theory -> practice -> limitations).
+- **Reviewer loop simulation**: built-in `Reviewer -> Author -> Area Chair` iterations include Reviewer 2 attack dimensions (overclaim, statistics, alternatives, ethics/bias, hidden omissions) and structured rebuttal categories.
+- **Reproducible figure governance**: scientific figure generation records fixed random seed, input-file provenance hashes, and environment dependencies in metadata for reruns.
 
 ### Sandbox & File System
 

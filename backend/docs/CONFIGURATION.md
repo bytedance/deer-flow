@@ -17,6 +17,15 @@ models:
     api_key: $OPENAI_API_KEY       # API key (use env var)
     max_tokens: 4096               # Max tokens per request
     temperature: 0.7               # Sampling temperature
+    supports_vision: true           # Enable vision (image_url blocks)
+    # Optional: override the default scientific-image analysis instruction used when
+    # ViewImageMiddleware injects recently viewed images into the conversation.
+    # vision_prompt: |
+    #   Please deeply analyze these scientific images (e.g., Western Blot, t-SNE, FACS, astronomical spectra, microscopy, etc.).
+    #   Do not just describe them superficially. You must:
+    #   1. Extract quantitative trends and structural patterns directly from the visual data.
+    #   2. Identify key features, anomalies, and control group comparisons.
+    #   3. Draw rigorous scientific conclusions based on the visual evidence.
 ```
 
 **Supported Providers**:
@@ -54,6 +63,120 @@ models:
         thinking:
           type: enabled
 ```
+
+### Scientific Vision (ImageReport)
+
+Enable an optional scientific-figure pre-analysis step that generates a structured `<image_report>` (JSON) from images loaded via the `view_image` tool:
+
+```yaml
+scientific_vision:
+  enabled: true
+  # Injection mode:
+  # - index: inject references + summaries (recommended; token-efficient, audit-friendly)
+  # - full:  inject full JSON payload (token-heavy)
+  inject_mode: index
+  # A vision-capable model configured in `models:` above.
+  # If null, DeerFlow uses the current runtime model.
+  model_name: sci-vision-model
+  # Where to store audit artifacts (relative to /mnt/user-data/outputs)
+  artifact_subdir: scientific-vision/image-reports
+  # Reuse existing artifacts when available (cache hit = skip vision model call)
+  cache_enabled: true
+  max_images: 4
+  prompt_template: null
+  write_batch_artifact: true
+  include_raw_model_output_in_batch: true
+  write_index_artifact: true
+  # Optional: run type-specific evidence parsers (ROI-based quantification) and persist evidence tables/overlays
+  evidence_enabled: true
+  evidence_parsers: ["western_blot", "facs", "tsne", "spectrum"]
+  evidence_write_csv: true
+  evidence_write_overlay: true
+  clear_viewed_images_after_report: false
+```
+
+When enabled:
+- `view_image` tool is available even for text-only main models
+- DeerFlow calls the scientific vision model after `view_image` completes and injects an `<image_report>` message into the main conversation
+- DeerFlow writes audit-grade artifacts under `/mnt/user-data/outputs/{artifact_subdir}/`:
+  - Per-image reports: `images/sha256-<image_sha256>/report-<analysis_sig>.json`
+  - Batch artifacts: `batches/batch-<batch_id>.json`
+  - Injection indexes: `indexes/index-<index_id>.json`
+
+### Scientific Data
+
+Enable raw scientific-data tooling independent of the ImageReport pipeline:
+
+```yaml
+scientific_data:
+  enabled: true
+```
+
+When `scientific_data.enabled: true` (or `scientific_vision.enabled: true`), DeerFlow exposes:
+- `analyze_fcs`, `analyze_embedding_csv`, `analyze_spectrum_csv`, `analyze_densitometry_csv`
+- `audit_cross_modal_consistency` (narrative claim -> evidence reverse verification)
+- `generate_reproducible_figure` (code-level figure generation with SVG/PDF + metadata)
+
+### Journal Style Alignment
+
+Enable venue-specific few-shot style alignment before `compile_section`:
+
+```yaml
+journal_style:
+  enabled: true
+  sample_size: 5
+  recent_year_window: 5
+  request_timeout_seconds: 12
+  cache_ttl_hours: 24
+  max_excerpt_chars: 1200
+```
+
+Notes:
+- DeerFlow resolves the target venue (for example Nature/Science/Cell and their sub-journals) via OpenAlex.
+- It fetches recent high-citation papers and derives sentence-length / paragraph-rhythm directives.
+- API-level overrides are available on `POST /research/compile/section`:
+  - `journal_style_enabled`
+  - `journal_style_force_refresh`
+  - `journal_style_sample_size`
+  - `journal_style_recent_year_window`
+
+### Native LaTeX Pipeline
+
+Enable direct `.tex` generation and optional PDF compilation:
+
+```yaml
+latex:
+  enabled: true
+  default_engine: auto  # auto|none|latexmk|pdflatex|xelatex
+  compile_pdf_default: true
+  compile_timeout_seconds: 90
+  artifact_subdir: research-writing/latex
+```
+
+Notes:
+- API endpoint: `POST /api/threads/{id}/research/latex/compile`
+- Supports direct markdown input or project/section-based assembly.
+- With `default_engine: none` (or request `engine=none`), DeerFlow only emits `.tex` without PDF compile.
+
+### Failure Mode Gate Thresholds
+
+Configure red-team/regression gate thresholds for `research/evals/academic`:
+
+```yaml
+failure_mode_gate:
+  citation_fidelity_max: 0.75
+  overclaim_claim_grounding_max: 0.65
+  numeric_drift_abstract_body_max: 0.8
+  evidence_chain_claim_grounding_max: 0.55
+  style_mismatch_venue_fit_max: 0.7
+  superficial_rebuttal_completeness_max: 0.7
+  min_target_recall: 0.95
+  max_control_false_positive_rate: 0.2
+```
+
+Notes:
+- These thresholds are applied when generating `failure_mode_gate_*` fields and the `.failure-modes.json` artifact.
+- CI can tighten thresholds per branch/stage by providing different `config.yaml` values (for example, stricter `min_target_recall` on release branches).
 
 ### Tool Groups
 

@@ -30,7 +30,7 @@ deer-flow/
 │   │   │   └── thread_state.py # ThreadState schema
 │   │   ├── gateway/           # FastAPI Gateway API
 │   │   │   ├── app.py         # FastAPI application
-│   │   │   └── routers/       # 6 route modules
+│   │   │   └── routers/       # Gateway route modules (models/mcp/skills/memory/uploads/artifacts/reports/etc.)
 │   │   ├── sandbox/           # Sandbox execution system
 │   │   │   ├── local/         # Local filesystem provider
 │   │   │   ├── sandbox.py     # Abstract Sandbox interface
@@ -48,6 +48,8 @@ deer-flow/
 │   │   ├── community/         # Community tools (tavily, jina_ai, firecrawl, image_search, aio_sandbox)
 │   │   ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
 │   │   ├── utils/             # Utilities (network, readability)
+│   │   ├── research_writing/  # Structured research-writing domain + compilers
+│   │   ├── evals/             # Academic evaluation framework
 │   │   └── client.py          # Embedded Python client (DeerFlowClient)
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
@@ -127,8 +129,10 @@ Middlewares execute in strict order in `src/agents/lead_agent/agent.py`:
 7. **TitleMiddleware** - Auto-generates thread title after first complete exchange
 8. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 9. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
-10. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if subagent_enabled)
-11. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
+10. **ScientificImageReportMiddleware** - Generates `<image_report>` (JSON) via a dedicated vision model and injects it into the conversation (optional, if scientific_vision.enabled)
+11. **AutoScientificClosureMiddleware** - When scientific evidence context exists and model attempts a final conclusion, auto-triggers `audit_cross_modal_consistency` and `generate_reproducible_figure`, injects a strict final-answer template requiring `证据一致性摘要` and `图表复现路径`, and applies a one-pass hard rewrite fallback if these sections are missing or fail quality thresholds (path items must match real artifacts)
+12. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if subagent_enabled)
+13. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
 
 ### Configuration System
 
@@ -168,6 +172,8 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
+| **Reports** (`/api/threads/{id}/reports`) | `POST /image_report_pdf` - export scientific image report artifacts as PDF; `POST /latex_diagnostics_markdown` - export clustered LaTeX troubleshooting report as markdown artifact (with reproducibility appendix: Debian/Ubuntu + Alpine templates, runtime auto-selection, one-click script, `DRY_RUN=1` preview, `STRICT=1` fail-fast behavior, and recent-command replay for faster CI triage) |
+| **Research** (`/api/threads/{id}/research`) | `projects/*` - structured project state CRUD; `ingest/fulltext`; `compile/section` (supports `journal_style_*` few-shot alignment knobs); `latex/compile` (native `.tex` + optional PDF compile); `review/simulate`; `review/peer-loop`; `hypotheses/generate`; `capabilities/catalog`; `capabilities/assess`; `evals/academic` (includes failure-mode red-team gates + gate artifact output) |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -194,7 +200,9 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 
 ### Subagent System (`src/subagents/`)
 
-**Built-in Agents**: `general-purpose` (all tools except `task`), `bash` (command specialist), `literature-reviewer` (academic literature search and citation analysis), `statistical-analyst` (hypothesis testing and APA reporting), and `code-reviewer` (research code quality review)
+**Built-in Agents**: `general-purpose` (all tools except `task`), `bash` (command specialist), `literature-reviewer` (academic literature search and citation analysis), `statistical-analyst` (hypothesis testing and APA reporting), `code-reviewer` (research code quality review), `data-scientist` (reproducible scientific figure generation with code + SVG/PDF exports), and `writer-agent` (evidence-aware manuscript drafting/revision with conservative claim calibration)
+**Prompt Composition**: Scientific and non-writing builtins (`writer-agent`, `data-scientist`, `experiment-designer`, scientific auditors, `general-purpose`, `bash`, `literature-reviewer`, `statistical-analyst`, `code-reviewer`) now share layered L0-L5 prompt headers plus role-specific contracts for rollback/A-B traceability.
+**Audit Agents**: `facs-auditor`, `blot-auditor`, `tsne-auditor`, `spectrum-auditor` — per-figure-type scientific audit agents (raw-data first, reproducible artifacts)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
@@ -208,7 +216,17 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 3. **Built-in tools**:
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); when `DEER_FLOW_EXPORT_DIR` is set, presented files are also copied to `{DEER_FLOW_EXPORT_DIR}/{thread_id}/...`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware → interrupts)
-   - `view_image` - Read image as base64 (added only if model supports vision)
+  - `research_project` - Structured research-writing runtime operations (project/section/claim/evidence/citation/fact upsert, standalone narrative planning, non-linear agentic-graph orchestration run, section compile with optional auto peer-review + hypothesis synthesis + narrative strategy controls + journal-style alignment, reviewer simulation, peer-loop simulation, self-play training with hard negatives, scientific compliance audit, HITL policy snapshot, capability catalog retrieval, capability assessment scoring, academic weekly leaderboard query, native LaTeX compile)
+   - `research_fulltext_ingest` - Ingest biomed/AI-CS literature, extract passage-level evidence units, and return dynamic GraphRAG context (citation graph + claim-centric support/refute/reconcile literature graph)
+   - `academic_eval` - Run groundedness-focused academic quality evaluation and persist eval artifact
+   - `view_image` - Read image as base64 (added if the runtime model supports vision OR `scientific_vision.enabled` is true)
+   - `extract_image_evidence` - Generate ROI-based evidence tables (JSON/CSV) and ROI overlay PNGs from ImageReport artifacts (added if `scientific_vision.enabled` is true)
+   - `analyze_fcs` - Analyze raw FCS (FlowIO) with optional compensation + gating + sensitivity (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
+   - `analyze_embedding_csv` - Analyze embedding CSV (t-SNE/UMAP) for batch mixing + separation metrics (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
+   - `analyze_spectrum_csv` - Analyze spectrum CSV for peaks + SNR (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
+   - `analyze_densitometry_csv` - Analyze blot densitometry CSV for normalization tables (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
+   - `audit_cross_modal_consistency` - Extract narrative claims and verify them against ImageReport + raw-data artifacts, with optional vision-model recheck (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
+   - `generate_reproducible_figure` - Generate and (optionally) execute reproducible plotting code to export publication-ready SVG/PDF + metadata/log artifacts (added if `scientific_data.enabled` OR `scientific_vision.enabled`)
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 
@@ -278,6 +296,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `updater.py` - LLM-based memory updates with fact extraction and atomic file I/O
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time)
 - `prompt.py` - Prompt templates for memory updates
+- `long_horizon_store.py` - Dense retrieval memory with topic/project aggregation plus hypothesis-validation trajectory history (including failed/reopened attempts)
 
 **Data Structure** (stored in `backend/.deer-flow/memory.json`):
 - **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
@@ -298,6 +317,8 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `model_name` - LLM for updates (null = default model)
 - `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
 - `max_injection_tokens` - Token limit for prompt injection (2000)
+- Long-horizon controls for retrieval continuity: `long_horizon_*`
+- Hypothesis-intuition controls: `long_horizon_hypothesis_memory_enabled`, `long_horizon_hypothesis_top_k`, `long_horizon_hypothesis_max_entries`, `long_horizon_hypothesis_failure_boost`
 
 ### Reflection System (`src/reflection/`)
 
@@ -307,15 +328,22 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 ### Config Schema
 
 **`config.yaml`** key sections:
-- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
+- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, `vision_prompt`, provider-specific fields
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory
 - `title` - Auto-title generation (enabled, max_words, max_chars, prompt_template)
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
+- `scientific_vision` - Scientific figure pre-analysis (ImageReport injection) using a dedicated vision model
+- `scientific_data` - Raw scientific-data tool inclusion independent of image-report flow
+- `failure_mode_gate` - Red-team regression gate thresholds for academic eval failure-mode library (`failure_mode_gate.*`)
 - `subagents.enabled` - Master switch for subagent delegation
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
+- Prompt-pack traceability env overrides:
+  - `DEER_FLOW_PROMPT_PACK_ID` (default: `rw.superagent.v1.3`)
+  - `DEER_FLOW_PROMPT_PACK_HASH` (optional manual hash override written into artifacts/ledger metadata)
+  - `DEER_FLOW_PROMPT_LAYER_OVERRIDES` (JSON object for layer-level rollback/A-B, e.g. `{"L2":"v0","L4":"v0","L5":"v0"}`)
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
@@ -349,6 +377,8 @@ Both can be modified at runtime via Gateway API endpoints or `DeerFlowClient` me
 | Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
 | Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
+| Reports | `export_image_report_pdf(thread_id, index_path/index_payload, output_filename)`, `export_latex_diagnostics_markdown(thread_id, ...)` | `{"pdf_path": "..."}`, `{"report_path": "..."}` |
+| Research | `research_upsert_project/get/list`, `research_ingest_fulltext`, `research_plan_narrative`, `research_compile_section`, `research_get_capability_catalog`, `research_assess_capabilities`, `research_compile_latex`, `research_simulate_review`, `research_simulate_peer_review_loop`, `research_generate_hypotheses`, `research_evaluate_academic` | dict |
 
 **Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`. Artifact returns `(bytes, mime_type)` instead of HTTP Response. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
 
@@ -447,9 +477,65 @@ See [docs/summarization.md](docs/summarization.md) for details.
 ### Vision Support
 
 For models with `supports_vision: true`:
-- `ViewImageMiddleware` processes images in conversation
+- `ViewImageMiddleware` processes images in conversation (injects recently viewed image(s) + analysis prompt)
+- `models[*].vision_prompt` optionally overrides the default scientific-image analysis instruction used for injection
 - `view_image_tool` added to agent's toolset
-- Images automatically converted to base64 and injected into state
+- Images automatically converted to base64 and injected into state (jpg/jpeg/png/webp/gif/bmp/svg)
+
+Scientific vision pre-analysis (`scientific_vision.enabled: true`):
+- Runs `ScientificImageReportMiddleware` to generate and inject a structured `<image_report>` (JSON) after `view_image` completes
+- Allows using a text-only main model while delegating image understanding to a separate vision-capable model
+- Writes audit-grade ImageReport artifacts under `/mnt/user-data/outputs/{scientific_vision.artifact_subdir}/` keyed by image SHA-256
+- Reuses cached artifacts when available (`cache_enabled: true` → cache hit skips the vision model call)
+- Optional evidence parsers (`scientific_vision.evidence_enabled: true`) generate ROI-based evidence tables (JSON/CSV) and ROI overlay PNGs for audit and reproducible quantification
+
+### Academic Writing Framework
+
+Structured academic-writing modules under `src/research_writing/`:
+- Project and manuscript state models (`ResearchProject`, `SectionDraft`, reviewer/rebuttal structures)
+- Full-text ingestion adapters for biomed + AI/CS sources (`pubmed`, `europe_pmc`, `openalex`, `dblp`, `arxiv`)
+- Dynamic GraphRAG built during ingest: citation graph (Semantic Scholar + OpenAlex enrichment, co-citation/shared-reference edges, timeline-aware narrative threads) plus claim-centric literature debate graph (support/refute/reconcile edges + synthesis threads)
+- `ClaimConstraintCompiler` hard grounding (`claim -> data_id/citation_id`) with strict/lenient compile modes and automatic binding markers
+- `ClaimConstraintCompiler` now also supports bind-first planning rows (`ClaimMapEntry`): `Claim ID | core_claim | support_data_ids | support_citation_ids | caveat`, plus rewrite-required validation when IDs are missing/invalid
+- `plan_project_section_narrative` and `compile_project_section` persist claim-map metadata with explicit table columns and rewrite-required claim summaries
+- `NarrativePlannerAgent` runs before `compile_section` and now emits structured rhetorical artifacts: CARS introduction moves, MEAL paragraph outline, 5-layer discussion stack, plus `takeaway_message`/`logical_flow`/`figure_storyboard`/multi-round `self_questioning`
+- `plan_project_section_narrative` and `compile_project_section` now persist/return `claim_map` + `claim_map_artifact_path`, so the runtime enforces "plan grounding first, then write sentences"
+- `compile_section` auto-injects professor-style literature-lineage narrative templates from graph threads (`citation_graph_*` + `literature_graph_*`); each injected sentence is explicitly grounded to `graph:*` evidence IDs
+- Narrative strategy layer supports venue-adaptive defaults (`target_venue`) and explicit overrides (`narrative_style`, `narrative_max_templates`, `narrative_evidence_density`) to control tone, insertion count, and evidence density
+- HITL feedback is converted to policy-learning snapshots (recommended tone, conservative-claim preference, validation pressure, ethics/repro requirements) and fed back into runtime compile defaults; `compile_section` now exposes an explicit A/B toggle (`policy_snapshot_auto_adjust_narrative`) to enable/disable policy-driven narrative preset adjustment
+- Policy snapshots now also emit `writing_directives` (from explicit HITL metadata + inferred edit intent) and `compile_section` injects them into the L4 style adapter for thread-level style convergence
+- Single-source-of-truth registry linking facts/figures/tables to generated manuscript text, with semantic fact checks (`unit`/`population`/`condition`/`timepoint`/`ci`/`p_value`/`derived_from`) and unit-normalized tolerance matching (for example `0.05` vs `5%`)
+- Venue-calibrated reviewer simulation and rebuttal planning
+- Multi-agent peer-review loop (`Reviewer -> Author -> Area Chair`) upgraded to explainable policy layers (`IssueDetector`, `RevisionPlanner`, `AreaChairPolicy`) with structured rubric output (`novelty/method/statistics/ethics/reproducibility`) and per-round evidence chains; Reviewer 2 attack coverage includes causal overclaim, missing statistical baseline, alternative hypotheses, ethics/bias risk, and hidden experimental-detail omissions
+- Rebuttal planner/letter rendering now returns structured response categories (`Accept & Modify`, `Clarify`, `Rebut`) so AC decisions can check whether responses are substantive
+- Multi-episode self-play trainer (`review/self-play`) mines hard-negative trajectories and persists reusable artifacts for later tuning
+- Self-play hard negatives are now promoted into a persistent writer few-shot library (`research-writing/self-play/writer-l3-fewshot-library.json`), and `task` auto-injects top examples into `writer-agent` L3 contracts
+- Hypothesis-driven reasoning engine (3-5 ranked mechanism hypotheses scored by data + literature + novelty)
+- Runtime service layer split into `IngestService` / `CompileService` / `ReviewService` / `EvalService` / `LatexService` with a unified append-only `ArtifactLedger`
+- Runtime outputs and artifact ledger metadata now include `prompt_pack_id` + `prompt_pack_hash` + `runtime_strategy` (`narrative` / `peer_review` / `journal_style` / `policy_snapshot`) plus `eval_impact` attribution fields; `compile_section` also writes the governance contract under `details.json.metadata`
+- Prompt pack now uses a layered contract (`L0` constitution, `L1` runtime protocol, `L2` stage recipe, `L3` role contracts, `L4` venue style adapter, `L5` expert reasoning chain) with version/rollback metadata (`prompt_layer_versions`, `prompt_layer_rollbacks`, `prompt_layer_signatures`) injected into runtime payloads
+- `plan_project_section_narrative`, `compile_project_section`, `simulate_peer_review_cycle`, and `build_latex_manuscript` now include `runtime_stage_context` from the standardized lifecycle (`ingest -> plan -> draft -> verify -> revise -> submit`)
+- Subagent role prompts for `writer-agent`, `data-scientist`, `experiment-designer`, scientific auditors, plus non-writing builtins (`general-purpose`, `bash`, `literature-reviewer`, `statistical-analyst`, `code-reviewer`) are now composed via layered L0-L5 headers plus role-specific base instructions to keep role handoff contracts versionable/revertible
+- Added `OrchestrationService` with `run_agentic_research_graph`: a LangGraph state-machine loop (`data-scientist -> experiment-designer -> writer-agent -> reroute`) backed by a shared blackboard artifact
+- Compile/runtime fail-close safety valve: when key evidence is missing, unresolved contradictions persist, HITL rejects key checkpoints, or scientific compliance audit reports critical/high-risk issues (causal overclaim / sample bias / missing ethics / missing reproducibility), output is downgraded to a risk-conservative conclusion template instead of strong claims
+- Hard-grounding sentence gate for core sections: conclusion-like sentences are scanned for missing `[data:*]`/`[citation:*]` bindings and can directly trigger safety-valve downgrade
+- Literature-alignment gate for core sections: citation-heavy discussion sentences are checked for mechanism-conflict synthesis (`[支持]/[反驳]/[调和]`) to avoid plain citation listing; violations can trigger fail-close downgrade
+- Reproducible figure generation metadata now includes fixed random seed, input-file provenance hashes, and environment dependency requirements for rerun auditability
+- `compile_section` now emits engineering quality gates (`deerflow.engineering_gates.v1`) and persists per-thread counters under `research-writing/metrics/compile-gates.json`, including: constraint-violation ratio (`issues.error` + strict downgrade markers), safety-valve trigger/reason distribution, strict HITL blocking rate, sentence-level traceability coverage, and delivery completeness for the minimal compile artifact set
+- `build_latex_manuscript` now emits `latex_quality_gate` and persists cumulative LaTeX compile telemetry under `research-writing/metrics/latex-gates.json` (compile-status distribution + clustered failure types such as missing engine/timeout/compile error/missing PDF)
+
+Academic eval framework under `src/evals/academic/`:
+- Metric modules for groundedness/citation fidelity/consistency/rebuttal completeness/venue fit with venue/domain dynamic weighting and decision calibration (`AUC`, `ECE`, `Brier`, confidence intervals)
+- Dataset evaluator + loader with offline benchmark fixtures in `tests/evals/fixtures/`
+- Layered offline benchmark raw-suite builder (`scripts/build_academic_offline_benchmark_suite.py`) emits Core / Failure-mode / Domain-split templates under `src/evals/academic/templates/offline_benchmark_suite/`, fully compatible with `scripts/import_academic_eval_dataset.py`
+- Offline regression gate runner (`scripts/run_academic_offline_regression.py`) evaluates layered suite with thresholds for Core calibration (`AUC/ECE/Brier`), Domain split separation gap, and Failure-mode red-team coverage; emits JSON/Markdown reports for CI consumption
+- Offline regression additionally supports baseline drift gating (`--baseline-report`) and blocks CI when citation hallucination rate / ECE / Brier degrade; emits `offline-benchmark-drift.json` + `offline-benchmark-drift.md`
+- Online regression automation (`scripts/run_academic_online_regression.py`) compares current run against previous commit snapshot and previous-week snapshot, emits drift alerts (AUC/ECE/Brier/overall/score-gap/status), and persists rolling history for CI trend gates
+- OpenReview conversion utility (`scripts/build_openreview_offline_benchmark.py`) transforms OpenReview JSON/JSONL exports into import-ready raw offline benchmark payloads
+- Failure-mode library gates (`deerflow.failure_mode_gates.v1`) for red-team/regression coverage over seven risk classes: citation hallucination, overclaim, numeric drift, evidence-chain break, style mismatch, superficial rebuttal, ethics gap
+- Failure-mode gate thresholds are configurable in `config.yaml` under `failure_mode_gate` (for CI branch/stage tightening without code changes)
+- Built-in regression dataset `failure_mode_library_v1` plus per-run gate artifact `research-writing/evals/<name>.failure-modes.json`
+- Weekly leaderboard utilities aggregate persisted eval runs by `discipline + venue` and keep ranked history with top-k pruning
 
 ## Code Style
 

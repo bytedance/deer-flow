@@ -106,7 +106,9 @@ FastAPI application providing REST endpoints for non-agent operations.
 │  │ 5. TitleMiddleware       - Auto-generate titles                 │   │
 │  │ 6. TodoListMiddleware    - Task tracking (if plan_mode)         │   │
 │  │ 7. ViewImageMiddleware   - Vision model support                 │   │
-│  │ 8. ClarificationMiddleware - Handle clarifications              │   │
+│  │ 8. ScientificImageReportMiddleware - ImageReport injection (if enabled) │   │
+│  │ 9. AutoScientificClosureMiddleware - Auto-trigger scientific closure tools + inject final scientific-summary template + one-pass format fallback rewrite (missing/low-quality sections; paths must resolve to artifacts) │   │
+│  │ 10. ClarificationMiddleware - Handle clarifications              │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
@@ -120,6 +122,13 @@ FastAPI application providing REST endpoints for non-agent operations.
 │  └──────────────────┘  └──────────────────┘  └──────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+When `scientific_vision.enabled: true`, `ScientificImageReportMiddleware` generates an audit-grade ImageReport index message and persists artifacts under `/mnt/user-data/outputs/{scientific_vision.artifact_subdir}/`, keyed by image SHA-256 (enabling caching and traceability).
+When `scientific_data.enabled: true` (or alongside scientific vision), DeerFlow also enables raw-data analysis + verification tools, including cross-modal consistency auditing and reproducible figure code generation (SVG/PDF + code artifacts). Subagent orchestration additionally includes a `data-scientist` specialist for figure-production workflows.
+
+Research-writing runtime (`src/research_writing/runtime_service.py`) now has two dedicated extension paths:
+- **Journal-style alignment** (`journal_style.py`): before `compile_project_section`, DeerFlow can fetch recent high-citation venue exemplars (OpenAlex), infer sentence/paragraph rhythm directives, and inject them into narrative strategy defaults.
+- **Native LaTeX pipeline** (`latex_pipeline.py`): DeerFlow can assemble manuscript markdown into `.tex`, then optionally invoke local TeX engines (`latexmk` / `pdflatex` / `xelatex`) to produce final PDF artifacts.
 
 ### Thread State
 
@@ -197,10 +206,10 @@ class ThreadState(AgentState):
 │ - present_file      │  │ - web_search        │  │ - github            │
 │ - ask_clarification │  │ - web_fetch         │  │ - filesystem        │
 │ - view_image        │  │ - bash              │  │ - postgres          │
-│                     │  │ - read_file         │  │ - brave-search      │
-│                     │  │ - write_file        │  │ - puppeteer         │
-│                     │  │ - str_replace       │  │ - ...               │
-│                     │  │ - ls                │  │                     │
+│ - extract_image_evidence │ - read_file       │  │ - brave-search      │
+│ - analyze_* raw data │  │ - write_file       │  │ - puppeteer         │
+│ - audit_cross_modal_consistency │ - str_replace │ │ - ...              │
+│ - generate_reproducible_figure │ - ls         │  │                     │
 └─────────────────────┘  └─────────────────────┘  └─────────────────────┘
            │                       │                       │
            └───────────────────────┴───────────────────────┘
