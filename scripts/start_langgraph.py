@@ -48,8 +48,8 @@ def main() -> None:
     if cwd not in sys.path:
         sys.path.append(cwd)
     for dep in config_json.get("dependencies", []):
-        dep_path = Path(cwd) / dep
-        if dep_path.is_dir() and dep_path.exists() and str(dep_path) not in sys.path:
+        dep_path = (Path(cwd) / dep).resolve()
+        if dep_path.is_dir() and str(dep_path) not in sys.path:
             sys.path.append(str(dep_path))
 
     try:
@@ -57,7 +57,7 @@ def main() -> None:
     except ImportError:
         print(
             "langgraph-api is not installed. "
-            'Install it with: uv add "langgraph-cli[inmem]"',
+            'Install it with: uv add "langgraph-api"',
             file=sys.stderr,
         )
         sys.exit(1)

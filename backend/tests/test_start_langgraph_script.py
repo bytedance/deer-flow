@@ -37,7 +37,7 @@ class TestStartLanggraphScript:
             captured.update(kwargs)
 
         with (
-            patch("start_langgraph.run_server", fake_run_server, create=True),
+            patch.dict(os.environ, {"DEER_FLOW_HOME": str(tmp_path / "df-home")}),
             patch(
                 "sys.argv",
                 [
@@ -50,11 +50,9 @@ class TestStartLanggraphScript:
                 ],
             ),
         ):
-            # Patch the import inside main()
             mock_module = MagicMock()
             mock_module.run_server = fake_run_server
             with patch.dict(sys.modules, {"langgraph_api.cli": mock_module}):
-                # Re-import to get the patched version
                 import importlib
 
                 importlib.reload(start_langgraph)
@@ -108,9 +106,12 @@ class TestStartLanggraphScript:
         def fake_run_server(**kwargs):
             captured.update(kwargs)
 
-        with patch(
-            "sys.argv",
-            ["start_langgraph.py", "--config", str(config_file), "--no-browser"],
+        with (
+            patch.dict(os.environ, {"DEER_FLOW_HOME": str(tmp_path / "df-home")}),
+            patch(
+                "sys.argv",
+                ["start_langgraph.py", "--config", str(config_file), "--no-browser"],
+            ),
         ):
             mock_module = MagicMock()
             mock_module.run_server = fake_run_server
