@@ -239,7 +239,7 @@ class DeerFlowClient:
         if isinstance(msg, ToolMessage):
             return {
                 "type": "tool",
-                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
@@ -345,7 +345,7 @@ class DeerFlowClient:
                         type="messages-tuple",
                         data={
                             "type": "tool",
-                            "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                            "content": self._extract_text(msg.content),
                             "name": getattr(msg, "name", None),
                             "tool_call_id": getattr(msg, "tool_call_id", None),
                             "id": msg_id,
