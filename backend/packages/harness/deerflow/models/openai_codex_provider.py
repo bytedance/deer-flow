@@ -54,15 +54,21 @@ class CodexChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "codex-responses"
 
+    def _validate_retry_config(self) -> None:
+        if self.retry_max_attempts < 1:
+            raise ValueError("retry_max_attempts must be >= 1")
+
     def model_post_init(self, __context: Any) -> None:
         """Auto-load Codex CLI credentials."""
+        self._validate_retry_config()
+
         cred = self._load_codex_auth()
         if cred:
             self._access_token = cred.access_token
             self._account_id = cred.account_id
             logger.info(f"Using Codex CLI credential (account: {self._account_id[:8]}...)")
         else:
-            logger.warning("No Codex CLI credentials found in ~/.codex/auth.json")
+            raise ValueError("Codex CLI credential not found. Expected ~/.codex/auth.json or CODEX_AUTH_PATH.")
 
         super().model_post_init(__context)
 
@@ -75,12 +81,14 @@ class CodexChatModel(BaseChatModel):
 
         Returns (instructions, input_items).
         """
-        instructions = ""
+        instructions_parts: list[str] = []
         input_items = []
 
         for msg in messages:
             if isinstance(msg, SystemMessage):
-                instructions = msg.content if isinstance(msg.content, str) else str(msg.content)
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if content:
+                    instructions_parts.append(content)
             elif isinstance(msg, HumanMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 input_items.append({"role": "user", "content": content})
@@ -107,8 +115,7 @@ class CodexChatModel(BaseChatModel):
                     }
                 )
 
-        if not instructions:
-            instructions = "You are a helpful assistant."
+        instructions = "\n\n".join(instructions_parts) or "You are a helpful assistant."
 
         return instructions, input_items
 

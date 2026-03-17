@@ -92,6 +92,36 @@ def test_load_claude_code_credential_ignores_directory_path(tmp_path, monkeypatc
     assert load_claude_code_credential() is None
 
 
+def test_load_claude_code_credential_falls_back_to_default_file_when_override_is_invalid(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    cred_dir = tmp_path / "claude-creds-dir"
+    cred_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_dir))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-default",
+                    "refreshToken": "sk-ant-ort01-default",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        )
+    )
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-default"
+    assert cred.refresh_token == "sk-ant-ort01-default"
+    assert cred.source == "claude-cli-file"
+
+
 def test_load_codex_cli_credential_supports_nested_tokens_shape(tmp_path, monkeypatch):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(

@@ -9,6 +9,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
+from deerflow.models import openai_codex_provider as codex_provider_module
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -498,3 +499,72 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
     # Create second model
     factory_module.create_chat_model(name="minimax-m2.5-highspeed")
     assert captured.get("model") == "MiniMax-M2.5-highspeed"
+
+
+# ---------------------------------------------------------------------------
+# Codex provider reasoning_effort mapping
+# ---------------------------------------------------------------------------
+
+
+class FakeCodexChatModel(FakeChatModel):
+    pass
+
+
+def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=False)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
+
+
+def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True, reasoning_effort="high")
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "high"
+
+
+def test_codex_provider_defaults_reasoning_effort_to_medium(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "medium"

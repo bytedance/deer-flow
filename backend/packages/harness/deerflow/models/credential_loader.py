@@ -105,6 +105,19 @@ def _credential_from_direct_token(access_token: str, source: str) -> ClaudeCodeC
     return ClaudeCodeCredential(access_token=token, source=source)
 
 
+def _iter_claude_code_credential_paths() -> list[Path]:
+    paths: list[Path] = []
+    override_path = os.getenv("CLAUDE_CODE_CREDENTIALS_PATH")
+    if override_path:
+        paths.append(Path(override_path).expanduser())
+
+    default_path = Path.home() / ".claude/.credentials.json"
+    if not paths or paths[-1] != default_path:
+        paths.append(default_path)
+
+    return paths
+
+
 def _extract_claude_code_credential(data: dict[str, Any], source: str) -> ClaudeCodeCredential | None:
     oauth = data.get("claudeAiOauth", {})
     access_token = oauth.get("accessToken", "")
@@ -161,23 +174,18 @@ def load_claude_code_credential() -> ClaudeCodeCredential | None:
         return cred
 
     override_path = os.getenv("CLAUDE_CODE_CREDENTIALS_PATH")
-    if override_path:
-        data = _load_json_file(Path(override_path).expanduser(), "Claude Code credentials")
+    override_path_obj = Path(override_path).expanduser() if override_path else None
+    for cred_path in _iter_claude_code_credential_paths():
+        data = _load_json_file(cred_path, "Claude Code credentials")
         if data is None:
-            return None
+            continue
         cred = _extract_claude_code_credential(data, "claude-cli-file")
         if cred:
-            logger.info(f"Loaded Claude Code OAuth credential from override path (expires_at={cred.expires_at})")
-        return cred
+            source_label = "override path" if override_path_obj is not None and cred_path == override_path_obj else "plaintext file"
+            logger.info(f"Loaded Claude Code OAuth credential from {source_label} (expires_at={cred.expires_at})")
+            return cred
 
-    cred_path = _resolve_credential_path("CLAUDE_CODE_CREDENTIALS_PATH", ".claude/.credentials.json")
-    data = _load_json_file(cred_path, "Claude Code credentials")
-    if data is None:
-        return None
-    cred = _extract_claude_code_credential(data, "claude-cli-file")
-    if cred:
-        logger.info(f"Loaded Claude Code OAuth credential from plaintext file (expires_at={cred.expires_at})")
-    return cred
+    return None
 
 
 def load_codex_cli_credential() -> CodexCliCredential | None:

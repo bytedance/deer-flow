@@ -49,6 +49,10 @@ class ClaudeChatModel(ChatAnthropic):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    def _validate_retry_config(self) -> None:
+        if self.retry_max_attempts < 1:
+            raise ValueError("retry_max_attempts must be >= 1")
+
     def model_post_init(self, __context: Any) -> None:
         """Auto-load credentials and configure OAuth if needed."""
         from pydantic import SecretStr
@@ -58,6 +62,8 @@ class ClaudeChatModel(ChatAnthropic):
             is_oauth_token,
             load_claude_code_credential,
         )
+
+        self._validate_retry_config()
 
         # Extract actual key value (SecretStr.str() returns '**********')
         current_key = ""

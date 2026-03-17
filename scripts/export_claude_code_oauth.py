@@ -15,6 +15,7 @@ import platform
 import shlex
 import subprocess
 import sys
+import tempfile
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -79,8 +80,14 @@ def load_keychain_container(service: str, account: str) -> dict[str, Any]:
 
 def write_credentials_file(output_path: Path, data: dict[str, Any]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(data, indent=2) + "\n")
-    output_path.chmod(0o600)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{output_path.name}.", suffix=".tmp", dir=output_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+        Path(tmp_name).replace(output_path)
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def parse_args() -> argparse.Namespace:
