@@ -22,7 +22,7 @@ help:
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
+	@echo "  make docker-init     - Pull the sandbox image"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
