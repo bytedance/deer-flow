@@ -36,6 +36,17 @@
       ],
       "env": {},
       "description": "PostgreSQL database access"
+    },
+    "omega-memory": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "omega-memory",
+        "serve"
+      ],
+      "env": {},
+      "description": "Persistent memory for AI agents — context compounds across sessions instead of resetting"
     }
   },
   "skills": {}
