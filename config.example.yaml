@@ -225,6 +225,18 @@ tools:
     use: deerflow.sandbox.tools:bash_tool
 
 # ============================================================================
+# Tool Search Configuration (Deferred Tool Loading)
+# ============================================================================
+# When enabled, MCP tools are not loaded into the agent's context directly.
+# Instead, they are listed by name in the system prompt and discoverable
+# via the tool_search tool at runtime.
+# This reduces context usage and improves tool selection accuracy when
+# multiple MCP servers expose a large number of tools.
+
+tool_search:
+  enabled: false
+
+# ============================================================================
 # Sandbox Configuration
 # ============================================================================
 # Choose between local sandbox (direct execution) or Docker-based AIO sandbox
