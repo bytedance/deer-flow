@@ -147,5 +147,20 @@ Save report as: `research_{topic}_{YYYYMMDD}.md`
 3. **Triangulate claims** - 2+ independent sources
 4. **Note conflicting info** - Don't hide contradictions
 5. **Distinguish fact vs opinion** - Label speculation clearly
-6. **Reference sources** - Add source references near claims where applicable
-7. **Update as you go** - Don't wait until end to synthesize
+6. **CRITICAL: Always include inline citations** - Use `[citation:Title](URL)` format immediately after each claim from external sources
+7. **Extract URLs from search results** - web_search returns {title, url, snippet} - always use the URL field
+8. **Update as you go** - Don't wait until end to synthesize
+
+### Citation Examples
+
+**Good - With inline citations:**
+```markdown
+The project gained 10,000 stars within 3 months of launch [citation:GitHub Stats](https://github.com/owner/repo).
+The architecture uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph).
+```
+
+**Bad - Without citations:**
+```markdown
+The project gained 10,000 stars within 3 months of launch.
+The architecture uses LangGraph for workflow orchestration.
+```
