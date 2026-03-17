@@ -92,7 +92,9 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
 
     try:
         data = json.loads(cred_path.read_text())
-        access_token = data.get("access_token") or data.get("token", "")
+        # Support both top-level and nested tokens structure
+        tokens = data.get("tokens", {})
+        access_token = tokens.get("access_token") or data.get("access_token") or data.get("token", "")
         if not access_token:
             logger.debug("Codex CLI credentials file exists but no token found")
             return None

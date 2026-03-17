@@ -36,7 +36,40 @@ models:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
+- Claude Code CLI OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
+- Codex CLI OAuth (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider
+
+**CLI OAuth Providers** (no separate API key needed):
+
+If you have Claude Code or Codex CLI installed, you can use their OAuth credentials directly:
+
+```yaml
+models:
+  # Claude via Claude Code CLI OAuth token (~/.claude/.credentials.json)
+  - name: claude-sonnet-4.6
+    use: deerflow.models.claude_provider:ClaudeChatModel
+    model: claude-sonnet-4-6
+    max_tokens: 16384
+    supports_thinking: true
+    when_thinking_enabled:
+      thinking:
+        type: enabled
+
+  # GPT via Codex CLI OAuth token (~/.codex/auth.json)
+  # Uses chatgpt.com/backend-api/codex/responses endpoint
+  - name: gpt-5.4
+    use: deerflow.models.openai_codex_provider:CodexChatModel
+    model: gpt-5.4
+    reasoning_effort: medium  # none, low, medium, high, xhigh
+    supports_thinking: true
+```
+
+Credential auto-loading priority:
+- **Claude**: `$ANTHROPIC_API_KEY` env var → `~/.claude/.credentials.json`
+- **Codex**: `~/.codex/auth.json` (requires `auth_mode: chatgpt`)
+
+Docker containers mount these credential files automatically (read-only).
 
 For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
 

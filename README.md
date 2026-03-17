@@ -134,6 +134,25 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        api_key: your-actual-api-key-here  # Replace placeholder
    ```
 
+- Option D: Use CLI OAuth credentials (no separate API key needed)
+
+   If you have [Claude Code](https://claude.ai/code) or [Codex CLI](https://github.com/openai/codex) installed, their OAuth credentials can be used directly. Configure `config.yaml` with the CLI providers:
+
+   ```yaml
+   models:
+     - name: claude-sonnet-4.6
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       # auto-loaded from ~/.claude/.credentials.json
+
+     - name: gpt-5.4
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       # auto-loaded from ~/.codex/auth.json
+   ```
+
+   See [Configuration Guide](backend/docs/CONFIGURATION.md) for details.
+
 ### Running the Application
 
 #### Option 1: Docker (Recommended)

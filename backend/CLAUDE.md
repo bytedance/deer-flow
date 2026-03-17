@@ -279,6 +279,15 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
+- For `CodexChatModel`: maps `thinking_enabled` + frontend mode to `reasoning_effort` (none/low/medium/high/xhigh)
+
+### CLI OAuth Providers (`packages/harness/deerflow/models/`)
+
+Custom LLM providers that use OAuth credentials from CLI tools instead of separate API keys:
+
+- **`credential_loader.py`** — Loads tokens from `~/.claude/.credentials.json` (Claude Code) and `~/.codex/auth.json` (Codex CLI). Handles expiration checks and nested token structures.
+- **`claude_provider.py`** (`ClaudeChatModel`) — Extends `ChatAnthropic` with OAuth Bearer auth. Detects `sk-ant-oat` tokens, patches the Anthropic SDK client to use `Authorization: Bearer` instead of `x-api-key`, injects required `anthropic-beta` headers, and disables prompt caching (OAuth limit: 4 cache_control blocks).
+- **`openai_codex_provider.py`** (`CodexChatModel`) — Extends `BaseChatModel` to call `chatgpt.com/backend-api/codex/responses` (OpenAI Responses API). Converts LangChain messages to Responses API format, supports tool calling, reasoning summaries (`additional_kwargs.reasoning_content`), and SSE streaming. Requires `stream: true` and `store: false`.
 
 ### IM Channels System (`app/channels/`)
 
