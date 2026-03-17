@@ -223,6 +223,17 @@ class TestToolSearchTool:
 
 
 class TestDeferredToolsPromptSection:
+    @pytest.fixture(autouse=True)
+    def _mock_app_config(self, monkeypatch):
+        """Provide a minimal AppConfig mock so tests don't need config.yaml."""
+        from unittest.mock import MagicMock
+
+        from deerflow.config.tool_search_config import ToolSearchConfig
+
+        mock_config = MagicMock()
+        mock_config.tool_search = ToolSearchConfig()  # disabled by default
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: mock_config)
+
     def test_empty_when_disabled(self):
         from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
 
@@ -232,7 +243,7 @@ class TestDeferredToolsPromptSection:
 
     def test_empty_when_enabled_but_no_registry(self, monkeypatch):
         from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
-        from deerflow.config.app_config import get_app_config
+        from deerflow.config import get_app_config
 
         monkeypatch.setattr(get_app_config().tool_search, "enabled", True)
         section = get_deferred_tools_prompt_section()
@@ -240,7 +251,7 @@ class TestDeferredToolsPromptSection:
 
     def test_empty_when_enabled_but_empty_registry(self, monkeypatch):
         from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
-        from deerflow.config.app_config import get_app_config
+        from deerflow.config import get_app_config
 
         monkeypatch.setattr(get_app_config().tool_search, "enabled", True)
         set_deferred_registry(DeferredToolRegistry())
@@ -249,7 +260,7 @@ class TestDeferredToolsPromptSection:
 
     def test_lists_tool_names(self, registry, monkeypatch):
         from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
-        from deerflow.config.app_config import get_app_config
+        from deerflow.config import get_app_config
 
         monkeypatch.setattr(get_app_config().tool_search, "enabled", True)
         set_deferred_registry(registry)
