@@ -1,9 +1,8 @@
-"""
-Generate a text-based PowerPoint presentation from a plan JSON file.
-Uses python-pptx only — no external tools or API keys required.
-"""
+"""Generate a text-only PowerPoint presentation from a plan JSON file."""
+
 import argparse
 import json
+import os
 import sys
 
 from pptx import Presentation
@@ -11,86 +10,72 @@ from pptx.dml.color import RGBColor
 from pptx.util import Inches, Pt
 
 
-# Theme: dark background with white text
 BG_COLOR = RGBColor(0x1A, 0x1A, 0x2E)
 ACCENT_COLOR = RGBColor(0x00, 0xB4, 0xD8)
 TITLE_COLOR = RGBColor(0xFF, 0xFF, 0xFF)
 BODY_COLOR = RGBColor(0xCC, 0xCC, 0xCC)
 
 
-def set_slide_background(slide, color: RGBColor):
+def set_slide_background(slide, color: RGBColor) -> None:
     fill = slide.background.fill
     fill.solid()
     fill.fore_color.rgb = color
 
 
-def add_title_slide(prs: Presentation, title: str, subtitle: str = ""):
-    layout = prs.slide_layouts[6]  # blank
-    slide = prs.slides.add_slide(layout)
+def add_title_slide(prs: Presentation, title: str, subtitle: str = "") -> None:
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
     set_slide_background(slide, BG_COLOR)
 
-    # Title
-    txBox = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11.33), Inches(1.5))
-    tf = txBox.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.text = title
-    p.font.size = Pt(44)
-    p.font.bold = True
-    p.font.color.rgb = TITLE_COLOR
+    title_box = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11.33), Inches(1.5))
+    title_frame = title_box.text_frame
+    title_frame.word_wrap = True
+    title_paragraph = title_frame.paragraphs[0]
+    title_paragraph.text = title
+    title_paragraph.font.size = Pt(44)
+    title_paragraph.font.bold = True
+    title_paragraph.font.color.rgb = TITLE_COLOR
 
-    # Accent line
     slide.shapes.add_connector(1, Inches(1), Inches(4.2), Inches(5), Inches(4.2))
 
-    # Subtitle
     if subtitle:
-        txBox2 = slide.shapes.add_textbox(Inches(1), Inches(4.4), Inches(11.33), Inches(0.8))
-        tf2 = txBox2.text_frame
-        p2 = tf2.paragraphs[0]
-        p2.text = subtitle
-        p2.font.size = Pt(24)
-        p2.font.color.rgb = ACCENT_COLOR
+        subtitle_box = slide.shapes.add_textbox(Inches(1), Inches(4.4), Inches(11.33), Inches(0.8))
+        subtitle_frame = subtitle_box.text_frame
+        subtitle_paragraph = subtitle_frame.paragraphs[0]
+        subtitle_paragraph.text = subtitle
+        subtitle_paragraph.font.size = Pt(24)
+        subtitle_paragraph.font.color.rgb = ACCENT_COLOR
 
 
-def add_content_slide(prs: Presentation, title: str, key_points: list[str]):
-    layout = prs.slide_layouts[6]  # blank
-    slide = prs.slides.add_slide(layout)
+def add_content_slide(prs: Presentation, title: str, key_points: list[str]) -> None:
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
     set_slide_background(slide, BG_COLOR)
 
-    # Title
-    txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12.33), Inches(0.9))
-    tf = txBox.text_frame
-    p = tf.paragraphs[0]
-    p.text = title
-    p.font.size = Pt(32)
-    p.font.bold = True
-    p.font.color.rgb = ACCENT_COLOR
+    title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12.33), Inches(0.9))
+    title_frame = title_box.text_frame
+    title_paragraph = title_frame.paragraphs[0]
+    title_paragraph.text = title
+    title_paragraph.font.size = Pt(32)
+    title_paragraph.font.bold = True
+    title_paragraph.font.color.rgb = ACCENT_COLOR
 
-    # Divider line
     slide.shapes.add_connector(1, Inches(0.5), Inches(1.35), Inches(12.83), Inches(1.35))
 
-    # Body
-    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.6), Inches(12.33), Inches(5.4))
-    tf2 = txBox2.text_frame
-    tf2.word_wrap = True
+    body_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.6), Inches(12.33), Inches(5.4))
+    body_frame = body_box.text_frame
+    body_frame.word_wrap = True
 
-    for i, point in enumerate(key_points):
-        if i == 0:
-            p = tf2.paragraphs[0]
-        else:
-            p = tf2.add_paragraph()
-        p.text = f"▸  {point}"
-        p.font.size = Pt(20)
-        p.font.color.rgb = BODY_COLOR
-        p.space_after = Pt(8)
+    for index, point in enumerate(key_points):
+        paragraph = body_frame.paragraphs[0] if index == 0 else body_frame.add_paragraph()
+        paragraph.text = f"- {point}"
+        paragraph.font.size = Pt(20)
+        paragraph.font.color.rgb = BODY_COLOR
+        paragraph.space_after = Pt(8)
 
 
 def generate_ppt(plan_file: str, output_file: str) -> str:
-    # Allow UTF-8 with BOM for better compatibility across editors/OSes.
-    with open(plan_file, "r", encoding="utf-8-sig") as f:
-        plan = json.load(f)
+    with open(plan_file, "r", encoding="utf-8-sig") as file:
+        plan = json.load(file)
 
-    import os
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     prs = Presentation()
@@ -120,6 +105,6 @@ if __name__ == "__main__":
 
     try:
         print(generate_ppt(args.plan_file, args.output_file))
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except Exception as error:
+        print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
