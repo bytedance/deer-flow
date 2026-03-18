@@ -176,7 +176,10 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
 def _fact_content_key(content: Any) -> str | None:
     if not isinstance(content, str):
         return None
-    return content.strip()
+    stripped = content.strip()
+    if not stripped:
+        return None
+    return stripped
 
 
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
@@ -349,19 +352,27 @@ class MemoryUpdater:
             current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
         # Add new facts
-        existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
+        existing_fact_keys = {
+            fact_key
+            for fact_key in (
+                _fact_content_key(fact.get("content"))
+                for fact in current_memory.get("facts", [])
+            )
+            if fact_key is not None
+        }
         new_facts = update_data.get("newFacts", [])
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
-                content = fact.get("content", "")
-                fact_key = _fact_content_key(content)
+                raw_content = fact.get("content", "")
+                normalized_content = raw_content.strip()
+                fact_key = _fact_content_key(normalized_content)
                 if fact_key is not None and fact_key in existing_fact_keys:
                     continue
 
                 fact_entry = {
                     "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": content,
+                    "content": normalized_content,
                     "category": fact.get("category", "context"),
                     "confidence": confidence,
                     "createdAt": now,
