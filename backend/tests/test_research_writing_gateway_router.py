@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,6 +24,173 @@ def _make_app() -> FastAPI:
     app = FastAPI()
     app.include_router(router)
     return app
+
+
+_TRUE_CHAIN_FAKE_JOURNAL_BUNDLE = {
+    "style_summary": {"avg_sentence_words": 19.0},
+    "writing_directives": ["Keep concise evidence-first tone."],
+    "dynamic_fewshot_recommended_top_k": 2,
+    "dynamic_fewshot_recommended_min_score": 0.0,
+    "dynamic_fewshot_vault": {
+        "schema_version": "deerflow.dynamic_fewshot_vault.v1",
+        "triplet_schema_version": "deerflow.style_triplet.v1",
+        "venue_name": "Nature",
+        "resolved_journal_name": "Nature",
+        "vector_dim": 48,
+        "entry_count": 2,
+        "built_at": "2026-03-18T00:00:00+00:00",
+        "entries": [
+            {
+                "entry_id": "v1",
+                "paper_title": "Nature sample A",
+                "paragraph": "We report a compact mechanism-first narrative with explicit evidence.",
+                "logic_chain": "problem->method->evidence",
+                "evidence_density": 0.4,
+                "syntax_structure": "balanced_compound",
+                "vector": [0.1] * 48,
+                "doi": "10.1000/nature.1",
+                "year": 2024,
+            },
+            {
+                "entry_id": "v2",
+                "paper_title": "Nature sample B",
+                "paragraph": "Here we demonstrate concise claim-evidence progression under controlled cohorts.",
+                "logic_chain": "claim->evidence",
+                "evidence_density": 0.35,
+                "syntax_structure": "short_direct",
+                "vector": [0.08] * 48,
+                "doi": "10.1000/nature.2",
+                "year": 2023,
+            },
+        ],
+    },
+}
+
+
+@pytest.fixture
+def true_chain_journal_bundle() -> dict:
+    """Shared dynamic few-shot bundle fixture for strict/lenient A/B cases."""
+    return copy.deepcopy(_TRUE_CHAIN_FAKE_JOURNAL_BUNDLE)
+
+
+def _seed_true_chain_entities(
+    client: TestClient,
+    *,
+    thread_id: str,
+    project_id: str,
+    title: str,
+    include_graph_signal: bool = False,
+) -> None:
+    section_evidence_ids = ["ev1"]
+    if include_graph_signal:
+        section_evidence_ids.append("graph:ev-literature-note")
+
+    upsert_resp = client.post(
+        f"/api/threads/{thread_id}/research/projects/upsert",
+        json={
+            "project_id": project_id,
+            "title": title,
+            "discipline": "biomed",
+            "target_venue": "Nature",
+            "sections": [
+                {
+                    "section_id": "discussion",
+                    "section_name": "Discussion",
+                    "status": "outlined",
+                    "content": "Initial discussion draft with mechanism uncertainty.",
+                    "claim_ids": ["c1"],
+                    "evidence_ids": section_evidence_ids,
+                }
+            ],
+        },
+    )
+    assert upsert_resp.status_code == 200
+
+    claim_resp = client.post(
+        f"/api/threads/{thread_id}/research/claims/upsert",
+        json={
+            "claim_id": "c1",
+            "text": "The pathway likely contributes to the outcome.",
+            "claim_type": "weak",
+            "evidence_ids": ["ev1"],
+            "citation_ids": [],
+        },
+    )
+    assert claim_resp.status_code == 200
+
+    evidence_resp = client.post(
+        f"/api/threads/{thread_id}/research/evidence/upsert",
+        json={
+            "evidence_id": "ev1",
+            "evidence_type": "paper_passage",
+            "summary": "However, not significant artifact indicates inconsistent signal under batch shift.",
+            "source_ref": "/mnt/user-data/outputs/research-writing/raw/ev1.csv",
+            "citation_ids": [],
+            "confidence": 0.32,
+        },
+    )
+    assert evidence_resp.status_code == 200
+
+    if include_graph_signal:
+        graph_evidence_resp = client.post(
+            f"/api/threads/{thread_id}/research/evidence/upsert",
+            json={
+                "evidence_id": "graph:ev-literature-note",
+                "evidence_type": "manual_note",
+                "summary": "Literature debate graph highlights competing support/refute edges.",
+                "quote": "Citation graph neighborhood indicates reconcile path.",
+                "source_ref": "/mnt/user-data/outputs/research-writing/raw/graph-note.json",
+                "citation_ids": [],
+                "confidence": 0.64,
+            },
+        )
+        assert graph_evidence_resp.status_code == 200
+
+
+def _compile_true_chain_section(
+    client: TestClient,
+    *,
+    thread_id: str,
+    project_id: str,
+    falsification_fail_close: str,
+    reasoning_mode: str | None,
+):
+    request_payload: dict[str, object] = {
+        "project_id": project_id,
+        "section_id": "discussion",
+        "mode": "lenient",
+        "auto_peer_review": False,
+        "auto_hypothesis": True,
+        "journal_style_enabled": True,
+        "dynamic_retrieval_top_k": 2,
+        "dynamic_retrieval_min_score": 0.0,
+        "task_complexity_score": 0.92,
+        "analysis_confidence": 0.25,
+        "role_contract_auto_tighten": True,
+        "min_competing_hypotheses": 5,
+        "min_survivors_required": 2,
+        "falsification_fail_close": falsification_fail_close,
+        "claim_map_json": {
+            "schema_version": "deerflow.claim_map.v1",
+            "claims": [
+                {
+                    "claim_id": "c1",
+                    "claim_type": "weak",
+                    "sentence_type": "general",
+                    "sentence_draft": "The pathway likely contributes to the outcome. [data:ev1]",
+                    "data_ids": ["ev1"],
+                    "citation_ids": [],
+                }
+            ],
+        },
+    }
+    if reasoning_mode is not None:
+        request_payload["hypothesis_reasoning_mode"] = reasoning_mode
+
+    return client.post(
+        f"/api/threads/{thread_id}/research/compile/section",
+        json=request_payload,
+    )
 
 
 def test_research_project_crud_and_eval(tmp_path):
@@ -523,6 +692,95 @@ def test_research_fulltext_ingest_returns_citation_graph_fields(tmp_path):
             assert payload["persisted_citation_ids"] == ["10.1234/demo", "s2:S1"]
 
 
+def test_research_prompt_optimizer_endpoint(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            with patch(
+                "src.gateway.routers.research_writing.run_prompt_layer_optimizer",
+                return_value={
+                    "optimizer_schema_version": "deerflow.prompt_optimizer.v1",
+                    "thread_id": "thread-opt",
+                    "generated_at": "2026-03-18T00:00:00Z",
+                    "status": "candidate_generated",
+                    "optimizer_config": {
+                        "enabled": True,
+                        "optimizer_mode": "llm_structured_patch",
+                        "model_name": "optimizer-llm",
+                        "thinking_enabled": True,
+                        "temperature": 0.2,
+                        "max_candidate_count": 2,
+                        "fallback_to_rules": True,
+                    },
+                    "optimizer_mode_requested": "llm_structured_patch",
+                    "optimizer_mode_used": "llm_structured_patch",
+                    "fallback_reason": None,
+                    "signals": {"binding_failures": True},
+                    "changes": [{"layer_id": "L1", "new_version": "v2"}],
+                    "change_count": 1,
+                    "candidate_prompt_layers_path": "/mnt/user-data/outputs/research-writing/prompt-optimizer/prompt_layers.candidate.yaml",
+                    "candidate_prompt_patch_path": "/mnt/user-data/outputs/research-writing/prompt-optimizer/prompt_patch_plan.candidate.json",
+                    "applied_prompt_patch": False,
+                    "applied_prompt_layers_path": None,
+                    "source_paths": {
+                        "compile_metrics_path": "/mnt/user-data/outputs/research-writing/metrics/compile-gates.json",
+                    },
+                    "llm_candidate": {"llm_model_name": "optimizer-llm"},
+                    "validation_issues": [],
+                    "offline_validation": {"status": "pass"},
+                },
+            ) as optimizer_mock:
+                resp = client.post(
+                    "/api/threads/thread-opt/research/metrics/prompt-optimizer",
+                    json={
+                        "compile_metrics_path": "/mnt/user-data/outputs/research-writing/metrics/compile-gates.json",
+                        "offline_regression_report_path": "/mnt/user-data/outputs/research-writing/evals/offline-benchmark-regression.json",
+                        "prompt_layers_path": "/tmp/prompt_layers.yaml",
+                        "apply_prompt_patch": False,
+                        "run_offline_validation": True,
+                        "dataset_version": "2026_03",
+                        "optimizer_config": {
+                            "enabled": True,
+                            "optimizer_mode": "llm_structured_patch",
+                            "model_name": "optimizer-llm",
+                            "thinking_enabled": True,
+                            "temperature": 0.2,
+                            "max_candidate_count": 2,
+                            "fallback_to_rules": True,
+                        },
+                    },
+                )
+
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["thread_id"] == "thread-opt"
+            assert payload["status"] == "candidate_generated"
+            assert payload["optimizer_config"]["model_name"] == "optimizer-llm"
+            assert payload["optimizer_mode_used"] == "llm_structured_patch"
+            _, kwargs = optimizer_mock.call_args
+            assert kwargs["thread_id"] == "thread-opt"
+            assert kwargs["compile_metrics_path"] == "/mnt/user-data/outputs/research-writing/metrics/compile-gates.json"
+            assert kwargs["offline_regression_report_path"] == "/mnt/user-data/outputs/research-writing/evals/offline-benchmark-regression.json"
+            assert kwargs["prompt_layers_path"] == "/tmp/prompt_layers.yaml"
+            assert kwargs["apply_prompt_patch"] is False
+            assert kwargs["run_offline_validation"] is True
+            assert kwargs["dataset_version"] == "2026_03"
+            assert kwargs["optimizer_config"] == {
+                "enabled": True,
+                "optimizer_mode": "llm_structured_patch",
+                "model_name": "optimizer-llm",
+                "thinking_enabled": True,
+                "temperature": 0.2,
+                "max_candidate_count": 2,
+                "fallback_to_rules": True,
+            }
+
+
 def test_compile_section_accepts_narrative_strategy_controls(tmp_path):
     paths_instance = _make_paths(tmp_path)
 
@@ -630,6 +888,21 @@ def test_compile_section_accepts_narrative_strategy_controls(tmp_path):
                             "domain_traditionalist",
                         ],
                         "peer_review_ab_variant": "A",
+                        "claim_map_json": {
+                            "schema_version": "deerflow.claim_map.v1",
+                            "claims": [
+                                {
+                                    "claim_id": "c1",
+                                    "claim_type": "strong",
+                                    "sentence_type": "general",
+                                    "sentence_draft": "Draft sentence [data:ev1] [citation:cit1]",
+                                    "data_ids": ["ev1"],
+                                    "citation_ids": ["cit1"],
+                                    "support_data_ids": ["ev1"],
+                                    "support_citation_ids": ["cit1"],
+                                }
+                            ],
+                        },
                     },
                 )
 
@@ -668,6 +941,343 @@ def test_compile_section_accepts_narrative_strategy_controls(tmp_path):
             assert call_kwargs["narrative_include_storyboard"] is True
             assert call_kwargs["reviewer2_styles"] == ["statistical_tyrant", "domain_traditionalist"]
             assert call_kwargs["peer_review_ab_variant"] == "A"
+            assert isinstance(call_kwargs["claim_map_json"], dict)
+            assert call_kwargs["require_claim_map_submission"] is True
+
+
+def test_compile_section_rejects_missing_claim_map_when_required(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/threads/thread-compile/research/compile/section",
+                json={
+                    "project_id": "p",
+                    "section_id": "discussion",
+                    "mode": "strict",
+                    "require_claim_map_submission": True,
+                },
+            )
+
+    assert resp.status_code == 422
+    detail = str(resp.json())
+    assert "claim_map_json" in detail
+
+
+def test_compile_section_response_exposes_l3_l4_l5_coordination_fields(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            with patch(
+                "src.gateway.routers.research_writing.compile_project_section",
+                return_value={
+                    "section_id": "discussion",
+                    "compiled_text": "compiled text",
+                    "issues": [],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/compiled/p-discussion.md",
+                    "details_artifact_path": "/mnt/user-data/outputs/research-writing/compiled/p-discussion.json",
+                    "claim_map": {
+                        "schema_version": "deerflow.claim_map.v1",
+                        "summary": {"total_claim_ids": 1},
+                        "claims": [],
+                    },
+                    "claim_map_artifact_path": "/mnt/user-data/outputs/research-writing/claim-maps/p-discussion.json",
+                    "resolved_venue": "Nature",
+                    "narrative_strategy": {
+                        "tone": "conservative",
+                        "max_templates": 2,
+                        "evidence_density": "high",
+                        "auto_by_section_type": True,
+                        "section_type": "discussion",
+                    },
+                    "adaptive_role_contract": {
+                        "schema_version": "deerflow.role_contract_adapter.v1",
+                        "tightened": True,
+                        "writer_claim_modality": "hedged",
+                        "auditor_escalation_policy": "always_on",
+                    },
+                    "dynamic_few_shot_context": [
+                        {
+                            "entry_id": "v1",
+                            "paper_title": "Nature sample",
+                            "paragraph": "Mechanism-to-evidence compact paragraph.",
+                            "similarity_score": 0.42,
+                        }
+                    ],
+                    "dynamic_few_shot_retrieval": {
+                        "enabled": True,
+                        "top_k": 2,
+                        "min_score": 0.05,
+                        "match_count": 1,
+                    },
+                    "hypothesis_bundle": {
+                        "reasoning_mode": "tot",
+                        "falsification_fail_close": "strict",
+                        "claim_map_gate_blocked": True,
+                        "surviving_hypothesis_ids": [],
+                        "claim_map_ready_hypotheses": [],
+                    },
+                },
+            ):
+                resp = client.post(
+                    "/api/threads/thread-compile/research/compile/section",
+                    json={
+                        "project_id": "p",
+                        "section_id": "discussion",
+                        "mode": "strict",
+                        "claim_map_json": {
+                            "schema_version": "deerflow.claim_map.v1",
+                            "claims": [
+                                {
+                                    "claim_id": "c1",
+                                    "claim_type": "strong",
+                                    "sentence_type": "general",
+                                    "sentence_draft": "Draft sentence [data:ev1] [citation:cit1]",
+                                    "data_ids": ["ev1"],
+                                    "citation_ids": ["cit1"],
+                                }
+                            ],
+                        },
+                    },
+                )
+
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["adaptive_role_contract"]["tightened"] is True
+            assert payload["adaptive_role_contract"]["writer_claim_modality"] == "hedged"
+            assert len(payload["dynamic_few_shot_context"]) == 1
+            assert payload["dynamic_few_shot_retrieval"]["enabled"] is True
+            assert payload["hypothesis_bundle"]["claim_map_gate_blocked"] is True
+
+
+@pytest.mark.parametrize(
+    ("falsification_fail_close", "reasoning_mode", "expected_claim_map_gate_blocked", "expected_bundle_reasoning_mode"),
+    [
+        ("strict", "tot", True, "tot"),
+        ("strict", "got", True, "got"),
+        # "auto" is a request-level override that runtime resolves using evidence signals.
+        # In this fixture, no GraphRAG/citation-graph manual notes are present, so "auto" resolves to ToT.
+        ("strict", "auto", True, "tot"),
+        ("lenient", "tot", False, "tot"),
+        ("lenient", "got", False, "got"),
+        ("lenient", "auto", False, "tot"),
+    ],
+)
+def test_compile_section_gateway_runtime_true_chain_matrix(
+    tmp_path,
+    true_chain_journal_bundle,
+    falsification_fail_close: str,
+    reasoning_mode: str,
+    expected_claim_map_gate_blocked: bool,
+    expected_bundle_reasoning_mode: str,
+):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+        patch("src.research_writing.runtime_service.build_journal_style_bundle", return_value=true_chain_journal_bundle),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            suffix = f"{falsification_fail_close}-{reasoning_mode}"
+            _seed_true_chain_entities(
+                client,
+                thread_id=f"thread-true-chain-{suffix}",
+                project_id=f"p-true-chain-{suffix}",
+                title=f"Gateway runtime chain {suffix}",
+            )
+            compile_resp = _compile_true_chain_section(
+                client,
+                thread_id=f"thread-true-chain-{suffix}",
+                project_id=f"p-true-chain-{suffix}",
+                falsification_fail_close=falsification_fail_close,
+                reasoning_mode=reasoning_mode,
+            )
+
+            assert compile_resp.status_code == 200
+            payload = compile_resp.json()
+            assert payload["adaptive_role_contract"]["tightened"] is True
+            assert isinstance(payload["dynamic_few_shot_context"], list)
+            assert len(payload["dynamic_few_shot_context"]) >= 1
+            assert payload["dynamic_few_shot_retrieval"]["enabled"] is True
+            assert payload["dynamic_few_shot_retrieval"]["match_count"] >= 1
+            assert payload["hypothesis_reasoning_mode"] == reasoning_mode
+            assert payload["hypothesis_bundle"]["reasoning_mode"] == expected_bundle_reasoning_mode
+            assert payload["hypothesis_bundle"]["falsification_fail_close"] == falsification_fail_close
+            assert payload["hypothesis_bundle"]["claim_map_gate_blocked"] is expected_claim_map_gate_blocked
+            if expected_claim_map_gate_blocked:
+                assert "Hypothesis falsification gate blocked Claim Map promotion" in " ".join(payload.get("safety_valve_reasons", []))
+            else:
+                assert len(payload["hypothesis_bundle"]["surviving_hypothesis_ids"]) >= 1
+                assert "Hypothesis falsification gate blocked Claim Map promotion" not in " ".join(payload.get("safety_valve_reasons", []))
+
+
+def test_compile_section_gateway_runtime_auto_reasoning_default_chain_infers_got(tmp_path, true_chain_journal_bundle):
+    paths_instance = _make_paths(tmp_path)
+    prompt_pack_auto_default = {
+        "prompt_pack_id": "rw.superagent.gateway-test",
+        "prompt_pack_hash": "gatewayautochain01",
+        "prompt_layer_schema_version": "deerflow.prompt_layers.v1",
+        "prompt_layer_versions": {"L0": "v1", "L1": "v1", "L2": "v1", "L3": "v1", "L4": "v1", "L5": "v2"},
+        "prompt_layer_rollbacks": {"L0": "v0", "L1": "v0", "L2": "v0", "L3": "v0", "L4": "v0", "L5": "v0"},
+        "prompt_layer_parameter_space": {
+            "L5": {
+                "reasoning_mode": {"default": "auto"},
+                "min_competing_hypotheses": {"default": 3},
+                "min_survivors_required": {"default": 1},
+                "falsification_fail_close": {"default": "lenient"},
+            }
+        },
+    }
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+        patch("src.research_writing.runtime_service.get_prompt_pack_metadata", return_value=prompt_pack_auto_default),
+        patch("src.research_writing.runtime_service.build_journal_style_bundle", return_value=true_chain_journal_bundle),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            _seed_true_chain_entities(
+                client,
+                thread_id="thread-true-chain-auto-default",
+                project_id="p-true-chain-auto-default",
+                title="Gateway runtime auto default chain",
+                include_graph_signal=True,
+            )
+            compile_resp = _compile_true_chain_section(
+                client,
+                thread_id="thread-true-chain-auto-default",
+                project_id="p-true-chain-auto-default",
+                falsification_fail_close="lenient",
+                reasoning_mode=None,
+            )
+
+            assert compile_resp.status_code == 200
+            payload = compile_resp.json()
+            assert payload["hypothesis_reasoning_mode"] == "auto"
+            assert payload["hypothesis_bundle"]["reasoning_mode"] == "got"
+            traces = payload["hypothesis_bundle"].get("reasoning_audit_traces") or []
+            assert len(traces) >= 1
+            assert all(str(row.get("reasoning_mode") or "").lower() == "got" for row in traces)
+
+
+def test_compile_section_auto_claim_map_requirement_intro_is_optional(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            with patch(
+                "src.gateway.routers.research_writing.compile_project_section",
+                return_value={
+                    "section_id": "intro",
+                    "compiled_text": "compiled text",
+                    "issues": [],
+                    "artifact_path": "/mnt/user-data/outputs/research-writing/compiled/p-intro.md",
+                    "details_artifact_path": "/mnt/user-data/outputs/research-writing/compiled/p-intro.json",
+                    "claim_map": {"schema_version": "deerflow.claim_map.v1", "summary": {"total_claim_ids": 0}, "claims": []},
+                    "claim_map_artifact_path": "/mnt/user-data/outputs/research-writing/claim-maps/p-intro.json",
+                },
+            ) as compile_mock:
+                resp = client.post(
+                    "/api/threads/thread-compile/research/compile/section",
+                    json={
+                        "project_id": "p",
+                        "section_id": "intro",
+                        "mode": "strict",
+                    },
+                )
+
+            assert resp.status_code == 200
+            _, call_kwargs = compile_mock.call_args
+            assert call_kwargs["require_claim_map_submission"] is False
+
+
+def test_verify_claim_map_endpoint_auto_requires_discussion_submission(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            with patch(
+                "src.gateway.routers.research_writing.verify_project_section_claim_map",
+                return_value={
+                    "project_id": "p",
+                    "section_id": "discussion",
+                    "claim_map": {
+                        "schema_version": "deerflow.claim_map.v1",
+                        "summary": {"total_claim_ids": 1},
+                        "claims": [],
+                    },
+                    "claim_map_artifact_path": "/mnt/user-data/outputs/research-writing/claim-maps/p-discussion.verified.json",
+                    "claim_map_validation": {"mode": "submitted", "required_submission": True},
+                },
+            ) as verify_mock:
+                resp = client.post(
+                    "/api/threads/thread-verify/research/verify/claim-map",
+                    json={
+                        "project_id": "p",
+                        "section_id": "discussion",
+                        "claim_map_json": {
+                            "claims": [
+                                {
+                                    "claim_id": "c1",
+                                    "claim_type": "weak",
+                                    "sentence_type": "general",
+                                    "sentence_draft": "Grounded claim [data:ev1]",
+                                    "data_ids": ["ev1"],
+                                    "citation_ids": [],
+                                }
+                            ]
+                        },
+                    },
+                )
+
+            assert resp.status_code == 200
+            _, call_kwargs = verify_mock.call_args
+            assert call_kwargs["require_claim_map_submission"] is True
+            assert isinstance(call_kwargs["claim_map_json"], dict)
+
+
+def test_verify_claim_map_rejects_missing_submission_when_required(tmp_path):
+    paths_instance = _make_paths(tmp_path)
+
+    with (
+        patch("src.research_writing.runtime_service.get_paths", return_value=paths_instance),
+        patch("src.gateway.path_utils.get_paths", return_value=paths_instance),
+    ):
+        app = _make_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/threads/thread-verify/research/verify/claim-map",
+                json={
+                    "project_id": "p",
+                    "section_id": "discussion",
+                    "require_claim_map_submission": True,
+                },
+            )
+
+    assert resp.status_code == 422
+    detail = str(resp.json())
+    assert "claim_map_json" in detail
 
 
 def test_plan_narrative_endpoint(tmp_path):

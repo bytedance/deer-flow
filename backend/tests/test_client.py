@@ -2117,12 +2117,61 @@ class TestGatewayConformance:
                 section_id="intro",
                 reviewer2_styles=["statistical_tyrant"],
                 peer_review_ab_variant="A",
+                claim_map_json={
+                    "claims": [
+                        {
+                            "claim_id": "c1",
+                            "claim_type": "strong",
+                            "sentence_type": "general",
+                            "sentence_draft": "Draft sentence [data:ev1] [citation:cit1]",
+                            "data_ids": ["ev1"],
+                            "citation_ids": ["cit1"],
+                        }
+                    ]
+                },
+                require_claim_map_submission=True,
             )
         parsed = SectionCompileResponse(**result)
         assert parsed.section_id == "intro"
         _, kwargs = compile_mock.call_args
         assert kwargs["reviewer2_styles"] == ["statistical_tyrant"]
         assert kwargs["peer_review_ab_variant"] == "A"
+        assert isinstance(kwargs["claim_map_json"], dict)
+        assert kwargs["require_claim_map_submission"] is True
+
+    def test_research_verify_claim_map_only(self, client):
+        with patch(
+            "src.research_writing.runtime_service.verify_project_section_claim_map",
+            return_value={
+                "project_id": "p1",
+                "section_id": "discussion",
+                "claim_map": {"schema_version": "deerflow.claim_map.v1", "summary": {"total_claim_ids": 1}, "claims": []},
+                "claim_map_artifact_path": "/mnt/user-data/outputs/research-writing/claim-maps/p1-discussion.verified.json",
+                "claim_map_validation": {"status": "passed"},
+            },
+        ) as verify_mock:
+            result = client.research_verify_claim_map_only(
+                "thread-1",
+                project_id="p1",
+                section_id="discussion",
+                claim_map_json={
+                    "claims": [
+                        {
+                            "claim_id": "c1",
+                            "claim_type": "weak",
+                            "sentence_type": "general",
+                            "sentence_draft": "Draft sentence [data:ev1]",
+                            "data_ids": ["ev1"],
+                            "citation_ids": [],
+                        }
+                    ]
+                },
+                require_claim_map_submission=True,
+            )
+        assert result["section_id"] == "discussion"
+        _, kwargs = verify_mock.call_args
+        assert isinstance(kwargs["claim_map_json"], dict)
+        assert kwargs["require_claim_map_submission"] is True
 
     def test_research_plan_narrative(self, client):
         with patch(
@@ -2287,6 +2336,84 @@ class TestGatewayConformance:
             min_traceability_coverage_rate=0.85,
             min_delivery_completeness_rate=1.0,
             min_latex_success_rate=0.9,
+        )
+
+    def test_research_optimize_prompt_layers(self, client):
+        with patch(
+            "src.research_writing.runtime_service.run_prompt_layer_optimizer",
+            return_value={
+                "optimizer_schema_version": "deerflow.prompt_optimizer.v1",
+                "thread_id": "thread-1",
+                "generated_at": "2026-03-18T00:00:00Z",
+                "status": "candidate_generated",
+                "optimizer_config": {
+                    "enabled": True,
+                    "optimizer_mode": "llm_structured_patch",
+                    "model_name": "optimizer-llm",
+                    "thinking_enabled": True,
+                    "temperature": 0.1,
+                    "max_candidate_count": 2,
+                    "fallback_to_rules": True,
+                },
+                "optimizer_mode_requested": "llm_structured_patch",
+                "optimizer_mode_used": "llm_structured_patch",
+                "fallback_reason": None,
+                "signals": {"binding_failures": True},
+                "changes": [{"layer_id": "L1", "new_version": "v2"}],
+                "change_count": 1,
+                "candidate_prompt_layers_path": "/mnt/user-data/outputs/research-writing/prompt-optimizer/prompt_layers.candidate.yaml",
+                "candidate_prompt_patch_path": "/mnt/user-data/outputs/research-writing/prompt-optimizer/prompt_patch_plan.candidate.json",
+                "applied_prompt_patch": False,
+                "applied_prompt_layers_path": None,
+                "source_paths": {},
+                "llm_candidate": {"summary": "tighten L1"},
+                "validation_issues": [],
+                "offline_validation": {"status": "pass"},
+            },
+        ) as optimizer_mock:
+            result = client.research_optimize_prompt_layers(
+                "thread-1",
+                compile_metrics_path="/mnt/user-data/outputs/research-writing/metrics/compile-gates.json",
+                offline_regression_report_path="/mnt/user-data/outputs/research-writing/evals/offline-benchmark-regression.json",
+                prompt_layers_path="/tmp/prompt_layers.yaml",
+                apply_prompt_patch=False,
+                run_offline_validation=True,
+                dataset_version="2026_03",
+                optimizer_config={
+                    "enabled": True,
+                    "optimizer_mode": "llm_structured_patch",
+                    "model_name": "optimizer-llm",
+                    "thinking_enabled": True,
+                    "temperature": 0.1,
+                    "max_candidate_count": 2,
+                    "fallback_to_rules": True,
+                },
+            )
+        assert result["thread_id"] == "thread-1"
+        assert result["status"] == "candidate_generated"
+        assert result["optimizer_config"]["model_name"] == "optimizer-llm"
+        assert result["optimizer_mode_used"] == "llm_structured_patch"
+        optimizer_mock.assert_called_once_with(
+            thread_id="thread-1",
+            compile_metrics_path="/mnt/user-data/outputs/research-writing/metrics/compile-gates.json",
+            offline_regression_report_path="/mnt/user-data/outputs/research-writing/evals/offline-benchmark-regression.json",
+            prompt_layers_path="/tmp/prompt_layers.yaml",
+            apply_prompt_patch=False,
+            run_offline_validation=True,
+            dataset_version="2026_03",
+            optimizer_config={
+                "enabled": True,
+                "optimizer_mode": "llm_structured_patch",
+                "model_name": "optimizer-llm",
+                "thinking_enabled": True,
+                "temperature": 0.1,
+                "max_candidate_count": 2,
+                "fallback_to_rules": True,
+            },
+            optimizer_mode="rules",
+            llm_model_name=None,
+            llm_thinking_enabled=False,
+            llm_temperature=0.0,
         )
 
     def test_research_generate_hypotheses(self, client):

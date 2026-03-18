@@ -6,7 +6,7 @@ import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.evals.academic.loader import load_builtin_eval_cases, load_eval_cases
 from src.evals.academic.schemas import AcademicEvalCase
@@ -42,6 +42,7 @@ from src.research_writing.runtime_service import (
     list_section_versions,
     plan_project_section_narrative,
     rollback_section_to_version,
+    run_prompt_layer_optimizer,
     run_agentic_research_graph,
     run_peer_self_play_training,
     simulate_peer_review_cycle,
@@ -53,6 +54,7 @@ from src.research_writing.runtime_service import (
     upsert_project,
     upsert_project_hitl_decisions,
     upsert_section,
+    verify_project_section_claim_map,
 )
 from src.research_writing.source_of_truth import NumericFact
 
@@ -61,6 +63,22 @@ logger = logging.getLogger(__name__)
 
 Reviewer2Style = Literal["statistical_tyrant", "methodology_fundamentalist", "domain_traditionalist"]
 PeerReviewABVariant = Literal["off", "A", "B"]
+_AUTO_CLAIM_MAP_REQUIRED_TOKENS: tuple[str, ...] = (
+    "discussion",
+    "result",
+    "results",
+    "conclusion",
+    "analysis",
+    "findings",
+)
+_AUTO_CLAIM_MAP_OPTIONAL_TOKENS: tuple[str, ...] = (
+    "intro",
+    "introduction",
+    "background",
+    "related work",
+    "related_work",
+    "relatedwork",
+)
 
 
 def _research_schema_dependency(
@@ -100,6 +118,26 @@ def _with_contract(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     }
 
 
+def _auto_require_claim_map_submission(*, thread_id: str, project_id: str, section_id: str) -> bool:
+    """Gateway-side auto policy: results/discussion-like sections are hard-required; intro-like sections are optional."""
+    descriptor_parts: list[str] = [section_id]
+    try:
+        project = get_project(thread_id, project_id)
+    except Exception:
+        project = None
+    if project is not None:
+        section = next((item for item in project.sections if item.section_id == section_id), None)
+        if section is not None and section.section_name:
+            descriptor_parts.append(section.section_name)
+    descriptor = " ".join(part for part in descriptor_parts if isinstance(part, str)).strip().lower()
+    if any(token in descriptor for token in _AUTO_CLAIM_MAP_REQUIRED_TOKENS):
+        return True
+    if any(token in descriptor for token in _AUTO_CLAIM_MAP_OPTIONAL_TOKENS):
+        return False
+    # Default fail-close for unknown section types.
+    return True
+
+
 router = APIRouter(
     prefix="/api/threads/{thread_id}/research",
     tags=["research"],
@@ -136,13 +174,25 @@ class SectionCompileResponse(ContractAwareResponse):
     details_artifact_path: str | None = None
     claim_map: dict[str, Any] | None = None
     claim_map_artifact_path: str | None = None
+    claim_map_validation: dict[str, Any] | None = None
     resolved_venue: str | None = None
     narrative_strategy: dict[str, Any] | None = None
+    dynamic_few_shot_context: list[dict[str, Any]] = Field(default_factory=list)
+    dynamic_few_shot_retrieval: dict[str, Any] | None = None
     narrative_sentence_count: int = 0
     journal_style: dict[str, Any] | None = None
     journal_style_alignment_applied: bool = False
+    adaptive_role_contract: dict[str, Any] | None = None
+    adaptive_role_contract_tone_applied: bool = False
+    task_complexity_score: float | None = None
+    analysis_confidence: float | None = None
+    complexity_confidence_diagnostics: dict[str, Any] | None = None
     peer_review: dict[str, Any] | None = None
     hypothesis_bundle: dict[str, Any] | None = None
+    hypothesis_reasoning_mode: str | None = None
+    min_competing_hypotheses: int | None = None
+    min_survivors_required: int | None = None
+    falsification_fail_close: str | None = None
     hitl_checkpoints: dict[str, Any] | None = None
     hitl_blocking: bool = False
     hitl_impact_preview: dict[str, Any] | None = None
@@ -342,10 +392,74 @@ class EngineeringGatesMetricsResponse(ContractAwareResponse):
     artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
+class PromptLayerOptimizerConfigRequest(BaseModel):
+    enabled: bool = True
+    optimizer_mode: Literal["rules", "llm_structured_patch"] = "rules"
+    model_name: str | None = None
+    thinking_enabled: bool = False
+    temperature: float = 0.0
+    max_candidate_count: int = Field(default=3, ge=1, le=8)
+    fallback_to_rules: bool = True
+
+
+class PromptLayerOptimizerRequest(BaseModel):
+    compile_metrics_path: str | None = None
+    offline_regression_report_path: str | None = None
+    prompt_layers_path: str | None = None
+    apply_prompt_patch: bool = False
+    run_offline_validation: bool = True
+    dataset_version: str = "optimizer-candidate"
+    optimizer_config: PromptLayerOptimizerConfigRequest | None = None
+    optimizer_mode: Literal["rules", "llm_structured_patch"] | None = None
+    llm_model_name: str | None = None
+    llm_thinking_enabled: bool | None = None
+    llm_temperature: float | None = None
+
+    @model_validator(mode="after")
+    def _backfill_optimizer_config(self) -> PromptLayerOptimizerRequest:
+        if self.optimizer_config is not None:
+            return self
+        if self.optimizer_mode is None and self.llm_model_name is None and self.llm_thinking_enabled is None and self.llm_temperature is None:
+            return self
+        self.optimizer_config = PromptLayerOptimizerConfigRequest(
+            optimizer_mode=self.optimizer_mode or "rules",
+            model_name=self.llm_model_name,
+            thinking_enabled=bool(self.llm_thinking_enabled),
+            temperature=float(self.llm_temperature or 0.0),
+        )
+        return self
+
+
+class PromptLayerOptimizerResponse(ContractAwareResponse):
+    optimizer_schema_version: str = "deerflow.prompt_optimizer.v1"
+    thread_id: str
+    generated_at: str | None = None
+    status: str = "no_change"
+    optimizer_config: dict[str, Any] = Field(default_factory=dict)
+    optimizer_mode_requested: str = "rules"
+    optimizer_mode_used: str = "rules"
+    fallback_reason: str | None = None
+    signals: dict[str, Any] = Field(default_factory=dict)
+    changes: list[dict[str, Any]] = Field(default_factory=list)
+    change_count: int = 0
+    candidate_prompt_layers_path: str | None = None
+    candidate_prompt_patch_path: str | None = None
+    applied_prompt_patch: bool = False
+    applied_prompt_layers_path: str | None = None
+    source_paths: dict[str, Any] = Field(default_factory=dict)
+    llm_candidate: dict[str, Any] | None = None
+    validation_issues: list[str] = Field(default_factory=list)
+    offline_validation: dict[str, Any] | None = None
+
+
 class HypothesisGenerateRequest(BaseModel):
     project_id: str
     section_id: str | None = None
     max_hypotheses: int = Field(default=5, ge=3, le=5)
+    reasoning_mode: Literal["tot", "got", "auto"] | None = None
+    min_competing_hypotheses: int | None = Field(default=None, ge=3, le=8)
+    min_survivors_required: int | None = Field(default=None, ge=1, le=5)
+    falsification_fail_close: Literal["strict", "lenient"] | None = None
 
 
 class HypothesisGenerateResponse(ContractAwareResponse):
@@ -354,6 +468,15 @@ class HypothesisGenerateResponse(ContractAwareResponse):
     feature_summary: list[str]
     hypotheses: list[dict[str, Any]]
     synthesis_paragraph: str
+    reasoning_mode: str | None = None
+    min_competing_hypotheses: int | None = None
+    min_survivors_required: int | None = None
+    falsification_fail_close: str | None = None
+    claim_map_gate_blocked: bool = False
+    surviving_hypothesis_ids: list[str] = Field(default_factory=list)
+    excluded_hypothesis_ids: list[str] = Field(default_factory=list)
+    claim_map_ready_hypotheses: list[dict[str, Any]] = Field(default_factory=list)
+    reasoning_audit_traces: list[dict[str, Any]] = Field(default_factory=list)
     historical_hypothesis_context: list[dict[str, Any]] = Field(default_factory=list)
     historical_failed_attempts: list[dict[str, Any]] = Field(default_factory=list)
     artifact_path: str
@@ -623,11 +746,75 @@ class SectionCompileRequest(BaseModel):
     journal_style_force_refresh: bool = False
     journal_style_sample_size: int | None = Field(default=None, ge=1, le=10)
     journal_style_recent_year_window: int | None = Field(default=None, ge=1, le=15)
+    dynamic_retrieval_top_k: int | None = Field(default=None, ge=1, le=8)
+    dynamic_retrieval_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    task_complexity_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    analysis_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    role_contract_auto_tighten: bool = True
     policy_snapshot_auto_adjust_narrative: bool = True
     narrative_self_question_rounds: int = Field(default=3, ge=1, le=8)
     narrative_include_storyboard: bool = True
+    hypothesis_reasoning_mode: Literal["tot", "got", "auto"] | None = None
+    min_competing_hypotheses: int | None = Field(default=None, ge=3, le=8)
+    min_survivors_required: int | None = Field(default=None, ge=1, le=5)
+    falsification_fail_close: Literal["strict", "lenient"] | None = None
     reviewer2_styles: list[Reviewer2Style] | None = None
     peer_review_ab_variant: str | None = Field(default=None, description="off | A | B | auto")
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = Field(
+        default=None,
+        description="Model-produced Claim Map JSON payload (object/list/stringified JSON).",
+    )
+    claim_map_artifact_path: str | None = Field(
+        default=None,
+        description="Optional sandbox path to Claim Map JSON artifact.",
+    )
+    require_claim_map_submission: bool | None = Field(
+        default=None,
+        description="If null, gateway auto-enforces by section type (discussion/results force, intro optional).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_claim_map_gate(self) -> SectionCompileRequest:
+        has_inline = self.claim_map_json is not None and (not isinstance(self.claim_map_json, str) or bool(self.claim_map_json.strip()))
+        has_artifact = isinstance(self.claim_map_artifact_path, str) and bool(self.claim_map_artifact_path.strip())
+        if self.require_claim_map_submission is True and not (has_inline or has_artifact):
+            raise ValueError("claim_map_json or claim_map_artifact_path is required when require_claim_map_submission=true")
+        return self
+
+
+class ClaimMapVerifyRequest(BaseModel):
+    project_id: str
+    section_id: str
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = Field(
+        default=None,
+        description="Model-produced Claim Map JSON payload (object/list/stringified JSON).",
+    )
+    claim_map_artifact_path: str | None = Field(
+        default=None,
+        description="Optional sandbox path to Claim Map JSON artifact.",
+    )
+    require_claim_map_submission: bool | None = Field(
+        default=None,
+        description="If null, gateway auto-enforces by section type (discussion/results force, intro optional).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_claim_map_gate(self) -> ClaimMapVerifyRequest:
+        has_inline = self.claim_map_json is not None and (not isinstance(self.claim_map_json, str) or bool(self.claim_map_json.strip()))
+        has_artifact = isinstance(self.claim_map_artifact_path, str) and bool(self.claim_map_artifact_path.strip())
+        if self.require_claim_map_submission is True and not (has_inline or has_artifact):
+            raise ValueError("claim_map_json or claim_map_artifact_path is required when require_claim_map_submission=true")
+        if self.claim_map_json is not None and has_artifact:
+            raise ValueError("Provide either claim_map_json or claim_map_artifact_path, not both")
+        return self
+
+
+class ClaimMapVerifyResponse(ContractAwareResponse):
+    project_id: str
+    section_id: str
+    claim_map: dict[str, Any]
+    claim_map_artifact_path: str | None = None
+    claim_map_validation: dict[str, Any]
 
 
 class NarrativePlanRequest(BaseModel):
@@ -723,6 +910,15 @@ class LatexCompileResponse(ContractAwareResponse):
 async def compile_section_endpoint(thread_id: str, payload: SectionCompileRequest, request: Request) -> SectionCompileResponse:
     validate_thread_id(thread_id)
     try:
+        resolved_require_claim_map = (
+            payload.require_claim_map_submission
+            if payload.require_claim_map_submission is not None
+            else _auto_require_claim_map_submission(
+                thread_id=thread_id,
+                project_id=payload.project_id,
+                section_id=payload.section_id,
+            )
+        )
         result = compile_project_section(
             thread_id=thread_id,
             project_id=payload.project_id,
@@ -742,15 +938,57 @@ async def compile_section_endpoint(thread_id: str, payload: SectionCompileReques
             journal_style_force_refresh=payload.journal_style_force_refresh,
             journal_style_sample_size=payload.journal_style_sample_size,
             journal_style_recent_year_window=payload.journal_style_recent_year_window,
+            dynamic_retrieval_top_k=payload.dynamic_retrieval_top_k,
+            dynamic_retrieval_min_score=payload.dynamic_retrieval_min_score,
+            task_complexity_score=payload.task_complexity_score,
+            analysis_confidence=payload.analysis_confidence,
+            role_contract_auto_tighten=payload.role_contract_auto_tighten,
             policy_snapshot_auto_adjust_narrative=payload.policy_snapshot_auto_adjust_narrative,
             narrative_self_question_rounds=payload.narrative_self_question_rounds,
             narrative_include_storyboard=payload.narrative_include_storyboard,
+            hypothesis_reasoning_mode=payload.hypothesis_reasoning_mode,
+            min_competing_hypotheses=payload.min_competing_hypotheses,
+            min_survivors_required=payload.min_survivors_required,
+            falsification_fail_close=payload.falsification_fail_close,
             reviewer2_styles=payload.reviewer2_styles,
             peer_review_ab_variant=payload.peer_review_ab_variant,
+            claim_map_json=payload.claim_map_json,
+            claim_map_artifact_path=payload.claim_map_artifact_path,
+            require_claim_map_submission=resolved_require_claim_map,
         )
         return SectionCompileResponse(**_with_contract(result, request))
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/verify/claim-map", response_model=ClaimMapVerifyResponse)
+async def verify_claim_map_endpoint(thread_id: str, payload: ClaimMapVerifyRequest, request: Request) -> ClaimMapVerifyResponse:
+    validate_thread_id(thread_id)
+    try:
+        resolved_require_claim_map = (
+            payload.require_claim_map_submission
+            if payload.require_claim_map_submission is not None
+            else _auto_require_claim_map_submission(
+                thread_id=thread_id,
+                project_id=payload.project_id,
+                section_id=payload.section_id,
+            )
+        )
+        result = verify_project_section_claim_map(
+            thread_id=thread_id,
+            project_id=payload.project_id,
+            section_id=payload.section_id,
+            claim_map_json=payload.claim_map_json,
+            claim_map_artifact_path=payload.claim_map_artifact_path,
+            require_claim_map_submission=resolved_require_claim_map,
+        )
+        return ClaimMapVerifyResponse(**_with_contract(result, request))
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 @router.post("/plan/narrative", response_model=NarrativePlanResponse)
@@ -962,6 +1200,33 @@ async def engineering_gates_metrics_endpoint(
     return EngineeringGatesMetricsResponse(**_with_contract(result, request))
 
 
+@router.post("/metrics/prompt-optimizer", response_model=PromptLayerOptimizerResponse)
+async def prompt_layer_optimizer_endpoint(
+    thread_id: str,
+    payload: PromptLayerOptimizerRequest,
+    request: Request,
+) -> PromptLayerOptimizerResponse:
+    validate_thread_id(thread_id)
+    try:
+        result = run_prompt_layer_optimizer(
+            thread_id=thread_id,
+            compile_metrics_path=payload.compile_metrics_path,
+            offline_regression_report_path=payload.offline_regression_report_path,
+            prompt_layers_path=payload.prompt_layers_path,
+            apply_prompt_patch=payload.apply_prompt_patch,
+            run_offline_validation=payload.run_offline_validation,
+            dataset_version=payload.dataset_version,
+            optimizer_config=payload.optimizer_config.model_dump() if payload.optimizer_config is not None else None,
+            optimizer_mode=payload.optimizer_mode or "rules",
+            llm_model_name=payload.llm_model_name,
+            llm_thinking_enabled=bool(payload.llm_thinking_enabled) if payload.llm_thinking_enabled is not None else False,
+            llm_temperature=float(payload.llm_temperature or 0.0),
+        )
+        return PromptLayerOptimizerResponse(**_with_contract(result, request))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/review/self-play", response_model=SelfPlayTrainingResponse)
 async def review_self_play_endpoint(
     thread_id: str,
@@ -992,6 +1257,10 @@ async def hypothesis_generate_endpoint(thread_id: str, payload: HypothesisGenera
             project_id=payload.project_id,
             section_id=payload.section_id,
             max_hypotheses=payload.max_hypotheses,
+            reasoning_mode=payload.reasoning_mode,
+            min_competing_hypotheses=payload.min_competing_hypotheses,
+            min_survivors_required=payload.min_survivors_required,
+            falsification_fail_close=payload.falsification_fail_close,
         )
         return HypothesisGenerateResponse(**_with_contract(result, request))
     except ValueError as exc:

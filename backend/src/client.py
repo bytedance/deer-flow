@@ -1064,11 +1064,23 @@ class DeerFlowClient:
         journal_style_force_refresh: bool = False,
         journal_style_sample_size: int | None = None,
         journal_style_recent_year_window: int | None = None,
+        dynamic_retrieval_top_k: int | None = None,
+        dynamic_retrieval_min_score: float | None = None,
+        task_complexity_score: float | None = None,
+        analysis_confidence: float | None = None,
+        role_contract_auto_tighten: bool = True,
         policy_snapshot_auto_adjust_narrative: bool = True,
         narrative_self_question_rounds: int = 3,
         narrative_include_storyboard: bool = True,
+        hypothesis_reasoning_mode: str | None = None,
+        min_competing_hypotheses: int | None = None,
+        min_survivors_required: int | None = None,
+        falsification_fail_close: str | None = None,
         reviewer2_styles: list[str] | None = None,
         peer_review_ab_variant: str | None = None,
+        claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+        claim_map_artifact_path: str | None = None,
+        require_claim_map_submission: bool = False,
     ) -> dict:
         """Compile a section with grounding constraints and optional auto-debate."""
         from src.research_writing.runtime_service import compile_project_section
@@ -1092,11 +1104,45 @@ class DeerFlowClient:
             journal_style_force_refresh=journal_style_force_refresh,
             journal_style_sample_size=journal_style_sample_size,
             journal_style_recent_year_window=journal_style_recent_year_window,
+            dynamic_retrieval_top_k=dynamic_retrieval_top_k,
+            dynamic_retrieval_min_score=dynamic_retrieval_min_score,
+            task_complexity_score=task_complexity_score,
+            analysis_confidence=analysis_confidence,
+            role_contract_auto_tighten=role_contract_auto_tighten,
             policy_snapshot_auto_adjust_narrative=policy_snapshot_auto_adjust_narrative,
             narrative_self_question_rounds=narrative_self_question_rounds,
             narrative_include_storyboard=narrative_include_storyboard,
+            hypothesis_reasoning_mode=hypothesis_reasoning_mode,
+            min_competing_hypotheses=min_competing_hypotheses,
+            min_survivors_required=min_survivors_required,
+            falsification_fail_close=falsification_fail_close,
             reviewer2_styles=reviewer2_styles,
             peer_review_ab_variant=peer_review_ab_variant,
+            claim_map_json=claim_map_json,
+            claim_map_artifact_path=claim_map_artifact_path,
+            require_claim_map_submission=require_claim_map_submission,
+        )
+
+    def research_verify_claim_map_only(
+        self,
+        thread_id: str,
+        *,
+        project_id: str,
+        section_id: str,
+        claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+        claim_map_artifact_path: str | None = None,
+        require_claim_map_submission: bool = False,
+    ) -> dict:
+        """Verify Claim Map gate without triggering section compile."""
+        from src.research_writing.runtime_service import verify_project_section_claim_map
+
+        return verify_project_section_claim_map(
+            thread_id=thread_id,
+            project_id=project_id,
+            section_id=section_id,
+            claim_map_json=claim_map_json,
+            claim_map_artifact_path=claim_map_artifact_path,
+            require_claim_map_submission=require_claim_map_submission,
         )
 
     def research_plan_narrative(
@@ -1321,6 +1367,40 @@ class DeerFlowClient:
             min_latex_success_rate=min_latex_success_rate,
         )
 
+    def research_optimize_prompt_layers(
+        self,
+        thread_id: str,
+        *,
+        compile_metrics_path: str | None = None,
+        offline_regression_report_path: str | None = None,
+        prompt_layers_path: str | None = None,
+        apply_prompt_patch: bool = False,
+        run_offline_validation: bool = True,
+        dataset_version: str = "optimizer-candidate",
+        optimizer_config: dict[str, Any] | None = None,
+        optimizer_mode: str = "rules",
+        llm_model_name: str | None = None,
+        llm_thinking_enabled: bool = False,
+        llm_temperature: float = 0.0,
+    ) -> dict:
+        """Run macro-evolution prompt optimizer from metrics and eval trends."""
+        from src.research_writing.runtime_service import run_prompt_layer_optimizer
+
+        return run_prompt_layer_optimizer(
+            thread_id=thread_id,
+            compile_metrics_path=compile_metrics_path,
+            offline_regression_report_path=offline_regression_report_path,
+            prompt_layers_path=prompt_layers_path,
+            apply_prompt_patch=apply_prompt_patch,
+            run_offline_validation=run_offline_validation,
+            dataset_version=dataset_version,
+            optimizer_config=optimizer_config,
+            optimizer_mode=optimizer_mode,
+            llm_model_name=llm_model_name,
+            llm_thinking_enabled=llm_thinking_enabled,
+            llm_temperature=llm_temperature,
+        )
+
     def research_run_self_play_training(
         self,
         thread_id: str,
@@ -1350,6 +1430,10 @@ class DeerFlowClient:
         project_id: str,
         section_id: str | None = None,
         max_hypotheses: int = 5,
+        reasoning_mode: str | None = None,
+        min_competing_hypotheses: int | None = None,
+        min_survivors_required: int | None = None,
+        falsification_fail_close: str | None = None,
     ) -> dict:
         """Generate ranked hypotheses from structured evidence/literature/facts."""
         from src.research_writing.runtime_service import generate_project_hypotheses
@@ -1359,6 +1443,10 @@ class DeerFlowClient:
             project_id=project_id,
             section_id=section_id,
             max_hypotheses=max_hypotheses,
+            reasoning_mode=reasoning_mode,
+            min_competing_hypotheses=min_competing_hypotheses,
+            min_survivors_required=min_survivors_required,
+            falsification_fail_close=falsification_fail_close,
         )
 
     def research_get_hitl_decisions(

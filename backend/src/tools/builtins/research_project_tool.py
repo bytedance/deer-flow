@@ -26,6 +26,7 @@ from src.research_writing.runtime_service import (
     get_project_policy_snapshot,
     get_section_traceability,
     get_weekly_academic_leaderboard,
+    run_prompt_layer_optimizer,
     list_projects,
     list_section_versions,
     plan_project_section_narrative,
@@ -41,6 +42,7 @@ from src.research_writing.runtime_service import (
     upsert_project,
     upsert_project_hitl_decisions,
     upsert_section,
+    verify_project_section_claim_map,
 )
 from src.research_writing.source_of_truth import NumericFact
 
@@ -56,6 +58,7 @@ ResearchProjectAction = Literal[
     "plan_narrative",
     "run_agentic_graph",
     "compile_section",
+    "verify_claim_map_only",
     "list_section_versions",
     "rollback_section",
     "get_section_traceability",
@@ -68,6 +71,7 @@ ResearchProjectAction = Literal[
     "upsert_hitl_decisions",
     "get_policy_snapshot",
     "get_academic_leaderboard",
+    "optimize_prompt_layers",
     "get_capability_catalog",
     "assess_capabilities",
     "compile_latex",
@@ -109,6 +113,13 @@ def _as_bool(value: Any, default: bool) -> bool:
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -177,6 +188,7 @@ def research_project_tool(
             - plan_narrative
             - run_agentic_graph
             - compile_section
+            - verify_claim_map_only
             - list_section_versions
             - rollback_section
             - get_section_traceability
@@ -189,6 +201,7 @@ def research_project_tool(
             - upsert_hitl_decisions
             - get_policy_snapshot
             - get_academic_leaderboard
+            - optimize_prompt_layers
             - get_capability_catalog
             - assess_capabilities
             - compile_latex
@@ -260,6 +273,16 @@ def research_project_tool(
             mode = payload.get("mode", "strict")
             if not project_id or not section_id:
                 raise ValueError("payload.project_id and payload.section_id are required")
+            claim_map_json = payload.get("claim_map_json")
+            claim_map_artifact_path = payload.get("claim_map_artifact_path")
+            require_claim_map_submission = _as_bool(payload.get("require_claim_map_submission"), True)
+            has_inline_claim_map = claim_map_json is not None and (not isinstance(claim_map_json, str) or bool(claim_map_json.strip()))
+            has_claim_map_artifact = isinstance(claim_map_artifact_path, str) and bool(claim_map_artifact_path.strip())
+            if require_claim_map_submission and not (has_inline_claim_map or has_claim_map_artifact):
+                raise ValueError(
+                    "payload.claim_map_json or payload.claim_map_artifact_path is required for compile_section. "
+                    "Call plan_narrative first and submit its Claim Map JSON."
+                )
             reviewer2_styles = _as_choice_list(
                 payload.get("reviewer2_styles"),
                 allowed={"statistical_tyrant", "methodology_fundamentalist", "domain_traditionalist"},
@@ -301,11 +324,65 @@ def research_project_tool(
                 journal_style_recent_year_window=_as_int(payload.get("journal_style_recent_year_window"), 5)
                 if payload.get("journal_style_recent_year_window") is not None
                 else None,
+                dynamic_retrieval_top_k=_as_int(payload.get("dynamic_retrieval_top_k"), 3)
+                if payload.get("dynamic_retrieval_top_k") is not None
+                else None,
+                dynamic_retrieval_min_score=_as_float(payload.get("dynamic_retrieval_min_score"), 0.08)
+                if payload.get("dynamic_retrieval_min_score") is not None
+                else None,
+                task_complexity_score=_as_float(payload.get("task_complexity_score"), 0.5)
+                if payload.get("task_complexity_score") is not None
+                else None,
+                analysis_confidence=_as_float(payload.get("analysis_confidence"), 0.7)
+                if payload.get("analysis_confidence") is not None
+                else None,
+                role_contract_auto_tighten=_as_bool(payload.get("role_contract_auto_tighten"), True),
                 policy_snapshot_auto_adjust_narrative=_as_bool(payload.get("policy_snapshot_auto_adjust_narrative"), True),
                 narrative_self_question_rounds=_as_int(payload.get("narrative_self_question_rounds"), 3),
                 narrative_include_storyboard=_as_bool(payload.get("narrative_include_storyboard"), True),
+                hypothesis_reasoning_mode=_as_choice(
+                    payload.get("hypothesis_reasoning_mode"),
+                    allowed={"tot", "got", "auto"},
+                    default=None,
+                ),
+                min_competing_hypotheses=_as_int(payload.get("min_competing_hypotheses"), 3)
+                if payload.get("min_competing_hypotheses") is not None
+                else None,
+                min_survivors_required=_as_int(payload.get("min_survivors_required"), 1)
+                if payload.get("min_survivors_required") is not None
+                else None,
+                falsification_fail_close=_as_choice(
+                    payload.get("falsification_fail_close"),
+                    allowed={"strict", "lenient"},
+                    default=None,
+                ),
                 reviewer2_styles=reviewer2_styles,
                 peer_review_ab_variant=peer_review_ab_variant,
+                claim_map_json=claim_map_json,
+                claim_map_artifact_path=claim_map_artifact_path if isinstance(claim_map_artifact_path, str) else None,
+                require_claim_map_submission=require_claim_map_submission,
+            )
+        elif action == "verify_claim_map_only":
+            project_id = str(payload.get("project_id") or "")
+            section_id = str(payload.get("section_id") or "")
+            if not project_id or not section_id:
+                raise ValueError("payload.project_id and payload.section_id are required")
+            claim_map_json = payload.get("claim_map_json")
+            claim_map_artifact_path = payload.get("claim_map_artifact_path")
+            require_claim_map_submission = _as_bool(payload.get("require_claim_map_submission"), True)
+            has_inline_claim_map = claim_map_json is not None and (not isinstance(claim_map_json, str) or bool(claim_map_json.strip()))
+            has_claim_map_artifact = isinstance(claim_map_artifact_path, str) and bool(claim_map_artifact_path.strip())
+            if require_claim_map_submission and not (has_inline_claim_map or has_claim_map_artifact):
+                raise ValueError(
+                    "payload.claim_map_json or payload.claim_map_artifact_path is required for verify_claim_map_only."
+                )
+            result = verify_project_section_claim_map(
+                thread_id=thread_id,
+                project_id=project_id,
+                section_id=section_id,
+                claim_map_json=claim_map_json,
+                claim_map_artifact_path=claim_map_artifact_path if isinstance(claim_map_artifact_path, str) else None,
+                require_claim_map_submission=require_claim_map_submission,
             )
         elif action == "list_section_versions":
             project_id = str(payload.get("project_id") or "")
@@ -381,6 +458,22 @@ def research_project_tool(
                 project_id=project_id,
                 section_id=str(section_id) if section_id is not None else None,
                 max_hypotheses=_as_int(payload.get("max_hypotheses"), 5),
+                reasoning_mode=_as_choice(
+                    payload.get("reasoning_mode"),
+                    allowed={"tot", "got", "auto"},
+                    default=None,
+                ),
+                min_competing_hypotheses=_as_int(payload.get("min_competing_hypotheses"), 3)
+                if payload.get("min_competing_hypotheses") is not None
+                else None,
+                min_survivors_required=_as_int(payload.get("min_survivors_required"), 1)
+                if payload.get("min_survivors_required") is not None
+                else None,
+                falsification_fail_close=_as_choice(
+                    payload.get("falsification_fail_close"),
+                    allowed={"strict", "lenient"},
+                    default=None,
+                ),
             )
         elif action == "run_self_play_training":
             raw_episodes = payload.get("episodes")
@@ -442,6 +535,48 @@ def research_project_tool(
             )
         elif action == "get_academic_leaderboard":
             result = get_weekly_academic_leaderboard(thread_id)
+        elif action == "optimize_prompt_layers":
+            optimizer_config = payload.get("optimizer_config")
+            resolved_optimizer_config = optimizer_config if isinstance(optimizer_config, dict) else None
+            if resolved_optimizer_config is None and any(
+                payload.get(key) is not None for key in ("optimizer_mode", "llm_model_name", "llm_thinking_enabled", "llm_temperature")
+            ):
+                resolved_optimizer_config = {
+                    "optimizer_mode": _as_choice(
+                        payload.get("optimizer_mode"),
+                        allowed={"rules", "llm_structured_patch"},
+                        default="rules",
+                    )
+                    or "rules",
+                    "model_name": str(payload.get("llm_model_name")).strip() if payload.get("llm_model_name") is not None else None,
+                    "thinking_enabled": _as_bool(payload.get("llm_thinking_enabled"), False),
+                    "temperature": _as_float(payload.get("llm_temperature"), 0.0),
+                }
+            result = run_prompt_layer_optimizer(
+                thread_id=thread_id,
+                compile_metrics_path=str(payload.get("compile_metrics_path")).strip()
+                if payload.get("compile_metrics_path") is not None
+                else None,
+                offline_regression_report_path=str(payload.get("offline_regression_report_path")).strip()
+                if payload.get("offline_regression_report_path") is not None
+                else None,
+                prompt_layers_path=str(payload.get("prompt_layers_path")).strip()
+                if payload.get("prompt_layers_path") is not None
+                else None,
+                apply_prompt_patch=_as_bool(payload.get("apply_prompt_patch"), False),
+                run_offline_validation=_as_bool(payload.get("run_offline_validation"), True),
+                dataset_version=str(payload.get("dataset_version") or "optimizer-candidate"),
+                optimizer_config=resolved_optimizer_config,
+                optimizer_mode=_as_choice(
+                    payload.get("optimizer_mode"),
+                    allowed={"rules", "llm_structured_patch"},
+                    default="rules",
+                )
+                or "rules",
+                llm_model_name=str(payload.get("llm_model_name")).strip() if payload.get("llm_model_name") is not None else None,
+                llm_thinking_enabled=_as_bool(payload.get("llm_thinking_enabled"), False),
+                llm_temperature=_as_float(payload.get("llm_temperature"), 0.0),
+            )
         elif action == "get_capability_catalog":
             result = get_capability_catalog(thread_id)
         elif action == "assess_capabilities":

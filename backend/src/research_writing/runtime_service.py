@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import hmac
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import asdict
@@ -44,19 +46,21 @@ from src.research_writing.agentic_graph import run_agentic_blackboard_graph
 from src.research_writing.capability_framework import capability_catalog, evaluate_capabilities
 from src.research_writing.citation_registry import CitationRecord, CitationRegistry
 from src.research_writing.claim_graph import Claim, ClaimGraph
-from src.research_writing.constraint_compiler import ClaimConstraintCompiler, classify_claim_sentence
+from src.research_writing.constraint_compiler import ClaimConstraintCompiler, ClaimMapEntry, classify_claim_sentence
 from src.research_writing.ethics_compliance import audit_scientific_compliance
 from src.research_writing.evidence_store import EvidenceStore, EvidenceUnit
 from src.research_writing.fulltext_ingest import FullTextEvidenceIngestor, LiteratureSource
 from src.research_writing.hypothesis_engine import generate_hypotheses
-from src.research_writing.journal_style import build_journal_style_bundle
+from src.research_writing.journal_style import build_journal_style_bundle, retrieve_dynamic_few_shot_context
 from src.research_writing.latex_pipeline import build_latex_artifacts
 from src.research_writing.narrative_planner import NarrativePlan, NarrativePlannerAgent
 from src.research_writing.peer_review_loop import run_peer_review_loop
 from src.research_writing.policy_learning import learn_policy_from_hitl_decisions
 from src.research_writing.project_state import HitlDecision, ResearchProject, ResearchProjectStateStore, SectionDraft
+from src.research_writing.prompt_optimizer import run_prompt_optimizer
 from src.research_writing.prompt_pack import (
     DEFAULT_PROMPT_PACK_ID,
+    build_adaptive_role_contract_profile,
     build_style_adapter_profile,
     get_prompt_pack_metadata,
     get_runtime_stage_recipe,
@@ -81,6 +85,8 @@ LatexEngineOverride = Literal["auto", "none", "latexmk", "pdflatex", "xelatex"]
 Reviewer2StyleOverride = Literal["statistical_tyrant", "methodology_fundamentalist", "domain_traditionalist"]
 PeerReviewABVariantOverride = Literal["off", "A", "B"]
 PeerReviewABVariantInputOverride = Literal["off", "A", "B", "auto"]
+HypothesisReasoningModeOverride = Literal["tot", "got", "auto"]
+FalsificationFailCloseOverride = Literal["strict", "lenient"]
 
 
 def _outputs_dir(thread_id: str) -> Path:
@@ -119,13 +125,20 @@ ENGINEERING_GATES_SCHEMA_VERSION = "deerflow.engineering_gates.v1"
 COMPILE_GATES_METRICS_SCHEMA_VERSION = "deerflow.compile_gates_metrics.v1"
 LATEX_GATES_METRICS_SCHEMA_VERSION = "deerflow.latex_gates_metrics.v1"
 ENGINEERING_GATES_RUNTIME_METRICS_SCHEMA_VERSION = "deerflow.engineering_gates_runtime_metrics.v1"
+PROMPT_OPTIMIZER_SCHEMA_VERSION = "deerflow.prompt_optimizer.v1"
 CLAIM_MAP_SCHEMA_VERSION = "deerflow.claim_map.v1"
+CLAIM_MAP_GATE_SCHEMA_VERSION = "deerflow.claim_map_gate.v1"
 PROMPT_REGISTRY_METADATA_SCHEMA_VERSION = "deerflow.prompt_registry_metadata.v1"
 SELF_PLAY_FEW_SHOT_LIBRARY_SCHEMA_VERSION = "deerflow.self_play_fewshot_library.v1"
+MICRO_EVOLUTION_SCHEMA_VERSION = "deerflow.micro_evolution.v1"
+ARTIFACT_LEDGER_SCHEMA_VERSION = "deerflow.artifact_ledger.v2"
+LEDGER_SIGNATURE_SCHEMA_VERSION = "deerflow.artifact_ledger_signature.v1"
+LEDGER_EVAL_IMPACT_SCHEMA_VERSION = "deerflow.ledger_eval_impact.v1"
+LEDGER_SIGNING_KEY_ENV_VAR = "DEER_FLOW_LEDGER_SIGNING_KEY"
 
 
-def _resolve_prompt_pack_metadata() -> dict[str, Any]:
-    raw = get_prompt_pack_metadata()
+def _resolve_prompt_pack_metadata(*, venue_name: str | None = None) -> dict[str, Any]:
+    raw = get_prompt_pack_metadata(venue_name=venue_name)
     prompt_pack_id = str(raw.get("prompt_pack_id") or DEFAULT_PROMPT_PACK_ID).strip() or DEFAULT_PROMPT_PACK_ID
     prompt_pack_hash = str(raw.get("prompt_pack_hash") or "").strip()
     if not prompt_pack_hash:
@@ -195,15 +208,38 @@ def _resolve_prompt_pack_metadata() -> dict[str, Any]:
         "prompt_layer_versions": prompt_layer_versions,
         "prompt_layer_rollbacks": prompt_layer_rollbacks,
         "prompt_layer_signatures": prompt_layer_signatures,
+        "prompt_layer_parameter_space": raw.get("prompt_layer_parameter_space") or {},
         "prompt_layer_compare_ready_layers": prompt_layer_compare_ready_layers,
         "prompt_layer_diff_summary": prompt_layer_diff_summary,
+        "prompt_layer_active_venue": raw.get("prompt_layer_active_venue") or (venue_name or None),
         "runtime_stage_recipe_schema_version": raw.get("runtime_stage_recipe_schema_version") or "",
         "runtime_stage_recipe_stages": raw.get("runtime_stage_recipe_stages") or [],
     }
 
 
-def _inject_prompt_pack_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    prompt_pack = _resolve_prompt_pack_metadata()
+def _resolve_prompt_registry_venue(payload: dict[str, Any] | None) -> str | None:
+    source = payload if isinstance(payload, dict) else {}
+    for key in (
+        "prompt_layer_active_venue",
+        "resolved_venue",
+        "venue_name",
+        "venue",
+        "target_venue",
+    ):
+        candidate = source.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    project = source.get("project")
+    if isinstance(project, dict):
+        candidate = project.get("target_venue")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _inject_prompt_pack_fields(payload: dict[str, Any], *, venue_name: str | None = None) -> dict[str, Any]:
+    resolved_venue = venue_name or _resolve_prompt_registry_venue(payload)
+    prompt_pack = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
     for key, value in prompt_pack.items():
         payload[key] = value
     prompt_registry = _build_prompt_registry_metadata(payload, prompt_pack_metadata=prompt_pack)
@@ -225,6 +261,8 @@ def _resolve_runtime_strategy_metadata(payload: dict[str, Any] | None) -> dict[s
     peer_review_strategy = source.get("peer_review_strategy") if isinstance(source.get("peer_review_strategy"), dict) else {}
     peer_review_payload = source.get("peer_review") if isinstance(source.get("peer_review"), dict) else {}
     venue_style_adapter = source.get("venue_style_adapter") if isinstance(source.get("venue_style_adapter"), dict) else {}
+    adaptive_role_contract = source.get("adaptive_role_contract") if isinstance(source.get("adaptive_role_contract"), dict) else {}
+    hypothesis_bundle = source.get("hypothesis_bundle") if isinstance(source.get("hypothesis_bundle"), dict) else {}
     has_policy_snapshot = isinstance(source.get("policy_snapshot"), dict) and len(source.get("policy_snapshot") or {}) > 0
     has_journal_style = isinstance(source.get("journal_style"), dict) and len(source.get("journal_style") or {}) > 0
 
@@ -258,6 +296,16 @@ def _resolve_runtime_strategy_metadata(payload: dict[str, Any] | None) -> dict[s
             "auto_adjust_narrative": bool(source.get("policy_snapshot_auto_adjust_narrative")),
             "adjustment_applied": bool(source.get("policy_snapshot_adjustment_applied")),
         },
+        "role_contract": {
+            "enabled": bool(adaptive_role_contract),
+            "tightened": bool(adaptive_role_contract.get("tightened")),
+            "writer_claim_modality": adaptive_role_contract.get("writer_claim_modality"),
+        },
+        "hypothesis": {
+            "enabled": bool(hypothesis_bundle),
+            "reasoning_mode": hypothesis_bundle.get("reasoning_mode"),
+            "claim_map_gate_blocked": bool(hypothesis_bundle.get("claim_map_gate_blocked")),
+        },
     }
 
 
@@ -284,6 +332,171 @@ def _resolve_eval_impact_metadata(payload: dict[str, Any] | None) -> dict[str, A
         "leaderboard_entries_updated": source.get("leaderboard_entries_updated"),
     }
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _clamp_unit_interval(value: Any, *, default: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = float(default)
+    return max(0.0, min(1.0, numeric))
+
+
+def _prompt_layer_param_default(
+    *,
+    prompt_layer_parameter_space: dict[str, Any],
+    layer_id: str,
+    parameter_name: str,
+    fallback: Any,
+) -> Any:
+    layer = prompt_layer_parameter_space.get(layer_id) if isinstance(prompt_layer_parameter_space, dict) else None
+    if not isinstance(layer, dict):
+        return fallback
+    parameter = layer.get(parameter_name)
+    if not isinstance(parameter, dict):
+        return fallback
+    return parameter.get("default", fallback)
+
+
+def _build_dynamic_style_query_text(
+    *,
+    section: SectionDraft,
+    narrative_plan_payload: dict[str, Any] | None,
+    claim_map_payload: dict[str, Any] | None,
+) -> str:
+    parts: list[str] = []
+    if section.section_name:
+        parts.append(section.section_name)
+    if section.content:
+        parts.append(section.content[:1200])
+
+    narrative_plan = narrative_plan_payload if isinstance(narrative_plan_payload, dict) else {}
+    for key in ("takeaway_message", "gap_statement", "disruption_statement", "introduction_hook", "discussion_pivot"):
+        value = narrative_plan.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+    claim_map = claim_map_payload if isinstance(claim_map_payload, dict) else {}
+    claim_rows = claim_map.get("claims")
+    if isinstance(claim_rows, list):
+        for row in claim_rows[:4]:
+            if not isinstance(row, dict):
+                continue
+            sentence = row.get("sentence_draft")
+            if isinstance(sentence, str) and sentence.strip():
+                parts.append(sentence.strip())
+
+    query_text = " ".join(part for part in parts if isinstance(part, str) and part.strip()).strip()
+    if not query_text:
+        query_text = section.section_id or section.section_name or "research section"
+    return query_text[:2400]
+
+
+def _resolve_dynamic_few_shot_controls(
+    *,
+    prompt_layer_parameter_space: dict[str, Any],
+    journal_style_bundle: dict[str, Any] | None,
+    dynamic_retrieval_top_k: int | None,
+    dynamic_retrieval_min_score: float | None,
+) -> tuple[int, float]:
+    l4_default_top_k = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L4",
+        parameter_name="retrieval_top_k",
+        fallback=3,
+    )
+    l4_default_min_score = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L4",
+        parameter_name="retrieval_min_score",
+        fallback=0.08,
+    )
+    bundle_top_k = (
+        journal_style_bundle.get("dynamic_fewshot_recommended_top_k")
+        if isinstance(journal_style_bundle, dict)
+        else None
+    )
+    bundle_min_score = (
+        journal_style_bundle.get("dynamic_fewshot_recommended_min_score")
+        if isinstance(journal_style_bundle, dict)
+        else None
+    )
+    resolved_top_k = max(
+        1,
+        int(
+            dynamic_retrieval_top_k
+            if dynamic_retrieval_top_k is not None
+            else (bundle_top_k if bundle_top_k is not None else l4_default_top_k)
+        ),
+    )
+    resolved_min_score = _clamp_unit_interval(
+        dynamic_retrieval_min_score
+        if dynamic_retrieval_min_score is not None
+        else (bundle_min_score if bundle_min_score is not None else l4_default_min_score),
+        default=0.08,
+    )
+    return resolved_top_k, resolved_min_score
+
+
+def _estimate_task_complexity_and_analysis_confidence(
+    *,
+    section: SectionDraft,
+    evidence_store: EvidenceStore,
+    source_of_truth_store: SourceOfTruthStore,
+    claim_map_validation: dict[str, Any] | None,
+    task_complexity_score: float | None,
+    analysis_confidence: float | None,
+) -> tuple[float, float, dict[str, Any]]:
+    evidence_rows = [evidence_store.get(eid) for eid in (section.evidence_ids or [])]
+    evidence_units = [row for row in evidence_rows if row is not None]
+    if not evidence_units:
+        evidence_units = evidence_store.list()
+    scoped_fact_count = len(section.fact_ids or [])
+    if scoped_fact_count <= 0:
+        scoped_fact_count = len(source_of_truth_store.list_facts())
+
+    avg_evidence_confidence = (
+        sum(_clamp_unit_interval(item.confidence, default=0.75) for item in evidence_units) / len(evidence_units)
+        if evidence_units
+        else 0.72
+    )
+    claim_validation = claim_map_validation if isinstance(claim_map_validation, dict) else {}
+    invalid_count = int(claim_validation.get("invalid_count") or claim_validation.get("invalid_claim_count") or 0)
+    rewrite_required_count = int(claim_validation.get("rewrite_required_count") or 0)
+    total_claim_rows = int(claim_validation.get("claim_count") or claim_validation.get("submitted_claim_count") or len(section.claim_ids or []))
+    invalid_ratio = invalid_count / max(1, total_claim_rows)
+    rewrite_ratio = rewrite_required_count / max(1, total_claim_rows)
+
+    estimated_complexity = _clamp_unit_interval(
+        0.18
+        + min(len(section.claim_ids or []), 10) * 0.05
+        + min(len(section.evidence_ids or []), 12) * 0.03
+        + min(scoped_fact_count, 8) * 0.03
+        + min(len(section.citation_ids or []), 12) * 0.02
+        + (0.09 if len((section.content or "").strip()) >= 1500 else 0.0),
+        default=0.5,
+    )
+    estimated_confidence = _clamp_unit_interval(
+        0.6 * avg_evidence_confidence
+        + 0.22 * (1.0 - invalid_ratio)
+        + 0.18 * (1.0 - rewrite_ratio),
+        default=0.7,
+    )
+
+    resolved_complexity = _clamp_unit_interval(task_complexity_score, default=estimated_complexity)
+    resolved_confidence = _clamp_unit_interval(analysis_confidence, default=estimated_confidence)
+    diagnostics = {
+        "estimated_task_complexity_score": round(estimated_complexity, 4),
+        "estimated_analysis_confidence": round(estimated_confidence, 4),
+        "resolved_task_complexity_score": round(resolved_complexity, 4),
+        "resolved_analysis_confidence": round(resolved_confidence, 4),
+        "avg_evidence_confidence": round(avg_evidence_confidence, 4),
+        "scoped_evidence_count": len(evidence_units),
+        "scoped_fact_count": scoped_fact_count,
+        "claim_validation_invalid_ratio": round(invalid_ratio, 4),
+        "claim_validation_rewrite_ratio": round(rewrite_ratio, 4),
+    }
+    return resolved_complexity, resolved_confidence, diagnostics
 
 
 def _build_prompt_registry_metadata(
@@ -317,7 +530,7 @@ def _build_prompt_registry_metadata(
 
 def _resolve_runtime_stage_context(
     *,
-    operation: Literal["plan_narrative", "compile_section", "simulate_review", "simulate_peer_review", "latex_submit"],
+    operation: Literal["plan_narrative", "compile_section", "verify_claim_map", "simulate_review", "simulate_peer_review", "latex_submit"],
     auto_peer_review: bool = False,
     auto_hypothesis: bool = False,
 ) -> dict[str, Any]:
@@ -341,6 +554,8 @@ def _resolve_runtime_stage_context(
             active_stage_ids.append("verify")
         if auto_peer_review:
             active_stage_ids.append("revise")
+    elif operation == "verify_claim_map":
+        active_stage_ids = ["plan", "verify"]
     elif operation == "simulate_review":
         active_stage_ids = ["verify", "revise"]
     elif operation == "simulate_peer_review":
@@ -881,6 +1096,472 @@ def _collect_literature_alignment_gaps(text: str, *, max_examples: int = 8) -> d
         "likely_listing_without_alignment": likely_listing,
         "listing_examples": listing_like[: max(1, int(max_examples))],
     }
+
+
+def _split_text_with_separators(text: str) -> list[str]:
+    """Split text into [chunk, sep, chunk, sep, ...] preserving separators."""
+    if not text:
+        return [""]
+    parts: list[str] = []
+    last = 0
+    for match in _SENTENCE_SPLIT_RE.finditer(text):
+        parts.append(text[last : match.start()])
+        parts.append(text[match.start() : match.end()])
+        last = match.end()
+    parts.append(text[last:])
+    return parts
+
+
+def _collect_unknown_binding_ids(
+    text: str,
+    *,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+) -> dict[str, Any]:
+    data_ids = _extract_tag_ids(text, tag="data")
+    citation_ids = _extract_tag_ids(text, tag="citation")
+    unknown_data = [data_id for data_id in data_ids if evidence_store.get(data_id) is None]
+    unknown_citation = [cid for cid in citation_ids if citation_registry.get(cid) is None]
+    return {
+        "data_id_count": len(data_ids),
+        "citation_id_count": len(citation_ids),
+        "unknown_data_ids": unknown_data,
+        "unknown_citation_ids": unknown_citation,
+    }
+
+
+def _build_failure_mode_case_for_section(
+    *,
+    case_id: str,
+    domain: str,
+    venue: str,
+    compiled_text: str,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+    claim_grounding_payload: dict[str, Any] | None = None,
+    failure_modes: list[str] | None = None,
+) -> AcademicEvalCase:
+    generated_citations = _extract_tag_ids(compiled_text, tag="citation")
+    verified_citations = [record.citation_id for record in citation_registry.list()]
+
+    grounding_index: dict[str, dict[str, Any]] = {}
+    if isinstance(claim_grounding_payload, dict):
+        claims = claim_grounding_payload.get("claims")
+        if isinstance(claims, list):
+            for row in claims:
+                if not isinstance(row, dict):
+                    continue
+                cid = str(row.get("claim_id") or "").strip()
+                if cid:
+                    grounding_index[cid] = row
+
+    claims_payload: list[dict[str, Any]] = []
+    for claim_id in section.claim_ids:
+        claim = claim_graph.get(claim_id)
+        if claim is None:
+            claims_payload.append(
+                {
+                    "id": claim_id,
+                    "type": "unknown",
+                    "text": "",
+                    "has_evidence": False,
+                    "has_citation": False,
+                    "references_missing_id": True,
+                    "artifact_drift": False,
+                }
+            )
+            continue
+        grounding_row = grounding_index.get(claim_id, {})
+        status = str(grounding_row.get("status") or "").strip().lower()
+        invalid_reasons = grounding_row.get("invalid_reasons") if isinstance(grounding_row.get("invalid_reasons"), list) else []
+        stale_reasons = grounding_row.get("stale_reasons") if isinstance(grounding_row.get("stale_reasons"), list) else []
+        has_missing_id = any("unknown evidence_id" in str(reason).lower() for reason in invalid_reasons)
+        artifact_drift = status == "stale" or bool(stale_reasons)
+        evidence_ok = any(evidence_store.get(eid) is not None for eid in claim.evidence_ids)
+        citation_ok = any(citation_registry.get(cid) is not None for cid in claim.citation_ids)
+        claims_payload.append(
+            {
+                "id": claim_id,
+                "type": claim.claim_type,
+                "text": claim.text,
+                "has_evidence": bool(claim.evidence_ids) and evidence_ok,
+                "has_citation": bool(claim.citation_ids) and citation_ok,
+                "data_id": claim.evidence_ids[0] if claim.evidence_ids else None,
+                "citation_id": claim.citation_ids[0] if claim.citation_ids else None,
+                "references_missing_id": bool(has_missing_id),
+                "artifact_drift": bool(artifact_drift),
+            }
+        )
+
+    return AcademicEvalCase(
+        case_id=case_id,
+        domain=domain or "unknown",
+        venue=venue or "unknown",
+        generated_citations=generated_citations,
+        verified_citations=verified_citations,
+        claims=claims_payload,
+        failure_modes=list(failure_modes or []),
+        safety_valve_triggered=False,
+        manuscript_text=compiled_text,
+        decision="unknown",
+        benchmark_split="runtime_micro_evolution",
+        source_name="runtime_service.compile_project_section",
+    )
+
+
+def _detect_failure_modes_for_text(
+    *,
+    case: AcademicEvalCase,
+    thresholds: FailureModeThresholds,
+) -> dict[str, Any]:
+    result = evaluate_case(case)
+    report = evaluate_failure_mode_library([case], case_results={case.case_id: result}, thresholds=thresholds)
+    cases = report.get("cases")
+    assessment = None
+    if isinstance(cases, list) and cases:
+        assessment = cases[0] if isinstance(cases[0], dict) else None
+    detection_by_mode = assessment.get("detection_by_mode") if isinstance(assessment, dict) else None
+    ethics_audit = assessment.get("ethics_audit") if isinstance(assessment, dict) else None
+    detected_modes = []
+    if isinstance(detection_by_mode, dict):
+        detected_modes = [str(mode) for mode, hit in detection_by_mode.items() if bool(hit)]
+    metrics = assessment.get("metrics") if isinstance(assessment, dict) else None
+    return {
+        "schema_version": FAILURE_MODE_GATES_SCHEMA_VERSION,
+        "thresholds": thresholds.model_dump(),
+        "detected_modes": detected_modes,
+        "detection_by_mode": detection_by_mode if isinstance(detection_by_mode, dict) else {},
+        "ethics_audit": ethics_audit if isinstance(ethics_audit, dict) else None,
+        "metrics": metrics if isinstance(metrics, dict) else {},
+        "case_id": case.case_id,
+    }
+
+
+def _render_micro_evolution_reflection(
+    *,
+    section_id: str,
+    attempt_index: int,
+    gate_failures: list[str],
+    hard_grounding_sentence_check: dict[str, Any],
+    literature_alignment_check: dict[str, Any],
+    unknown_bindings: dict[str, Any],
+    failure_modes: dict[str, Any],
+    peer_review_payload: dict[str, Any] | None,
+    applied_fixes: list[str] | None = None,
+) -> str:
+    unresolved = 0
+    final_decision = None
+    if isinstance(peer_review_payload, dict):
+        unresolved = int(peer_review_payload.get("unresolved_issue_count") or 0)
+        final_decision = peer_review_payload.get("final_decision")
+
+    lines: list[str] = []
+    lines.append("<Reflection>")
+    lines.append(f"- section_id: {section_id}")
+    lines.append(f"- attempt: {attempt_index}")
+    if final_decision is not None:
+        lines.append(f"- peer_review_final_decision: {final_decision}")
+    lines.append(f"- peer_review_unresolved_issue_count: {unresolved}")
+    lines.append("")
+    lines.append("Why it failed:")
+    if gate_failures:
+        lines.extend([f"- {item}" for item in gate_failures])
+    else:
+        lines.append("- Unknown gate failure; manual inspection required.")
+    lines.append("")
+    lines.append("Hard signals:")
+    lines.append(
+        f"- hard_grounding_missing_data: {int(hard_grounding_sentence_check.get('missing_data_binding_count') or 0)}"
+    )
+    lines.append(
+        f"- hard_grounding_missing_citation: {int(hard_grounding_sentence_check.get('missing_citation_binding_count') or 0)}"
+    )
+    lines.append(f"- literature_listing_risk: {bool(literature_alignment_check.get('likely_listing_without_alignment'))}")
+    unknown_citation = unknown_bindings.get("unknown_citation_ids") if isinstance(unknown_bindings, dict) else []
+    unknown_data = unknown_bindings.get("unknown_data_ids") if isinstance(unknown_bindings, dict) else []
+    if unknown_citation:
+        lines.append(f"- unknown_citation_ids: {unknown_citation}")
+    if unknown_data:
+        lines.append(f"- unknown_data_ids: {unknown_data}")
+    detected = failure_modes.get("detected_modes") if isinstance(failure_modes, dict) else []
+    if detected:
+        lines.append(f"- detected_failure_modes: {detected}")
+    lines.append("")
+    lines.append("How to modify next attempt:")
+    lines.append("- 逐句检查 conclusion-like 句子（含数字/因果/对比/结论触发词），必须补齐 [data:*] 与 [citation:*] 绑定；无法绑定时立刻降级表述并显式列出缺口。")
+    lines.append("- 若出现未知 citation/data ID，视为伪造/断链：删除该绑定并回到证据/文献注册表补齐真实 ID，禁止凭空替换。")
+    lines.append("- 文献综述避免 paper-by-paper 罗列：补齐 [支持]/[反驳]/[调和] 三元组，并用 mechanism-conflict 句式把冲突与当前数据连接起来。")
+    lines.append("- 对 Reviewer2 的 major issues：逐条回应并在文本中明确补上统计/方法/局限与下一步验证。")
+    if applied_fixes:
+        lines.append("")
+        lines.append("Auto-fixes applied in this loop:")
+        lines.extend([f"- {item}" for item in applied_fixes])
+    lines.append("</Reflection>")
+    return "\n".join(lines).strip()
+
+
+def _append_literature_triad_synthesis(
+    *,
+    text: str,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+) -> tuple[str, list[str]]:
+    """Add a minimal [支持]/[反驳]/[调和] synthesis block if likely listing is detected."""
+    citations: list[str] = []
+    for cid in section.citation_ids:
+        if citation_registry.get(cid) is not None:
+            citations.append(cid)
+    if not citations and section.claim_ids:
+        claim = claim_graph.get(section.claim_ids[0])
+        if claim is not None:
+            for cid in claim.citation_ids:
+                if citation_registry.get(cid) is not None:
+                    citations.append(cid)
+    citations = _dedup_keep_order(citations)[:2]
+
+    evidence_ids: list[str] = []
+    for eid in section.evidence_ids:
+        if evidence_store.get(eid) is not None:
+            evidence_ids.append(eid)
+    if not evidence_ids and section.claim_ids:
+        claim = claim_graph.get(section.claim_ids[0])
+        if claim is not None:
+            for eid in claim.evidence_ids:
+                if evidence_store.get(eid) is not None:
+                    evidence_ids.append(eid)
+    evidence_ids = _dedup_keep_order(evidence_ids)[:1]
+
+    if len(citations) < 2 or not evidence_ids:
+        return text, []
+
+    synth = "\n".join(
+        [
+            "## Literature Conflict Synthesis (Triad Repair)",
+            f"- [支持] Prior work supports mechanism A [citation:{citations[0]}] [data:{evidence_ids[0]}].",
+            f"- [反驳] Other evidence challenges key assumptions [citation:{citations[1]}] [data:{evidence_ids[0]}].",
+            f"- [调和] We reconcile the discrepancy via current data constraints [data:{evidence_ids[0]}] [citation:{citations[0]}], which suggests a context-dependent pathway (however, residual confounders remain).",
+        ]
+    ).strip()
+    return f"{text.strip()}\n\n{synth}".strip(), ["added_literature_triad_synthesis"]
+
+
+def _repair_conclusion_like_sentence_bindings(
+    *,
+    text: str,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+) -> tuple[str, list[str]]:
+    parts = _split_text_with_separators(text)
+    fixes: list[str] = []
+
+    def _candidate_bindings_from_claim_ids(claim_ids: list[str]) -> tuple[list[str], list[str]]:
+        evidence_ids: list[str] = []
+        citation_ids: list[str] = []
+        for cid in claim_ids:
+            claim = claim_graph.get(cid)
+            if claim is None:
+                continue
+            for eid in claim.evidence_ids:
+                if evidence_store.get(eid) is not None:
+                    evidence_ids.append(eid)
+            for cite in claim.citation_ids:
+                if citation_registry.get(cite) is not None:
+                    citation_ids.append(cite)
+        return _dedup_keep_order(evidence_ids), _dedup_keep_order(citation_ids)
+
+    default_claim_ids: list[str] = []
+    if len(section.claim_ids) == 1:
+        default_claim_ids = [section.claim_ids[0]]
+
+    for idx in range(0, len(parts), 2):
+        chunk = parts[idx]
+        normalized = _normalize_line(chunk)
+        if not normalized or not _is_conclusion_like_sentence(normalized):
+            continue
+        has_data = bool(_DATA_TAG_RE.search(chunk))
+        has_citation = bool(_CITATION_TAG_RE.search(chunk))
+        if has_data and has_citation:
+            continue
+
+        claim_ids = _extract_tag_ids(chunk, tag="claim") or default_claim_ids
+        evidence_ids, citation_ids = _candidate_bindings_from_claim_ids(claim_ids)
+        if not evidence_ids:
+            evidence_ids = _dedup_keep_order([eid for eid in section.evidence_ids if evidence_store.get(eid) is not None])
+        if not citation_ids:
+            citation_ids = _dedup_keep_order([cid for cid in section.citation_ids if citation_registry.get(cid) is not None])
+
+        additions: list[str] = []
+        if not has_data and evidence_ids:
+            additions.append(f"[data:{evidence_ids[0]}]")
+            fixes.append("patched_missing_data_binding")
+        if not has_citation and citation_ids:
+            additions.append(f"[citation:{citation_ids[0]}]")
+            fixes.append("patched_missing_citation_binding")
+        if additions:
+            stripped_chunk = chunk.rstrip()
+            terminal = ""
+            if stripped_chunk.endswith((".", "!", "?", ";", ":")):
+                terminal = stripped_chunk[-1]
+                stripped_chunk = stripped_chunk[:-1].rstrip()
+            patched_chunk = f"{stripped_chunk} {' '.join(additions)}"
+            if terminal:
+                patched_chunk = f"{patched_chunk}{terminal}"
+            parts[idx] = patched_chunk
+
+    return "".join(parts).strip(), _dedup_keep_order(fixes)
+
+
+def _micro_evolution_rewrite_text(
+    *,
+    compiled_text: str,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+    hard_grounding_sentence_check: dict[str, Any],
+    literature_alignment_check: dict[str, Any],
+    unknown_bindings: dict[str, Any],
+    reflection_addendum: str | None = None,
+) -> tuple[str, list[str]]:
+    """Deterministic 'rewrite' pass to reduce hard-gate violations without fabricating sources."""
+    output = compiled_text
+    fixes: list[str] = []
+
+    unknown_citation = unknown_bindings.get("unknown_citation_ids") if isinstance(unknown_bindings, dict) else []
+    if isinstance(unknown_citation, list) and unknown_citation:
+        for cid in unknown_citation:
+            if not isinstance(cid, str) or not cid.strip():
+                continue
+            output = output.replace(f"[citation:{cid}]", "")
+        output = re.sub(r"\[citation:UNVERIFIED\]", "", output, flags=re.IGNORECASE)
+        fixes.append("removed_unknown_citation_ids")
+
+    unknown_data = unknown_bindings.get("unknown_data_ids") if isinstance(unknown_bindings, dict) else []
+    if isinstance(unknown_data, list) and unknown_data:
+        for did in unknown_data:
+            if not isinstance(did, str) or not did.strip():
+                continue
+            output = output.replace(f"[data:{did}]", "")
+        output = re.sub(r"\[data:UNVERIFIED\]", "", output, flags=re.IGNORECASE)
+        fixes.append("removed_unknown_data_ids")
+
+    # Patch conclusion-like sentence bindings when a safe mapping exists (claim-scoped first, section-scoped fallback).
+    if int(hard_grounding_sentence_check.get("flagged_sentence_count") or 0) > 0:
+        output, patched = _repair_conclusion_like_sentence_bindings(
+            text=output,
+            section=section,
+            claim_graph=claim_graph,
+            evidence_store=evidence_store,
+            citation_registry=citation_registry,
+        )
+        fixes.extend(patched)
+
+    # Repair literature listing by injecting an explicit triad synthesis block.
+    if bool(literature_alignment_check.get("likely_listing_without_alignment")):
+        output, triad_fixes = _append_literature_triad_synthesis(
+            text=output,
+            section=section,
+            claim_graph=claim_graph,
+            evidence_store=evidence_store,
+            citation_registry=citation_registry,
+        )
+        fixes.extend(triad_fixes)
+
+    if reflection_addendum and reflection_addendum.strip():
+        # Treat reflection as an explicit prompt-side guardrail for this rewrite pass:
+        # force one certainty downgrade step when loop diagnostics indicate risk.
+        output = _downgrade_strong_conclusions(output)
+        fixes.append("applied_reflection_guided_conclusion_downgrade")
+
+    output = re.sub(r"\s{2,}", " ", output)
+    output = re.sub(r"[ \t]+\n", "\n", output)
+    output = re.sub(r"\n{3,}", "\n\n", output)
+    return output.strip(), _dedup_keep_order(fixes)
+
+
+def _build_compile_safety_valve_reasons(
+    *,
+    hitl_blocking: bool,
+    compile_errors: list[Any],
+    rewrite_required_claims: int,
+    section: SectionDraft,
+    is_core: bool,
+    hard_grounding_sentence_check: dict[str, Any],
+    literature_alignment_check: dict[str, Any],
+    claim_grounding_payload: dict[str, Any],
+    peer_review_payload: dict[str, Any] | None,
+    hypothesis_bundle_payload: dict[str, Any] | None,
+    compliance_report: Any,
+    capability_gate_reasons: list[str],
+    unknown_bindings: dict[str, Any] | None = None,
+    failure_mode_payload: dict[str, Any] | None = None,
+) -> list[str]:
+    reasons: list[str] = []
+    if hitl_blocking:
+        reasons.append("One or more key HITL checkpoints are rejected.")
+    if compile_errors:
+        reasons.append(f"Section compiler found {len(compile_errors)} blocking grounding issue(s).")
+    if rewrite_required_claims > 0:
+        reasons.append(
+            f"Claim Map validation requires rewrite for {rewrite_required_claims} claim(s) with invalid bindings."
+        )
+    if section.claim_ids and not (section.evidence_ids or section.fact_ids or section.citation_ids):
+        reasons.append("Claims exist but key evidence/fact/citation bindings are missing.")
+    if is_core:
+        if int(hard_grounding_sentence_check.get("missing_data_binding_count") or 0) > 0:
+            reasons.append("Hard grounding check detected conclusion sentences without [data:*] binding.")
+        if int(hard_grounding_sentence_check.get("missing_citation_binding_count") or 0) > 0:
+            reasons.append("Hard grounding check detected conclusion sentences without [citation:*] binding.")
+        if bool(literature_alignment_check.get("likely_listing_without_alignment")):
+            reasons.append(
+                "Literature alignment check detected citation listing without [支持]/[反驳]/[调和] mechanism-conflict synthesis."
+            )
+    grounding_summary = claim_grounding_payload.get("summary") if isinstance(claim_grounding_payload.get("summary"), dict) else {}
+    invalid_claims = int(grounding_summary.get("invalid_claims") or 0)
+    stale_claims = int(grounding_summary.get("stale_claims") or 0)
+    if invalid_claims > 0:
+        reasons.append(f"Claim grounding AST detected {invalid_claims} invalid claim(s) without hard data linkage.")
+    if stale_claims > 0:
+        reasons.append(f"Claim grounding AST detected {stale_claims} stale claim(s) due to artifact drift.")
+    if isinstance(unknown_bindings, dict):
+        unknown_data = unknown_bindings.get("unknown_data_ids")
+        unknown_citation = unknown_bindings.get("unknown_citation_ids")
+        if isinstance(unknown_data, list) and unknown_data:
+            reasons.append(f"Detected {len(unknown_data)} unknown [data:*] binding(s) not present in evidence registry.")
+        if isinstance(unknown_citation, list) and unknown_citation:
+            reasons.append(f"Detected {len(unknown_citation)} unknown [citation:*] binding(s) not present in citation registry.")
+    if isinstance(failure_mode_payload, dict):
+        detected_modes = failure_mode_payload.get("detected_modes")
+        if isinstance(detected_modes, list):
+            for mode in detected_modes:
+                token = str(mode).strip()
+                if token:
+                    reasons.append(f"Failure-mode gate detected runtime risk: {token}.")
+    if isinstance(peer_review_payload, dict):
+        if str(peer_review_payload.get("final_decision")) != "accept":
+            reasons.append("Peer-review loop did not reach accept decision.")
+        if int(peer_review_payload.get("unresolved_issue_count") or 0) > 0:
+            reasons.append("Peer-review loop still reports unresolved reviewer issues.")
+    if isinstance(hypothesis_bundle_payload, dict) and bool(hypothesis_bundle_payload.get("claim_map_gate_blocked")):
+        reasons.append(
+            "Hypothesis falsification gate blocked Claim Map promotion due to insufficient surviving hypotheses."
+        )
+    if compliance_report.blocked_by_critical:
+        reasons.append("Scientific compliance audit found critical ethics gaps.")
+    if compliance_report.risk_level == "high":
+        reasons.append("Scientific compliance audit risk level is high.")
+    if compliance_report.findings:
+        major_plus = [item for item in compliance_report.findings if item.severity in {"critical", "major"}]
+        if major_plus:
+            reasons.append(f"Scientific compliance audit found {len(major_plus)} major/critical issue(s).")
+    reasons.extend(capability_gate_reasons)
+    return _dedup_keep_order(reasons)
 
 
 def _build_triplet_reason(change_type: str, *, source: str) -> str:
@@ -2232,6 +2913,239 @@ def _build_section_claim_map(
     }
 
 
+def _claim_map_submission_staging_path(thread_id: str, project_id: str, section_id: str) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return _research_root(thread_id) / "claim-maps" / "submissions" / f"{project_id}-{section_id}-{stamp}.json"
+
+
+def _parse_claim_map_json_submission(claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None) -> Any:
+    if claim_map_json is None:
+        return None
+    if isinstance(claim_map_json, str):
+        raw = claim_map_json.strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception as exc:
+            raise ValueError("claim_map_json must be valid JSON string.") from exc
+    return claim_map_json
+
+
+def _load_claim_map_submission(
+    *,
+    thread_id: str,
+    project_id: str,
+    section_id: str,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None,
+    claim_map_artifact_path: str | None,
+) -> tuple[Any, str | None, str | None]:
+    if claim_map_json is not None and claim_map_artifact_path:
+        raise ValueError("Provide only one of claim_map_json or claim_map_artifact_path.")
+    parsed_inline = _parse_claim_map_json_submission(claim_map_json)
+    if parsed_inline is not None:
+        staging_path = _claim_map_submission_staging_path(thread_id, project_id, section_id)
+        _dump_json(staging_path, parsed_inline)
+        return parsed_inline, "claim_map_json", _to_virtual_path(thread_id, staging_path)
+    if claim_map_artifact_path:
+        try:
+            actual_path = get_paths().resolve_virtual_path(thread_id, claim_map_artifact_path)
+        except Exception as exc:
+            raise ValueError("claim_map_artifact_path must be a valid sandbox virtual path.") from exc
+        if not actual_path.exists() or not actual_path.is_file():
+            raise ValueError(f"claim_map_artifact_path does not exist: {claim_map_artifact_path}")
+        try:
+            payload = json.loads(actual_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ValueError("claim_map_artifact_path must point to a valid JSON file.") from exc
+        return payload, "claim_map_artifact_path", claim_map_artifact_path
+    return None, None, None
+
+
+def _claim_map_rows_from_submission(raw_payload: Any) -> list[dict[str, Any]]:
+    rows_payload: Any = None
+    if isinstance(raw_payload, list):
+        rows_payload = raw_payload
+    elif isinstance(raw_payload, dict):
+        if isinstance(raw_payload.get("claims"), list):
+            rows_payload = raw_payload.get("claims")
+        elif isinstance(raw_payload.get("claim_map"), dict) and isinstance(raw_payload.get("claim_map", {}).get("claims"), list):
+            rows_payload = raw_payload["claim_map"]["claims"]
+    if not isinstance(rows_payload, list):
+        raise ValueError("Submitted Claim Map JSON must contain a `claims` list or be a list of rows.")
+    rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows_payload):
+        if not isinstance(row, dict):
+            raise ValueError(f"Claim Map row #{idx + 1} must be an object.")
+        rows.append(row)
+    return rows
+
+
+def _validate_submitted_claim_map(
+    *,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+    submission_payload: Any,
+    submission_source: str,
+    submission_artifact_path: str | None,
+) -> tuple[dict[str, Any], list[ClaimMapEntry], dict[str, Any]]:
+    rows = _claim_map_rows_from_submission(submission_payload)
+    entries: list[ClaimMapEntry] = []
+    for idx, row in enumerate(rows):
+        try:
+            entries.append(ClaimMapEntry.model_validate(row))
+        except Exception as exc:
+            raise ValueError(f"Claim Map row #{idx + 1} schema validation failed: {exc}") from exc
+
+    section_claim_ids = list(section.claim_ids)
+    section_claim_id_set = set(section_claim_ids)
+    entry_map: dict[str, ClaimMapEntry] = {}
+    duplicate_claim_ids: list[str] = []
+    for entry in entries:
+        if entry.claim_id in entry_map:
+            duplicate_claim_ids.append(entry.claim_id)
+            continue
+        entry_map[entry.claim_id] = entry
+    if duplicate_claim_ids:
+        raise ValueError(
+            "Claim Map has duplicate claim_id rows: " + ", ".join(sorted(set(duplicate_claim_ids)))
+        )
+    extra_claim_ids = [claim_id for claim_id in entry_map if claim_id not in section_claim_id_set]
+    if extra_claim_ids:
+        raise ValueError("Claim Map contains out-of-section claim_id(s): " + ", ".join(sorted(extra_claim_ids)))
+    missing_claim_ids = [claim_id for claim_id in section_claim_ids if claim_id not in entry_map]
+    if missing_claim_ids:
+        raise ValueError("Claim Map missing section claim_id(s): " + ", ".join(missing_claim_ids))
+    missing_graph_claim_ids = [claim_id for claim_id in section_claim_ids if claim_graph.get(claim_id) is None]
+    if missing_graph_claim_ids:
+        raise ValueError("Claim Map references missing claim graph ID(s): " + ", ".join(missing_graph_claim_ids))
+
+    compiler = ClaimConstraintCompiler(
+        evidence_store=evidence_store,
+        citation_registry=citation_registry,
+        mode="strict",
+    )
+    ordered_entries = [entry_map[claim_id] for claim_id in section_claim_ids]
+    issues: list[dict[str, Any]] = []
+    blocking_messages: list[str] = []
+    for entry in ordered_entries:
+        for issue in compiler.validate_claim_map_entry(entry):
+            issue_payload = {
+                "claim_id": issue.claim_id,
+                "severity": issue.severity,
+                "message": issue.message,
+            }
+            issues.append(issue_payload)
+            if issue.severity == "error":
+                blocking_messages.append(issue.message)
+    if blocking_messages:
+        preview = "; ".join(blocking_messages[:3])
+        suffix = " ..." if len(blocking_messages) > 3 else ""
+        raise ValueError(f"Submitted Claim Map failed hard constraint validation: {preview}{suffix}")
+
+    rows_payload = [entry.model_dump() for entry in ordered_entries]
+    rewrite_required_rows = [row for row in rows_payload if bool(row.get("rewrite_required"))]
+    summary = {
+        "total_claim_ids": len(section.claim_ids),
+        "mapped_claims": len(rows_payload),
+        "rows_with_markers": sum(1 for row in rows_payload if int(row.get("marker_count") or 0) > 0),
+        "rewrite_required_claims": len(rewrite_required_rows),
+        "rewrite_required_claim_ids": [
+            str(row.get("claim_id") or "")
+            for row in rewrite_required_rows
+            if str(row.get("claim_id") or "").strip()
+        ],
+    }
+    validation_payload = {
+        "schema_version": CLAIM_MAP_GATE_SCHEMA_VERSION,
+        "status": "passed",
+        "validated_at": _now_iso(),
+        "validated_in_sandbox": True,
+        "source": submission_source,
+        "submission_artifact_path": submission_artifact_path,
+        "validated_claim_count": len(rows_payload),
+        "warning_count": sum(1 for item in issues if str(item.get("severity")) == "warning"),
+        "error_count": 0,
+    }
+    normalized_payload = {
+        "schema_version": CLAIM_MAP_SCHEMA_VERSION,
+        "generated_at": _now_iso(),
+        "section_id": section.section_id,
+        "claim_ids": list(section.claim_ids),
+        "table_columns": [
+            "Claim ID",
+            "核心主张",
+            "支撑 Data ID",
+            "支撑 Citation ID",
+            "局限性/Caveat",
+        ],
+        "claims": rows_payload,
+        "issues": issues,
+        "summary": summary,
+        "validation": validation_payload,
+    }
+    return normalized_payload, ordered_entries, validation_payload
+
+
+def _resolve_claim_map_for_compile(
+    *,
+    thread_id: str,
+    project_id: str,
+    section: SectionDraft,
+    claim_graph: ClaimGraph,
+    evidence_store: EvidenceStore,
+    citation_registry: CitationRegistry,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None,
+    claim_map_artifact_path: str | None,
+    require_claim_map_submission: bool,
+) -> tuple[dict[str, Any], list[ClaimMapEntry], dict[str, Any]]:
+    submission_payload, submission_source, submission_virtual_path = _load_claim_map_submission(
+        thread_id=thread_id,
+        project_id=project_id,
+        section_id=section.section_id,
+        claim_map_json=claim_map_json,
+        claim_map_artifact_path=claim_map_artifact_path,
+    )
+    if submission_payload is None:
+        if require_claim_map_submission:
+            raise ValueError(
+                "compile_project_section now requires a Claim Map JSON submission. "
+                "Provide claim_map_json or claim_map_artifact_path generated before drafting."
+            )
+        fallback_payload = _build_section_claim_map(
+            section=section,
+            claim_graph=claim_graph,
+            evidence_store=evidence_store,
+            citation_registry=citation_registry,
+        )
+        fallback_rows = fallback_payload.get("claims") if isinstance(fallback_payload.get("claims"), list) else []
+        fallback_entries = [ClaimMapEntry.model_validate(row) for row in fallback_rows if isinstance(row, dict)]
+        fallback_validation = {
+            "schema_version": CLAIM_MAP_GATE_SCHEMA_VERSION,
+            "status": "auto_generated",
+            "validated_at": _now_iso(),
+            "validated_in_sandbox": True,
+            "source": "runtime_auto_generated",
+            "submission_artifact_path": None,
+            "validated_claim_count": len(fallback_entries),
+            "warning_count": 0,
+            "error_count": 0,
+        }
+        fallback_payload["validation"] = fallback_validation
+        return fallback_payload, fallback_entries, fallback_validation
+    return _validate_submitted_claim_map(
+        section=section,
+        claim_graph=claim_graph,
+        evidence_store=evidence_store,
+        citation_registry=citation_registry,
+        submission_payload=submission_payload,
+        submission_source=submission_source or "unknown",
+        submission_artifact_path=submission_virtual_path,
+    )
+
+
 def _collect_section_evidence_units(
     section: SectionDraft,
     claims: list[Claim],
@@ -2698,8 +3612,46 @@ def _render_risk_conclusion_template(
     return "\n".join(lines).strip()
 
 
+def _record_state_mutation_to_ledger(
+    *,
+    thread_id: str,
+    operation: str,
+    artifact_path: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    record_metadata = dict(metadata or {})
+    resolved_venue = _resolve_prompt_registry_venue(record_metadata)
+    prompt_pack = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
+    for key, value in prompt_pack.items():
+        record_metadata.setdefault(key, value)
+    prompt_registry = _build_prompt_registry_metadata(record_metadata, prompt_pack_metadata=prompt_pack)
+    record_metadata.setdefault("prompt_registry", prompt_registry)
+    record_metadata.setdefault("runtime_strategy", prompt_registry.get("runtime_strategy"))
+    record_metadata.setdefault("runtime_strategy_hash", prompt_registry.get("runtime_strategy_hash"))
+    record_metadata.setdefault("eval_impact", prompt_registry.get("eval_impact"))
+    record_metadata.setdefault("eval_attribution_key", prompt_registry.get("eval_attribution_key"))
+    _artifact_ledger(thread_id).record(
+        service="state",
+        operation=operation,
+        artifact_path=artifact_path,
+        metadata=record_metadata,
+    )
+
+
 def upsert_project(thread_id: str, project: ResearchProject) -> ResearchProject:
-    return _project_store(thread_id).upsert_project(project)
+    saved = _project_store(thread_id).upsert_project(project)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_project",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "projects.json"),
+        metadata={
+            "project_id": saved.project_id,
+            "target_venue": saved.target_venue,
+            "section_count": len(saved.sections),
+            "mutation_type": "project_state",
+        },
+    )
+    return saved
 
 
 def get_project(thread_id: str, project_id: str) -> ResearchProject | None:
@@ -2717,10 +3669,12 @@ def upsert_section(thread_id: str, project_id: str, section: SectionDraft) -> Se
         raise ValueError(f"Project '{project_id}' not found")
     existing = _get_section_from_project(project, section.section_id)
     saved = store.upsert_section(project_id, section)
+    auto_captured_directive_count = 0
     # Auto-capture human edit intent as policy feedback directives.
     if existing is not None:
         directives = _infer_writing_directives_from_section_edit(existing.content, section.content)
         if directives:
+            auto_captured_directive_count = len(directives)
             latest_project = store.get_project(project_id)
             if latest_project is not None:
                 decision_map = _load_hitl_decision_map(latest_project)
@@ -2746,12 +3700,26 @@ def upsert_section(thread_id: str, project_id: str, section: SectionDraft) -> Se
                     "hitl_decisions": hitl_metadata,
                 }
                 store.upsert_project(latest_project)
-    _append_section_version_event(
+    version_diff_payload = _append_section_version_event(
         thread_id=thread_id,
         project_id=project_id,
         section=saved,
         before_text=existing.content if existing is not None else "",
         source="upsert_section",
+    )
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_section",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "projects.json"),
+        metadata={
+            "project_id": project_id,
+            "section_id": saved.section_id,
+            "section_version": int(saved.version or 1),
+            "target_venue": project.target_venue,
+            "auto_captured_directive_count": auto_captured_directive_count,
+            "version_diff_to_version_id": version_diff_payload.get("to_version_id"),
+            "mutation_type": "section_content_update",
+        },
     )
     return saved
 
@@ -2927,19 +3895,64 @@ def get_section_traceability(thread_id: str, project_id: str, section_id: str) -
 
 
 def upsert_claim(thread_id: str, claim: Claim) -> Claim:
-    return _claim_graph(thread_id).upsert(claim)
+    saved = _claim_graph(thread_id).upsert(claim)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_claim",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "claims.json"),
+        metadata={
+            "claim_id": saved.claim_id,
+            "claim_type": saved.claim_type,
+            "mutation_type": "claim_graph_update",
+        },
+    )
+    return saved
 
 
 def upsert_evidence(thread_id: str, evidence: EvidenceUnit) -> EvidenceUnit:
-    return _evidence_store(thread_id).upsert(evidence)
+    saved = _evidence_store(thread_id).upsert(evidence)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_evidence",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "evidence.json"),
+        metadata={
+            "evidence_id": saved.evidence_id,
+            "evidence_type": saved.evidence_type,
+            "mutation_type": "evidence_store_update",
+        },
+    )
+    return saved
 
 
 def upsert_citation(thread_id: str, citation: CitationRecord) -> CitationRecord:
-    return _citation_registry(thread_id).upsert(citation)
+    saved = _citation_registry(thread_id).upsert(citation)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_citation",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "citations.json"),
+        metadata={
+            "citation_id": saved.citation_id,
+            "source": saved.source,
+            "verified": bool(saved.verified),
+            "mutation_type": "citation_registry_update",
+        },
+    )
+    return saved
 
 
 def upsert_fact(thread_id: str, fact: NumericFact) -> NumericFact:
-    return _source_of_truth_store(thread_id).upsert_fact(fact)
+    saved = _source_of_truth_store(thread_id).upsert_fact(fact)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_fact",
+        artifact_path=_to_virtual_path(thread_id, _research_root(thread_id) / "source_of_truth.json"),
+        metadata={
+            "fact_id": saved.fact_id,
+            "metric": saved.metric,
+            "mutation_type": "source_of_truth_update",
+        },
+    )
+    return saved
 
 
 def _citation_id_from_graph_node(node: dict[str, Any]) -> str | None:
@@ -3291,9 +4304,21 @@ def compile_project_section(
     journal_style_force_refresh: bool = False,
     journal_style_sample_size: int | None = None,
     journal_style_recent_year_window: int | None = None,
+    dynamic_retrieval_top_k: int | None = None,
+    dynamic_retrieval_min_score: float | None = None,
+    task_complexity_score: float | None = None,
+    analysis_confidence: float | None = None,
+    role_contract_auto_tighten: bool = True,
     policy_snapshot_auto_adjust_narrative: bool = True,
     narrative_self_question_rounds: int = 3,
     narrative_include_storyboard: bool = True,
+    hypothesis_reasoning_mode: HypothesisReasoningModeOverride | None = None,
+    min_competing_hypotheses: int | None = None,
+    min_survivors_required: int | None = None,
+    falsification_fail_close: FalsificationFailCloseOverride | None = None,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+    claim_map_artifact_path: str | None = None,
+    require_claim_map_submission: bool = False,
 ) -> dict[str, Any]:
     store = _project_store(thread_id)
     project = store.get_project(project_id)
@@ -3327,11 +4352,16 @@ def compile_project_section(
     evidence_store = _evidence_store(thread_id)
     citation_registry = _citation_registry(thread_id)
     source_of_truth_store = _source_of_truth_store(thread_id)
-    claim_map_payload = _build_section_claim_map(
+    claim_map_payload, submitted_claim_map_rows, claim_map_validation = _resolve_claim_map_for_compile(
+        thread_id=thread_id,
+        project_id=project_id,
         section=section,
         claim_graph=claim_graph,
         evidence_store=evidence_store,
         citation_registry=citation_registry,
+        claim_map_json=claim_map_json,
+        claim_map_artifact_path=claim_map_artifact_path,
+        require_claim_map_submission=require_claim_map_submission,
     )
     claim_map_path = _research_root(thread_id) / "claim-maps" / f"{project_id}-{section_id}.json"
     _dump_json(claim_map_path, claim_map_payload)
@@ -3362,6 +4392,48 @@ def compile_project_section(
     resolved_peer_review_max_rounds = int(peer_review_strategy["resolved_max_rounds"])
     resolved_peer_review_ab_variant = str(peer_review_strategy["ab_variant"])
     style_venue_name = _resolve_style_venue_name(project.target_venue, resolved_venue)
+    prompt_pack_metadata = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
+    prompt_layer_parameter_space = (
+        prompt_pack_metadata.get("prompt_layer_parameter_space")
+        if isinstance(prompt_pack_metadata.get("prompt_layer_parameter_space"), dict)
+        else {}
+    )
+    default_reasoning_mode = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L5",
+            parameter_name="reasoning_mode",
+            fallback="auto",
+        )
+    ).strip().lower()
+    resolved_hypothesis_reasoning_mode = str(hypothesis_reasoning_mode or default_reasoning_mode or "auto").strip().lower()
+    if resolved_hypothesis_reasoning_mode not in {"tot", "got", "auto"}:
+        resolved_hypothesis_reasoning_mode = "auto"
+    default_min_competing = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L5",
+        parameter_name="min_competing_hypotheses",
+        fallback=3,
+    )
+    default_min_survivors = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L5",
+        parameter_name="min_survivors_required",
+        fallback=1,
+    )
+    default_fail_close = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L5",
+            parameter_name="falsification_fail_close",
+            fallback="strict",
+        )
+    ).strip().lower()
+    resolved_min_competing_hypotheses = max(3, min(int(min_competing_hypotheses or default_min_competing), 8))
+    resolved_min_survivors_required = max(1, min(int(min_survivors_required or default_min_survivors), 5))
+    resolved_falsification_fail_close = str(falsification_fail_close or default_fail_close or "strict").strip().lower()
+    if resolved_falsification_fail_close not in {"strict", "lenient"}:
+        resolved_falsification_fail_close = "strict"
     narrative_strategy = _resolve_narrative_strategy(
         venue_name=resolved_venue,
         section=section,
@@ -3393,6 +4465,94 @@ def compile_project_section(
             or narrative_strategy.evidence_density != original_density
             or narrative_strategy.max_templates != original_max_templates
         )
+    resolved_task_complexity_score, resolved_analysis_confidence, complexity_confidence_diagnostics = (
+        _estimate_task_complexity_and_analysis_confidence(
+            section=section,
+            evidence_store=evidence_store,
+            source_of_truth_store=source_of_truth_store,
+            claim_map_validation=claim_map_validation,
+            task_complexity_score=task_complexity_score,
+            analysis_confidence=analysis_confidence,
+        )
+    )
+    l3_complexity_model = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L3",
+            parameter_name="complexity_model",
+            fallback="balanced",
+        )
+    ).strip().lower()
+    if l3_complexity_model not in {"lightweight", "balanced", "strict"}:
+        l3_complexity_model = "balanced"
+    high_complexity_threshold_map = {
+        "lightweight": 0.62,
+        "balanced": 0.72,
+        "strict": 0.82,
+    }
+    l3_high_complexity_threshold = high_complexity_threshold_map.get(l3_complexity_model, 0.72)
+    l3_low_confidence_threshold = _clamp_unit_interval(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L3",
+            parameter_name="low_confidence_threshold",
+            fallback=0.55,
+        ),
+        default=0.55,
+    )
+    l3_writer_claim_modality = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L3",
+            parameter_name="writer_claim_modality",
+            fallback="calibrated",
+        )
+    ).strip().lower()
+    if l3_writer_claim_modality not in {"calibrated", "conservative", "hedged"}:
+        l3_writer_claim_modality = "calibrated"
+    l3_auditor_escalation_policy = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L3",
+            parameter_name="auditor_escalation_policy",
+            fallback="risk_based",
+        )
+    ).strip().lower()
+    if l3_auditor_escalation_policy not in {"off", "risk_based", "always_on"}:
+        l3_auditor_escalation_policy = "risk_based"
+    adaptive_role_contract = build_adaptive_role_contract_profile(
+        task_complexity_score=resolved_task_complexity_score,
+        analysis_confidence=resolved_analysis_confidence,
+        enable_auto_tighten=role_contract_auto_tighten,
+        low_confidence_threshold=l3_low_confidence_threshold,
+        high_complexity_threshold=l3_high_complexity_threshold,
+        preferred_writer_claim_modality=l3_writer_claim_modality,
+        auditor_escalation_policy=l3_auditor_escalation_policy,
+    )
+    complexity_confidence_diagnostics["l3_complexity_model"] = l3_complexity_model
+    complexity_confidence_diagnostics["l3_low_confidence_threshold"] = round(l3_low_confidence_threshold, 4)
+    complexity_confidence_diagnostics["l3_high_complexity_threshold"] = round(l3_high_complexity_threshold, 4)
+    complexity_confidence_diagnostics["l3_writer_claim_modality"] = l3_writer_claim_modality
+    complexity_confidence_diagnostics["l3_auditor_escalation_policy"] = l3_auditor_escalation_policy
+    adaptive_directives_raw = adaptive_role_contract.get("writing_directives")
+    adaptive_directives = adaptive_directives_raw if isinstance(adaptive_directives_raw, list) else []
+    if adaptive_directives:
+        merged_writing_directives: list[str] = []
+        seen_directives: set[str] = set()
+        for row in [*policy_writing_directives, *adaptive_directives]:
+            token = str(row or "").strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered in seen_directives:
+                continue
+            seen_directives.add(lowered)
+            merged_writing_directives.append(token)
+        policy_writing_directives = merged_writing_directives
+    adaptive_role_contract_tone_applied = False
+    if str(adaptive_role_contract.get("writer_claim_modality") or "") == "hedged" and narrative_strategy.tone != "conservative":
+        narrative_strategy.tone = "conservative"
+        adaptive_role_contract_tone_applied = True
     journal_style_cfg = get_journal_style_config()
     resolved_journal_style_enabled = journal_style_cfg.enabled if journal_style_enabled is None else journal_style_enabled
     journal_style_bundle: dict[str, Any] | None = None
@@ -3413,12 +4573,42 @@ def compile_project_section(
             narrative_max_templates=narrative_max_templates,
             narrative_evidence_density=narrative_evidence_density,
         )
+    dynamic_few_shot_query_text = _build_dynamic_style_query_text(
+        section=section,
+        narrative_plan_payload=narrative_plan_payload,
+        claim_map_payload=claim_map_payload,
+    )
+    resolved_dynamic_retrieval_top_k, resolved_dynamic_retrieval_min_score = _resolve_dynamic_few_shot_controls(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        journal_style_bundle=journal_style_bundle,
+        dynamic_retrieval_top_k=dynamic_retrieval_top_k,
+        dynamic_retrieval_min_score=dynamic_retrieval_min_score,
+    )
+    dynamic_few_shot_context: list[dict[str, Any]] = []
+    if isinstance(journal_style_bundle, dict):
+        dynamic_few_shot_context = retrieve_dynamic_few_shot_context(
+            journal_style_bundle,
+            query_text=dynamic_few_shot_query_text,
+            top_k=resolved_dynamic_retrieval_top_k,
+            min_score=resolved_dynamic_retrieval_min_score,
+        )
+    dynamic_few_shot_retrieval = {
+        "enabled": bool(dynamic_few_shot_context),
+        "query_text": dynamic_few_shot_query_text,
+        "top_k": resolved_dynamic_retrieval_top_k,
+        "min_score": resolved_dynamic_retrieval_min_score,
+        "match_count": len(dynamic_few_shot_context),
+    }
     venue_style_adapter = build_style_adapter_profile(
         journal_style_bundle=journal_style_bundle,
         claim_tone=narrative_strategy.tone,
         evidence_density=narrative_strategy.evidence_density,
         max_templates=narrative_strategy.max_templates,
         runtime_writing_directives=policy_writing_directives,
+        dynamic_few_shot_context=dynamic_few_shot_context,
+        dynamic_retrieval_top_k=resolved_dynamic_retrieval_top_k,
+        dynamic_retrieval_min_score=resolved_dynamic_retrieval_min_score,
+        venue_name=resolved_venue,
     )
     runtime_stage_context = _resolve_runtime_stage_context(
         operation="compile_section",
@@ -3434,6 +4624,7 @@ def compile_project_section(
         source_of_truth_store=source_of_truth_store,
         mode=mode,
         narrative_strategy=narrative_strategy,
+        claim_map_override=submitted_claim_map_rows,
     )
 
     compiled_text = result.compiled_text
@@ -3451,6 +4642,7 @@ def compile_project_section(
     claim_map_payload["summary"] = claim_map_summary
     claim_map_payload["claims"] = claim_map_rows
     claim_map_payload["generated_at"] = _now_iso()
+    claim_map_payload["validation"] = claim_map_validation
     _dump_json(claim_map_path, claim_map_payload)
     hypothesis_bundle_payload: dict[str, Any] | None = None
     peer_review_payload: dict[str, Any] | None = None
@@ -3461,6 +4653,17 @@ def compile_project_section(
     if metrics_path.exists():
         peer_review_ab_metrics_artifact_path = _to_virtual_path(thread_id, metrics_path)
     is_core = _is_core_section(section)
+    strict_micro_reviewer2_styles = [
+        "statistical_tyrant",
+        "methodology_fundamentalist",
+        "domain_traditionalist",
+    ]
+    strict_reviewer2_profile_applied = False
+    if is_core and mode == "strict" and auto_peer_review:
+        for style in strict_micro_reviewer2_styles:
+            if style not in resolved_reviewer2_styles:
+                resolved_reviewer2_styles.append(style)
+                strict_reviewer2_profile_applied = True
 
     if is_core and auto_hypothesis:
         hypothesis_bundle = generate_hypotheses(
@@ -3470,6 +4673,10 @@ def compile_project_section(
             focus_evidence_ids=section.evidence_ids or None,
             focus_fact_ids=section.fact_ids or None,
             max_hypotheses=max_hypotheses,
+            reasoning_mode=resolved_hypothesis_reasoning_mode,
+            min_competing_hypotheses=resolved_min_competing_hypotheses,
+            min_survivors_required=resolved_min_survivors_required,
+            falsification_fail_close=resolved_falsification_fail_close,
         )
         hypothesis_bundle_payload = hypothesis_bundle.model_dump()
         if hypothesis_bundle.synthesis_paragraph.strip():
@@ -3508,25 +4715,193 @@ def compile_project_section(
         peer_review_ab_metrics_payload["strategy_config"] = peer_review_strategy_config
         peer_review_ab_metrics_artifact_path = _to_virtual_path(thread_id, _peer_review_ab_metrics_path(thread_id))
 
-    claim_grounding_payload = _build_claim_grounding_snapshot(
-        thread_id=thread_id,
-        project_id=project_id,
-        section=section,
-        claim_graph=claim_graph,
-        evidence_store=evidence_store,
-        source_of_truth_store=source_of_truth_store,
-    )
-    claim_grounding_payload = _revalidate_claim_grounding_snapshot(
-        thread_id=thread_id,
-        snapshot=claim_grounding_payload,
-    )
+    failure_mode_config = get_failure_mode_gate_config()
+    failure_mode_thresholds = FailureModeThresholds(**failure_mode_config.model_dump())
+    micro_evolution_enabled = bool(is_core and mode == "strict")
+    micro_evolution_max_attempts = 2
+    micro_evolution_attempts: list[dict[str, Any]] = []
+    micro_evolution_artifact_path: str | None = None
+    claim_grounding_payload: dict[str, Any] = {}
+    claim_grounding_alerts: list[str] = []
+    overlay_compiled_text = compiled_text
+    hard_grounding_sentence_check: dict[str, Any] = {}
+    literature_alignment_check: dict[str, Any] = {}
+    unknown_bindings: dict[str, Any] = {}
+    runtime_failure_mode_payload: dict[str, Any] = {}
+    compliance_report = audit_scientific_compliance(compiled_text)
+    compile_errors = [issue for issue in result.issues if issue.severity == "error"]
+    rewrite_required_claims = int(claim_map_summary.get("rewrite_required_claims") or 0)
+
+    for attempt_index in range(1, micro_evolution_max_attempts + 1):
+        claim_grounding_payload = _build_claim_grounding_snapshot(
+            thread_id=thread_id,
+            project_id=project_id,
+            section=section,
+            claim_graph=claim_graph,
+            evidence_store=evidence_store,
+            source_of_truth_store=source_of_truth_store,
+        )
+        claim_grounding_payload = _revalidate_claim_grounding_snapshot(
+            thread_id=thread_id,
+            snapshot=claim_grounding_payload,
+        )
+        overlay_compiled_text, claim_grounding_alerts = _apply_claim_grounding_overlays(compiled_text, claim_grounding_payload)
+        hard_grounding_sentence_check = _collect_hard_grounding_sentence_gaps(overlay_compiled_text)
+        literature_alignment_check = _collect_literature_alignment_gaps(overlay_compiled_text)
+        unknown_bindings = _collect_unknown_binding_ids(
+            overlay_compiled_text,
+            evidence_store=evidence_store,
+            citation_registry=citation_registry,
+        )
+        runtime_failure_mode_case = _build_failure_mode_case_for_section(
+            case_id=f"{project_id}:{section.section_id}:attempt-{attempt_index}",
+            domain=project.discipline,
+            venue=resolved_venue,
+            compiled_text=compiled_text,
+            section=section,
+            claim_graph=claim_graph,
+            evidence_store=evidence_store,
+            citation_registry=citation_registry,
+            claim_grounding_payload=claim_grounding_payload,
+            failure_modes=[
+                "citation_hallucination",
+                "overclaim",
+                "evidence_chain_break",
+                "style_mismatch",
+            ],
+        )
+        runtime_failure_mode_payload = _detect_failure_modes_for_text(
+            case=runtime_failure_mode_case,
+            thresholds=failure_mode_thresholds,
+        )
+        compliance_report = audit_scientific_compliance(compiled_text)
+        attempt_gate_failures = _build_compile_safety_valve_reasons(
+            hitl_blocking=hitl_blocking,
+            compile_errors=compile_errors,
+            rewrite_required_claims=rewrite_required_claims,
+            section=section,
+            is_core=is_core,
+            hard_grounding_sentence_check=hard_grounding_sentence_check,
+            literature_alignment_check=literature_alignment_check,
+            claim_grounding_payload=claim_grounding_payload,
+            peer_review_payload=peer_review_payload,
+            hypothesis_bundle_payload=hypothesis_bundle_payload,
+            compliance_report=compliance_report,
+            capability_gate_reasons=[],
+            unknown_bindings=unknown_bindings,
+            failure_mode_payload=runtime_failure_mode_payload,
+        )
+        rewrite_triggered = bool(micro_evolution_enabled and attempt_gate_failures and attempt_index < micro_evolution_max_attempts)
+        reflection_text: str | None = None
+        applied_fixes: list[str] = []
+        if rewrite_triggered:
+            reflection_text = _render_micro_evolution_reflection(
+                section_id=section.section_id,
+                attempt_index=attempt_index,
+                gate_failures=attempt_gate_failures,
+                hard_grounding_sentence_check=hard_grounding_sentence_check,
+                literature_alignment_check=literature_alignment_check,
+                unknown_bindings=unknown_bindings,
+                failure_modes=runtime_failure_mode_payload,
+                peer_review_payload=peer_review_payload,
+            )
+            rewritten_text, applied_fixes = _micro_evolution_rewrite_text(
+                compiled_text=compiled_text,
+                section=section,
+                claim_graph=claim_graph,
+                evidence_store=evidence_store,
+                citation_registry=citation_registry,
+                hard_grounding_sentence_check=hard_grounding_sentence_check,
+                literature_alignment_check=literature_alignment_check,
+                unknown_bindings=unknown_bindings,
+                reflection_addendum=reflection_text,
+            )
+            reflection_text = _render_micro_evolution_reflection(
+                section_id=section.section_id,
+                attempt_index=attempt_index,
+                gate_failures=attempt_gate_failures,
+                hard_grounding_sentence_check=hard_grounding_sentence_check,
+                literature_alignment_check=literature_alignment_check,
+                unknown_bindings=unknown_bindings,
+                failure_modes=runtime_failure_mode_payload,
+                peer_review_payload=peer_review_payload,
+                applied_fixes=applied_fixes,
+            )
+            if rewritten_text.strip() and rewritten_text.strip() != compiled_text.strip():
+                compiled_text = rewritten_text
+                if is_core and auto_peer_review:
+                    peer_review_result = run_peer_review_loop(
+                        manuscript_text=compiled_text,
+                        venue_name=resolved_venue,
+                        section_id=section.section_id,
+                        max_rounds=resolved_peer_review_max_rounds,
+                        reviewer2_styles=resolved_reviewer2_styles,
+                    )
+                    compiled_text = peer_review_result.final_text
+                    peer_review_payload = peer_review_result.model_dump()
+                    peer_review_ab_metrics_payload = _record_peer_review_ab_metrics(
+                        thread_id=thread_id,
+                        event={
+                            "source": "compile_section_micro_evolution",
+                            "project_id": project_id,
+                            "section_id": section.section_id,
+                            "venue_name": resolved_venue,
+                            "ab_variant": resolved_peer_review_ab_variant,
+                            "reviewer2_styles": resolved_reviewer2_styles,
+                            "peer_review_max_rounds": resolved_peer_review_max_rounds,
+                            "style_source": peer_review_strategy.get("style_source"),
+                            "round_source": peer_review_strategy.get("round_source"),
+                            "ab_variant_source": peer_review_strategy.get("ab_variant_source"),
+                            "auto_split_applied": bool(peer_review_strategy.get("auto_split_applied")),
+                            "thread_hash_ratio": peer_review_strategy.get("thread_hash_ratio"),
+                            "final_decision": peer_review_payload.get("final_decision"),
+                            "unresolved_issue_count": int(peer_review_payload.get("unresolved_issue_count") or 0),
+                            "round_count": len(peer_review_payload.get("rounds") or []),
+                            "micro_evolution_attempt": attempt_index + 1,
+                        },
+                    )
+                    peer_review_ab_metrics_payload["strategy_config"] = peer_review_strategy_config
+                    peer_review_ab_metrics_artifact_path = _to_virtual_path(thread_id, _peer_review_ab_metrics_path(thread_id))
+        micro_evolution_attempts.append(
+            {
+                "attempt": attempt_index,
+                "gate_failures": attempt_gate_failures,
+                "rewrite_triggered": rewrite_triggered,
+                "applied_fixes": applied_fixes,
+                "reflection": reflection_text,
+                "peer_review_final_decision": peer_review_payload.get("final_decision") if isinstance(peer_review_payload, dict) else None,
+                "peer_review_unresolved_issue_count": int(peer_review_payload.get("unresolved_issue_count") or 0)
+                if isinstance(peer_review_payload, dict)
+                else 0,
+                "hard_grounding_sentence_check": hard_grounding_sentence_check,
+                "literature_alignment_check": literature_alignment_check,
+                "unknown_bindings": unknown_bindings,
+                "failure_modes": runtime_failure_mode_payload,
+            }
+        )
+        if not rewrite_triggered:
+            break
+
     claim_grounding_artifact_path = _claim_grounding_path(thread_id, project_id, section.section_id)
     _dump_json(claim_grounding_artifact_path, claim_grounding_payload)
-    overlay_compiled_text, claim_grounding_alerts = _apply_claim_grounding_overlays(compiled_text, claim_grounding_payload)
-    hard_grounding_sentence_check = _collect_hard_grounding_sentence_gaps(overlay_compiled_text)
-    literature_alignment_check = _collect_literature_alignment_gaps(overlay_compiled_text)
+    if micro_evolution_attempts:
+        micro_payload = {
+            "schema_version": MICRO_EVOLUTION_SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "project_id": project_id,
+            "section_id": section.section_id,
+            "enabled": micro_evolution_enabled,
+            "max_attempts": micro_evolution_max_attempts,
+            "attempt_count": len(micro_evolution_attempts),
+            "rewrite_count": sum(1 for item in micro_evolution_attempts if bool(item.get("rewrite_triggered"))),
+            "strict_reviewer2_profile_applied": strict_reviewer2_profile_applied,
+            "resolved_reviewer2_styles": resolved_reviewer2_styles,
+            "attempts": micro_evolution_attempts,
+        }
+        micro_path = _research_root(thread_id) / "compiled" / f"{project_id}-{section_id}.micro-evolution.json"
+        _dump_json(micro_path, micro_payload)
+        micro_evolution_artifact_path = _to_virtual_path(thread_id, micro_path)
 
-    compliance_report = audit_scientific_compliance(compiled_text)
     compliance_payload = {
         "schema_version": COMPLIANCE_AUDIT_SCHEMA_VERSION,
         "project_id": project_id,
@@ -3585,53 +4960,22 @@ def compile_project_section(
         capability_gate_reasons.append(f"Capability gate failed: {card_name}.")
     capability_gate_failed = len(capability_gate_reasons) > 0
 
-    safety_valve_reasons: list[str] = []
-    if hitl_blocking:
-        safety_valve_reasons.append("One or more key HITL checkpoints are rejected.")
-    compile_errors = [issue for issue in result.issues if issue.severity == "error"]
-    if compile_errors:
-        safety_valve_reasons.append(f"Section compiler found {len(compile_errors)} blocking grounding issue(s).")
-    rewrite_required_claims = int(claim_map_summary.get("rewrite_required_claims") or 0)
-    if rewrite_required_claims > 0:
-        safety_valve_reasons.append(
-            f"Claim Map validation requires rewrite for {rewrite_required_claims} claim(s) with invalid bindings."
-        )
-    if section.claim_ids and not (section.evidence_ids or section.fact_ids or section.citation_ids):
-        safety_valve_reasons.append("Claims exist but key evidence/fact/citation bindings are missing.")
-    if is_core:
-        if int(hard_grounding_sentence_check.get("missing_data_binding_count") or 0) > 0:
-            safety_valve_reasons.append(
-                "Hard grounding check detected conclusion sentences without [data:*] binding."
-            )
-        if int(hard_grounding_sentence_check.get("missing_citation_binding_count") or 0) > 0:
-            safety_valve_reasons.append(
-                "Hard grounding check detected conclusion sentences without [citation:*] binding."
-            )
-        if bool(literature_alignment_check.get("likely_listing_without_alignment")):
-            safety_valve_reasons.append(
-                "Literature alignment check detected citation listing without [支持]/[反驳]/[调和] mechanism-conflict synthesis."
-            )
-    grounding_summary = claim_grounding_payload.get("summary") if isinstance(claim_grounding_payload.get("summary"), dict) else {}
-    invalid_claims = int(grounding_summary.get("invalid_claims") or 0)
-    stale_claims = int(grounding_summary.get("stale_claims") or 0)
-    if invalid_claims > 0:
-        safety_valve_reasons.append(f"Claim grounding AST detected {invalid_claims} invalid claim(s) without hard data linkage.")
-    if stale_claims > 0:
-        safety_valve_reasons.append(f"Claim grounding AST detected {stale_claims} stale claim(s) due to artifact drift.")
-    if isinstance(peer_review_payload, dict):
-        if str(peer_review_payload.get("final_decision")) != "accept":
-            safety_valve_reasons.append("Peer-review loop did not reach accept decision.")
-        if int(peer_review_payload.get("unresolved_issue_count") or 0) > 0:
-            safety_valve_reasons.append("Peer-review loop still reports unresolved reviewer issues.")
-    if compliance_report.blocked_by_critical:
-        safety_valve_reasons.append("Scientific compliance audit found critical ethics gaps.")
-    if compliance_report.risk_level == "high":
-        safety_valve_reasons.append("Scientific compliance audit risk level is high.")
-    if compliance_report.findings:
-        major_plus = [item for item in compliance_report.findings if item.severity in {"critical", "major"}]
-        if major_plus:
-            safety_valve_reasons.append(f"Scientific compliance audit found {len(major_plus)} major/critical issue(s).")
-    safety_valve_reasons.extend(capability_gate_reasons)
+    safety_valve_reasons = _build_compile_safety_valve_reasons(
+        hitl_blocking=hitl_blocking,
+        compile_errors=compile_errors,
+        rewrite_required_claims=rewrite_required_claims,
+        section=section,
+        is_core=is_core,
+        hard_grounding_sentence_check=hard_grounding_sentence_check,
+        literature_alignment_check=literature_alignment_check,
+        claim_grounding_payload=claim_grounding_payload,
+        peer_review_payload=peer_review_payload,
+        hypothesis_bundle_payload=hypothesis_bundle_payload,
+        compliance_report=compliance_report,
+        capability_gate_reasons=capability_gate_reasons,
+        unknown_bindings=unknown_bindings,
+        failure_mode_payload=runtime_failure_mode_payload,
+    )
     safety_valve_triggered = len(safety_valve_reasons) > 0
     risk_conclusion_template: str | None = None
     if safety_valve_triggered:
@@ -3683,6 +5027,7 @@ def compile_project_section(
             "version_diff_json": _to_virtual_path(thread_id, diff_artifact_path),
             "policy_snapshot_json": _to_virtual_path(thread_id, policy_snapshot_artifact_path),
             "compliance_audit_json": _to_virtual_path(thread_id, compliance_artifact_path),
+            "micro_evolution_json": micro_evolution_artifact_path,
         }
     )
     compile_gate_counters = _record_compile_attempt_metrics(
@@ -3727,6 +5072,14 @@ def compile_project_section(
         "delivery_completeness": delivery_completeness,
         "hard_grounding_sentence_check": hard_grounding_sentence_check,
         "literature_alignment_check": literature_alignment_check,
+        "unknown_bindings": unknown_bindings,
+        "runtime_failure_modes": runtime_failure_mode_payload,
+        "micro_evolution": {
+            "enabled": micro_evolution_enabled,
+            "attempt_count": len(micro_evolution_attempts),
+            "rewrite_count": sum(1 for item in micro_evolution_attempts if bool(item.get("rewrite_triggered"))),
+            "artifact_path": micro_evolution_artifact_path,
+        },
     }
     engineering_gate_metrics_path = _metrics_path(thread_id, "compile-gates")
     engineering_gates["compile_gate_counters_artifact_path"] = _to_virtual_path(thread_id, engineering_gate_metrics_path)
@@ -3754,11 +5107,14 @@ def compile_project_section(
         "is_core_section": is_core,
         "claim_map": claim_map_payload,
         "claim_map_artifact_path": _to_virtual_path(thread_id, claim_map_path),
+        "claim_map_validation": claim_map_validation,
         "narrative_plan": narrative_plan_payload,
         "narrative_plan_artifact_path": _to_virtual_path(thread_id, narrative_plan_path),
         "resolved_venue": resolved_venue,
         "narrative_strategy": narrative_strategy.model_dump(),
         "venue_style_adapter": venue_style_adapter,
+        "dynamic_few_shot_context": dynamic_few_shot_context,
+        "dynamic_few_shot_retrieval": dynamic_few_shot_retrieval,
         "narrative_sentence_count": result.narrative_sentence_count,
         "runtime_stage_context": runtime_stage_context,
         "issues": [issue.model_dump() for issue in result.issues],
@@ -3766,28 +5122,42 @@ def compile_project_section(
         "journal_style_alignment_applied": journal_style_alignment_applied,
         "peer_review": peer_review_payload,
         "reviewer2_styles": resolved_reviewer2_styles,
+        "strict_reviewer2_profile_applied": strict_reviewer2_profile_applied,
         "peer_review_ab_variant": resolved_peer_review_ab_variant,
         "peer_review_max_rounds": resolved_peer_review_max_rounds,
         "peer_review_strategy": peer_review_strategy,
         "peer_review_strategy_config": peer_review_strategy_config,
         "peer_review_ab_metrics": peer_review_ab_metrics_payload,
         "peer_review_ab_metrics_artifact_path": peer_review_ab_metrics_artifact_path,
+        "micro_evolution": micro_evolution_attempts,
+        "micro_evolution_artifact_path": micro_evolution_artifact_path,
         "claim_grounding": claim_grounding_payload,
         "claim_grounding_alerts": claim_grounding_alerts,
         "claim_grounding_artifact_path": _to_virtual_path(thread_id, claim_grounding_artifact_path),
         "hard_grounding_sentence_check": hard_grounding_sentence_check,
         "literature_alignment_check": literature_alignment_check,
+        "unknown_bindings": unknown_bindings,
+        "runtime_failure_modes": runtime_failure_mode_payload,
         "hypothesis_bundle": hypothesis_bundle_payload,
         "hitl_checkpoints": hitl_checkpoints,
         "hitl_blocking": hitl_blocking,
         "hitl_impact_preview": hitl_impact_preview,
         "policy_snapshot": policy_snapshot,
         "policy_writing_directives": policy_writing_directives,
+        "adaptive_role_contract": adaptive_role_contract,
+        "adaptive_role_contract_tone_applied": adaptive_role_contract_tone_applied,
+        "task_complexity_score": round(resolved_task_complexity_score, 4),
+        "analysis_confidence": round(resolved_analysis_confidence, 4),
+        "complexity_confidence_diagnostics": complexity_confidence_diagnostics,
         "policy_snapshot_auto_adjust_narrative": policy_snapshot_auto_adjust_narrative,
         "policy_snapshot_adjustment_applied": policy_snapshot_adjustment_applied,
         "policy_snapshot_artifact_path": _to_virtual_path(thread_id, policy_snapshot_artifact_path),
         "narrative_self_question_rounds": max(1, min(int(narrative_self_question_rounds), 8)),
         "narrative_include_storyboard": bool(narrative_include_storyboard),
+        "hypothesis_reasoning_mode": resolved_hypothesis_reasoning_mode,
+        "min_competing_hypotheses": resolved_min_competing_hypotheses,
+        "min_survivors_required": resolved_min_survivors_required,
+        "falsification_fail_close": resolved_falsification_fail_close,
         "compliance_audit": compliance_report.model_dump(),
         "compliance_audit_artifact_path": _to_virtual_path(thread_id, compliance_artifact_path),
         "capability_assessment": capability_assessment,
@@ -3814,39 +5184,56 @@ def compile_project_section(
         "details_artifact_path": _to_virtual_path(thread_id, detail_artifact_path),
         "claim_map": claim_map_payload,
         "claim_map_artifact_path": _to_virtual_path(thread_id, claim_map_path),
+        "claim_map_validation": claim_map_validation,
         "narrative_plan": narrative_plan_payload,
         "narrative_plan_artifact_path": _to_virtual_path(thread_id, narrative_plan_path),
         "resolved_venue": resolved_venue,
         "narrative_strategy": narrative_strategy.model_dump(),
         "venue_style_adapter": venue_style_adapter,
+        "dynamic_few_shot_context": dynamic_few_shot_context,
+        "dynamic_few_shot_retrieval": dynamic_few_shot_retrieval,
         "narrative_sentence_count": result.narrative_sentence_count,
         "runtime_stage_context": runtime_stage_context,
         "journal_style": journal_style_bundle,
         "journal_style_alignment_applied": journal_style_alignment_applied,
         "peer_review": peer_review_payload,
         "reviewer2_styles": resolved_reviewer2_styles,
+        "strict_reviewer2_profile_applied": strict_reviewer2_profile_applied,
         "peer_review_ab_variant": resolved_peer_review_ab_variant,
         "peer_review_max_rounds": resolved_peer_review_max_rounds,
         "peer_review_strategy": peer_review_strategy,
         "peer_review_strategy_config": peer_review_strategy_config,
         "peer_review_ab_metrics": peer_review_ab_metrics_payload,
         "peer_review_ab_metrics_artifact_path": peer_review_ab_metrics_artifact_path,
+        "micro_evolution": micro_evolution_attempts,
+        "micro_evolution_artifact_path": micro_evolution_artifact_path,
         "claim_grounding": claim_grounding_payload,
         "claim_grounding_alerts": claim_grounding_alerts,
         "claim_grounding_artifact_path": _to_virtual_path(thread_id, claim_grounding_artifact_path),
         "hard_grounding_sentence_check": hard_grounding_sentence_check,
         "literature_alignment_check": literature_alignment_check,
+        "unknown_bindings": unknown_bindings,
+        "runtime_failure_modes": runtime_failure_mode_payload,
         "hypothesis_bundle": hypothesis_bundle_payload,
         "hitl_checkpoints": hitl_checkpoints,
         "hitl_blocking": hitl_blocking,
         "hitl_impact_preview": hitl_impact_preview,
         "policy_snapshot": policy_snapshot,
         "policy_writing_directives": policy_writing_directives,
+        "adaptive_role_contract": adaptive_role_contract,
+        "adaptive_role_contract_tone_applied": adaptive_role_contract_tone_applied,
+        "task_complexity_score": round(resolved_task_complexity_score, 4),
+        "analysis_confidence": round(resolved_analysis_confidence, 4),
+        "complexity_confidence_diagnostics": complexity_confidence_diagnostics,
         "policy_snapshot_auto_adjust_narrative": policy_snapshot_auto_adjust_narrative,
         "policy_snapshot_adjustment_applied": policy_snapshot_adjustment_applied,
         "policy_snapshot_artifact_path": _to_virtual_path(thread_id, policy_snapshot_artifact_path),
         "narrative_self_question_rounds": max(1, min(int(narrative_self_question_rounds), 8)),
         "narrative_include_storyboard": bool(narrative_include_storyboard),
+        "hypothesis_reasoning_mode": resolved_hypothesis_reasoning_mode,
+        "min_competing_hypotheses": resolved_min_competing_hypotheses,
+        "min_survivors_required": resolved_min_survivors_required,
+        "falsification_fail_close": resolved_falsification_fail_close,
         "compliance_audit": compliance_report.model_dump(),
         "compliance_audit_artifact_path": _to_virtual_path(thread_id, compliance_artifact_path),
         "capability_assessment": capability_assessment,
@@ -3865,6 +5252,53 @@ def compile_project_section(
     }
     _inject_prompt_pack_fields(return_payload)
     return return_payload
+
+
+def _verify_project_section_claim_map_direct(
+    thread_id: str,
+    project_id: str,
+    section_id: str,
+    *,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+    claim_map_artifact_path: str | None = None,
+    require_claim_map_submission: bool = False,
+) -> dict[str, Any]:
+    """Verify Claim Map gate only (no prose generation)."""
+    store = _project_store(thread_id)
+    project = store.get_project(project_id)
+    if project is None:
+        raise ValueError(f"Project '{project_id}' not found")
+    section = next((s for s in project.sections if s.section_id == section_id), None)
+    if section is None:
+        raise ValueError(f"Section '{section_id}' not found in project '{project_id}'")
+
+    claim_graph = _claim_graph(thread_id)
+    evidence_store = _evidence_store(thread_id)
+    citation_registry = _citation_registry(thread_id)
+    claim_map_payload, _rows, claim_map_validation = _resolve_claim_map_for_compile(
+        thread_id=thread_id,
+        project_id=project_id,
+        section=section,
+        claim_graph=claim_graph,
+        evidence_store=evidence_store,
+        citation_registry=citation_registry,
+        claim_map_json=claim_map_json,
+        claim_map_artifact_path=claim_map_artifact_path,
+        require_claim_map_submission=require_claim_map_submission,
+    )
+    claim_map_path = _research_root(thread_id) / "claim-maps" / f"{project_id}-{section_id}.verified.json"
+    _dump_json(claim_map_path, claim_map_payload)
+    payload = {
+        "project_id": project_id,
+        "section_id": section_id,
+        "claim_map": claim_map_payload,
+        "claim_map_artifact_path": _to_virtual_path(thread_id, claim_map_path),
+        "claim_map_validation": claim_map_validation,
+        "runtime_stage_context": _resolve_runtime_stage_context(operation="verify_claim_map"),
+        "require_claim_map_submission": require_claim_map_submission,
+    }
+    _inject_prompt_pack_fields(payload, venue_name=_resolve_supported_venue(project.target_venue, project.discipline))
+    return payload
 
 
 def _collect_project_markdown_for_latex(project: ResearchProject, *, section_ids: list[str] | None = None) -> str:
@@ -4451,6 +5885,58 @@ def get_engineering_gates_metrics(
     return payload
 
 
+def run_prompt_layer_optimizer(
+    thread_id: str,
+    *,
+    compile_metrics_path: str | None = None,
+    offline_regression_report_path: str | None = None,
+    prompt_layers_path: str | None = None,
+    apply_prompt_patch: bool = False,
+    run_offline_validation: bool = True,
+    dataset_version: str = "optimizer-candidate",
+    optimizer_config: dict[str, Any] | None = None,
+    optimizer_mode: str = "rules",
+    llm_model_name: str | None = None,
+    llm_thinking_enabled: bool = False,
+    llm_temperature: float = 0.0,
+) -> dict[str, Any]:
+    """Run macro-evolution prompt optimizer from runtime metrics and eval trends."""
+    compile_metrics_physical = _resolve_artifact_path(thread_id, compile_metrics_path or "") if compile_metrics_path else None
+    if compile_metrics_physical is None:
+        compile_metrics_physical = _metrics_path(thread_id, "compile-gates")
+    offline_regression_physical = _resolve_artifact_path(thread_id, offline_regression_report_path or "") if offline_regression_report_path else None
+    prompt_layers_physical = _resolve_artifact_path(thread_id, prompt_layers_path or "") if prompt_layers_path else None
+
+    payload = run_prompt_optimizer(
+        thread_id=thread_id,
+        compile_metrics_path=compile_metrics_physical,
+        offline_regression_report_path=offline_regression_physical,
+        prompt_layers_path=prompt_layers_physical,
+        output_dir=_research_root(thread_id) / "prompt-optimizer",
+        apply_prompt_patch=apply_prompt_patch,
+        run_offline_validation=run_offline_validation,
+        dataset_version=dataset_version,
+        optimizer_config=optimizer_config,
+        optimizer_mode=optimizer_mode,
+        llm_model_name=llm_model_name,
+        llm_thinking_enabled=llm_thinking_enabled,
+        llm_temperature=llm_temperature,
+    )
+    payload["schema_version"] = PROMPT_OPTIMIZER_SCHEMA_VERSION
+    payload["optimizer_schema_version"] = PROMPT_OPTIMIZER_SCHEMA_VERSION
+    for key in ("candidate_prompt_layers_path", "candidate_prompt_patch_path", "applied_prompt_layers_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = _to_virtual_output_path_if_possible(thread_id, value)
+    source_paths = payload.get("source_paths")
+    if isinstance(source_paths, dict):
+        for key, value in list(source_paths.items()):
+            if isinstance(value, str) and value.strip():
+                source_paths[key] = _to_virtual_output_path_if_possible(thread_id, value)
+    _inject_prompt_pack_fields(payload)
+    return payload
+
+
 def _classify_hypothesis_validation_status(candidate: Any) -> str:
     supporting = len(getattr(candidate, "supporting_evidence_ids", []) or [])
     contradicting = len(getattr(candidate, "contradicting_evidence_ids", []) or [])
@@ -4472,6 +5958,10 @@ def generate_project_hypotheses(
     project_id: str,
     section_id: str | None = None,
     max_hypotheses: int = 5,
+    reasoning_mode: HypothesisReasoningModeOverride | None = None,
+    min_competing_hypotheses: int | None = None,
+    min_survivors_required: int | None = None,
+    falsification_fail_close: FalsificationFailCloseOverride | None = None,
 ) -> dict[str, Any]:
     """Generate hypothesis bundle for project-level or section-level evidence."""
     project = _project_store(thread_id).get_project(project_id)
@@ -4484,13 +5974,61 @@ def generate_project_hypotheses(
         if section is None:
             raise ValueError(f"Section '{section_id}' not found in project '{project_id}'")
 
+    resolved_venue = _resolve_supported_venue(project.target_venue, project.discipline)
+    prompt_pack_metadata = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
+    prompt_layer_parameter_space = (
+        prompt_pack_metadata.get("prompt_layer_parameter_space")
+        if isinstance(prompt_pack_metadata.get("prompt_layer_parameter_space"), dict)
+        else {}
+    )
+    default_reasoning_mode = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L5",
+            parameter_name="reasoning_mode",
+            fallback="auto",
+        )
+    ).strip().lower()
+    resolved_reasoning_mode = str(reasoning_mode or default_reasoning_mode or "auto").strip().lower()
+    if resolved_reasoning_mode not in {"tot", "got", "auto"}:
+        resolved_reasoning_mode = "auto"
+    default_min_competing = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L5",
+        parameter_name="min_competing_hypotheses",
+        fallback=3,
+    )
+    default_min_survivors = _prompt_layer_param_default(
+        prompt_layer_parameter_space=prompt_layer_parameter_space,
+        layer_id="L5",
+        parameter_name="min_survivors_required",
+        fallback=1,
+    )
+    default_fail_close = str(
+        _prompt_layer_param_default(
+            prompt_layer_parameter_space=prompt_layer_parameter_space,
+            layer_id="L5",
+            parameter_name="falsification_fail_close",
+            fallback="strict",
+        )
+    ).strip().lower()
+    resolved_min_competing = max(3, min(int(min_competing_hypotheses or default_min_competing), 8))
+    resolved_min_survivors = max(1, min(int(min_survivors_required or default_min_survivors), 5))
+    resolved_fail_close = str(falsification_fail_close or default_fail_close or "strict").strip().lower()
+    if resolved_fail_close not in {"strict", "lenient"}:
+        resolved_fail_close = "strict"
+
     bundle = generate_hypotheses(
         evidence_store=_evidence_store(thread_id),
         citation_registry=_citation_registry(thread_id),
         source_of_truth_store=_source_of_truth_store(thread_id),
         focus_evidence_ids=section.evidence_ids if section else None,
         focus_fact_ids=section.fact_ids if section else None,
-        max_hypotheses=max_hypotheses,
+        max_hypotheses=max(max_hypotheses, resolved_min_competing),
+        reasoning_mode=resolved_reasoning_mode,
+        min_competing_hypotheses=resolved_min_competing,
+        min_survivors_required=resolved_min_survivors,
+        falsification_fail_close=resolved_fail_close,
     )
     artifact_name = f"hypothesis-{project_id}" + (f"-{section_id}" if section_id else "")
     artifact_path = _research_root(thread_id) / "hypotheses" / f"{artifact_name}.json"
@@ -4500,6 +6038,15 @@ def generate_project_hypotheses(
         "feature_summary": bundle.feature_summary,
         "hypotheses": [item.model_dump() for item in bundle.hypotheses],
         "synthesis_paragraph": bundle.synthesis_paragraph,
+        "reasoning_mode": bundle.reasoning_mode,
+        "min_competing_hypotheses": bundle.min_competing_hypotheses,
+        "min_survivors_required": bundle.min_survivors_required,
+        "falsification_fail_close": bundle.falsification_fail_close,
+        "claim_map_gate_blocked": bundle.claim_map_gate_blocked,
+        "surviving_hypothesis_ids": bundle.surviving_hypothesis_ids,
+        "excluded_hypothesis_ids": bundle.excluded_hypothesis_ids,
+        "claim_map_ready_hypotheses": bundle.claim_map_ready_hypotheses,
+        "reasoning_audit_traces": bundle.reasoning_audit_traces,
     }
     historical_hypothesis_context: list[dict[str, Any]] = []
     historical_failed_attempts: list[dict[str, Any]] = []
@@ -4709,6 +6256,18 @@ def upsert_project_hitl_decisions(
     result["policy_snapshot"] = policy_snapshot_payload.get("policy") or {}
     result["writing_directives"] = policy_snapshot_payload.get("writing_directives") or []
     result["policy_snapshot_artifact_path"] = _to_virtual_path(thread_id, policy_artifact_path)
+    _record_state_mutation_to_ledger(
+        thread_id=thread_id,
+        operation="upsert_project_hitl_decisions",
+        artifact_path=result["artifact_path"],
+        metadata={
+            "project_id": project_id,
+            "section_id": section_id,
+            "decision_count": len(decisions),
+            "writing_directive_count": len(result.get("writing_directives") or []),
+            "mutation_type": "hitl_decision_update",
+        },
+    )
     return result
 
 
@@ -4962,6 +6521,7 @@ def _init_self_play_few_shot_library(thread_id: str) -> dict[str, Any]:
         "thread_id": thread_id,
         "updated_at": _now_iso(),
         "total_examples": 0,
+        "negative_examples": 0,
         "accepted_recovery_examples": 0,
         "examples": [],
     }
@@ -4980,6 +6540,7 @@ def _load_self_play_few_shot_library(thread_id: str) -> dict[str, Any]:
     raw_examples = payload.get("examples")
     payload["examples"] = [item for item in raw_examples if isinstance(item, dict)] if isinstance(raw_examples, list) else []
     payload["total_examples"] = int(payload.get("total_examples") or len(payload["examples"]))
+    payload["negative_examples"] = int(payload.get("negative_examples") or 0)
     payload["accepted_recovery_examples"] = int(payload.get("accepted_recovery_examples") or 0)
     return payload
 
@@ -4988,11 +6549,18 @@ def _build_hard_negative_few_shot_rows(result: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in getattr(result, "hard_negatives", []):
         reasons = [str(reason).strip() for reason in item.reasons if str(reason).strip()]
+        severe_failure_signals = [
+            str(signal).strip() for signal in getattr(item, "severe_failure_signals", []) if str(signal).strip()
+        ]
         accepted_recovery = (
             str(item.final_decision) == "accept"
             and "initial_major_rebuttal_then_accept" in reasons
         )
+        example_kind = str(getattr(item, "example_kind", "negative") or "negative").strip().lower()
+        if example_kind not in {"negative", "recovery"}:
+            example_kind = "recovery" if accepted_recovery else "negative"
         revision_focus = [str(note).strip() for note in item.recommendations if str(note).strip()][:4]
+        anti_pattern_summary = severe_failure_signals[:3] or reasons[:3] or ["hard_negative_trajectory"]
         rows.append(
             {
                 "example_id": str(item.hard_negative_id),
@@ -5003,8 +6571,12 @@ def _build_hard_negative_few_shot_rows(result: Any) -> list[dict[str, Any]]:
                 "round_count": int(item.round_count),
                 "initial_major_issue_count": int(item.initial_major_issue_count),
                 "unresolved_issue_count": int(item.unresolved_issue_count),
+                "severity_score": int(getattr(item, "severity_score", 0) or 0),
+                "example_kind": example_kind,
                 "accepted_recovery": accepted_recovery,
                 "trigger_reasons": reasons,
+                "severe_failure_signals": severe_failure_signals,
+                "anti_pattern_summary": anti_pattern_summary,
                 "issue_types": [str(mode).strip() for mode in item.issue_types if str(mode).strip()],
                 "revision_focus": revision_focus,
                 "draft_before": str(item.original_text).strip(),
@@ -5043,8 +6615,10 @@ def _upsert_self_play_few_shot_library(
     merged = list(index.values())
     merged.sort(
         key=lambda row: (
-            bool(row.get("accepted_recovery")),
+            str(row.get("example_kind") or "negative") == "negative",
+            int(row.get("severity_score") or 0),
             int(row.get("initial_major_issue_count") or 0),
+            bool(row.get("accepted_recovery")),
             int(row.get("round_count") or 0),
             str(row.get("created_at") or ""),
         ),
@@ -5056,6 +6630,7 @@ def _upsert_self_play_few_shot_library(
     payload["updated_at"] = _now_iso()
     payload["examples"] = merged
     payload["total_examples"] = len(merged)
+    payload["negative_examples"] = sum(1 for row in merged if str(row.get("example_kind") or "") == "negative")
     payload["accepted_recovery_examples"] = sum(1 for row in merged if bool(row.get("accepted_recovery")))
     path = _self_play_few_shot_library_path(thread_id)
     _dump_json(path, payload)
@@ -5078,38 +6653,65 @@ def get_writer_l3_few_shot_addendum(thread_id: str, *, top_k: int = 3) -> str | 
     rows = [item for item in examples if isinstance(item, dict)]
     rows.sort(
         key=lambda row: (
-            bool(row.get("accepted_recovery")),
+            str(row.get("example_kind") or "negative") == "negative",
+            int(row.get("severity_score") or 0),
             int(row.get("initial_major_issue_count") or 0),
+            bool(row.get("accepted_recovery")),
             int(row.get("round_count") or 0),
         ),
         reverse=True,
     )
-    selected = rows[: max(1, int(top_k))]
+    top_limit = max(1, int(top_k))
+    negative_rows = [row for row in rows if str(row.get("example_kind") or "negative") == "negative"][:top_limit]
+    recovery_rows = [row for row in rows if bool(row.get("accepted_recovery"))][:top_limit]
+    selected = negative_rows + [row for row in recovery_rows if row not in negative_rows]
+    selected = selected[: max(top_limit, len(negative_rows))]
     if not selected:
         return None
 
     lines: list[str] = []
     lines.append("[L3 Dynamic Few-shot Contract Addendum]")
     lines.append("Use the following mined hard trajectories as behavioral anchors before drafting:")
-    for idx, row in enumerate(selected, start=1):
+    if negative_rows:
+        lines.append("Negative Examples (Do Not Repeat):")
+    negative_index = 0
+    recovery_index = 0
+    for row in selected:
         venue = str(row.get("venue_name") or "unknown")
         section_id = str(row.get("section_id") or "unknown")
         initial_major = int(row.get("initial_major_issue_count") or 0)
         final_decision = str(row.get("final_decision") or "unknown")
         reasons = [str(item).strip() for item in (row.get("trigger_reasons") or []) if str(item).strip()]
+        severe_failure_signals = [
+            str(item).strip() for item in (row.get("severe_failure_signals") or []) if str(item).strip()
+        ]
         revision_focus = [str(item).strip() for item in (row.get("revision_focus") or []) if str(item).strip()]
         before_text = _truncate_for_prompt(str(row.get("draft_before") or ""))
         after_text = _truncate_for_prompt(str(row.get("draft_after") or ""))
-        lines.append(
-            f"- Example {idx} ({venue}/{section_id}): initial_major={initial_major}, final={final_decision}, reasons={reasons[:2] or ['n/a']}."
-        )
+        example_kind = str(row.get("example_kind") or "negative")
+        if example_kind == "negative":
+            negative_index += 1
+            lines.append(
+                f"- Negative Example {negative_index} ({venue}/{section_id}): severity={int(row.get('severity_score') or 0)}, final={final_decision}, signals={severe_failure_signals[:3] or reasons[:2] or ['n/a']}."
+            )
+        else:
+            if recovery_index == 0:
+                lines.append("Recovered Examples (Repair Patterns):")
+            recovery_index += 1
+            lines.append(
+                f"- Recovery Example {recovery_index} ({venue}/{section_id}): initial_major={initial_major}, final={final_decision}, reasons={reasons[:2] or ['n/a']}."
+            )
         if before_text:
             lines.append(f"  - Before: {before_text}")
         if after_text:
             lines.append(f"  - After: {after_text}")
+        if severe_failure_signals:
+            lines.append(f"  - Negative signals: {severe_failure_signals[:4]}")
         if revision_focus:
             lines.append(f"  - Revision focus: {revision_focus[:3]}")
-    lines.append("Apply the same repair pattern: soften unsupported certainty, patch evidence chain, and close reviewer-critical gaps.")
+    lines.append(
+        "Apply the same repair pattern: avoid these negative examples first, then reuse the recovery patterns to soften unsupported certainty, patch evidence chain, and close reviewer-critical gaps."
+    )
     return "\n".join(lines).strip()
 
 
@@ -5315,17 +6917,170 @@ class ArtifactLedger:
             return []
         return [item for item in data if isinstance(item, dict)]
 
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            return round(float(value), 6)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _canonical_json(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    def _eval_state_path(self) -> Path:
+        return self.ledger_path.parent / "metrics" / "ledger-eval-impact.json"
+
+    def _load_eval_state(self) -> dict[str, Any]:
+        path = self._eval_state_path()
+        if not path.exists():
+            return {
+                "schema_version": LEDGER_EVAL_IMPACT_SCHEMA_VERSION,
+                "updated_at": _now_iso(),
+                "last_scores": {},
+            }
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("schema_version", LEDGER_EVAL_IMPACT_SCHEMA_VERSION)
+        payload.setdefault("updated_at", _now_iso())
+        if not isinstance(payload.get("last_scores"), dict):
+            payload["last_scores"] = {}
+        return payload
+
+    def _save_eval_state(self, payload: dict[str, Any]) -> None:
+        path = self._eval_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _extract_eval_score(self, metadata: dict[str, Any]) -> float | None:
+        direct = self._coerce_float(metadata.get("academic_eval_score"))
+        if direct is not None:
+            return direct
+        avg_overall = self._coerce_float(metadata.get("average_overall_score"))
+        if avg_overall is not None:
+            return avg_overall
+        score = self._coerce_float(metadata.get("score"))
+        if score is not None:
+            return score
+        eval_impact = metadata.get("eval_impact")
+        if isinstance(eval_impact, dict):
+            impacted = self._coerce_float(eval_impact.get("academic_eval_score"))
+            if impacted is not None:
+                return impacted
+        return None
+
+    def _resolve_eval_context_key(self, *, operation: str, metadata: dict[str, Any]) -> str:
+        project_id = str(metadata.get("project_id") or "global")
+        section_id = str(metadata.get("section_id") or "all")
+        prompt_pack_hash = str(metadata.get("prompt_pack_hash") or "unknown")
+        runtime_strategy_hash = str(metadata.get("runtime_strategy_hash") or "unknown")
+        return "::".join([project_id, section_id, prompt_pack_hash, runtime_strategy_hash, operation])
+
+    def _build_eval_increment(
+        self,
+        *,
+        operation: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = self._load_eval_state()
+        last_scores = state.get("last_scores")
+        if not isinstance(last_scores, dict):
+            last_scores = {}
+        context_key = self._resolve_eval_context_key(operation=operation, metadata=metadata)
+        previous_score = self._coerce_float(last_scores.get(context_key))
+        current_score = self._extract_eval_score(metadata)
+        if current_score is None:
+            eval_score_delta = 0.0
+            delta_source = "unavailable"
+        elif previous_score is None:
+            eval_score_delta = 0.0
+            delta_source = "cold_start"
+            last_scores[context_key] = current_score
+        else:
+            eval_score_delta = round(current_score - previous_score, 6)
+            delta_source = "delta_from_previous"
+            last_scores[context_key] = current_score
+        state["last_scores"] = last_scores
+        state["updated_at"] = _now_iso()
+        self._save_eval_state(state)
+        return {
+            "schema_version": LEDGER_EVAL_IMPACT_SCHEMA_VERSION,
+            "context_key": context_key,
+            "delta_source": delta_source,
+            "previous_eval_score": previous_score,
+            "current_eval_score": current_score,
+            "eval_score_delta": eval_score_delta,
+            "updated_at": state["updated_at"],
+        }
+
+    def _resolve_signing_key(self) -> tuple[bytes, str, str]:
+        env_key = (os.getenv(LEDGER_SIGNING_KEY_ENV_VAR) or "").strip()
+        if env_key:
+            key_material = env_key
+            key_source = "env"
+        else:
+            key_material = f"deerflow-ledger::{self.ledger_path.resolve()}"
+            key_source = "derived_path_default"
+        key_bytes = key_material.encode("utf-8")
+        key_id = hashlib.sha256(key_bytes).hexdigest()[:12]
+        return key_bytes, key_id, key_source
+
+    def _sign_entry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        key_bytes, key_id, key_source = self._resolve_signing_key()
+        signature_value = hmac.new(
+            key_bytes,
+            self._canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "schema_version": LEDGER_SIGNATURE_SCHEMA_VERSION,
+            "algorithm": "hmac-sha256",
+            "key_id": key_id,
+            "key_source": key_source,
+            "value": signature_value,
+        }
+
     def record(self, *, service: str, operation: str, artifact_path: str, metadata: dict[str, Any] | None = None) -> None:
         rows = self._load()
-        rows.append(
-            {
-                "timestamp": _now_iso(),
-                "service": service,
-                "operation": operation,
-                "artifact_path": artifact_path,
-                "metadata": metadata or {},
-            }
+        normalized_metadata = dict(metadata or {})
+        resolved_venue = _resolve_prompt_registry_venue(normalized_metadata)
+        prompt_pack = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
+        for key, value in prompt_pack.items():
+            normalized_metadata.setdefault(key, value)
+        eval_increment = self._build_eval_increment(
+            operation=operation,
+            metadata=normalized_metadata,
         )
+        normalized_metadata["ledger_eval_impact"] = eval_increment
+        normalized_metadata.setdefault("eval_score_delta", eval_increment.get("eval_score_delta"))
+        timestamp = _now_iso()
+        entry_core = {
+            "ledger_schema_version": ARTIFACT_LEDGER_SCHEMA_VERSION,
+            "timestamp": timestamp,
+            "service": service,
+            "operation": operation,
+            "artifact_path": artifact_path,
+            "metadata": normalized_metadata,
+        }
+        signature_payload = {
+            "timestamp": timestamp,
+            "service": service,
+            "operation": operation,
+            "artifact_path": artifact_path,
+            "metadata": normalized_metadata,
+        }
+        signature = self._sign_entry(signature_payload)
+        entry_id_seed = f"{timestamp}|{service}|{operation}|{artifact_path}|{signature['value']}"
+        entry = {
+            **entry_core,
+            "entry_id": hashlib.sha256(entry_id_seed.encode("utf-8")).hexdigest()[:24],
+            "signature": signature,
+        }
+        rows.append(entry)
         self.ledger_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -5368,9 +7123,10 @@ class _BaseRuntimeService:
         self.ledger = _artifact_ledger(thread_id)
 
     def _record_payload(self, *, operation: str, payload: dict[str, Any], metadata: dict[str, Any] | None = None) -> None:
-        _inject_prompt_pack_fields(payload)
+        resolved_venue = _resolve_prompt_registry_venue(payload)
+        _inject_prompt_pack_fields(payload, venue_name=resolved_venue)
         record_metadata = dict(metadata or {})
-        prompt_pack = _resolve_prompt_pack_metadata()
+        prompt_pack = _resolve_prompt_pack_metadata(venue_name=resolved_venue)
         for key, value in prompt_pack.items():
             record_metadata.setdefault(key, value)
         prompt_registry = _build_prompt_registry_metadata(payload, prompt_pack_metadata=prompt_pack)
@@ -5424,9 +7180,21 @@ class CompileService(_BaseRuntimeService):
         journal_style_force_refresh: bool = False,
         journal_style_sample_size: int | None = None,
         journal_style_recent_year_window: int | None = None,
+        dynamic_retrieval_top_k: int | None = None,
+        dynamic_retrieval_min_score: float | None = None,
+        task_complexity_score: float | None = None,
+        analysis_confidence: float | None = None,
+        role_contract_auto_tighten: bool = True,
         policy_snapshot_auto_adjust_narrative: bool = True,
         narrative_self_question_rounds: int = 3,
         narrative_include_storyboard: bool = True,
+        hypothesis_reasoning_mode: HypothesisReasoningModeOverride | None = None,
+        min_competing_hypotheses: int | None = None,
+        min_survivors_required: int | None = None,
+        falsification_fail_close: FalsificationFailCloseOverride | None = None,
+        claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+        claim_map_artifact_path: str | None = None,
+        require_claim_map_submission: bool = False,
     ) -> dict[str, Any]:
         payload = _compile_project_section_impl(
             self.thread_id,
@@ -5449,9 +7217,21 @@ class CompileService(_BaseRuntimeService):
             journal_style_force_refresh=journal_style_force_refresh,
             journal_style_sample_size=journal_style_sample_size,
             journal_style_recent_year_window=journal_style_recent_year_window,
+            dynamic_retrieval_top_k=dynamic_retrieval_top_k,
+            dynamic_retrieval_min_score=dynamic_retrieval_min_score,
+            task_complexity_score=task_complexity_score,
+            analysis_confidence=analysis_confidence,
+            role_contract_auto_tighten=role_contract_auto_tighten,
             policy_snapshot_auto_adjust_narrative=policy_snapshot_auto_adjust_narrative,
             narrative_self_question_rounds=narrative_self_question_rounds,
             narrative_include_storyboard=narrative_include_storyboard,
+            hypothesis_reasoning_mode=hypothesis_reasoning_mode,
+            min_competing_hypotheses=min_competing_hypotheses,
+            min_survivors_required=min_survivors_required,
+            falsification_fail_close=falsification_fail_close,
+            claim_map_json=claim_map_json,
+            claim_map_artifact_path=claim_map_artifact_path,
+            require_claim_map_submission=require_claim_map_submission,
         )
         self._record_payload(
             operation="compile_project_section",
@@ -5464,7 +7244,47 @@ class CompileService(_BaseRuntimeService):
                 "peer_review_ab_variant": peer_review_ab_variant,
                 "policy_snapshot_auto_adjust_narrative": policy_snapshot_auto_adjust_narrative,
                 "narrative_self_question_rounds": narrative_self_question_rounds,
+                "dynamic_retrieval_top_k": dynamic_retrieval_top_k,
+                "dynamic_retrieval_min_score": dynamic_retrieval_min_score,
+                "task_complexity_score": task_complexity_score,
+                "analysis_confidence": analysis_confidence,
+                "role_contract_auto_tighten": role_contract_auto_tighten,
+                "hypothesis_reasoning_mode": hypothesis_reasoning_mode,
+                "min_competing_hypotheses": min_competing_hypotheses,
+                "min_survivors_required": min_survivors_required,
+                "falsification_fail_close": falsification_fail_close,
+                "claim_map_submission_provided": claim_map_json is not None or bool(claim_map_artifact_path),
+                "claim_map_submission_required": require_claim_map_submission,
                 "safety_valve_triggered": bool(payload.get("safety_valve_triggered")),
+            },
+        )
+        return payload
+
+    def verify_claim_map_only(
+        self,
+        project_id: str,
+        section_id: str,
+        *,
+        claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+        claim_map_artifact_path: str | None = None,
+        require_claim_map_submission: bool = False,
+    ) -> dict[str, Any]:
+        payload = _verify_project_section_claim_map_impl(
+            self.thread_id,
+            project_id=project_id,
+            section_id=section_id,
+            claim_map_json=claim_map_json,
+            claim_map_artifact_path=claim_map_artifact_path,
+            require_claim_map_submission=require_claim_map_submission,
+        )
+        self._record_payload(
+            operation="verify_claim_map_only",
+            payload=payload,
+            metadata={
+                "project_id": project_id,
+                "section_id": section_id,
+                "claim_map_submission_provided": claim_map_json is not None or bool(claim_map_artifact_path),
+                "claim_map_submission_required": require_claim_map_submission,
             },
         )
         return payload
@@ -5592,6 +7412,53 @@ class CompileService(_BaseRuntimeService):
     def get_capability_catalog(self) -> dict[str, Any]:
         payload = _get_capability_catalog_impl()
         self._record_payload(operation="get_capability_catalog", payload=payload, metadata={})
+        return payload
+
+    def run_prompt_layer_optimizer(
+        self,
+        *,
+        compile_metrics_path: str | None = None,
+        offline_regression_report_path: str | None = None,
+        prompt_layers_path: str | None = None,
+        apply_prompt_patch: bool = False,
+        run_offline_validation: bool = True,
+        dataset_version: str = "optimizer-candidate",
+        optimizer_config: dict[str, Any] | None = None,
+        optimizer_mode: str = "rules",
+        llm_model_name: str | None = None,
+        llm_thinking_enabled: bool = False,
+        llm_temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        payload = _run_prompt_layer_optimizer_impl(
+            self.thread_id,
+            compile_metrics_path=compile_metrics_path,
+            offline_regression_report_path=offline_regression_report_path,
+            prompt_layers_path=prompt_layers_path,
+            apply_prompt_patch=apply_prompt_patch,
+            run_offline_validation=run_offline_validation,
+            dataset_version=dataset_version,
+            optimizer_config=optimizer_config,
+            optimizer_mode=optimizer_mode,
+            llm_model_name=llm_model_name,
+            llm_thinking_enabled=llm_thinking_enabled,
+            llm_temperature=llm_temperature,
+        )
+        self._record_payload(
+            operation="run_prompt_layer_optimizer",
+            payload=payload,
+            metadata={
+                "apply_prompt_patch": apply_prompt_patch,
+                "run_offline_validation": run_offline_validation,
+                "dataset_version": dataset_version,
+                "optimizer_config": optimizer_config
+                or {
+                    "optimizer_mode": optimizer_mode,
+                    "model_name": llm_model_name,
+                    "thinking_enabled": llm_thinking_enabled,
+                    "temperature": llm_temperature,
+                },
+            },
+        )
         return payload
 
     def assess_project_capabilities(self, *, project_id: str, section_id: str | None = None) -> dict[str, Any]:
@@ -5855,11 +7722,13 @@ class LatexService(_BaseRuntimeService):
 
 _ingest_fulltext_evidence_impl = ingest_fulltext_evidence
 _compile_project_section_impl = compile_project_section
+_verify_project_section_claim_map_impl = _verify_project_section_claim_map_direct
 _plan_project_section_narrative_impl = plan_project_section_narrative
 _list_section_versions_impl = list_section_versions
 _rollback_section_to_version_impl = rollback_section_to_version
 _get_section_traceability_impl = get_section_traceability
 _get_engineering_gates_metrics_impl = get_engineering_gates_metrics
+_run_prompt_layer_optimizer_impl = run_prompt_layer_optimizer
 _simulate_review_and_plan_impl = simulate_review_and_plan
 _simulate_peer_review_cycle_impl = simulate_peer_review_cycle
 _get_peer_review_ab_metrics_impl = get_peer_review_ab_metrics
@@ -5916,9 +7785,21 @@ def compile_project_section(
     journal_style_force_refresh: bool = False,
     journal_style_sample_size: int | None = None,
     journal_style_recent_year_window: int | None = None,
+    dynamic_retrieval_top_k: int | None = None,
+    dynamic_retrieval_min_score: float | None = None,
+    task_complexity_score: float | None = None,
+    analysis_confidence: float | None = None,
+    role_contract_auto_tighten: bool = True,
     policy_snapshot_auto_adjust_narrative: bool = True,
     narrative_self_question_rounds: int = 3,
     narrative_include_storyboard: bool = True,
+    hypothesis_reasoning_mode: HypothesisReasoningModeOverride | None = None,
+    min_competing_hypotheses: int | None = None,
+    min_survivors_required: int | None = None,
+    falsification_fail_close: FalsificationFailCloseOverride | None = None,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+    claim_map_artifact_path: str | None = None,
+    require_claim_map_submission: bool = False,
 ) -> dict[str, Any]:
     return CompileService(thread_id).compile_project_section(
         project_id,
@@ -5940,9 +7821,39 @@ def compile_project_section(
         journal_style_force_refresh=journal_style_force_refresh,
         journal_style_sample_size=journal_style_sample_size,
         journal_style_recent_year_window=journal_style_recent_year_window,
+        dynamic_retrieval_top_k=dynamic_retrieval_top_k,
+        dynamic_retrieval_min_score=dynamic_retrieval_min_score,
+        task_complexity_score=task_complexity_score,
+        analysis_confidence=analysis_confidence,
+        role_contract_auto_tighten=role_contract_auto_tighten,
         policy_snapshot_auto_adjust_narrative=policy_snapshot_auto_adjust_narrative,
         narrative_self_question_rounds=narrative_self_question_rounds,
         narrative_include_storyboard=narrative_include_storyboard,
+        hypothesis_reasoning_mode=hypothesis_reasoning_mode,
+        min_competing_hypotheses=min_competing_hypotheses,
+        min_survivors_required=min_survivors_required,
+        falsification_fail_close=falsification_fail_close,
+        claim_map_json=claim_map_json,
+        claim_map_artifact_path=claim_map_artifact_path,
+        require_claim_map_submission=require_claim_map_submission,
+    )
+
+
+def verify_project_section_claim_map(
+    thread_id: str,
+    *,
+    project_id: str,
+    section_id: str,
+    claim_map_json: dict[str, Any] | list[dict[str, Any]] | str | None = None,
+    claim_map_artifact_path: str | None = None,
+    require_claim_map_submission: bool = False,
+) -> dict[str, Any]:
+    return CompileService(thread_id).verify_claim_map_only(
+        project_id,
+        section_id,
+        claim_map_json=claim_map_json,
+        claim_map_artifact_path=claim_map_artifact_path,
+        require_claim_map_submission=require_claim_map_submission,
     )
 
 
@@ -6007,6 +7918,36 @@ def get_engineering_gates_metrics(
         min_traceability_coverage_rate=min_traceability_coverage_rate,
         min_delivery_completeness_rate=min_delivery_completeness_rate,
         min_latex_success_rate=min_latex_success_rate,
+    )
+
+
+def run_prompt_layer_optimizer(
+    thread_id: str,
+    *,
+    compile_metrics_path: str | None = None,
+    offline_regression_report_path: str | None = None,
+    prompt_layers_path: str | None = None,
+    apply_prompt_patch: bool = False,
+    run_offline_validation: bool = True,
+    dataset_version: str = "optimizer-candidate",
+    optimizer_config: dict[str, Any] | None = None,
+    optimizer_mode: str = "rules",
+    llm_model_name: str | None = None,
+    llm_thinking_enabled: bool = False,
+    llm_temperature: float = 0.0,
+) -> dict[str, Any]:
+    return CompileService(thread_id).run_prompt_layer_optimizer(
+        compile_metrics_path=compile_metrics_path,
+        offline_regression_report_path=offline_regression_report_path,
+        prompt_layers_path=prompt_layers_path,
+        apply_prompt_patch=apply_prompt_patch,
+        run_offline_validation=run_offline_validation,
+        dataset_version=dataset_version,
+        optimizer_config=optimizer_config,
+        optimizer_mode=optimizer_mode,
+        llm_model_name=llm_model_name,
+        llm_thinking_enabled=llm_thinking_enabled,
+        llm_temperature=llm_temperature,
     )
 
 
