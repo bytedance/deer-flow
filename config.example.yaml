@@ -202,6 +202,13 @@ tools:
     use: deerflow.community.image_search.tools:image_search_tool
     max_results: 5
 
+  # Image recognition tool (uses vision-capable LLMs)
+  # Analyzes images to extract information, identify objects, perform OCR, etc.
+  # Requires a vision-capable model to be configured (supports_vision: true)
+  - name: image_recognition
+    group: web
+    use: deerflow.community.image_recognition.tools:image_recognition_tool
+
   # File operations tools
   - name: ls
     group: file:read
