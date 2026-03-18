@@ -19,12 +19,9 @@ import asyncio
 import json
 import logging
 import mimetypes
-import os
-import re
 import shutil
 import tempfile
 import uuid
-import zipfile
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,8 +36,10 @@ from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
-from deerflow.config.paths import get_paths
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.models import create_chat_model
+from deerflow.skills.installer import install_skill_from_archive
+from deerflow.uploads.manager import deduplicate_filename, delete_file_safe, ensure_uploads_dir, get_uploads_dir, list_files_in_dir
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +511,7 @@ class DeerFlowClient:
         self._atomic_write_json(config_path, config_data)
 
         self._agent = None
+        self._agent_config_key = None
         reloaded = reload_extensions_config()
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
@@ -577,6 +577,7 @@ class DeerFlowClient:
         self._atomic_write_json(config_path, config_data)
 
         self._agent = None
+        self._agent_config_key = None
         reload_extensions_config()
 
         updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
@@ -603,56 +604,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        from deerflow.skills.loader import get_skills_root_path
-        from deerflow.skills.validation import _validate_skill_frontmatter
-
-        path = Path(skill_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Skill file not found: {skill_path}")
-        if not path.is_file():
-            raise ValueError(f"Path is not a file: {skill_path}")
-        if path.suffix != ".skill":
-            raise ValueError("File must have .skill extension")
-        if not zipfile.is_zipfile(path):
-            raise ValueError("File is not a valid ZIP archive")
-
-        skills_root = get_skills_root_path()
-        custom_dir = skills_root / "custom"
-        custom_dir.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            with zipfile.ZipFile(path, "r") as zf:
-                total_size = sum(info.file_size for info in zf.infolist())
-                if total_size > 100 * 1024 * 1024:
-                    raise ValueError("Skill archive too large when extracted (>100MB)")
-                for info in zf.infolist():
-                    if Path(info.filename).is_absolute() or ".." in Path(info.filename).parts:
-                        raise ValueError(f"Unsafe path in archive: {info.filename}")
-                zf.extractall(tmp_path)
-            for p in tmp_path.rglob("*"):
-                if p.is_symlink():
-                    p.unlink()
-
-            items = list(tmp_path.iterdir())
-            if not items:
-                raise ValueError("Skill archive is empty")
-
-            skill_dir = items[0] if len(items) == 1 and items[0].is_dir() else tmp_path
-
-            is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-            if not is_valid:
-                raise ValueError(f"Invalid skill: {message}")
-            if not re.fullmatch(r"[a-zA-Z0-9_-]+", skill_name):
-                raise ValueError(f"Invalid skill name: {skill_name}")
-
-            target = custom_dir / skill_name
-            if target.exists():
-                raise ValueError(f"Skill '{skill_name}' already exists")
-
-            shutil.copytree(skill_dir, target)
-
-        return {"success": True, "skill_name": skill_name, "message": f"Skill '{skill_name}' installed successfully"}
+        return install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management
@@ -702,13 +654,6 @@ class DeerFlowClient:
     # Public API — file uploads
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_uploads_dir(thread_id: str) -> Path:
-        """Get (and create) the uploads directory for a thread."""
-        base = get_paths().sandbox_uploads_dir(thread_id)
-        base.mkdir(parents=True, exist_ok=True)
-        return base
-
     def upload_files(self, thread_id: str, files: list[str | Path]) -> dict:
         """Upload local files into a thread's uploads directory.
 
@@ -730,6 +675,7 @@ class DeerFlowClient:
 
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
+        seen_names: set[str] = set()
         convertible_extensions = {ext.lower() for ext in CONVERTIBLE_EXTENSIONS}
         has_convertible_file = False
         for f in files:
@@ -738,11 +684,13 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            resolved_files.append(p)
+            dest_name = deduplicate_filename(p.name, seen_names)
+            seen_names.add(dest_name)
+            resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in convertible_extensions:
                 has_convertible_file = True
 
-        uploads_dir = self._get_uploads_dir(thread_id)
+        uploads_dir = ensure_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
 
         conversion_pool = None
@@ -762,17 +710,19 @@ class DeerFlowClient:
             return asyncio.run(convert_file_to_markdown(path))
 
         try:
-            for src_path in resolved_files:
-                dest = uploads_dir / src_path.name
+            for src_path, dest_name in resolved_files:
+                dest = uploads_dir / dest_name
                 shutil.copy2(src_path, dest)
 
                 info: dict[str, Any] = {
-                    "filename": src_path.name,
+                    "filename": dest_name,
                     "size": str(dest.stat().st_size),
                     "path": str(dest),
-                    "virtual_path": f"/mnt/user-data/uploads/{src_path.name}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{src_path.name}",
+                    "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{dest_name}",
+                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{dest_name}",
                 }
+                if dest_name != src_path.name:
+                    info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in convertible_extensions:
                     try:
@@ -790,7 +740,8 @@ class DeerFlowClient:
 
                     if md_path is not None:
                         info["markdown_file"] = md_path.name
-                        info["markdown_virtual_path"] = f"/mnt/user-data/uploads/{md_path.name}"
+                        info["markdown_path"] = str(uploads_dir / md_path.name)
+                        info["markdown_virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
                         info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
 
                 uploaded_files.append(info)
@@ -814,29 +765,17 @@ class DeerFlowClient:
             Dict with "files" and "count" keys, matching the Gateway API
             ``list_uploaded_files`` response.
         """
-        uploads_dir = self._get_uploads_dir(thread_id)
-        if not uploads_dir.exists():
-            return {"files": [], "count": 0}
+        uploads_dir = get_uploads_dir(thread_id)
+        result = list_files_in_dir(uploads_dir)
 
-        files = []
-        with os.scandir(uploads_dir) as entries:
-            file_entries = [entry for entry in entries if entry.is_file()]
+        # Enrich with virtual paths and artifact URLs.
+        for f in result["files"]:
+            filename = f["filename"]
+            f["size"] = str(f["size"])  # Client returns str, shared returns int
+            f["virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
+            f["artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}"
 
-        for entry in sorted(file_entries, key=lambda item: item.name):
-            stat = entry.stat()
-            filename = entry.name
-            files.append(
-                {
-                    "filename": filename,
-                    "size": str(stat.st_size),
-                    "path": str(Path(entry.path)),
-                    "virtual_path": f"/mnt/user-data/uploads/{filename}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                    "modified": stat.st_mtime,
-                }
-            )
-        return {"files": files, "count": len(files)}
+        return result
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
         """Delete a file from a thread's uploads directory.
@@ -853,19 +792,8 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             PermissionError: If path traversal is detected.
         """
-        uploads_dir = self._get_uploads_dir(thread_id)
-        file_path = (uploads_dir / filename).resolve()
-
-        try:
-            file_path.relative_to(uploads_dir.resolve())
-        except ValueError as exc:
-            raise PermissionError("Access denied: path traversal detected") from exc
-
-        if not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {filename}")
-
-        file_path.unlink()
-        return {"success": True, "message": f"Deleted {filename}"}
+        uploads_dir = get_uploads_dir(thread_id)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts
@@ -885,19 +813,12 @@ class DeerFlowClient:
             FileNotFoundError: If the artifact does not exist.
             ValueError: If the path is invalid.
         """
-        virtual_prefix = "mnt/user-data"
-        clean_path = path.lstrip("/")
-        if not clean_path.startswith(virtual_prefix):
-            raise ValueError(f"Path must start with /{virtual_prefix}")
-
-        relative = clean_path[len(virtual_prefix) :].lstrip("/")
-        base_dir = get_paths().sandbox_user_data_dir(thread_id)
-        actual = (base_dir / relative).resolve()
-
         try:
-            actual.relative_to(base_dir.resolve())
+            actual = get_paths().resolve_virtual_path(thread_id, path)
         except ValueError as exc:
-            raise PermissionError("Access denied: path traversal detected") from exc
+            if "traversal" in str(exc):
+                raise PermissionError("Access denied: path traversal detected") from exc
+            raise
         if not actual.exists():
             raise FileNotFoundError(f"Artifact not found: {path}")
         if not actual.is_file():
