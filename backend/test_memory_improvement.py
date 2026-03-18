@@ -1,7 +1,7 @@
 """Test script for memory system improvements."""
 
-import json
 from src.agents.memory.prompt import format_memory_for_injection
+
 
 def test_fact_ranking():
     print("Testing Similarity-Based Fact Retrieval...")
@@ -25,7 +25,8 @@ def test_fact_ranking():
     result_python = format_memory_for_injection(memory_data, max_tokens=1000, current_context=context_python)
     print("Resulting Facts (should prioritize Python):")
     for line in result_python.split("\n"):
-        if line.startswith("-"): print(line)
+        if line.startswith("-"):
+            print(line)
 
     # Case 2: Context about Frontend
     context_web = "The UI is looking a bit slow, how can I improve the performance of my components?"
@@ -33,7 +34,8 @@ def test_fact_ranking():
     result_web = format_memory_for_injection(memory_data, max_tokens=1000, current_context=context_web)
     print("Resulting Facts (should prioritize React/Next.js and maybe CSS):")
     for line in result_web.split("\n"):
-        if line.startswith("-"): print(line)
+        if line.startswith("-"):
+            print(line)
 
     # Case 3: Context about infra
     context_infra = "How do I deploy this to production?"
@@ -41,7 +43,9 @@ def test_fact_ranking():
     result_infra = format_memory_for_injection(memory_data, max_tokens=1000, current_context=context_infra)
     print("Resulting Facts (should prioritize Docker):")
     for line in result_infra.split("\n"):
-        if line.startswith("-"): print(line)
+        if line.startswith("-"):
+            print(line)
+
 
 def test_token_counting():
     print("\nTesting Accurate Token Counting...")

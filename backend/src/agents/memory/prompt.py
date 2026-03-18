@@ -186,13 +186,16 @@ def _rank_facts_by_relevance(
         # Calculate cosine similarities
         similarities = cosine_similarity(fact_vectors, context_vector).flatten()
         
-        # Calculate final scores
+        # Calculate final scores without mutating the original fact dicts
+        scored_facts: list[tuple[float, dict[str, Any]]] = []
         for i, fact in enumerate(facts):
             similarity = float(similarities[i])
             confidence = float(fact.get("confidence", 0.0))
-            fact["_final_score"] = (similarity * similarity_weight) + (confidence * confidence_weight)
-            
-        return sorted(facts, key=lambda x: x.get("_final_score", 0.0), reverse=True)
+            final_score = (similarity * similarity_weight) + (confidence * confidence_weight)
+            scored_facts.append((final_score, fact))
+
+        scored_facts.sort(key=lambda item: item[0], reverse=True)
+        return [fact for _, fact in scored_facts]
     except Exception:
         # Graceful fallback to confidence-only
         return sorted(facts, key=lambda x: x.get("confidence", 0.0), reverse=True)

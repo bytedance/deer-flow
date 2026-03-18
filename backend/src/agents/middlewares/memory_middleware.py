@@ -3,9 +3,9 @@
 import re
 from typing import Any, override
 
-from langchain_core.messages import SystemMessage
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
 
 from src.agents.memory.prompt import format_memory_for_injection
@@ -18,6 +18,23 @@ class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     pass
+
+
+MEMORY_BLOCK_RE = re.compile(r"<memory>[\s\S]*?</memory>\n*", re.IGNORECASE)
+
+
+def _remove_existing_memory_injection(messages: list[Any]) -> list[Any]:
+    """Remove any previously injected memory blocks to ensure idempotency.
+
+    This prevents duplicate memory injections across turns.
+
+    Args:
+        messages: List of messages that may contain a prior memory injection.
+
+    Returns:
+        Filtered list with any existing memory blocks removed.
+    """
+    return [msg for msg in messages if not (getattr(msg, "additional_kwargs", {}).get("name") == "memory_context")]
 
 
 def _extract_conversation_context(messages: list[Any], max_turns: int = 3) -> str:
@@ -150,12 +167,15 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             Updated state with memory message injected.
         """
         config = get_memory_config()
-        if not config.enabled or not config.inject_memory:
+        if not config.enabled or not config.injection_enabled:
             return None
 
         # Get messages from state
         messages = state.get("messages", [])
-        
+
+        # Remove any prior memory injection to ensure idempotency
+        messages = _remove_existing_memory_injection(messages)
+
         # Extract recent context for similarity-based fact retrieval
         current_context = _extract_conversation_context(messages)
 
