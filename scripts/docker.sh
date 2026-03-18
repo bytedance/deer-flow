@@ -79,9 +79,41 @@ init() {
 
     SANDBOX_IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 
+    # Detect sandbox mode from config.yaml
+    local sandbox_mode
+    sandbox_mode="$(detect_sandbox_mode)"
+
+    # Skip image pull for local sandbox mode (no container image needed)
+    if [ "$sandbox_mode" = "local" ]; then
+        echo -e "${GREEN}Detected local sandbox mode — no Docker image required.${NC}"
+        echo ""
+        echo -e "${GREEN}✓ Docker environment is ready.${NC}"
+        echo ""
+        echo -e "${YELLOW}Next step: make docker-start${NC}"
+        return 0
+    fi
+
     if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${SANDBOX_IMAGE}$"; then
         echo -e "${BLUE}Pulling sandbox image: $SANDBOX_IMAGE ...${NC}"
-        docker pull "$SANDBOX_IMAGE"
+        echo ""
+
+        if ! docker pull "$SANDBOX_IMAGE" 2>&1; then
+            echo ""
+            echo -e "${YELLOW}⚠ Failed to pull sandbox image.${NC}"
+            echo ""
+            echo "This is expected if:"
+            echo "  1. You are using local sandbox mode (default — no image needed)"
+            echo "  2. You are behind a corporate proxy or firewall"
+            echo "  3. The registry requires authentication"
+            echo ""
+            echo -e "${GREEN}The Docker development environment can still be started.${NC}"
+            echo "If you need AIO sandbox (container-based execution):"
+            echo "  - Ensure you have network access to the registry"
+            echo "  - Or configure a custom sandbox image in config.yaml"
+            echo ""
+            echo -e "${YELLOW}Next step: make docker-start${NC}"
+            return 0
+        fi
     else
         echo -e "${GREEN}Sandbox image already exists locally: $SANDBOX_IMAGE${NC}"
     fi
