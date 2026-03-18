@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 1
+config_version: 2
 
 # ============================================================================
 # Models Configuration
@@ -223,6 +223,18 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+# ============================================================================
+# Tool Search Configuration (Deferred Tool Loading)
+# ============================================================================
+# When enabled, MCP tools are not loaded into the agent's context directly.
+# Instead, they are listed by name in the system prompt and discoverable
+# via the tool_search tool at runtime.
+# This reduces context usage and improves tool selection accuracy when
+# multiple MCP servers expose a large number of tools.
+
+tool_search:
+  enabled: false
 
 # ============================================================================
 # Sandbox Configuration
