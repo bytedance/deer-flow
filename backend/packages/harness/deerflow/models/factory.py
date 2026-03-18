@@ -66,7 +66,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort in ("low", "medium", "high", "xhigh"):
+        elif explicit_effort in ("none", "low", "medium", "high", "xhigh"):
             model_settings_from_config["reasoning_effort"] = explicit_effort
 
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:

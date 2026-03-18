@@ -21,6 +21,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class CodexChatModel(BaseChatModel):
 
     Config example:
         - name: gpt-5.4
-          use: src.models.openai_codex_provider:CodexChatModel
+          use: deerflow.models.openai_codex_provider:CodexChatModel
           model: gpt-5.4
           max_tokens: 100000
           reasoning_effort: medium
@@ -43,8 +44,8 @@ class CodexChatModel(BaseChatModel):
     max_tokens: int = 100000
     reasoning_effort: str = "medium"
     retry_max_attempts: int = MAX_RETRIES
-    _access_token: str = ""
-    _account_id: str = ""
+    _access_token: str = PrivateAttr(default="")
+    _account_id: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -53,14 +54,22 @@ class CodexChatModel(BaseChatModel):
         return "codex-responses"
 
     def model_post_init(self, __context: Any) -> None:
-        """Auto-load Codex CLI credentials."""
+        """Auto-load Codex CLI credentials, or validate provided access token."""
         cred_data = self._load_codex_auth()
         if cred_data:
             self._access_token = cred_data["access_token"]
             self._account_id = cred_data["account_id"]
             logger.info(f"Using Codex CLI credential (account: {self._account_id[:8]}...)")
         else:
-            logger.warning("No Codex CLI credentials found in ~/.codex/auth.json")
+            if self._access_token:
+                # Caller has provided an access token via configuration; use it.
+                logger.info("No Codex CLI credentials found in ~/.codex/auth.json; using configured access token.")
+            else:
+                # Fail fast rather than sending requests with an empty Authorization header.
+                raise ValueError(
+                    "No Codex access token available. Either run 'codex auth' to create "
+                    "~/.codex/auth.json, or configure CodexChatModel with a valid access token."
+                )
 
         super().model_post_init(__context)
 
@@ -74,9 +83,29 @@ class CodexChatModel(BaseChatModel):
             return None
         try:
             data = json.loads(auth_path.read_text())
-            tokens = data.get("tokens", {})
-            access_token = tokens.get("access_token", "")
-            account_id = tokens.get("account_id", "")
+            # Primary source: nested tokens object (Codex CLI default)
+            tokens = data.get("tokens") or {}
+            access_token = ""
+            account_id = ""
+
+            if isinstance(tokens, dict):
+                access_token = (
+                    tokens.get("access_token")
+                    or tokens.get("token")
+                    or ""
+                )
+                account_id = tokens.get("account_id") or ""
+
+            # Fallbacks: top-level fields supported by Codex CLI
+            if not access_token:
+                access_token = (
+                    data.get("access_token")
+                    or data.get("token")
+                    or ""
+                )
+            if not account_id:
+                account_id = data.get("account_id") or ""
+
             if not access_token:
                 return None
             return {"access_token": access_token, "account_id": account_id}

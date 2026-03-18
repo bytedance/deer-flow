@@ -3,7 +3,7 @@
 Implements two credential strategies:
   1. Claude Code OAuth token from ~/.claude/.credentials.json
      - Uses Authorization: Bearer header (NOT x-api-key)
-     - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
+     - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14
   2. Codex CLI token from ~/.codex/auth.json
      - Uses chatgpt.com/backend-api/codex/responses endpoint
 """
@@ -22,7 +22,7 @@ OAUTH_ANTHROPIC_BETAS = "oauth-2025-04-20,claude-code-20250219,interleaved-think
 
 def is_oauth_token(token: str) -> bool:
     """Check if a token is a Claude Code OAuth token (not a standard API key)."""
-    return isinstance(token, str) and "sk-ant-oat" in token
+    return isinstance(token, str) and token.startswith("sk-ant-oat")
 
 
 @dataclass
