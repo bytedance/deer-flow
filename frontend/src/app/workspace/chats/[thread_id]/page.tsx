@@ -32,7 +32,7 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
 
-  const [thread, sendMessage, isUploading] = useThreadStream({
+  const [thread, sendMessage] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
@@ -127,7 +127,7 @@ export default function ChatPage() {
                   extraHeader={
                     isNewThread && <Welcome mode={settings.context.mode} />
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || isUploading}
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
