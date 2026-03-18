@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from langgraph.prebuilt import ToolRuntime
 
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
@@ -9,6 +10,7 @@ from deerflow.sandbox.tools import (
     _reject_path_traversal,
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
+    ls_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -21,6 +23,17 @@ _THREAD_DATA = {
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+def _make_runtime(state: dict) -> ToolRuntime:
+    return ToolRuntime(
+        state=state,
+        context={},
+        config={},
+        stream_writer=lambda _: None,
+        tool_call_id="tc-1",
+        store=None,
+    )
 
 
 # ---------- replace_virtual_path ----------
@@ -56,6 +69,24 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
 
         assert "/home/user/deer-flow/skills" not in masked
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+
+
+def test_mask_local_paths_in_output_hides_thread_local_skills_copy_paths(tmp_path: Path) -> None:
+    thread_data = {
+        "workspace_path": str(tmp_path / "user-data" / "workspace"),
+        "uploads_path": str(tmp_path / "user-data" / "uploads"),
+        "outputs_path": str(tmp_path / "user-data" / "outputs"),
+    }
+    copy_root = tmp_path / "user-data" / ".skills-cache" / "public" / "bootstrap"
+    copy_root.mkdir(parents=True)
+    copied_skill = copy_root / "SKILL.md"
+    copied_skill.write_text("copied")
+
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        masked = mask_local_paths_in_output(f"Reading: {copied_skill}", thread_data)
+
+    assert str(copied_skill) not in masked
+    assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
 
 
 # ---------- _reject_path_traversal ----------
@@ -222,6 +253,40 @@ def test_replace_virtual_paths_in_command_replaces_both() -> None:
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
 
 
+def test_replace_virtual_paths_in_command_uses_thread_local_skills_copy(tmp_path: Path) -> None:
+    skills_host = tmp_path / "host-skills"
+    source_skill = skills_host / "public" / "bootstrap" / "SKILL.md"
+    source_skill.parent.mkdir(parents=True)
+    source_skill.write_text("original")
+
+    user_data = tmp_path / "thread" / "user-data"
+    workspace = user_data / "workspace"
+    workspace.mkdir(parents=True)
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(user_data / "uploads"),
+        "outputs_path": str(user_data / "outputs"),
+    }
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_host)),
+    ):
+        result = replace_virtual_paths_in_command(
+            "python /mnt/skills/public/bootstrap/SKILL.md",
+            thread_data,
+            use_local_skills_copy=True,
+        )
+
+    copied_skill = user_data / ".skills-cache" / "public" / "bootstrap" / "SKILL.md"
+    assert str(source_skill) not in result
+    assert str(copied_skill) in result
+    assert copied_skill.read_text() == "original"
+
+    copied_skill.write_text("modified")
+    assert source_skill.read_text() == "original"
+
+
 # ---------- validate_local_bash_command_paths ----------
 
 
@@ -322,3 +387,27 @@ def test_validate_local_tool_path_skills_custom_container_path() -> None:
                 _THREAD_DATA,
                 read_only=True,
             )
+
+
+def test_ls_tool_masks_local_host_paths(monkeypatch) -> None:
+    expected_host_path = str(Path("/tmp/deer-flow/threads/t1/user-data/workspace").resolve())
+
+    class FakeSandbox:
+        def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
+            assert path == expected_host_path
+            return [str(Path(expected_host_path) / "result.txt")]
+
+    runtime = _make_runtime(
+        {
+            "thread_data": _THREAD_DATA,
+            "sandbox": {"sandbox_id": "local"},
+        }
+    )
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FakeSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    result = ls_tool.func(runtime=runtime, description="list workspace", path="/mnt/user-data/workspace")
+
+    assert "/tmp/deer-flow/threads/t1/user-data" not in result
+    assert "/mnt/user-data/workspace/result.txt" in result

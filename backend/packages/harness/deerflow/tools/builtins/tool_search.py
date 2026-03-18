@@ -14,9 +14,11 @@ import logging
 import re
 from dataclasses import dataclass
 
-from langchain.tools import BaseTool
+from langchain.tools import BaseTool, ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_function
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +134,7 @@ def reset_deferred_registry() -> None:
 
 
 @tool
-def tool_search(query: str) -> str:
+def tool_search(query: str, runtime: ToolRuntime) -> str | Command:
     """Fetches full schema definitions for deferred tools so they can be called.
 
     Deferred tools appear by name in <available-deferred-tools> in the system
@@ -155,14 +157,44 @@ def tool_search(query: str) -> str:
     """
     registry = get_deferred_registry()
     if registry is None:
-        return "No deferred tools available."
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="No deferred tools available.",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
 
     matched_tools = registry.search(query)
     if not matched_tools:
-        return f"No tools found matching: {query}"
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=f"No tools found matching: {query}",
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ]
+            }
+        )
 
     # Use LangChain's built-in serialization to produce OpenAI function format.
     # This is model-agnostic: all LLMs understand this standard schema.
-    tool_defs = [convert_to_openai_function(t) for t in matched_tools[:MAX_RESULTS]]
+    selected_tools = matched_tools[:MAX_RESULTS]
+    tool_defs = [convert_to_openai_function(t) for t in selected_tools]
+    payload = json.dumps(tool_defs, indent=2, ensure_ascii=False)
 
-    return json.dumps(tool_defs, indent=2, ensure_ascii=False)
+    return Command(
+        update={
+            "loaded_deferred_tools": [tool.name for tool in selected_tools],
+            "messages": [
+                ToolMessage(
+                    content=payload,
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+        }
+    )
