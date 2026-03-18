@@ -349,6 +349,7 @@ export const enUS: Translations = {
       refreshSuccess: (count: number) =>
         `Refreshed, ${count} skill${count === 1 ? "" : "s"} found`,
       refreshError: "Failed to refresh",
+      refreshSkills: "Refresh skills",
       allowExternalSkills: "Allow External Skills",
     },
     notification: {

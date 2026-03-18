@@ -117,10 +117,10 @@ function SkillSettingsList({
           <Button
             size="sm"
             variant="ghost"
-            disabled={isRefreshing}
+            disabled={isRefreshing || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
             onClick={() => void handleRefresh()}
-            aria-label="Refresh skills"
-            title="Refresh skills"
+            aria-label={t.settings.skills.refreshSkills}
+            title={t.settings.skills.refreshSkills}
           >
             <RefreshCwIcon className={isRefreshing ? "animate-spin" : ""} />
           </Button>

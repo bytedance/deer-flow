@@ -281,6 +281,7 @@ export interface Translations {
       emptyButton: string;
       refreshSuccess: (count: number) => string;
       refreshError: string;
+      refreshSkills: string;
       allowExternalSkills: string;
     };
     notification: {
