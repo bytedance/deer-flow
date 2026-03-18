@@ -58,7 +58,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
 
-        client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors)
+        client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
         # Get all tools from all servers, with a hard timeout to prevent a
         # slow/unreachable server from blocking agent initialization indefinitely.

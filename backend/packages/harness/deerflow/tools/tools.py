@@ -5,6 +5,7 @@ from langchain.tools import BaseTool
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_variable
 from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, task_tool, view_image_tool
+from deerflow.tools.builtins.tool_search import reset_deferred_registry
 
 logger = logging.getLogger(__name__)
 
@@ -42,27 +43,6 @@ def get_available_tools(
     config = get_app_config()
     loaded_tools = [resolve_variable(tool.use, BaseTool) for tool in config.tools if groups is None or tool.group in groups]
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
-    mcp_tools = []
-    if include_mcp:
-        try:
-            from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
-
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
-        except ImportError:
-            logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
-        except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
-
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
 
@@ -81,4 +61,41 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
+    # Get cached MCP tools if enabled
+    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
+    # to always read the latest configuration from disk. This ensures that changes
+    # made through the Gateway API (which runs in a separate process) are immediately
+    # reflected when loading MCP tools.
+    mcp_tools = []
+    # Reset deferred registry upfront to prevent stale state from previous calls
+    reset_deferred_registry()
+    if include_mcp:
+        try:
+            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.mcp.cache import get_cached_mcp_tools
+
+            extensions_config = ExtensionsConfig.from_file()
+            if extensions_config.get_enabled_mcp_servers():
+                mcp_tools = get_cached_mcp_tools()
+                if mcp_tools:
+                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+
+                    # When tool_search is enabled, register MCP tools in the
+                    # deferred registry and add tool_search to builtin tools.
+                    if config.tool_search.enabled:
+                        from deerflow.tools.builtins.tool_search import DeferredToolRegistry, set_deferred_registry
+                        from deerflow.tools.builtins.tool_search import tool_search as tool_search_tool
+
+                        registry = DeferredToolRegistry()
+                        for t in mcp_tools:
+                            registry.register(t)
+                        set_deferred_registry(registry)
+                        builtin_tools.append(tool_search_tool)
+                        logger.info(f"Tool search active: {len(mcp_tools)} tools deferred")
+        except ImportError:
+            logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
+        except Exception as e:
+            logger.error(f"Failed to get cached MCP tools: {e}")
+
+    logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}")
     return loaded_tools + builtin_tools + mcp_tools
