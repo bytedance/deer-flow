@@ -70,6 +70,20 @@ cleanup() {
 # Set up trap for Ctrl+C
 trap cleanup INT TERM
 
+docker_available() {
+    # Check that the docker CLI exists
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Check that the Docker daemon is reachable
+    if ! docker info >/dev/null 2>&1; then
+        return 1
+    fi
+
+    return 0
+}
+
 # Initialize: pre-pull the sandbox image so first Pod startup is fast
 init() {
     echo "=========================================="
@@ -87,9 +101,18 @@ init() {
     if [ "$sandbox_mode" = "local" ]; then
         echo -e "${GREEN}Detected local sandbox mode — no Docker image required.${NC}"
         echo ""
-        echo -e "${GREEN}✓ Docker environment is ready.${NC}"
-        echo ""
-        echo -e "${YELLOW}Next step: make docker-start${NC}"
+
+        if docker_available; then
+            echo -e "${GREEN}✓ Docker environment is ready.${NC}"
+            echo ""
+            echo -e "${YELLOW}Next step: make docker-start${NC}"
+        else
+            echo -e "${YELLOW}Docker does not appear to be installed, or the Docker daemon is not reachable.${NC}"
+            echo "Local sandbox mode itself does not require Docker, but Docker-based workflows (e.g., docker-start) will fail until Docker is available."
+            echo ""
+            echo -e "${YELLOW}Install and start Docker, then run: make docker-init && make docker-start${NC}"
+        fi
+
         return 0
     fi
 

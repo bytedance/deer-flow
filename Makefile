@@ -75,7 +75,7 @@ setup-sandbox:
 	fi; \
 	if command -v docker >/dev/null 2>&1; then \
 		echo "Pulling image using Docker..."; \
-		if docker pull "$$IMAGE" 2>/dev/null; then \
+		if docker pull "$$IMAGE"; then \
 			echo ""; \
 			echo "✓ Sandbox image pulled successfully"; \
 		else \
