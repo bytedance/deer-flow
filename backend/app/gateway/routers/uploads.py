@@ -189,9 +189,8 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
     try:
         if file_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
             companion_markdown = file_path.with_suffix(".md")
-            if companion_markdown.exists():
-                companion_markdown.unlink()
-        file_path.unlink()
+            companion_markdown.unlink(missing_ok=True)
+        file_path.unlink(missing_ok=True)
         logger.info(f"Deleted file: {filename}")
         return {"success": True, "message": f"Deleted {filename}"}
     except Exception as e:
