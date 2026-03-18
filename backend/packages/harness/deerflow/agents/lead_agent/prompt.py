@@ -235,6 +235,8 @@ You: "Deploying to staging..." [proceed]
 
 {skills_section}
 
+{deferred_tools_section}
+
 {subagent_section}
 
 <working_directory existed="true">
@@ -417,6 +419,31 @@ def get_agent_soul(agent_name: str | None) -> str:
     return ""
 
 
+def get_deferred_tools_prompt_section() -> str:
+    """Generate <available-deferred-tools> block for the system prompt.
+
+    Lists only deferred tool names so the agent knows what exists
+    and can use tool_search to load them.
+    Returns empty string when tool_search is disabled or no tools are deferred.
+    """
+    from deerflow.tools.builtins.tool_search import get_deferred_registry
+
+    try:
+        from deerflow.config import get_app_config
+
+        if not get_app_config().tool_search.enabled:
+            return ""
+    except FileNotFoundError:
+        return ""
+
+    registry = get_deferred_registry()
+    if not registry:
+        return ""
+
+    names = "\n".join(e.name for e in registry.entries)
+    return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -446,11 +473,15 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     # Get skills section
     skills_section = get_skills_prompt_section(available_skills)
 
+    # Get deferred tools section (tool_search)
+    deferred_tools_section = get_deferred_tools_prompt_section()
+
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         skills_section=skills_section,
+        deferred_tools_section=deferred_tools_section,
         memory_context=memory_context,
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
