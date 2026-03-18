@@ -187,7 +187,10 @@ async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
         raise HTTPException(status_code=403, detail="Access denied")
 
     try:
-        file_path.unlink()
+        if file_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+            companion_markdown = file_path.with_suffix(".md")
+            companion_markdown.unlink(missing_ok=True)
+        file_path.unlink(missing_ok=True)
         logger.info(f"Deleted file: {filename}")
         return {"success": True, "message": f"Deleted {filename}"}
     except Exception as e:
