@@ -146,20 +146,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS middleware (needed when running without nginx reverse proxy)
-    from fastapi.middleware.cors import CORSMiddleware
-
-    gateway_config = get_gateway_config()
-    allow_credentials = "*" not in gateway_config.cors_origins
-    if not allow_credentials:
-        logger.warning("CORS_ORIGINS contains '*' — disabling credentialed CORS for spec-compliant wildcard responses.")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=gateway_config.cors_origins,
-        allow_credentials=allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS is handled by nginx - no need for FastAPI middleware
 
     # Include routers
     # Models API is mounted at /api/models

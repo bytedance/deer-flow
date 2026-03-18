@@ -28,17 +28,6 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
     via tool_search at runtime.
     """
 
-    @staticmethod
-    def _loaded_tool_names(request: ModelRequest) -> set[str]:
-        state = request.state
-        if state is None:
-            return set()
-        if isinstance(state, dict):
-            loaded = state.get("loaded_deferred_tools", [])
-        else:
-            loaded = getattr(state, "loaded_deferred_tools", [])
-        return set(loaded or [])
-
     def _filter_tools(self, request: ModelRequest) -> ModelRequest:
         from deerflow.tools.builtins.tool_search import get_deferred_registry
 
@@ -47,14 +36,7 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
             return request
 
         deferred_names = {e.name for e in registry.entries}
-        loaded_tool_names = self._loaded_tool_names(request)
-        active_tools = [
-            t
-            for t in request.tools
-            if (name := getattr(t, "name", None)) is None
-            or name not in deferred_names
-            or name in loaded_tool_names
-        ]
+        active_tools = [t for t in request.tools if getattr(t, "name", None) not in deferred_names]
 
         if len(active_tools) < len(request.tools):
             logger.debug(f"Filtered {len(request.tools) - len(active_tools)} deferred tool schema(s) from model binding")

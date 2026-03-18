@@ -102,36 +102,6 @@ def _resolve_skills_path(path: str) -> str:
     return str(Path(skills_host) / relative) if relative else skills_host
 
 
-def _get_thread_skills_copy_root(thread_data: ThreadDataState | None) -> str | None:
-    """Return the per-thread copy location used for bash access to skills."""
-    if thread_data is None:
-        return None
-    workspace_path = thread_data.get("workspace_path")
-    if not workspace_path:
-        return None
-    return str(Path(workspace_path).resolve().parent / ".skills-cache")
-
-
-def _prepare_local_skills_copy(thread_data: ThreadDataState | None) -> str:
-    """Materialize a per-thread skills copy for local bash execution.
-
-    Bash runs against a thread-local copy instead of the shared skills checkout so
-    commands can read and execute skill assets without mutating the shared source.
-    """
-    import shutil
-
-    skills_host = _get_skills_host_path()
-    copy_root = _get_thread_skills_copy_root(thread_data)
-    if skills_host is None or copy_root is None:
-        raise FileNotFoundError("Skills directory not available for local bash execution")
-
-    destination = Path(copy_root)
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(skills_host, destination)
-    return str(destination)
-
-
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
 
@@ -220,18 +190,12 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     """
     result = output
 
-    skills_container = _get_skills_container_path()
-    skills_roots = []
+    # Mask skills host paths
     skills_host = _get_skills_host_path()
+    skills_container = _get_skills_container_path()
     if skills_host:
-        skills_roots.append(skills_host)
-    thread_skills_copy = _get_thread_skills_copy_root(thread_data)
-    if thread_skills_copy and Path(thread_skills_copy).exists():
-        skills_roots.append(thread_skills_copy)
-
-    for skills_root in skills_roots:
-        raw_base = str(Path(skills_root))
-        resolved_base = str(Path(skills_root).resolve())
+        raw_base = str(Path(skills_host))
+        resolved_base = str(Path(skills_host).resolve())
         for base in _path_variants(raw_base) | _path_variants(resolved_base):
             escaped = re.escape(base).replace(r"\\", r"[/\\]")
             pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
@@ -395,19 +359,12 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
-def replace_virtual_paths_in_command(
-    command: str,
-    thread_data: ThreadDataState | None,
-    *,
-    use_local_skills_copy: bool = False,
-) -> str:
+def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
     """Replace all virtual paths (/mnt/user-data and /mnt/skills) in a command string.
 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
-        use_local_skills_copy: Whether /mnt/skills paths should be rewritten to a
-            per-thread copy instead of the shared host skills directory.
 
     Returns:
         The command with all virtual paths replaced.
@@ -416,21 +373,12 @@ def replace_virtual_paths_in_command(
 
     # Replace skills paths
     skills_container = _get_skills_container_path()
-    skills_root = None
-    if skills_container in result:
-        if use_local_skills_copy:
-            skills_root = _prepare_local_skills_copy(thread_data)
-        else:
-            skills_root = _get_skills_host_path()
-    if skills_root and skills_container in result:
+    skills_host = _get_skills_host_path()
+    if skills_host and skills_container in result:
         skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
 
         def replace_skills_match(match: re.Match) -> str:
-            matched_path = match.group(0)
-            if matched_path == skills_container:
-                return skills_root
-            relative = matched_path[len(skills_container):].lstrip("/")
-            return str(Path(skills_root) / relative) if relative else skills_root
+            return _resolve_skills_path(match.group(0))
 
         result = skills_pattern.sub(replace_skills_match, result)
 
@@ -610,11 +558,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         thread_data = get_thread_data(runtime)
         if is_local_sandbox(runtime):
             validate_local_bash_command_paths(command, thread_data)
-            command = replace_virtual_paths_in_command(
-                command,
-                thread_data,
-                use_local_skills_copy=True,
-            )
+            command = replace_virtual_paths_in_command(command, thread_data)
             output = sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
         return sandbox.execute_command(command)
@@ -638,7 +582,6 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
-        thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -649,10 +592,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
-        output = "\n".join(children)
-        if is_local_sandbox(runtime):
-            return mask_local_paths_in_output(output, thread_data)
-        return output
+        return "\n".join(children)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
