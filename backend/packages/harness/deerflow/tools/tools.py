@@ -7,7 +7,6 @@ from deerflow.reflection import resolve_variable
 from deerflow.tools.builtins import ask_clarification_tool, cron_tool, present_file_tool, task_tool, view_image_tool
 from deerflow.tools.builtins.tool_search import reset_deferred_registry
 
-
 logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
