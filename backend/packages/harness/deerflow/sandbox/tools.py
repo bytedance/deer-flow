@@ -24,9 +24,100 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/dev/",
 )
 
+_DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+
+
+def _get_skills_container_path() -> str:
+    """Get the skills container path from config, with fallback to default.
+
+    Result is cached after the first successful config load.  If config loading
+    fails the default is returned *without* caching so that a later call can
+    pick up the real value once the config is available.
+    """
+    cached = getattr(_get_skills_container_path, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        from deerflow.config import get_app_config
+
+        value = get_app_config().skills.container_path
+        _get_skills_container_path._cached = value  # type: ignore[attr-defined]
+        return value
+    except Exception:
+        return _DEFAULT_SKILLS_CONTAINER_PATH
+
+
+def _get_skills_host_path() -> str | None:
+    """Get the skills host filesystem path from config.
+
+    Returns None if the skills directory does not exist or config cannot be
+    loaded.  Only successful lookups are cached; failures are retried on the
+    next call so that a transiently unavailable skills directory does not
+    permanently disable skills access.
+    """
+    cached = getattr(_get_skills_host_path, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        from deerflow.config import get_app_config
+
+        config = get_app_config()
+        skills_path = config.skills.get_skills_path()
+        if skills_path.exists():
+            value = str(skills_path)
+            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
+            return value
+    except Exception:
+        pass
+    return None
+
+
+def _is_skills_path(path: str) -> bool:
+    """Check if a path is under the skills container path."""
+    skills_prefix = _get_skills_container_path()
+    return path == skills_prefix or path.startswith(f"{skills_prefix}/")
+
+
+def _resolve_skills_path(path: str) -> str:
+    """Resolve a virtual skills path to a host filesystem path.
+
+    Args:
+        path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
+
+    Returns:
+        Resolved host path.
+
+    Raises:
+        FileNotFoundError: If skills directory is not configured or doesn't exist.
+    """
+    skills_container = _get_skills_container_path()
+    skills_host = _get_skills_host_path()
+    if skills_host is None:
+        raise FileNotFoundError(f"Skills directory not available for path: {path}")
+
+    if path == skills_container:
+        return skills_host
+
+    relative = path[len(skills_container):].lstrip("/")
+    return str(Path(skills_host) / relative) if relative else skills_host
+
 
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
+
+
+def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
+    """Sanitize an error message to avoid leaking host filesystem paths.
+
+    In local-sandbox mode, resolved host paths in the error string are masked
+    back to their virtual equivalents so that user-visible output never exposes
+    the host directory layout.
+    """
+    msg = f"{type(error).__name__}: {error}"
+    if runtime is not None and is_local_sandbox(runtime):
+        thread_data = get_thread_data(runtime)
+        msg = mask_local_paths_in_output(msg, thread_data)
+    return msg
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -93,15 +184,39 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
 
 
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
-    """Mask host absolute paths from local sandbox output using virtual paths."""
+    """Mask host absolute paths from local sandbox output using virtual paths.
+
+    Handles both user-data paths (per-thread) and skills paths (global).
+    """
+    result = output
+
+    # Mask skills host paths
+    skills_host = _get_skills_host_path()
+    skills_container = _get_skills_container_path()
+    if skills_host:
+        raw_base = str(Path(skills_host))
+        resolved_base = str(Path(skills_host).resolve())
+        for base in _path_variants(raw_base) | _path_variants(resolved_base):
+            escaped = re.escape(base).replace(r"\\", r"[/\\]")
+            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+            def replace_skills(match: re.Match, _base: str = base) -> str:
+                matched_path = match.group(0)
+                if matched_path == _base:
+                    return skills_container
+                relative = matched_path[len(_base):].lstrip("/\\")
+                return f"{skills_container}/{relative}" if relative else skills_container
+
+            result = pattern.sub(replace_skills, result)
+
+    # Mask user-data host paths
     if thread_data is None:
-        return output
+        return result
 
     mappings = _thread_actual_to_virtual_mappings(thread_data)
     if not mappings:
-        return output
+        return result
 
-    result = output
     for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
         raw_base = str(Path(actual_base))
         resolved_base = str(Path(actual_base).resolve())
@@ -109,32 +224,71 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             escaped_actual = re.escape(base).replace(r"\\", r"[/\\]")
             pattern = re.compile(escaped_actual + r"(?:[/\\][^\s\"';&|<>()]*)?")
 
-            def replace_match(match: re.Match) -> str:
+            def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual_base) -> str:
                 matched_path = match.group(0)
-                if matched_path == base:
-                    return virtual_base
-                relative = matched_path[len(base) :].lstrip("/\\")
-                return f"{virtual_base}/{relative}" if relative else virtual_base
+                if matched_path == _base:
+                    return _virtual
+                relative = matched_path[len(_base):].lstrip("/\\")
+                return f"{_virtual}/{relative}" if relative else _virtual
 
             result = pattern.sub(replace_match, result)
 
     return result
 
 
-def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> str:
-    """Resolve and validate a local-sandbox tool path.
+def _reject_path_traversal(path: str) -> None:
+    """Reject paths that contain '..' segments to prevent directory traversal."""
+    # Normalise to forward slashes, then check for '..' segments.
+    normalised = path.replace("\\", "/")
+    for segment in normalised.split("/"):
+        if segment == "..":
+            raise PermissionError("Access denied: path traversal detected")
 
-    Only virtual paths under /mnt/user-data are allowed in local mode.
+
+def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
+    """Validate that a virtual path is allowed for local-sandbox access.
+
+    This function is a security gate — it checks whether *path* may be
+    accessed and raises on violation.  It does **not** resolve the virtual
+    path to a host path; callers are responsible for resolution via
+    ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
+
+    Allowed virtual-path families:
+      - ``/mnt/user-data/*``  — always allowed (read + write)
+      - ``/mnt/skills/*``     — allowed only when *read_only* is True
+
+    Args:
+        path: The virtual path to validate.
+        thread_data: Thread data (must be present for local sandbox).
+        read_only: When True, skills paths are permitted.
+
+    Raises:
+        SandboxRuntimeError: If thread data is missing.
+        PermissionError: If the path is not allowed or contains traversal.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
-    if not path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ are allowed")
+    _reject_path_traversal(path)
 
-    resolved_path = replace_virtual_path(path, thread_data)
-    resolved = Path(resolved_path).resolve()
+    # Skills paths — read-only access only
+    if _is_skills_path(path):
+        if not read_only:
+            raise PermissionError(f"Write access to skills path is not allowed: {path}")
+        return
 
+    # User-data paths
+    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        return
+
+    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ or {_get_skills_container_path()}/ are allowed")
+
+
+def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
+    """Verify that a resolved host path stays inside allowed per-thread roots.
+
+    Raises PermissionError if the path escapes workspace/uploads/outputs.
+    """
     allowed_roots = [
         Path(p).resolve()
         for p in (
@@ -151,19 +305,31 @@ def resolve_local_tool_path(path: str, thread_data: ThreadDataState | None) -> s
     for root in allowed_roots:
         try:
             resolved.relative_to(root)
-            return str(resolved)
+            return
         except ValueError:
             continue
 
     raise PermissionError("Access denied: path traversal detected")
 
 
+def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
+    """Resolve a /mnt/user-data virtual path and validate it stays in bounds.
+
+    Returns the resolved host path string.
+    """
+    resolved_str = replace_virtual_path(path, thread_data)
+    resolved = Path(resolved_str).resolve()
+    _validate_resolved_user_data_path(resolved, thread_data)
+    return str(resolved)
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
     In local mode, commands must use virtual paths under /mnt/user-data for
-    user data access. A small allowlist of common system path prefixes is kept
-    for executable and device references (e.g. /bin/sh, /dev/null).
+    user data access. Skills paths under /mnt/skills are allowed for reading.
+    A small allowlist of common system path prefixes is kept for executable
+    and device references (e.g. /bin/sh, /dev/null).
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -172,6 +338,12 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+            _reject_path_traversal(absolute_path)
+            continue
+
+        # Allow skills container path (resolved by tools.py before passing to sandbox)
+        if _is_skills_path(absolute_path):
+            _reject_path_traversal(absolute_path)
             continue
 
         if any(
@@ -188,7 +360,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
-    """Replace all virtual /mnt/user-data paths in a command string.
+    """Replace all virtual paths (/mnt/user-data and /mnt/skills) in a command string.
 
     Args:
         command: The command string that may contain virtual paths.
@@ -197,20 +369,29 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     Returns:
         The command with all virtual paths replaced.
     """
-    if VIRTUAL_PATH_PREFIX not in command:
-        return command
+    result = command
 
-    if thread_data is None:
-        return command
+    # Replace skills paths
+    skills_container = _get_skills_container_path()
+    skills_host = _get_skills_host_path()
+    if skills_host and skills_container in result:
+        skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
 
-    # Pattern to match /mnt/user-data followed by path characters
-    pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+        def replace_skills_match(match: re.Match) -> str:
+            return _resolve_skills_path(match.group(0))
 
-    def replace_match(match: re.Match) -> str:
-        full_path = match.group(0)
-        return replace_virtual_path(full_path, thread_data)
+        result = skills_pattern.sub(replace_skills_match, result)
 
-    return pattern.sub(replace_match, command)
+    # Replace user-data paths
+    if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
+        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+
+        def replace_user_data_match(match: re.Match) -> str:
+            return replace_virtual_path(match.group(0), thread_data)
+
+        result = pattern.sub(replace_user_data_match, result)
+
+    return result
 
 
 def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
@@ -386,7 +567,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
     except PermissionError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error executing command: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
 @tool("ls", parse_docstring=True)
@@ -403,7 +584,11 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data, read_only=True)
+            if _is_skills_path(path):
+                path = _resolve_skills_path(path)
+            else:
+                path = _resolve_and_validate_user_data_path(path, thread_data)
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -415,7 +600,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error listing directory: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
 @tool("read_file", parse_docstring=True)
@@ -440,7 +625,11 @@ def read_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data, read_only=True)
+            if _is_skills_path(path):
+                path = _resolve_skills_path(path)
+            else:
+                path = _resolve_and_validate_user_data_path(path, thread_data)
         content = sandbox.read_file(path)
         if not content:
             return "(empty)"
@@ -456,7 +645,7 @@ def read_file_tool(
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error reading file: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
 @tool("write_file", parse_docstring=True)
@@ -480,7 +669,8 @@ def write_file_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data)
+            path = _resolve_and_validate_user_data_path(path, thread_data)
         sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
@@ -490,9 +680,9 @@ def write_file_tool(
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
     except OSError as e:
-        return f"Error: Failed to write file '{requested_path}': {e}"
+        return f"Error: Failed to write file '{requested_path}': {_sanitize_error(e, runtime)}"
     except Exception as e:
-        return f"Error: Unexpected error writing file: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error writing file: {_sanitize_error(e, runtime)}"
 
 
 @tool("str_replace", parse_docstring=True)
@@ -520,7 +710,8 @@ def str_replace_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
-            path = resolve_local_tool_path(path, thread_data)
+            validate_local_tool_path(path, thread_data)
+            path = _resolve_and_validate_user_data_path(path, thread_data)
         content = sandbox.read_file(path)
         if not content:
             return "OK"
@@ -539,4 +730,4 @@ def str_replace_tool(
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error replacing string: {type(e).__name__}: {e}"
+        return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
