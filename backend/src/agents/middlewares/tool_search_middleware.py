@@ -9,6 +9,7 @@ Uses the same patterns as:
 - ClarificationMiddleware: Command return from wrap_tool_call
 """
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import override
@@ -125,26 +126,31 @@ class ToolSearchMiddleware(AgentMiddleware[ToolSearchMiddlewareState]):
         max_results = min(args.get("max_results", 5), 10)
 
         if not query.strip():
-            return "Please provide a search query.", []
+            return json.dumps({"found": 0, "query": query, "tools": [], "message": "Please provide a search query."}), []
 
         results = self.catalog.search(query, mode=mode, max_results=max_results)
 
         if not results:
-            return "No matching tools found. Try a different query or broader search terms.", []
+            return json.dumps({"found": 0, "query": query, "tools": [], "message": "No matching tools found. Try a different query or broader search terms."}), []
 
         discovered_names: list[str] = []
-        lines = [f"Found {len(results)} tool(s):\n"]
+        tools = []
         for entry in results:
-            lines.append(f"- **{entry.name}**: {entry.description}")
-            if entry.parameter_names:
-                lines.append(f"  Parameters: {', '.join(entry.parameter_names)}")
-            if entry.server_name:
-                lines.append(f"  (from: {entry.server_name})")
+            tools.append({
+                "name": entry.name,
+                "description": entry.description,
+                "parameters": entry.parameter_names or [],
+                "server": entry.server_name,
+            })
             discovered_names.append(entry.name)
 
-        lines.append("\nThese tools are now activated and available for your next action.")
-
-        return "\n".join(lines), discovered_names
+        result = {
+            "found": len(results),
+            "query": query,
+            "tools": tools,
+            "message": "These tools are now activated and available for your next action.",
+        }
+        return json.dumps(result), discovered_names
 
     @override
     def wrap_model_call(
