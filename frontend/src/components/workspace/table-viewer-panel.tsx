@@ -275,14 +275,14 @@ export function TableViewerPanel({ className }: { className?: string }) {
       {/* Data Grid */}
       <div className={cn("min-h-0 grow", wrapText && "rdg-wrap")}>
         <DataGrid
-          className="rdg-light h-full"
+          className="h-full"
           columns={columns}
           rows={sortedRows}
           sortColumns={sortColumns}
           onSortColumnsChange={setSortColumns}
           defaultColumnOptions={{ resizable: true, sortable: true }}
-          rowHeight={32}
-          headerRowHeight={34}
+          rowHeight={35}
+          headerRowHeight={35}
           enableVirtualization={!wrapText}
         />
       </div>

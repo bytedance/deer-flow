@@ -585,29 +585,28 @@
   --container-width-lg: calc(var(--spacing) * 256);
 }
 
-/* react-data-grid theme overrides */
+/* react-data-grid theme — mirrors the official CommonFeatures demo */
 .table-viewer-panel .rdg {
-  --rdg-font-size: 13px;
-  --rdg-border-color: var(--border);
-  --rdg-background-color: var(--background);
-  --rdg-header-background-color: var(--muted);
-  --rdg-row-hover-background-color: var(--accent);
-  --rdg-row-selected-background-color: var(--accent);
-  --rdg-row-selected-hover-background-color: var(--accent);
-  --rdg-color: var(--foreground);
-  --rdg-selection-color: var(--ring);
+  --rdg-font-size: 14px;
   block-size: 100%;
   border: none;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.table-viewer-panel .rdg-header-row .rdg-cell {
+  font-weight: 700;
 }
 
 .table-viewer-panel .rdg-row-num,
 .table-viewer-panel .rdg-row-num-header {
   text-align: center;
-  color: var(--muted-foreground);
-  font-size: 11px;
+  color: light-dark(#999, #888);
+  font-size: 12px;
+  font-weight: 400 !important;
   user-select: none;
 }
 
+/* Text-wrap mode */
 .table-viewer-panel .rdg-wrap .rdg {
   grid-template-rows: none !important;
   grid-auto-rows: min-content !important;

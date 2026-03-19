@@ -39,6 +39,20 @@ export interface McpToolMeta {
   error?: string;
 }
 
+export interface ToolSearchEntry {
+  name: string;
+  description: string;
+  parameters: string[];
+  server?: string | null;
+}
+
+export interface ToolSearchResult {
+  found: number;
+  query?: string;
+  tools: ToolSearchEntry[];
+  message?: string;
+}
+
 // ─── Result Detection ────────────────────────────────────────
 
 /**
@@ -50,6 +64,67 @@ export function isMcpDataResult(
   if (!result || typeof result === "string") return false;
   if (Array.isArray(result.data)) return true;
   return false;
+}
+
+/**
+ * Shape-based detection for tool_search results.
+ * Returns an intersection so the predicate satisfies TypeScript's assignability
+ * requirement while still exposing all ToolSearchResult fields.
+ */
+export function isToolSearchResult(
+  result: string | Record<string, unknown> | undefined,
+): result is ToolSearchResult & Record<string, unknown> {
+  if (!result || typeof result === "string") return false;
+  return typeof result.found === "number" && Array.isArray(result.tools);
+}
+
+// ─── Result Normalization (non-standard → {data: [...]}) ─────
+//
+// Some MCP servers return `{ studies: [...] }` or `{ records: [...] }` instead
+// of the standard `{ data: [...] }` shape. `normalizeMcpResult` maps each
+// known tool's native data field to `data` so `McpDataToolCall` can render
+// it without modification.
+
+type DataExtractor =
+  | string
+  | ((r: Record<string, unknown>) => unknown[] | undefined);
+
+const DATA_EXTRACTORS: Record<string, DataExtractor> = {
+  // ClinicalTrials.gov
+  clinicaltrials_search_studies: "studies",
+  // NCBI E-utilities
+  ncbi_summary: "records",
+  ncbi_link: "linksets",
+  ncbi_global_search: "results",
+  ncbi_citmatch: "matches",
+  ncbi_search: (r) =>
+    Array.isArray(r.ids)
+      ? (r.ids as string[]).map((id) => ({ id }))
+      : undefined,
+  ncbi_info: (r) => {
+    if (Array.isArray(r.databases)) return r.databases as unknown[];
+    if (Array.isArray(r.fields)) return r.fields as unknown[];
+    return undefined;
+  },
+};
+
+/**
+ * Normalizes a tool result to the `{ data: [...] }` shape expected by
+ * `McpDataToolCall`. Tools already in standard form are returned unchanged.
+ */
+export function normalizeMcpResult(
+  toolName: string,
+  result: Record<string, unknown>,
+): Record<string, unknown> {
+  if (Array.isArray(result.data)) return result;
+  const extractor = DATA_EXTRACTORS[toolName];
+  if (!extractor) return result;
+  const data =
+    typeof extractor === "string"
+      ? (result[extractor] as unknown[] | undefined)
+      : extractor(result);
+  if (!Array.isArray(data)) return result;
+  return { ...result, data };
 }
 
 // ─── Meta Shape Extractors (keyed by server prefix) ──────────
@@ -95,8 +170,32 @@ function extractWorldbankMeta(result: Record<string, unknown>): McpToolMeta {
   };
 }
 
+function extractClinicalTrialsMeta(result: Record<string, unknown>): McpToolMeta {
+  const data = result.data as unknown[];
+  return {
+    count: data.length,
+    total:
+      typeof result.totalCount === "number" ? result.totalCount : undefined,
+    warning: typeof result.warning === "string" ? result.warning : undefined,
+    error: typeof result.error === "string" ? result.error : undefined,
+  };
+}
+
+function extractNcbiMeta(result: Record<string, unknown>): McpToolMeta {
+  const data = result.data as unknown[];
+  return {
+    count: data.length,
+    // ncbi_search exposes `count` as the total across all pages
+    total: typeof result.count === "number" ? result.count : undefined,
+    warning: typeof result.warning === "string" ? result.warning : undefined,
+    error: typeof result.error === "string" ? result.error : undefined,
+  };
+}
+
 const META_EXTRACTORS: Record<string, MetaExtractor> = {
+  clinicaltrials_: extractClinicalTrialsMeta,
   fiscaldata_: extractFiscalMeta,
+  ncbi_: extractNcbiMeta,
   worldbank_: extractWorldbankMeta,
 };
 
@@ -197,6 +296,35 @@ const TOOL_DESCRIPTORS: Record<string, ToolDescriptor> = {
     withArgs("Mapping site URLs", a, ["url"]),
   firecrawl_extract: () => "Extracting structured data",
   firecrawl_agent: () => "Running web research agent",
+
+  // ── ClinicalTrials MCP ─────────────────────────────────────
+  clinicaltrials_search_studies: (a) =>
+    withArgs("Searching ClinicalTrials.gov", a, ["query", "condition", "intervention"]),
+  clinicaltrials_get_study: (a) =>
+    withArgs("Getting study details", a, ["nct_id"]),
+  clinicaltrials_get_stats: () => "Getting clinical trial statistics",
+
+  // ── NCBI MCP ───────────────────────────────────────────────
+  ncbi_search: (a) =>
+    withArgs("Searching NCBI", a, ["term", "db"]),
+  ncbi_summary: (a) =>
+    withArgs("Getting NCBI summaries", a, ["db"]),
+  ncbi_fetch: (a) =>
+    withArgs("Fetching NCBI records", a, ["db"]),
+  ncbi_link: (a) =>
+    withArgs("Finding linked records", a, ["dbfrom"]),
+  ncbi_info: (a) =>
+    withArgs("Getting NCBI database info", a, ["db"]),
+  ncbi_global_search: (a) =>
+    withArgs("Global NCBI search", a, ["term"]),
+  ncbi_spell: (a) =>
+    withArgs("Checking spelling", a, ["term"]),
+  ncbi_citmatch: (a) =>
+    withArgs("Matching citation", a, ["title"]),
+
+  // ── Built-in: Tool Search ───────────────────────────────────
+  tool_search: (a) =>
+    withArgs("Searching for tools", a, ["query"]),
 };
 
 // ─── Server Prefix Labels (Tier 2 fallback) ──────────────────
@@ -207,8 +335,10 @@ const TOOL_DESCRIPTORS: Record<string, ToolDescriptor> = {
  * remaining name is humanized.
  */
 const SERVER_PREFIXES: string[] = [
+  "clinicaltrials_",
   "firecrawl_",
   "fiscaldata_",
+  "ncbi_",
   "worldbank_",
 ];
 
@@ -268,6 +398,15 @@ export function getToolIconHint(name: string): ToolIconHint {
   // Financial data tools
   if (name === "TOOL_LIST" || name === "TOOL_GET" || name === "TOOL_CALL") {
     return "chart";
+  }
+  // Structured data tools (MCP servers returning {data: [...]})
+  if (
+    name.startsWith("worldbank_") ||
+    name.startsWith("fiscaldata_") ||
+    name.startsWith("clinicaltrials_") ||
+    name.startsWith("ncbi_")
+  ) {
+    return "database";
   }
   return "default";
 }

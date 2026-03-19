@@ -2,7 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { UseStream } from "@langchain/langgraph-sdk/react";
 
 import { authFetch } from "@/core/auth/fetch";
-import { type McpToolMeta, extractMcpMeta } from "@/core/mcp/tools";
+import { type McpToolMeta, extractMcpMeta, normalizeMcpResult } from "@/core/mcp/tools";
 import { findToolCallResult } from "@/core/messages/utils";
 
 import type { AgentThreadState } from "../threads";
@@ -79,11 +79,12 @@ export function loadMcpDataFromToolCall({
     return undefined;
   }
 
-  if (!Array.isArray(parsed.data)) return undefined;
-
   const toolName = decodeURIComponent(url.pathname);
-  const data = parsed.data as Record<string, unknown>[];
-  const meta = extractMcpMeta(toolName, parsed);
+  const normalized = normalizeMcpResult(toolName, parsed);
+  if (!Array.isArray(normalized.data)) return undefined;
+
+  const data = normalized.data as Record<string, unknown>[];
+  const meta = extractMcpMeta(toolName, normalized);
 
   return { toolName, data, meta };
 }

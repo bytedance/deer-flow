@@ -45,6 +45,9 @@ import {
   getToolDisplayCategory,
   getToolIconHint,
   isMcpDataResult,
+  isToolSearchResult,
+  normalizeMcpResult,
+  type ToolSearchResult,
 } from "@/core/mcp/tools";
 import {
   extractReasoningContentFromMessage,
@@ -380,6 +383,15 @@ export const ToolCall = memo(function ToolCall({
     useArtifacts();
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const displayCategory = getToolDisplayCategory(name);
+  // Normalize non-standard MCP shapes (e.g. {studies:[]} or {records:[]})
+  // to the {data:[]} convention so McpDataToolCall can render them uniformly.
+  const normalizedResult = useMemo(
+    () =>
+      result && typeof result === "object"
+        ? normalizeMcpResult(name, result)
+        : result,
+    [name, result],
+  );
 
   if (displayCategory === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -700,14 +712,23 @@ export const ToolCall = memo(function ToolCall({
         icon={ImageIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (isMcpDataResult(result)) {
+  } else if (name === "tool_search" && isToolSearchResult(result)) {
+    return (
+      <ToolSearchToolCall
+        id={id}
+        args={args}
+        result={result}
+        hideContent={hideContent}
+      />
+    );
+  } else if (isMcpDataResult(normalizedResult)) {
     return (
       <McpDataToolCall
         id={id}
         messageId={messageId}
         name={name}
         args={args}
-        result={result}
+        result={normalizedResult}
         hideContent={hideContent}
       />
     );
@@ -738,6 +759,58 @@ export const ToolCall = memo(function ToolCall({
     && prev.isLoading === next.isLoading
     && prev.hideContent === next.hideContent
     && (prev.result == null) === (next.result == null);
+});
+
+export const ToolSearchToolCall = memo(function ToolSearchToolCall({
+  id,
+  args,
+  result,
+  hideContent = false,
+}: {
+  id?: string;
+  args: Record<string, unknown>;
+  result: ToolSearchResult;
+  hideContent?: boolean;
+}) {
+  const { t } = useI18n();
+  const label = typeof args.query === "string"
+    ? t.toolCalls.toolSearchFor(args.query)
+    : describeMcpTool("tool_search", args, t.toolCalls.useTool("tool_search"));
+
+  return (
+    <ChainOfThoughtStep key={id} label={label} icon={WrenchIcon}>
+      {!hideContent && result.tools.length > 0 && (
+        <div className="bg-background/80 mt-2 overflow-hidden rounded-lg border">
+          <ul className="divide-y divide-border/70">
+            {result.tools.map((tool) => (
+              <li key={tool.name} className="px-3 py-2.5">
+                <div className="flex items-baseline justify-between gap-2 mb-1">
+                  <span className="text-primary font-mono text-xs font-medium truncate min-w-0">
+                    {tool.name}
+                  </span>
+                  {tool.server && (
+                    <span className="font-mono text-[10px] text-muted-foreground bg-muted border border-border/50 rounded px-1.5 py-0.5 shrink-0 whitespace-nowrap">
+                      {tool.server}
+                    </span>
+                  )}
+                </div>
+                {tool.description && (
+                  <p className="text-xs text-muted-foreground leading-snug">
+                    {tool.description}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </ChainOfThoughtStep>
+  );
+}, (prev, next) => {
+  // Tool search results are immutable once received.
+  return prev.id === next.id
+    && prev.hideContent === next.hideContent
+    && prev.result === next.result;
 });
 
 const MAX_PREVIEW_COLUMNS = 6;
