@@ -466,7 +466,23 @@ class FeishuChannel(Channel):
 
             # Parse message content
             content = json.loads(message.content)
-            text = content.get("text", "").strip()
+            
+            if "text" in content:
+                # Handle plain text messages
+                text = content["text"]
+            elif "content" in content and isinstance(content["content"], list):
+                # Handle topic group messages
+                text_parts = []
+                for paragraph in content["content"]:
+                    if isinstance(paragraph, list):
+                        for element in paragraph:
+                            if isinstance(element, dict) and element.get("tag") == "text":
+                                text_parts.append(element.get("text", ""))
+                text = "".join(text_parts)
+            else:
+                text = ""
+            text = text.strip()
+            
             logger.info(
                 "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
                 chat_id,
