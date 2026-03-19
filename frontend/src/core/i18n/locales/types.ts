@@ -166,6 +166,7 @@ export interface Translations {
     searchFor: (query: string) => string;
     searchForRelatedImagesFor: (query: string) => string;
     searchOnWebFor: (query: string) => string;
+    toolSearchFor: (query: string) => string;
     viewWebPage: string;
     listFolder: string;
     readFile: string;

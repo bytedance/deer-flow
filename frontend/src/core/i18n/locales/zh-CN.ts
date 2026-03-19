@@ -215,6 +215,7 @@ export const zhCN: Translations = {
     searchForRelatedImages: "搜索相关图片",
     searchForRelatedImagesFor: (query: string) => `搜索相关图片 “${query}”`,
     searchOnWebFor: (query: string) => `在网络上搜索 “${query}”`,
+    toolSearchFor: (query: string) => `搜索工具：”${query}”`,
     viewWebPage: "查看网页",
     listFolder: "列出文件夹",
     readFile: "读取文件",

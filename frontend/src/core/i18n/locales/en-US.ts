@@ -221,6 +221,7 @@ export const enUS: Translations = {
     searchForRelatedImagesFor: (query: string) =>
       `Search for related images for "${query}"`,
     searchOnWebFor: (query: string) => `Search on the web for "${query}"`,
+    toolSearchFor: (query: string) => `Search for tools: "${query}"`,
     viewWebPage: "View web page",
     listFolder: "List folder",
     readFile: "Read file",
