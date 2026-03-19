@@ -536,12 +536,12 @@ For multi-tenant SaaS with thousands of concurrent sandboxes:
 │          Firecracker VMM             │
 │                                      │
 │  ┌────────────────────────────────┐  │
-│  │ microVM (~5 MiB memory)       │  │
-│  │ ┌──────────────────────────┐  │  │
-│  │ │ Minimal Linux kernel     │  │  │
-│  │ │ Python 3 + dependencies  │  │  │
-│  │ │ /mnt/user-data (virtio)  │  │  │
-│  │ └──────────────────────────┘  │  │
+│  │ microVM (~5 MiB memory)        │  │
+│  │ ┌──────────────────────────┐   │  │
+│  │ │ Minimal Linux kernel     │   │  │
+│  │ │ Python 3 + dependencies  │   │  │
+│  │ │ /mnt/user-data (virtio)  │   │  │
+│  │ └──────────────────────────┘   │  │
 │  └────────────────────────────────┘  │
 │                                      │
 │  Snapshot → restore in 4-25ms        │
