@@ -86,7 +86,8 @@ class TestTitleMiddlewareCoreLogic:
                 AIMessage(content="好的，先确认需求"),
             ]
         }
-        title = asyncio.run(middleware._generate_title(state))
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        title = result["title"]
 
         assert '"' not in title
         assert "'" not in title
@@ -111,7 +112,8 @@ class TestTitleMiddlewareCoreLogic:
             ]
         }
 
-        title = asyncio.run(middleware._generate_title(state))
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        title = result["title"]
 
         prompt = fake_model.ainvoke.await_args.args[0]
         assert "请帮我总结这段代码" in prompt
@@ -135,20 +137,64 @@ class TestTitleMiddlewareCoreLogic:
                 AIMessage(content="收到"),
             ]
         }
-        title = asyncio.run(middleware._generate_title(state))
+        result = asyncio.run(middleware._agenerate_title_result(state))
+        title = result["title"]
 
         # Assert behavior (truncated fallback + ellipsis) without overfitting exact text.
         assert title.endswith("...")
         assert title.startswith("这是一个非常长的问题描述")
 
-    def test_after_agent_returns_title_only_when_needed(self, monkeypatch):
+    def test_aafter_model_delegates_to_async_helper(self, monkeypatch):
         middleware = TitleMiddleware()
-        monkeypatch.setattr(middleware, "_should_generate_title", lambda state: True)
-        monkeypatch.setattr(middleware, "_generate_title", AsyncMock(return_value="核心逻辑回归"))
 
+        monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value={"title": "异步标题"}))
         result = asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock()))
+        assert result == {"title": "异步标题"}
 
-        assert result == {"title": "核心逻辑回归"}
-
-        monkeypatch.setattr(middleware, "_should_generate_title", lambda state: False)
+        monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value=None))
         assert asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock())) is None
+
+    def test_after_model_sync_delegates_to_sync_helper(self, monkeypatch):
+        middleware = TitleMiddleware()
+
+        monkeypatch.setattr(middleware, "_generate_title_result", MagicMock(return_value={"title": "同步标题"}))
+        result = middleware.after_model({"messages": []}, runtime=MagicMock())
+        assert result == {"title": "同步标题"}
+
+        monkeypatch.setattr(middleware, "_generate_title_result", MagicMock(return_value=None))
+        assert middleware.after_model({"messages": []}, runtime=MagicMock()) is None
+
+    def test_sync_generate_title_with_model(self, monkeypatch):
+        """Sync path calls model.invoke and produces a title."""
+        _set_test_title_config(max_chars=20)
+        middleware = TitleMiddleware()
+        fake_model = MagicMock()
+        fake_model.invoke = MagicMock(return_value=MagicMock(content='"同步生成的标题"'))
+        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我写测试"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = middleware._generate_title_result(state)
+        assert result == {"title": "同步生成的标题"}
+        fake_model.invoke.assert_called_once()
+
+    def test_empty_title_falls_back(self, monkeypatch):
+        """Empty model response triggers fallback title."""
+        _set_test_title_config(max_chars=50)
+        middleware = TitleMiddleware()
+        fake_model = MagicMock()
+        fake_model.invoke = MagicMock(return_value=MagicMock(content="   "))
+        monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: fake_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="空标题测试"),
+                AIMessage(content="回复"),
+            ]
+        }
+        result = middleware._generate_title_result(state)
+        assert result["title"] == "空标题测试"
