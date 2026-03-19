@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -170,7 +171,9 @@ class TestSearchExecution:
         result_text, discovered = middleware._execute_search({"query": "ncbi biomedical"})
         assert len(discovered) > 0
         assert "ncbi_search" in discovered
-        assert "ncbi_search" in result_text
+        data = json.loads(result_text)
+        assert data["found"] > 0
+        assert any(t["name"] == "ncbi_search" for t in data["tools"])
 
     def test_search_empty_query(self):
         tools = [_make_tool("bash", "Execute commands")]
@@ -178,7 +181,9 @@ class TestSearchExecution:
 
         result_text, discovered = middleware._execute_search({"query": ""})
         assert discovered == []
-        assert "provide a search query" in result_text.lower()
+        data = json.loads(result_text)
+        assert data["found"] == 0
+        assert "provide a search query" in data["message"].lower()
 
     def test_search_no_match(self):
         tools = [_make_tool("bash", "Execute commands")]
@@ -186,7 +191,9 @@ class TestSearchExecution:
 
         result_text, discovered = middleware._execute_search({"query": "quantum cryptography"})
         assert discovered == []
-        assert "no matching" in result_text.lower()
+        data = json.loads(result_text)
+        assert data["found"] == 0
+        assert "no matching" in data["message"].lower()
 
     def test_search_respects_max_results(self):
         tools = [_make_tool(f"search_tool_{i}", f"Search tool {i}") for i in range(10)]
@@ -317,7 +324,9 @@ class TestWrapToolCall:
         handler.assert_not_called()
         # No results → ToolMessage (not Command)
         assert not isinstance(result, Command)
-        assert "no matching" in result.content.lower()
+        data = json.loads(result.content)
+        assert data["found"] == 0
+        assert "no matching" in data["message"].lower()
 
     def test_search_empty_query_returns_tool_message(self):
         tools = [_make_tool("bash", "Execute commands")]
