@@ -1,4 +1,4 @@
-"""Tests for channel file attachment support (ResolvedAttachment, resolution, send_file)."""
+"""Tests for channel 文件 attachment support (ResolvedAttachment, resolution, send_file)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from app.channels.message_bus import MessageBus, OutboundMessage, ResolvedAttach
 
 
 def _run(coro):
-    """Run an async coroutine synchronously."""
+    """Run an 异步 coroutine synchronously."""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(coro)
@@ -19,9 +19,15 @@ def _run(coro):
         loop.close()
 
 
-# ---------------------------------------------------------------------------
-# ResolvedAttachment tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    ResolvedAttachment tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestResolvedAttachment:
@@ -56,9 +62,15 @@ class TestResolvedAttachment:
         assert att.is_image is True
 
 
-# ---------------------------------------------------------------------------
-# OutboundMessage.attachments field tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    OutboundMessage.attachments field tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestOutboundMessageAttachments:
@@ -94,17 +106,25 @@ class TestOutboundMessageAttachments:
         assert msg.attachments[0].filename == "file.txt"
 
 
-# ---------------------------------------------------------------------------
-# _resolve_attachments tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _resolve_attachments tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestResolveAttachments:
     def test_resolves_existing_file(self, tmp_path):
-        """Successfully resolves a virtual path to an existing file."""
+        """Successfully resolves a virtual 路径 to an existing 文件."""
         from app.channels.manager import _resolve_attachments
 
-        # Create the directory structure: threads/{thread_id}/user-data/outputs/
+        #    Create the 目录 structure: threads/{thread_id}/用户-数据/outputs/
+
+
         thread_id = "test-thread-123"
         outputs_dir = tmp_path / "threads" / thread_id / "user-data" / "outputs"
         outputs_dir.mkdir(parents=True)
@@ -125,7 +145,7 @@ class TestResolveAttachments:
         assert result[0].size == len(b"%PDF-1.4 fake content")
 
     def test_resolves_image_file(self, tmp_path):
-        """Images are detected by MIME type."""
+        """Images are detected by MIME 类型."""
         from app.channels.manager import _resolve_attachments
 
         thread_id = "test-thread"
@@ -146,7 +166,7 @@ class TestResolveAttachments:
         assert result[0].mime_type == "image/png"
 
     def test_skips_missing_file(self, tmp_path):
-        """Missing files are skipped with a warning."""
+        """Missing files are skipped with a 警告."""
         from app.channels.manager import _resolve_attachments
 
         outputs_dir = tmp_path / "outputs"
@@ -174,7 +194,7 @@ class TestResolveAttachments:
         assert result == []
 
     def test_rejects_uploads_path(self):
-        """Paths under /mnt/user-data/uploads/ are rejected (security)."""
+        """Paths under /mnt/用户-数据/uploads/ are rejected (安全)."""
         from app.channels.manager import _resolve_attachments
 
         mock_paths = MagicMock()
@@ -186,7 +206,7 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.assert_not_called()
 
     def test_rejects_workspace_path(self):
-        """Paths under /mnt/user-data/workspace/ are rejected (security)."""
+        """Paths under /mnt/用户-数据/工作区/ are rejected (安全)."""
         from app.channels.manager import _resolve_attachments
 
         mock_paths = MagicMock()
@@ -198,13 +218,15 @@ class TestResolveAttachments:
         mock_paths.resolve_virtual_path.assert_not_called()
 
     def test_rejects_path_traversal_escape(self, tmp_path):
-        """Paths that escape the outputs directory after resolution are rejected."""
+        """Paths that escape the outputs 目录 after resolution are rejected."""
         from app.channels.manager import _resolve_attachments
 
         thread_id = "t1"
         outputs_dir = tmp_path / "threads" / thread_id / "user-data" / "outputs"
         outputs_dir.mkdir(parents=True)
-        # Simulate a resolved path that escapes outside the outputs directory
+        #    Simulate a resolved 路径 that escapes outside the outputs 目录
+
+
         escaped_file = tmp_path / "threads" / thread_id / "user-data" / "uploads" / "stolen.txt"
         escaped_file.parent.mkdir(parents=True, exist_ok=True)
         escaped_file.write_text("sensitive")
@@ -219,7 +241,7 @@ class TestResolveAttachments:
         assert result == []
 
     def test_multiple_artifacts_partial_resolution(self, tmp_path):
-        """Mixed valid/invalid artifacts: only valid ones are returned."""
+        """Mixed 有效/无效 artifacts: only 有效 ones are returned."""
         from app.channels.manager import _resolve_attachments
 
         thread_id = "t1"
@@ -248,13 +270,19 @@ class TestResolveAttachments:
         assert result[0].filename == "data.csv"
 
 
-# ---------------------------------------------------------------------------
-# Channel base class _on_outbound with attachments
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Channel base 类 _on_outbound with attachments
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class _DummyChannel(Channel):
-    """Concrete channel for testing the base class behavior."""
+    """Concrete channel for testing the base 类 behavior."""
 
     def __init__(self, bus):
         super().__init__(name="dummy", bus=bus, config={})
@@ -277,7 +305,7 @@ class _DummyChannel(Channel):
 
 class TestBaseChannelOnOutbound:
     def test_send_file_called_for_each_attachment(self, tmp_path):
-        """_on_outbound sends text first, then uploads each attachment."""
+        """_on_outbound sends text 第一, then uploads each attachment."""
         bus = MessageBus()
         ch = _DummyChannel(bus)
 
@@ -326,7 +354,9 @@ class TestBaseChannelOnOutbound:
         bus = MessageBus()
         ch = _DummyChannel(bus)
 
-        # Override send_file to fail on first call, succeed on second
+        #    Override send_file to fail on 第一 call, succeed on second
+
+
         call_count = 0
         original_send_file = ch.send_file
 
@@ -337,7 +367,9 @@ class TestBaseChannelOnOutbound:
                 raise RuntimeError("upload failed")
             return await original_send_file(msg, att)
 
-        ch.send_file = flaky_send_file  # type: ignore
+        ch.send_file = flaky_send_file  #    类型: ignore
+
+
 
         f1 = tmp_path / "fail.txt"
         f1.write_text("x")
@@ -357,19 +389,23 @@ class TestBaseChannelOnOutbound:
 
         _run(ch._on_outbound(msg))
 
-        # First upload failed, second succeeded
+        #    First upload failed, second succeeded
+
+
         assert len(ch.sent_files) == 1
         assert ch.sent_files[0][1].filename == "ok.txt"
 
     def test_send_raises_skips_file_uploads(self, tmp_path):
-        """When send() raises, file uploads are skipped entirely."""
+        """When send() raises, 文件 uploads are skipped entirely."""
         bus = MessageBus()
         ch = _DummyChannel(bus)
 
         async def failing_send(msg):
             raise RuntimeError("network error")
 
-        ch.send = failing_send  # type: ignore
+        ch.send = failing_send  #    类型: ignore
+
+
 
         f = tmp_path / "a.pdf"
         f.write_bytes(b"%PDF")
@@ -384,11 +420,13 @@ class TestBaseChannelOnOutbound:
 
         _run(ch._on_outbound(msg))
 
-        # send() raised, so send_file should never be called
+        #    send() raised, so send_file should never be called
+
+
         assert len(ch.sent_files) == 0
 
     def test_default_send_file_returns_false(self):
-        """The base Channel.send_file returns False by default."""
+        """The base Channel.send_file returns False by 默认."""
 
         class MinimalChannel(Channel):
             async def start(self):
@@ -409,24 +447,32 @@ class TestBaseChannelOnOutbound:
         assert result is False
 
 
-# ---------------------------------------------------------------------------
-# ChannelManager artifact resolution integration
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    ChannelManager artifact resolution integration
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestManagerArtifactResolution:
     def test_handle_chat_populates_attachments(self):
-        """Verify _resolve_attachments is importable and works with the manager module."""
+        """Verify _resolve_attachments is importable and works with the manager 模块."""
         from app.channels.manager import _resolve_attachments
 
-        # Basic smoke test: empty artifacts returns empty list
+        #    Basic smoke 测试: empty artifacts returns empty 列表
+
+
         mock_paths = MagicMock()
         with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
             result = _resolve_attachments("t1", [])
         assert result == []
 
     def test_format_artifact_text_for_unresolved(self):
-        """_format_artifact_text produces expected output."""
+        """_format_artifact_text produces expected 输出."""
         from app.channels.manager import _format_artifact_text
 
         assert "report.pdf" in _format_artifact_text(["/mnt/user-data/outputs/report.pdf"])

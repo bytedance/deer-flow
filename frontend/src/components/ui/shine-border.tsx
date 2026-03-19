@@ -7,17 +7,17 @@ import { cn } from "@/lib/utils"
 interface ShineBorderProps extends React.HTMLAttributes<HTMLDivElement> {
   /**
    * Width of the border in pixels
-   * @default 1
+   * @默认 1
    */
   borderWidth?: number
   /**
    * Duration of the animation in seconds
-   * @default 14
+   * @默认 14
    */
   duration?: number
   /**
-   * Color of the border, can be a single color or an array of colors
-   * @default "#000000"
+   * Color of the border, can be a single color or an 数组 of colors
+   * @默认 "#000000"
    */
   shineColor?: string | string[]
 }
@@ -25,7 +25,7 @@ interface ShineBorderProps extends React.HTMLAttributes<HTMLDivElement> {
 /**
  * Shine Border
  *
- * An animated background border effect component with configurable properties.
+ * An animated background border effect 组件 with configurable properties.
  */
 export function ShineBorder({
   borderWidth = 1,

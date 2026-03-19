@@ -2,12 +2,16 @@ import fnmatch
 from pathlib import Path
 
 IGNORE_PATTERNS = [
-    # Version Control
+    #    Version Control
+
+
     ".git",
     ".svn",
     ".hg",
     ".bzr",
-    # Dependencies
+    #    Dependencies
+
+
     "node_modules",
     "__pycache__",
     ".venv",
@@ -19,7 +23,9 @@ IGNORE_PATTERNS = [
     ".eggs",
     "*.egg-info",
     "site-packages",
-    # Build outputs
+    #    Build outputs
+
+
     "dist",
     "build",
     ".next",
@@ -28,7 +34,9 @@ IGNORE_PATTERNS = [
     ".turbo",
     "target",
     "out",
-    # IDE & Editor
+    #    IDE & Editor
+
+
     ".idea",
     ".vscode",
     "*.swp",
@@ -37,12 +45,16 @@ IGNORE_PATTERNS = [
     ".project",
     ".classpath",
     ".settings",
-    # OS generated
+    #    OS generated
+
+
     ".DS_Store",
     "Thumbs.db",
     "desktop.ini",
     "*.lnk",
-    # Logs & temp files
+    #    Logs & temp files
+
+
     "*.log",
     "*.tmp",
     "*.temp",
@@ -50,7 +62,9 @@ IGNORE_PATTERNS = [
     "*.cache",
     ".cache",
     "logs",
-    # Coverage & test artifacts
+    #    Coverage & 测试 artifacts
+
+
     ".coverage",
     "coverage",
     ".nyc_output",
@@ -62,7 +76,7 @@ IGNORE_PATTERNS = [
 
 
 def _should_ignore(name: str) -> bool:
-    """Check if a file/directory name matches any ignore pattern."""
+    """Check if a 文件/目录 名称 matches any ignore pattern."""
     for pattern in IGNORE_PATTERNS:
         if fnmatch.fnmatch(name, pattern):
             return True
@@ -71,15 +85,15 @@ def _should_ignore(name: str) -> bool:
 
 def list_dir(path: str, max_depth: int = 2) -> list[str]:
     """
-    List files and directories up to max_depth levels deep.
+    List files and directories 上 to max_depth levels deep.
 
     Args:
-        path: The root directory path to list.
-        max_depth: Maximum depth to traverse (default: 2).
+        路径: The root 目录 路径 to 列表.
+        max_depth: Maximum depth to traverse (默认: 2).
                    1 = only direct children, 2 = children + grandchildren, etc.
 
     Returns:
-        A list of absolute paths for files and directories,
+        A 列表 of absolute paths for files and directories,
         excluding items matching IGNORE_PATTERNS.
     """
     result: list[str] = []
@@ -89,7 +103,7 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
         return result
 
     def _traverse(current_path: Path, current_depth: int) -> None:
-        """Recursively traverse directories up to max_depth."""
+        """Recursively traverse directories 上 to max_depth."""
         if current_depth > max_depth:
             return
 
@@ -101,7 +115,9 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
                 post_fix = "/" if item.is_dir() else ""
                 result.append(str(item.resolve()) + post_fix)
 
-                # Recurse into subdirectories if not at max depth
+                #    Recurse into subdirectories 如果 not at max depth
+
+
                 if item.is_dir() and current_depth < max_depth:
                     _traverse(item, current_depth + 1)
         except PermissionError:

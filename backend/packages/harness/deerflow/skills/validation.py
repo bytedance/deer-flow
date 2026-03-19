@@ -8,18 +8,20 @@ from pathlib import Path
 
 import yaml
 
-# Allowed properties in SKILL.md frontmatter
+#    Allowed properties in SKILL.md frontmatter
+
+
 ALLOWED_FRONTMATTER_PROPERTIES = {"name", "description", "license", "allowed-tools", "metadata", "compatibility", "version", "author"}
 
 
 def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
-    """Validate a skill directory's SKILL.md frontmatter.
+    """Validate a skill 目录's SKILL.md frontmatter.
 
     Args:
-        skill_dir: Path to the skill directory containing SKILL.md.
+        skill_dir: Path to the skill 目录 containing SKILL.md.
 
     Returns:
-        Tuple of (is_valid, message, skill_name).
+        Tuple of (is_valid, 消息, skill_name).
     """
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
@@ -29,14 +31,18 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     if not content.startswith("---"):
         return False, "No YAML frontmatter found", None
 
-    # Extract frontmatter
+    #    Extract frontmatter
+
+
     match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
     if not match:
         return False, "Invalid frontmatter format", None
 
     frontmatter_text = match.group(1)
 
-    # Parse YAML frontmatter
+    #    Parse YAML frontmatter
+
+
     try:
         frontmatter = yaml.safe_load(frontmatter_text)
         if not isinstance(frontmatter, dict):
@@ -44,18 +50,24 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}", None
 
-    # Check for unexpected properties
+    #    Check 对于 unexpected properties
+
+
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_PROPERTIES
     if unexpected_keys:
         return False, f"Unexpected key(s) in SKILL.md frontmatter: {', '.join(sorted(unexpected_keys))}", None
 
-    # Check required fields
+    #    Check required fields
+
+
     if "name" not in frontmatter:
         return False, "Missing 'name' in frontmatter", None
     if "description" not in frontmatter:
         return False, "Missing 'description' in frontmatter", None
 
-    # Validate name
+    #    Validate 名称
+
+
     name = frontmatter.get("name", "")
     if not isinstance(name, str):
         return False, f"Name must be a string, got {type(name).__name__}", None
@@ -63,7 +75,9 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     if not name:
         return False, "Name cannot be empty", None
 
-    # Check naming convention (hyphen-case: lowercase with hyphens)
+    #    Check naming convention (hyphen-case: lowercase with hyphens)
+
+
     if not re.match(r"^[a-z0-9-]+$", name):
         return False, f"Name '{name}' should be hyphen-case (lowercase letters, digits, and hyphens only)", None
     if name.startswith("-") or name.endswith("-") or "--" in name:
@@ -71,7 +85,9 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     if len(name) > 64:
         return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters.", None
 
-    # Validate description
+    #    Validate 描述
+
+
     description = frontmatter.get("description", "")
     if not isinstance(description, str):
         return False, f"Description must be a string, got {type(description).__name__}", None

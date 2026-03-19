@@ -1,4 +1,4 @@
-"""Sandbox-related exceptions with structured error information."""
+"""Sandbox-related exceptions with structured 错误 information."""
 
 
 class SandboxError(Exception):
@@ -17,7 +17,7 @@ class SandboxError(Exception):
 
 
 class SandboxNotFoundError(SandboxError):
-    """Raised when a sandbox cannot be found or is not available."""
+    """Raised when a sandbox cannot be found or is not 可用的."""
 
     def __init__(self, message: str = "Sandbox not found", sandbox_id: str | None = None):
         details = {"sandbox_id": sandbox_id} if sandbox_id else None
@@ -26,7 +26,7 @@ class SandboxNotFoundError(SandboxError):
 
 
 class SandboxRuntimeError(SandboxError):
-    """Raised when sandbox runtime is not available or misconfigured."""
+    """Raised when sandbox runtime is not 可用的 or misconfigured."""
 
     pass
 
@@ -46,7 +46,7 @@ class SandboxCommandError(SandboxError):
 
 
 class SandboxFileError(SandboxError):
-    """Raised when a file operation fails in the sandbox."""
+    """Raised when a 文件 operation fails in the sandbox."""
 
     def __init__(self, message: str, path: str | None = None, operation: str | None = None):
         details = {}
@@ -60,12 +60,12 @@ class SandboxFileError(SandboxError):
 
 
 class SandboxPermissionError(SandboxFileError):
-    """Raised when a permission error occurs during file operations."""
+    """Raised when a 权限 错误 occurs during 文件 operations."""
 
     pass
 
 
 class SandboxFileNotFoundError(SandboxFileError):
-    """Raised when a file or directory is not found."""
+    """Raised when a 文件 or 目录 is not found."""
 
     pass

@@ -3,8 +3,8 @@ import { z } from "zod";
 
 export const env = createEnv({
   /**
-   * Specify your server-side environment variables schema here. This way you can ensure the app
-   * isn't built with invalid env vars.
+   * Specify your 服务器-side 环境 variables schema here. This way you can ensure the app
+   * isn't built with 无效 env vars.
    */
   server: {
     BETTER_AUTH_SECRET:
@@ -20,8 +20,8 @@ export const env = createEnv({
   },
 
   /**
-   * Specify your client-side environment variables schema here. This way you can ensure the app
-   * isn't built with invalid env vars. To expose them to the client, prefix them with
+   * Specify your 客户端-side 环境 variables schema here. This way you can ensure the app
+   * isn't built with 无效 env vars. To expose them to the 客户端, prefix them with
    * `NEXT_PUBLIC_`.
    */
   client: {
@@ -31,8 +31,8 @@ export const env = createEnv({
   },
 
   /**
-   * You can't destruct `process.env` as a regular object in the Next.js edge runtimes (e.g.
-   * middlewares) or client-side so we need to destruct manually.
+   * You can't destruct `处理.env` as a regular 对象 in the Next.js edge runtimes (e.g.
+   * middlewares) or 客户端-side so we need to destruct manually.
    */
   runtimeEnv: {
     BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
@@ -48,13 +48,13 @@ export const env = createEnv({
     GITHUB_OAUTH_TOKEN: process.env.GITHUB_OAUTH_TOKEN,
   },
   /**
-   * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
+   * Run `构建` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
    * useful for Docker builds.
    */
   skipValidation: !!process.env.SKIP_ENV_VALIDATION,
   /**
-   * Makes it so that empty strings are treated as undefined. `SOME_VAR: z.string()` and
-   * `SOME_VAR=''` will throw an error.
+   * Makes it so that empty strings are treated as undefined. `SOME_VAR: z.字符串()` and
+   * `SOME_VAR=''` will throw an 错误.
    */
   emptyStringAsUndefined: true,
 });

@@ -1,4 +1,4 @@
-"""Unit tests for checkpointer config and singleton factory."""
+"""Unit tests for checkpointer 配置 and singleton factory."""
 
 import sys
 from unittest.mock import MagicMock, patch
@@ -16,7 +16,7 @@ from deerflow.config.checkpointer_config import (
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Reset singleton state before each test."""
+    """Reset singleton 状态 before each 测试."""
     set_checkpointer_config(None)
     reset_checkpointer()
     yield
@@ -24,9 +24,15 @@ def reset_state():
     reset_checkpointer()
 
 
-# ---------------------------------------------------------------------------
-# Config tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    配置 tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestCheckpointerConfig:
@@ -65,14 +71,20 @@ class TestCheckpointerConfig:
             load_checkpointer_config_from_dict({"type": "unknown"})
 
 
-# ---------------------------------------------------------------------------
-# Factory tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Factory tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestGetCheckpointer:
     def test_returns_in_memory_saver_when_not_configured(self):
-        """get_checkpointer should return InMemorySaver when not configured."""
+        """get_checkpointer should 返回 InMemorySaver when not configured."""
         from langgraph.checkpoint.memory import InMemorySaver
 
         cp = get_checkpointer()
@@ -124,7 +136,7 @@ class TestGetCheckpointer:
                 get_checkpointer()
 
     def test_sqlite_creates_saver(self):
-        """SQLite checkpointer is created when package is available."""
+        """SQLite checkpointer is created when 包 is 可用的."""
         load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": "/tmp/test.db"})
 
         mock_saver_instance = MagicMock()
@@ -147,7 +159,7 @@ class TestGetCheckpointer:
         mock_saver_instance.setup.assert_called_once()
 
     def test_postgres_creates_saver(self):
-        """Postgres checkpointer is created when packages are available."""
+        """Postgres checkpointer is created when packages are 可用的."""
         load_checkpointer_config_from_dict({"type": "postgres", "connection_string": "postgresql://localhost/db"})
 
         mock_saver_instance = MagicMock()
@@ -170,14 +182,20 @@ class TestGetCheckpointer:
         mock_saver_instance.setup.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# app_config.py integration
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    app_config.py integration
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestAppConfigLoadsCheckpointer:
     def test_load_checkpointer_section(self):
-        """load_checkpointer_config_from_dict populates the global config."""
+        """load_checkpointer_config_from_dict populates the global 配置."""
         set_checkpointer_config(None)
         load_checkpointer_config_from_dict({"type": "memory"})
         cfg = get_checkpointer_config()
@@ -185,9 +203,15 @@ class TestAppConfigLoadsCheckpointer:
         assert cfg.type == "memory"
 
 
-# ---------------------------------------------------------------------------
-# DeerFlowClient falls back to config checkpointer
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    DeerFlowClient falls back to 配置 checkpointer
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestClientCheckpointerFallback:
@@ -227,7 +251,7 @@ class TestClientCheckpointerFallback:
         assert isinstance(captured_kwargs["checkpointer"], InMemorySaver)
 
     def test_client_explicit_checkpointer_takes_precedence(self):
-        """An explicitly provided checkpointer is used even when config checkpointer is set."""
+        """An explicitly provided checkpointer is used even when 配置 checkpointer is 集合."""
         from deerflow.client import DeerFlowClient
 
         load_checkpointer_config_from_dict({"type": "memory"})

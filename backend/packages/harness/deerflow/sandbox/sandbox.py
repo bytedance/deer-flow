@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 
 class Sandbox(ABC):
-    """Abstract base class for sandbox environments"""
+    """Abstract base 类 for sandbox environments"""
 
     _id: str
 
@@ -18,55 +18,55 @@ class Sandbox(ABC):
         """Execute bash command in sandbox.
 
         Args:
-            command: The command to execute.
+            command: The command to 执行.
 
         Returns:
-            The standard or error output of the command.
+            The standard or 错误 输出 of the command.
         """
         pass
 
     @abstractmethod
     def read_file(self, path: str) -> str:
-        """Read the content of a file.
+        """Read the content of a 文件.
 
         Args:
-            path: The absolute path of the file to read.
+            路径: The absolute 路径 of the 文件 to read.
 
         Returns:
-            The content of the file.
+            The content of the 文件.
         """
         pass
 
     @abstractmethod
     def list_dir(self, path: str, max_depth=2) -> list[str]:
-        """List the contents of a directory.
+        """List the contents of a 目录.
 
         Args:
-            path: The absolute path of the directory to list.
+            路径: The absolute 路径 of the 目录 to 列表.
             max_depth: The maximum depth to traverse. Default is 2.
 
         Returns:
-            The contents of the directory.
+            The contents of the 目录.
         """
         pass
 
     @abstractmethod
     def write_file(self, path: str, content: str, append: bool = False) -> None:
-        """Write content to a file.
+        """Write content to a 文件.
 
         Args:
-            path: The absolute path of the file to write to.
-            content: The text content to write to the file.
-            append: Whether to append the content to the file. If False, the file will be created or overwritten.
+            路径: The absolute 路径 of the 文件 to write to.
+            content: The text content to write to the 文件.
+            append: Whether to append the content to the 文件. If False, the 文件 will be created or overwritten.
         """
         pass
 
     @abstractmethod
     def update_file(self, path: str, content: bytes) -> None:
-        """Update a file with binary content.
+        """Update a 文件 with binary content.
 
         Args:
-            path: The absolute path of the file to update.
-            content: The binary content to write to the file.
+            路径: The absolute 路径 of the 文件 to 更新.
+            content: The binary content to write to the 文件.
         """
         pass

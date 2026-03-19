@@ -1,8 +1,10 @@
-#!/usr/bin/env python3
-"""Run trigger evaluation for a skill description.
+#   !/usr/bin/env python3
 
-Tests whether a skill's description causes Claude to trigger (read the skill)
-for a set of queries. Outputs results as JSON.
+
+"""Run trigger evaluation for a skill 描述.
+
+Tests whether a skill's 描述 causes Claude to trigger (read the skill)
+for a 集合 of queries. Outputs results as JSON.
 """
 
 import argparse
@@ -20,10 +22,10 @@ from scripts.utils import parse_skill_md
 
 
 def find_project_root() -> Path:
-    """Find the project root by walking up from cwd looking for .claude/.
+    """Find the 项目 root by walking 上 from cwd looking for .claude/.
 
-    Mimics how Claude Code discovers its project root, so the command file
-    we create ends up where claude -p will look for it.
+    Mimics how Claude Code discovers its 项目 root, so the command 文件
+    we 创建 ends 上 where claude -p will look for it.
     """
     current = Path.cwd()
     for parent in [current, *current.parents]:
@@ -40,13 +42,13 @@ def run_single_query(
     project_root: str,
     model: str | None = None,
 ) -> bool:
-    """Run a single query and return whether the skill was triggered.
+    """Run a single query and 返回 whether the skill was triggered.
 
-    Creates a command file in .claude/commands/ so it appears in Claude's
-    available_skills list, then runs `claude -p` with the raw query.
+    Creates a command 文件 in .claude/commands/ so it appears in Claude's
+    available_skills 列表, then runs `claude -p` with the raw query.
     Uses --include-partial-messages to detect triggering early from
     stream events (content_block_start) rather than waiting for the
-    full assistant message, which only arrives after tool execution.
+    full assistant 消息, which only arrives after 工具 execution.
     """
     unique_id = uuid.uuid4().hex[:8]
     clean_name = f"{skill_name}-skill-{unique_id}"
@@ -55,14 +57,18 @@ def run_single_query(
 
     try:
         project_commands_dir.mkdir(parents=True, exist_ok=True)
-        # Use YAML block scalar to avoid breaking on quotes in description
+        #    Use YAML block scalar to avoid breaking on quotes in 描述
+
+
         indented_desc = "\n  ".join(skill_description.split("\n"))
         command_content = (
             f"---\n"
             f"description: |\n"
             f"  {indented_desc}\n"
             f"---\n\n"
-            f"# {skill_name}\n\n"
+            f"#   {skill_name}\n\n"
+
+
             f"This skill handles: {skill_description}\n"
         )
         command_file.write_text(command_content)
@@ -77,9 +83,15 @@ def run_single_query(
         if model:
             cmd.extend(["--model", model])
 
-        # Remove CLAUDECODE env var to allow nesting claude -p inside a
-        # Claude Code session. The guard is for interactive terminal conflicts;
-        # programmatic subprocess usage is safe.
+        #    Remove CLAUDECODE env var to allow nesting claude -p inside a
+
+
+        #    Claude Code 会话. The guard is 对于 interactive terminal conflicts;
+
+
+        #    programmatic subprocess usage is safe.
+
+
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
         process = subprocess.Popen(
@@ -93,7 +105,9 @@ def run_single_query(
         triggered = False
         start_time = time.time()
         buffer = ""
-        # Track state for stream event detection
+        #    Track 状态 对于 stream event detection
+
+
         pending_tool_name = None
         accumulated_json = ""
 
@@ -125,7 +139,9 @@ def run_single_query(
                     except json.JSONDecodeError:
                         continue
 
-                    # Early detection via stream events
+                    #    Early detection via stream events
+
+
                     if event.get("type") == "stream_event":
                         se = event.get("event", {})
                         se_type = se.get("type", "")
@@ -153,7 +169,9 @@ def run_single_query(
                             if se_type == "message_stop":
                                 return False
 
-                    # Fallback: full assistant message
+                    #    Fallback: full assistant 消息
+
+
                     elif event.get("type") == "assistant":
                         message = event.get("message", {})
                         for content_item in message.get("content", []):
@@ -170,7 +188,9 @@ def run_single_query(
                     elif event.get("type") == "result":
                         return triggered
         finally:
-            # Clean up process on any exit path (return, exception, timeout)
+            #    Clean 上 处理 on any exit 路径 (返回, exception, timeout)
+
+
             if process.poll() is None:
                 process.kill()
                 process.wait()
@@ -192,7 +212,7 @@ def run_eval(
     trigger_threshold: float = 0.5,
     model: str | None = None,
 ) -> dict:
-    """Run the full eval set and return results."""
+    """Run the full eval 集合 and 返回 results."""
     results = []
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:

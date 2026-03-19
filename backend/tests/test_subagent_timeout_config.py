@@ -1,12 +1,12 @@
 """Tests for subagent timeout configuration.
 
 Covers:
-- SubagentsAppConfig / SubagentOverrideConfig model validation and defaults
-- get_timeout_for() resolution logic (global vs per-agent)
+- SubagentsAppConfig / SubagentOverrideConfig 模型 validation and defaults
+- get_timeout_for() resolution logic (global vs per-代理)
 - load_subagents_config_from_dict() and get_subagents_app_config() singleton
-- registry.get_subagent_config() applies config overrides
+- registry.get_subagent_config() applies 配置 overrides
 - registry.list_subagents() applies overrides for all agents
-- Polling timeout calculation in task_tool is consistent with config
+- Polling timeout calculation in task_tool is consistent with 配置
 """
 
 import pytest
@@ -19,19 +19,31 @@ from deerflow.config.subagents_config import (
 )
 from deerflow.subagents.config import SubagentConfig
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Helpers
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _reset_subagents_config(timeout_seconds: int = 900, agents: dict | None = None) -> None:
-    """Reset global subagents config to a known state."""
+    """Reset global subagents 配置 to a known 状态."""
     load_subagents_config_from_dict({"timeout_seconds": timeout_seconds, "agents": agents or {}})
 
 
-# ---------------------------------------------------------------------------
-# SubagentOverrideConfig
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    SubagentOverrideConfig
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestSubagentOverrideConfig:
@@ -56,9 +68,15 @@ class TestSubagentOverrideConfig:
         assert override.timeout_seconds == 1
 
 
-# ---------------------------------------------------------------------------
-# SubagentsAppConfig – defaults and validation
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    SubagentsAppConfig – defaults and validation
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestSubagentsAppConfigDefaults:
@@ -83,9 +101,15 @@ class TestSubagentsAppConfigDefaults:
             SubagentsAppConfig(timeout_seconds=-60)
 
 
-# ---------------------------------------------------------------------------
-# SubagentsAppConfig.get_timeout_for()
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    SubagentsAppConfig.get_timeout_for()
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestGetTimeoutFor:
@@ -128,14 +152,20 @@ class TestGetTimeoutFor:
         assert config.get_timeout_for("bash") == 120
 
 
-# ---------------------------------------------------------------------------
-# load_subagents_config_from_dict / get_subagents_app_config singleton
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    load_subagents_config_from_dict / get_subagents_app_config singleton
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestLoadSubagentsConfig:
     def teardown_method(self):
-        """Restore defaults after each test."""
+        """Restore defaults after each 测试."""
         _reset_subagents_config()
 
     def test_load_global_timeout(self):
@@ -185,9 +215,15 @@ class TestLoadSubagentsConfig:
         assert get_subagents_app_config() is get_subagents_app_config()
 
 
-# ---------------------------------------------------------------------------
-# registry.get_subagent_config – timeout override applied
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    registry.get_subagent_config – timeout override applied
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestRegistryGetSubagentConfig:
@@ -244,7 +280,7 @@ class TestRegistryGetSubagentConfig:
         assert gp_config.timeout_seconds == 900
 
     def test_builtin_config_object_is_not_mutated(self):
-        """Registry must return a new object, leaving the builtin default intact."""
+        """Registry must 返回 a 新建 对象, leaving the builtin 默认 intact."""
         from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
         from deerflow.subagents.registry import get_subagent_config
 
@@ -272,9 +308,15 @@ class TestRegistryGetSubagentConfig:
         assert overridden.disallowed_tools == original.disallowed_tools
 
 
-# ---------------------------------------------------------------------------
-# registry.list_subagents – all agents get overrides
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    registry.list_subagents – all agents get overrides
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestRegistryListSubagents:
@@ -312,22 +354,38 @@ class TestRegistryListSubagents:
         assert by_name["bash"].timeout_seconds == 60
 
 
-# ---------------------------------------------------------------------------
-# Polling timeout calculation (logic extracted from task_tool)
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Polling timeout calculation (logic extracted from task_tool)
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestPollingTimeoutCalculation:
-    """Verify the formula (timeout_seconds + 60) // 5 is correct for various inputs."""
+    """Verify the formula (timeout_seconds + 60) // 5 is 正确 for various inputs."""
 
     @pytest.mark.parametrize(
         "timeout_seconds, expected_max_polls",
         [
-            (900, 192),  # default 15 min → (900+60)//5 = 192
-            (300, 72),  # 5 min → (300+60)//5 = 72
-            (1800, 372),  # 30 min → (1800+60)//5 = 372
-            (60, 24),  # 1 min → (60+60)//5 = 24
-            (1, 12),  # minimum → (1+60)//5 = 12
+            (900, 192),  #    默认 15 min → (900+60)//5 = 192
+
+
+            (300, 72),  #    5 min → (300+60)//5 = 72
+
+
+            (1800, 372),  #    30 min → (1800+60)//5 = 372
+
+
+            (60, 24),  #    1 min → (60+60)//5 = 24
+
+
+            (1, 12),  #    minimum → (1+60)//5 = 12
+
+
         ],
     )
     def test_polling_timeout_formula(self, timeout_seconds: int, expected_max_polls: int):

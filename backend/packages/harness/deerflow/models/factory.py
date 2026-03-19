@@ -9,13 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
-    """Create a chat model instance from the config.
+    """Create a 聊天 模型 instance from the 配置.
 
     Args:
-        name: The name of the model to create. If None, the first model in the config will be used.
+        名称: The 名称 of the 模型 to 创建. If None, the 第一 模型 in the 配置 will be used.
 
     Returns:
-        A chat model instance.
+        A 聊天 模型 instance.
     """
     config = get_app_config()
     if name is None:
@@ -38,8 +38,12 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_vision",
         },
     )
-    # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
-    # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
+    #    Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
+
+
+    #    The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
+
+
     has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
     effective_wte: dict = dict(model_config.when_thinking_enabled) if model_config.when_thinking_enabled else {}
     if model_config.thinking is not None:
@@ -52,11 +56,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled and has_thinking_settings:
         if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
-            # OpenAI-compatible gateway: thinking is nested under extra_body
+            #    OpenAI-compatible gateway: thinking is nested under extra_body
+
+
             kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
             kwargs.update({"reasoning_effort": "minimal"})
         elif effective_wte.get("thinking", {}).get("type"):
-            # Native langchain_anthropic: thinking is a direct constructor parameter
+            #    Native langchain_anthropic: thinking is a direct constructor 参数
+
+
             kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]

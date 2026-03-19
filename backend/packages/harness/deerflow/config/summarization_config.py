@@ -53,12 +53,14 @@ class SummarizationConfig(BaseModel):
     )
 
 
-# Global configuration instance
+#    Global configuration instance
+
+
 _summarization_config: SummarizationConfig = SummarizationConfig()
 
 
 def get_summarization_config() -> SummarizationConfig:
-    """Get the current summarization configuration."""
+    """Get the 当前 summarization configuration."""
     return _summarization_config
 
 

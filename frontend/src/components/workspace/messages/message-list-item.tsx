@@ -78,7 +78,7 @@ export function MessageListItem({
 }
 
 /**
- * Custom image component that handles artifact URLs
+ * Custom image 组件 that handles artifact URLs
  */
 function MessageImage({
   src,
@@ -135,7 +135,7 @@ function MessageContent_({
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
       if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+        //    If the content contains the <uploaded_files> tag, we 返回 the parsed files from the content 对于 backward compatibility.
         return parseUploadedFiles(rawContent);
       }
       return null;
@@ -155,7 +155,7 @@ function MessageContent_({
       <RichFilesList files={files} threadId={thread_id} />
     ) : null;
 
-  // Uploading state: mock AI message shown while files upload
+  //    Uploading 状态: mock AI 消息 shown 当 files upload
   if (message.additional_kwargs?.element === "task") {
     return (
       <AIElementMessageContent className={className}>
@@ -171,7 +171,7 @@ function MessageContent_({
     );
   }
 
-  // Reasoning-only AI message (no main response content yet)
+  //    Reasoning-only AI 消息 (no main 响应 content yet)
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
@@ -220,7 +220,7 @@ function MessageContent_({
 }
 
 /**
- * Get file extension and check helpers
+ * Get 文件 extension and 检查 helpers
  */
 const getFileExt = (filename: string) =>
   filename.split(".").pop()?.toLowerCase() ?? "";
@@ -263,7 +263,7 @@ function isImageFile(filename: string): boolean {
 }
 
 /**
- * Format bytes to human-readable size string
+ * Format bytes to human-readable size 字符串
  */
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "—";
@@ -297,7 +297,7 @@ function RichFilesList({
 }
 
 /**
- * Single file card that handles FileInMessage (supports uploading state)
+ * Single 文件 card that handles FileInMessage (supports uploading 状态)
  */
 function RichFileCard({
   file,

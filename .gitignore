@@ -1,54 +1,117 @@
-# DeerFlow docker image cache
-docker/.cache/
-# OS generated files
-.DS_Store
-*.local
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+```
+# Dependencies
+backend/venv/
+backend/.venv/
+frontend/node_modules/
+backend/packages/harness/.venv/
+backend/packages/harness/venv/
 
-# Python cache
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Virtual environments
-.venv
-venv/
-
-# Environment variables
-.env
-
-# Configuration files
-config.yaml
-mcp_config.json
-extensions_config.json
+# Testing
+.coverage
+coverage/
+htmlcov/
+.nox/
+.tox/
+.coverage.*
+.cache
+.pytest_cache/
+.hypothesis/
 
 # IDE
-.idea/
 .vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
 
-# Coverage report
-coverage.xml
-coverage/
-.deer-flow/
-.claude/
-skills/custom/*
-logs/
-log/
+# OS
+.DS_Store
+Thumbs.db
 
-# Local git hooks (keep only on this machine, do not push)
-.githooks/
+# Logs
+*.log
 
-# pnpm
-.pnpm-store
-sandbox_image_cache.tar
+# Environment
+.env
+.env.local
+*.env.*
 
-# ignore the legacy `web` folder
-web/
+# Build artifacts from frontend
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/out/
 
-# Deployment artifacts
-backend/Dockerfile.langgraph
-config.yaml.bak
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+
+# Backend specific build artifacts
+backend/build/
+backend/dist/
+backend/target/
+backend/.gradle/
+
+# Frontend specific
+frontend/.nuxt/
+frontend/.output/
+frontend/.vercel/
+frontend/.netlify/
+
+# Skills build artifacts
+skills/*/dist/
+skills/*/build/
+skills/*/.venv/
+skills/*/node_modules/
+
+# Docker
+.dockerenv
+Dockerfile.*
+docker-compose.*
+
+# Coverage
+.coverage*
+```

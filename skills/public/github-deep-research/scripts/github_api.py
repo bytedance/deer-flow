@@ -1,6 +1,8 @@
-#!/usr/bin/env python3
+#   !/usr/bin/env python3
+
+
 """
-GitHub API client for deep research.
+GitHub API 客户端 for deep research.
 Uses requests for HTTP operations.
 """
 
@@ -11,12 +13,14 @@ from typing import Any, Dict, List, Optional
 try:
     import requests
 except ImportError:
-    # Fallback to urllib if requests not available
+    #    Fallback to urllib 如果 requests not 可用的
+
+
     import urllib.error
     import urllib.request
 
     class RequestsFallback:
-        """Minimal requests-like interface using urllib."""
+        """Minimal requests-like 接口 using urllib."""
 
         class Response:
             def __init__(self, data: bytes, status: int):
@@ -48,13 +52,13 @@ except ImportError:
 
 
 class GitHubAPI:
-    """GitHub API client for repository analysis."""
+    """GitHub API 客户端 for repository analysis."""
 
     BASE_URL = "https://api.github.com"
 
     def __init__(self, token: Optional[str] = None):
         """
-        Initialize GitHub API client.
+        Initialize GitHub API 客户端.
 
         Args:
             token: Optional GitHub personal access token for higher rate limits
@@ -70,7 +74,7 @@ class GitHubAPI:
     def _get(
         self, endpoint: str, params: Optional[Dict] = None, accept: Optional[str] = None
     ) -> Any:
-        """Make GET request to GitHub API."""
+        """Make GET 请求 to GitHub API."""
         url = f"{self.BASE_URL}{endpoint}"
         headers = self.headers.copy()
         if accept:
@@ -99,18 +103,20 @@ class GitHubAPI:
     def get_tree(
         self, owner: str, repo: str, branch: str = "main", recursive: bool = True
     ) -> Dict:
-        """Get repository directory tree."""
+        """Get repository 目录 tree."""
         params = {"recursive": "1"} if recursive else {}
         try:
             return self._get(f"/repos/{owner}/{repo}/git/trees/{branch}", params)
         except Exception:
-            # Try 'master' if 'main' fails
+            #    Try 'master' 如果 'main' fails
+
+
             if branch == "main":
                 return self._get(f"/repos/{owner}/{repo}/git/trees/master", params)
             raise
 
     def get_file_content(self, owner: str, repo: str, path: str) -> str:
-        """Get content of a specific file."""
+        """Get content of a specific 文件."""
         try:
             return self._get(
                 f"/repos/{owner}/{repo}/contents/{path}",
@@ -137,9 +143,9 @@ class GitHubAPI:
 
         Args:
             owner: Repository owner
-            repo: Repository name
+            repo: Repository 名称
             limit: Max commits to fetch
-            since: ISO date string to fetch commits since
+            since: ISO date 字符串 to fetch commits since
         """
         params = {"per_page": min(limit, 100)}
         if since:
@@ -158,7 +164,7 @@ class GitHubAPI:
         Get repository issues.
 
         Args:
-            state: 'open', 'closed', or 'all'
+            状态: '打开', 'closed', or 'all'
             labels: Comma-separated label names
         """
         params = {"state": state, "per_page": min(limit, 100)}
@@ -193,7 +199,7 @@ class GitHubAPI:
         return self._get("/search/issues", params={"q": q, "per_page": min(limit, 100)})
 
     def get_commit_activity(self, owner: str, repo: str) -> List[Dict]:
-        """Get weekly commit activity for the last year."""
+        """Get weekly commit activity for the 最后 year."""
         return self._get(f"/repos/{owner}/{repo}/stats/commit_activity")
 
     def get_code_frequency(self, owner: str, repo: str) -> List[List[int]]:
@@ -202,10 +208,10 @@ class GitHubAPI:
 
     def format_tree(self, tree_data: Dict, max_depth: int = 3) -> str:
         """
-        Format tree data as text directory structure.
+        Format tree 数据 as text 目录 structure.
 
         Args:
-            tree_data: Response from get_tree()
+            tree_data: 响应 from get_tree()
             max_depth: Maximum depth to display
         """
         if "tree" not in tree_data:
@@ -223,13 +229,15 @@ class GitHubAPI:
                 else:
                     lines.append(f"{indent}{name}")
 
-        return "\n".join(lines[:100])  # Limit output
+        return "\n".join(lines[:100])  #    Limit 输出
+
+
 
     def summarize_repo(self, owner: str, repo: str) -> Dict:
         """
-        Get comprehensive repository summary.
+        Get comprehensive repository 摘要.
 
-        Returns dict with: info, languages, contributor_count,
+        Returns 字典 with: 信息, languages, contributor_count,
         recent_activity, top_issues, latest_release
         """
         info = self.get_repo_info(owner, repo)
@@ -252,23 +260,31 @@ class GitHubAPI:
             "topics": info.get("topics", []),
         }
 
-        # Add languages
+        #    Add languages
+
+
         try:
             summary["languages"] = self.get_languages(owner, repo)
         except Exception:
             summary["languages"] = {}
 
-        # Add contributor count
+        #    Add contributor 计数
+
+
         try:
             contributors = self.get_contributors(owner, repo, limit=1)
-            # GitHub returns Link header with total, but we approximate
+            #    GitHub returns Link header with 总计, but we approximate
+
+
             summary["contributor_count"] = len(
                 self.get_contributors(owner, repo, limit=100)
             )
         except Exception:
             summary["contributor_count"] = "N/A"
 
-        # Latest release
+        #    Latest release
+
+
         try:
             releases = self.get_releases(owner, repo, limit=1)
             if releases:
@@ -284,7 +300,7 @@ class GitHubAPI:
 
 
 def main():
-    """CLI interface for testing."""
+    """CLI 接口 for testing."""
     if len(sys.argv) < 3:
         print("Usage: python github_api.py <owner> <repo> [command]")
         print("Commands: info, readme, tree, languages, contributors,")

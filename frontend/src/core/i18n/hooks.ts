@@ -30,7 +30,7 @@ export function useI18n() {
     setLocaleInCookie(newLocale);
   };
 
-  // Initialize locale on mount
+  //    Initialize locale on mount
   useEffect(() => {
     const saved = getLocaleFromCookie();
     if (saved) {

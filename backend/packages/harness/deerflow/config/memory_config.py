@@ -1,10 +1,10 @@
-"""Configuration for memory mechanism."""
+"""Configuration for 内存 mechanism."""
 
 from pydantic import BaseModel, Field
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for global memory mechanism."""
+    """Configuration for global 内存 mechanism."""
 
     enabled: bool = Field(
         default=True,
@@ -57,22 +57,24 @@ class MemoryConfig(BaseModel):
     )
 
 
-# Global configuration instance
+#    Global configuration instance
+
+
 _memory_config: MemoryConfig = MemoryConfig()
 
 
 def get_memory_config() -> MemoryConfig:
-    """Get the current memory configuration."""
+    """Get the 当前 内存 configuration."""
     return _memory_config
 
 
 def set_memory_config(config: MemoryConfig) -> None:
-    """Set the memory configuration."""
+    """Set the 内存 configuration."""
     global _memory_config
     _memory_config = config
 
 
 def load_memory_config_from_dict(config_dict: dict) -> None:
-    """Load memory configuration from a dictionary."""
+    """Load 内存 configuration from a dictionary."""
     global _memory_config
     _memory_config = MemoryConfig(**config_dict)

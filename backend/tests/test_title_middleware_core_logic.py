@@ -10,7 +10,9 @@ from deerflow.config.title_config import TitleConfig, get_title_config, set_titl
 
 
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
-    # Avoid mutating shared global config objects across tests.
+    #    Avoid mutating shared global 配置 objects across tests.
+
+
     return TitleConfig(**config.model_dump())
 
 
@@ -24,7 +26,9 @@ def _set_test_title_config(**overrides) -> TitleConfig:
 
 class TestTitleMiddlewareCoreLogic:
     def setup_method(self):
-        # Title config is a global singleton; snapshot and restore for test isolation.
+        #    Title 配置 is a global singleton; snapshot and restore 对于 测试 isolation.
+
+
         self._original = _clone_title_config(get_title_config())
 
     def teardown_method(self):
@@ -116,7 +120,9 @@ class TestTitleMiddlewareCoreLogic:
         prompt = fake_model.ainvoke.await_args.args[0]
         assert "请帮我总结这段代码" in prompt
         assert "好的，先看结构" in prompt
-        # Ensure structured message dict/JSON reprs are not leaking into the prompt.
+        #    Ensure structured 消息 字典/JSON reprs are not leaking into the 提示词.
+
+
         assert "{'type':" not in prompt
         assert "'type':" not in prompt
         assert '"type":' not in prompt
@@ -137,7 +143,9 @@ class TestTitleMiddlewareCoreLogic:
         }
         title = asyncio.run(middleware._generate_title(state))
 
-        # Assert behavior (truncated fallback + ellipsis) without overfitting exact text.
+        #    Assert behavior (truncated 回退 + ellipsis) without overfitting exact text.
+
+
         assert title.endswith("...")
         assert title.startswith("这是一个非常长的问题描述")
 

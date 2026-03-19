@@ -30,16 +30,16 @@ export default function NewAgentPage() {
   const { t } = useI18n();
   const router = useRouter();
 
-  // ── Step 1: name form ──────────────────────────────────────────────────────
+  //    ── Step 1: 名称 form ──────────────────────────────────────────────────────
   const [step, setStep] = useState<Step>("name");
   const [nameInput, setNameInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [isCheckingName, setIsCheckingName] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agent, setAgent] = useState<Agent | null>(null);
-  // ── Step 2: chat ───────────────────────────────────────────────────────────
+  //    ── Step 2: 聊天 ───────────────────────────────────────────────────────────
 
-  // Stable thread ID — all turns belong to the same thread
+  //    Stable 线程 ID — all turns belong to the same 线程
   const threadId = useMemo(() => uuid(), []);
 
   const [thread, sendMessage] = useThreadStream({
@@ -53,12 +53,12 @@ export default function NewAgentPage() {
       getAgent(agentName)
         .then((fetched) => setAgent(fetched))
         .catch(() => {
-          // agent write may not be flushed yet — ignore silently
+          //    代理 write may not be flushed yet — ignore silently
         });
     },
   });
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
+  //    ── Handlers ───────────────────────────────────────────────────────────────
 
   const handleConfirmName = useCallback(async () => {
     const trimmed = nameInput.trim();
@@ -117,7 +117,7 @@ export default function NewAgentPage() {
     [thread.isLoading, sendMessage, threadId, agentName],
   );
 
-  // ── Shared header ──────────────────────────────────────────────────────────
+  //    ── Shared header ──────────────────────────────────────────────────────────
 
   const header = (
     <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
@@ -132,7 +132,7 @@ export default function NewAgentPage() {
     </header>
   );
 
-  // ── Step 1: name form ──────────────────────────────────────────────────────
+  //    ── Step 1: 名称 form ──────────────────────────────────────────────────────
 
   if (step === "name") {
     return (
@@ -183,7 +183,7 @@ export default function NewAgentPage() {
     );
   }
 
-  // ── Step 2: chat ───────────────────────────────────────────────────────────
+  //    ── Step 2: 聊天 ───────────────────────────────────────────────────────────
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -192,7 +192,7 @@ export default function NewAgentPage() {
           {header}
 
           <main className="flex min-h-0 flex-1 flex-col">
-            {/* ── Message area ── */}
+            {/* ── 消息 area ── */}
             <div className="flex min-h-0 flex-1 justify-center">
               <MessageList
                 className="size-full pt-10"
@@ -205,7 +205,7 @@ export default function NewAgentPage() {
             <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
               <div className="w-full max-w-(--container-width-md)">
                 {agent ? (
-                  // ✅ Success card
+                  //    ✅ Success card
                   <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
                     <CheckCircleIcon className="text-primary h-10 w-10" />
                     <p className="font-semibold">{t.agents.agentCreated}</p>
@@ -228,7 +228,7 @@ export default function NewAgentPage() {
                     </div>
                   </div>
                 ) : (
-                  // 📝 Normal input
+                  //    📝 Normal 输入
                   <PromptInput
                     onSubmit={({ text }) => void handleChatSubmit(text)}
                   >

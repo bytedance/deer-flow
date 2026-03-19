@@ -1,4 +1,4 @@
-"""Tests for memory prompt injection formatting."""
+"""Tests for 内存 提示词 injection formatting."""
 
 import math
 
@@ -38,7 +38,9 @@ def test_format_memory_sorts_facts_by_confidence_desc() -> None:
 
 
 def test_format_memory_respects_budget_when_adding_facts(monkeypatch) -> None:
-    # Make token counting deterministic for this test by counting characters.
+    #    Make token counting deterministic 对于 this 测试 by counting characters.
+
+
     monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", lambda text, encoding_name="cl100k_base": len(text))
 
     memory_data = {
@@ -59,7 +61,9 @@ def test_format_memory_respects_budget_when_adding_facts(monkeypatch) -> None:
     }
     one_fact_result = format_memory_for_injection(first_fact_only_memory_data, max_tokens=2000)
     two_facts_result = format_memory_for_injection(memory_data, max_tokens=2000)
-    # Choose a budget that can include exactly one fact section line.
+    #    Choose a budget that can include exactly one fact section line.
+
+
     max_tokens = (len(one_fact_result) + len(two_facts_result)) // 2
 
     first_only_result = format_memory_for_injection(memory_data, max_tokens=max_tokens)
@@ -69,13 +73,13 @@ def test_format_memory_respects_budget_when_adding_facts(monkeypatch) -> None:
 
 
 def test_coerce_confidence_nan_falls_back_to_default() -> None:
-    """NaN should not be treated as a valid confidence value."""
+    """NaN should not be treated as a 有效 confidence 值."""
     result = _coerce_confidence(math.nan, default=0.5)
     assert result == 0.5
 
 
 def test_coerce_confidence_inf_falls_back_to_default() -> None:
-    """Infinite values should fall back to default rather than clamping to 1.0."""
+    """Infinite values should fall back to 默认 rather than clamping to 1.0."""
     assert _coerce_confidence(math.inf, default=0.3) == 0.3
     assert _coerce_confidence(-math.inf, default=0.3) == 0.3
 
@@ -88,7 +92,7 @@ def test_coerce_confidence_valid_values_are_clamped() -> None:
 
 
 def test_format_memory_skips_none_content_facts() -> None:
-    """Facts with content=None must not produce a 'None' line in the output."""
+    """Facts with content=None must not produce a 'None' line in the 输出."""
     memory_data = {
         "facts": [
             {"content": None, "category": "knowledge", "confidence": 0.9},
@@ -103,7 +107,7 @@ def test_format_memory_skips_none_content_facts() -> None:
 
 
 def test_format_memory_skips_non_string_content_facts() -> None:
-    """Facts with non-string content (e.g. int/list) must be ignored."""
+    """Facts with non-字符串 content (e.g. int/列表) must be ignored."""
     memory_data = {
         "facts": [
             {"content": 42, "category": "knowledge", "confidence": 0.9},
@@ -114,9 +118,13 @@ def test_format_memory_skips_non_string_content_facts() -> None:
 
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
-    # The formatted line for an integer content would be "- [knowledge | 0.90] 42".
+    #    The formatted line 对于 an integer content would be "- [knowledge | 0.90] 42".
+
+
     assert "| 0.90] 42" not in result
-    # The formatted line for a list content would be "- [knowledge | 0.85] ['list']".
+    #    The formatted line 对于 a 列表 content would be "- [knowledge | 0.85] ['列表']".
+
+
     assert "| 0.85]" not in result
     assert "Valid fact" in result
 

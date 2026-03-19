@@ -2,7 +2,7 @@
 
 const fs = require("fs");
 
-// Chart type mapping, consistent with src/utils/callTool.ts
+//    Chart 类型 mapping, consistent with src/utils/callTool.ts
 const CHART_TYPE_MAP = {
   generate_area_chart: "area",
   generate_bar_chart: "bar",
@@ -34,7 +34,7 @@ const CHART_TYPE_MAP = {
 function getVisRequestServer() {
   return (
     process.env.VIS_REQUEST_SERVER ||
-    "https://antv-studio.alipay.com/api/gpt-vis"
+    "https://   antv-studio.alipay.com/接口/gpt-vis"
   );
 }
 
@@ -169,5 +169,5 @@ if (require.main === module) {
   });
 }
 
-// Export functions for testing
+//    Export functions 对于 testing
 module.exports = { generateChartUrl, generateMap, httpPost, CHART_TYPE_MAP };

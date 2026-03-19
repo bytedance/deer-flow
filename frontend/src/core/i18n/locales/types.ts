@@ -1,12 +1,12 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
-  // Locale meta
+  //    Locale meta
   locale: {
     localName: string;
   };
 
-  // Common
+  //    Common
   common: {
     home: string;
     settings: string;
@@ -34,7 +34,7 @@ export interface Translations {
     create: string;
   };
 
-  // Welcome
+  //    Welcome
   welcome: {
     greeting: string;
     description: string;
@@ -42,7 +42,7 @@ export interface Translations {
     createYourOwnSkillDescription: string;
   };
 
-  // Clipboard
+  //    Clipboard
   clipboard: {
     copyToClipboard: string;
     copiedToClipboard: string;
@@ -50,7 +50,7 @@ export interface Translations {
     linkCopied: string;
   };
 
-  // Input Box
+  //    Input Box
   inputBox: {
     placeholder: string;
     createSkillPrompt: string;
@@ -98,7 +98,7 @@ export interface Translations {
     )[];
   };
 
-  // Sidebar
+  //    Sidebar
   sidebar: {
     recentChats: string;
     newChat: string;
@@ -107,7 +107,7 @@ export interface Translations {
     agents: string;
   };
 
-  // Agents
+  //    Agents
   agents: {
     title: string;
     description: string;
@@ -134,13 +134,13 @@ export interface Translations {
     backToGallery: string;
   };
 
-  // Breadcrumb
+  //    Breadcrumb
   breadcrumb: {
     workspace: string;
     chats: string;
   };
 
-  // Workspace
+  //    Workspace
   workspace: {
     officialWebsite: string;
     githubTooltip: string;
@@ -151,18 +151,18 @@ export interface Translations {
     about: string;
   };
 
-  // Conversation
+  //    Conversation
   conversation: {
     noMessages: string;
     startConversation: string;
   };
 
-  // Chats
+  //    Chats
   chats: {
     searchChats: string;
   };
 
-  // Page titles (document title)
+  //    Page titles (document title)
   pages: {
     appName: string;
     chats: string;
@@ -170,7 +170,7 @@ export interface Translations {
     untitled: string;
   };
 
-  // Tool calls
+  //    工具 calls
   toolCalls: {
     moreSteps: (count: number) => string;
     lessSteps: string;
@@ -192,13 +192,13 @@ export interface Translations {
     skillInstallTooltip: string;
   };
 
-  // Uploads
+  //    Uploads
   uploads: {
     uploading: string;
     uploadingFiles: string;
   };
 
-  // Subtasks
+  //    Subtasks
   subtasks: {
     subtask: string;
     executing: (count: number) => string;
@@ -207,7 +207,7 @@ export interface Translations {
     failed: string;
   };
 
-  // Settings
+  //    Settings
   settings: {
     title: string;
     description: string;

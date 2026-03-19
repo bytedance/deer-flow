@@ -1,4 +1,4 @@
-"""Middleware to enforce maximum concurrent subagent tool calls per model response."""
+"""中间件 to enforce maximum 并发 subagent 工具 calls per 模型 响应."""
 
 import logging
 from typing import override
@@ -11,25 +11,27 @@ from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
-# Valid range for max_concurrent_subagents
+#    Valid range 对于 max_concurrent_subagents
+
+
 MIN_SUBAGENT_LIMIT = 2
 MAX_SUBAGENT_LIMIT = 4
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [2, 4]."""
+    """Clamp subagent limit to 有效 range [2, 4]."""
     return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
 
 
 class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
-    """Truncates excess 'task' tool calls from a single model response.
+    """Truncates excess 'task' 工具 calls from a single 模型 响应.
 
-    When an LLM generates more than max_concurrent parallel task tool calls
-    in one response, this middleware keeps only the first max_concurrent and
-    discards the rest. This is more reliable than prompt-based limits.
+    When an LLM generates more than max_concurrent 并行 task 工具 calls
+    in one 响应, this 中间件 keeps only the 第一 max_concurrent and
+    discards the rest. This is more reliable than 提示词-based limits.
 
     Args:
-        max_concurrent: Maximum number of concurrent subagent calls allowed.
+        max_concurrent: Maximum 数字 of 并发 subagent calls allowed.
             Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [2, 4].
     """
 
@@ -50,19 +52,25 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         if not tool_calls:
             return None
 
-        # Count task tool calls
+        #    Count task 工具 calls
+
+
         task_indices = [i for i, tc in enumerate(tool_calls) if tc.get("name") == "task"]
         if len(task_indices) <= self.max_concurrent:
             return None
 
-        # Build set of indices to drop (excess task calls beyond the limit)
+        #    Build 集合 of indices to drop (excess task calls beyond the limit)
+
+
         indices_to_drop = set(task_indices[self.max_concurrent :])
         truncated_tool_calls = [tc for i, tc in enumerate(tool_calls) if i not in indices_to_drop]
 
         dropped_count = len(indices_to_drop)
         logger.warning(f"Truncated {dropped_count} excess task tool call(s) from model response (limit: {self.max_concurrent})")
 
-        # Replace the AIMessage with truncated tool_calls (same id triggers replacement)
+        #    Replace the AIMessage with truncated tool_calls (same 标识符 triggers replacement)
+
+
         updated_msg = last_msg.model_copy(update={"tool_calls": truncated_tool_calls})
         return {"messages": [updated_msg]}
 

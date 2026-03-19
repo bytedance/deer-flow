@@ -1,4 +1,4 @@
-"""Tests for readability extraction fallback behavior."""
+"""Tests for readability extraction 回退 behavior."""
 
 import subprocess
 

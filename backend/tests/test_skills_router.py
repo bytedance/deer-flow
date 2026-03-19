@@ -20,15 +20,17 @@ def test_validate_skill_frontmatter_allows_standard_optional_metadata(tmp_path: 
     _write_skill(
         skill_dir,
         """---
-name: demo-skill
-description: Demo skill
+名称: demo-skill
+描述: Demo skill
 version: 1.0.0
-author: example.com/demo
+author: 示例.com/demo
 compatibility: OpenClaw >= 1.0
 license: MIT
 ---
 
-# Demo Skill
+#    Demo Skill
+
+
 """,
     )
 
@@ -44,12 +46,14 @@ def test_validate_skill_frontmatter_still_rejects_unknown_keys(tmp_path: Path) -
     _write_skill(
         skill_dir,
         """---
-name: demo-skill
-description: Demo skill
+名称: demo-skill
+描述: Demo skill
 unsupported: true
 ---
 
-# Demo Skill
+#    Demo Skill
+
+
 """,
     )
 
@@ -65,11 +69,13 @@ def test_validate_skill_frontmatter_reads_utf8_on_windows_locale(tmp_path, monke
     _write_skill(
         skill_dir,
         """---
-name: demo-skill
-description: "Curly quotes: \u201cutf8\u201d"
+名称: demo-skill
+描述: "Curly quotes: \u201cutf8\u201d"
 ---
 
-# Demo Skill
+#    Demo Skill
+
+
 """,
     )
 

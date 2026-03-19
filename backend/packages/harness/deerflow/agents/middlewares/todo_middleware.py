@@ -1,9 +1,9 @@
-"""Middleware that extends TodoListMiddleware with context-loss detection.
+"""中间件 that extends TodoListMiddleware with context-loss detection.
 
-When the message history is truncated (e.g., by SummarizationMiddleware), the
-original `write_todos` tool call and its ToolMessage can be scrolled out of the
-active context window. This middleware detects that situation and injects a
-reminder message so the model still knows about the outstanding todo list.
+When the 消息 history is truncated (e.g., by SummarizationMiddleware), the
+original `write_todos` 工具 call and its ToolMessage can be scrolled out of the
+活跃 context window. This 中间件 detects that situation and injects a
+reminder 消息 so the 模型 still knows about the outstanding 待办 列表.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from langgraph.runtime import Runtime
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
-    """Return True if any AIMessage in *messages* contains a write_todos tool call."""
+    """Return True if any AIMessage in *messages* contains a write_todos 工具 call."""
     for msg in messages:
         if isinstance(msg, AIMessage) and msg.tool_calls:
             for tc in msg.tool_calls:
@@ -35,7 +35,7 @@ def _reminder_in_messages(messages: list[Any]) -> bool:
 
 
 def _format_todos(todos: list[Todo]) -> str:
-    """Format a list of Todo items into a human-readable string."""
+    """Format a 列表 of Todo items into a human-readable 字符串."""
     lines: list[str] = []
     for todo in todos:
         status = todo.get("status", "pending")
@@ -47,34 +47,46 @@ def _format_todos(todos: list[Todo]) -> str:
 class TodoMiddleware(TodoListMiddleware):
     """Extends TodoListMiddleware with `write_todos` context-loss detection.
 
-    When the original `write_todos` tool call has been truncated from the message
-    history (e.g., after summarization), the model loses awareness of the current
-    todo list. This middleware detects that gap in `before_model` / `abefore_model`
-    and injects a reminder message so the model can continue tracking progress.
+    When the original `write_todos` 工具 call has been truncated from the 消息
+    history (e.g., after summarization), the 模型 loses awareness of the 当前
+    待办 列表. This 中间件 detects that gap in `before_model` / `abefore_model`
+    and injects a reminder 消息 so the 模型 can continue tracking progress.
     """
 
     @override
     def before_model(
         self,
         state: PlanningState,
-        runtime: Runtime,  # noqa: ARG002
+        runtime: Runtime,  #    noqa: ARG002
+
+
     ) -> dict[str, Any] | None:
-        """Inject a todo-list reminder when write_todos has left the context window."""
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        """Inject a 待办-列表 reminder when write_todos has 左 the context window."""
+        todos: list[Todo] = state.get("todos") or []  #    类型: ignore[assignment]
+
+
         if not todos:
             return None
 
         messages = state.get("messages") or []
         if _todos_in_messages(messages):
-            # write_todos is still visible in context — nothing to do.
+            #    write_todos is still 可见 in context — nothing to do.
+
+
             return None
 
         if _reminder_in_messages(messages):
-            # A reminder was already injected and hasn't been truncated yet.
+            #    A reminder was already injected and hasn't been truncated yet.
+
+
             return None
 
-        # The todo list exists in state but the original write_todos call is gone.
-        # Inject a reminder as a HumanMessage so the model stays aware.
+        #    The 待办 列表 exists in 状态 but the original write_todos call is gone.
+
+
+        #    Inject a reminder as a HumanMessage so the 模型 stays aware.
+
+
         formatted = _format_todos(todos)
         reminder = HumanMessage(
             name="todo_reminder",

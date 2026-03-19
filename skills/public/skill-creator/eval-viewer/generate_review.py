@@ -1,13 +1,15 @@
-#!/usr/bin/env python3
+#   !/usr/bin/env python3
+
+
 """Generate and serve a review page for eval results.
 
-Reads the workspace directory, discovers runs (directories with outputs/),
-embeds all output data into a self-contained HTML page, and serves it via
-a tiny HTTP server. Feedback auto-saves to feedback.json in the workspace.
+Reads the 工作区 目录, discovers runs (directories with outputs/),
+embeds all 输出 数据 into a self-contained HTML page, and serves it via
+a tiny HTTP 服务器. Feedback auto-saves to feedback.json in the 工作区.
 
 Usage:
-    python generate_review.py <workspace-path> [--port PORT] [--skill-name NAME]
-    python generate_review.py <workspace-path> --previous-feedback /path/to/old/feedback.json
+    python generate_review.py <工作区-路径> [--port PORT] [--skill-名称 NAME]
+    python generate_review.py <工作区-路径> --上一个-feedback /路径/to/旧/feedback.json
 
 No dependencies beyond the Python stdlib are required.
 """
@@ -27,20 +29,28 @@ from functools import partial
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-# Files to exclude from output listings
+#    Files to exclude from 输出 listings
+
+
 METADATA_FILES = {"transcript.md", "user_notes.md", "metrics.json"}
 
-# Extensions we render as inline text
+#    Extensions we render as inline text
+
+
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".json", ".csv", ".py", ".js", ".ts", ".tsx", ".jsx",
     ".yaml", ".yml", ".xml", ".html", ".css", ".sh", ".rb", ".go", ".rs",
     ".java", ".c", ".cpp", ".h", ".hpp", ".sql", ".r", ".toml",
 }
 
-# Extensions we render as inline images
+#    Extensions we render as inline images
+
+
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 
-# MIME type overrides for common types
+#    MIME 类型 overrides 对于 common types
+
+
 MIME_OVERRIDES = {
     ".svg": "image/svg+xml",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -83,11 +93,13 @@ def _find_runs_recursive(root: Path, current: Path, runs: list[dict]) -> None:
 
 
 def build_run(root: Path, run_dir: Path) -> dict | None:
-    """Build a run dict with prompt, outputs, and grading data."""
+    """Build a 运行 字典 with 提示词, outputs, and grading 数据."""
     prompt = ""
     eval_id = None
 
-    # Try eval_metadata.json
+    #    Try eval_metadata.json
+
+
     for candidate in [run_dir / "eval_metadata.json", run_dir.parent / "eval_metadata.json"]:
         if candidate.exists():
             try:
@@ -99,13 +111,17 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
             if prompt:
                 break
 
-    # Fall back to transcript.md
+    #    Fall back to transcript.md
+
+
     if not prompt:
         for candidate in [run_dir / "transcript.md", run_dir / "outputs" / "transcript.md"]:
             if candidate.exists():
                 try:
                     text = candidate.read_text()
-                    match = re.search(r"## Eval Prompt\n\n([\s\S]*?)(?=\n##|$)", text)
+                    match = re.search(r"#  # Eval 提示词\n\n([\s\S]*?)(?=\n##|$)", text)
+
+
                     if match:
                         prompt = match.group(1).strip()
                 except OSError:
@@ -118,7 +134,9 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
 
     run_id = str(run_dir.relative_to(root)).replace("/", "-").replace("\\", "-")
 
-    # Collect output files
+    #    Collect 输出 files
+
+
     outputs_dir = run_dir / "outputs"
     output_files: list[dict] = []
     if outputs_dir.is_dir():
@@ -126,7 +144,9 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
             if f.is_file() and f.name not in METADATA_FILES:
                 output_files.append(embed_file(f))
 
-    # Load grading if present
+    #    Load grading 如果 present
+
+
     grading = None
     for candidate in [run_dir / "grading.json", run_dir.parent / "grading.json"]:
         if candidate.exists():
@@ -147,7 +167,7 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
 
 
 def embed_file(path: Path) -> dict:
-    """Read a file and return an embedded representation."""
+    """Read a 文件 and 返回 an embedded representation."""
     ext = path.suffix.lower()
     mime = get_mime_type(path)
 
@@ -196,7 +216,9 @@ def embed_file(path: Path) -> dict:
             "data_b64": b64,
         }
     else:
-        # Binary / unknown — base64 download link
+        #    Binary / unknown — base64 download link
+
+
         try:
             raw = path.read_bytes()
             b64 = base64.b64encode(raw).decode("ascii")
@@ -211,13 +233,15 @@ def embed_file(path: Path) -> dict:
 
 
 def load_previous_iteration(workspace: Path) -> dict[str, dict]:
-    """Load previous iteration's feedback and outputs.
+    """Load 上一个 iteration's feedback and outputs.
 
-    Returns a map of run_id -> {"feedback": str, "outputs": list[dict]}.
+    Returns a map of run_id -> {"feedback": str, "outputs": 列表[字典]}.
     """
     result: dict[str, dict] = {}
 
-    # Load feedback
+    #    Load feedback
+
+
     feedback_map: dict[str, str] = {}
     feedback_path = workspace / "feedback.json"
     if feedback_path.exists():
@@ -231,7 +255,9 @@ def load_previous_iteration(workspace: Path) -> dict[str, dict]:
         except (json.JSONDecodeError, OSError, KeyError):
             pass
 
-    # Load runs (to get outputs)
+    #    Load runs (to get outputs)
+
+
     prev_runs = find_runs(workspace)
     for run in prev_runs:
         result[run["id"]] = {
@@ -239,7 +265,9 @@ def load_previous_iteration(workspace: Path) -> dict[str, dict]:
             "outputs": run.get("outputs", []),
         }
 
-    # Also add feedback for run_ids that had feedback but no matching run
+    #    Also add feedback 对于 run_ids that had feedback but no matching 运行
+
+
     for run_id, fb in feedback_map.items():
         if run_id not in result:
             result[run_id] = {"feedback": fb, "outputs": []}
@@ -253,11 +281,13 @@ def generate_html(
     previous: dict[str, dict] | None = None,
     benchmark: dict | None = None,
 ) -> str:
-    """Generate the complete standalone HTML page with embedded data."""
+    """Generate the complete standalone HTML page with embedded 数据."""
     template_path = Path(__file__).parent / "viewer.html"
     template = template_path.read_text()
 
-    # Build previous_feedback and previous_outputs maps for the template
+    #    Build previous_feedback and previous_outputs maps 对于 the template
+
+
     previous_feedback: dict[str, str] = {}
     previous_outputs: dict[str, list[dict]] = {}
     if previous:
@@ -281,12 +311,18 @@ def generate_html(
     return template.replace("/*__EMBEDDED_DATA__*/", f"const EMBEDDED_DATA = {data_json};")
 
 
-# ---------------------------------------------------------------------------
-# HTTP server (stdlib only, zero dependencies)
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    HTTP 服务器 (stdlib only, zero dependencies)
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 def _kill_port(port: int) -> None:
-    """Kill any process listening on the given port."""
+    """Kill any 处理 listening on the given port."""
     try:
         result = subprocess.run(
             ["lsof", "-ti", f":{port}"],
@@ -308,8 +344,8 @@ def _kill_port(port: int) -> None:
 class ReviewHandler(BaseHTTPRequestHandler):
     """Serves the review HTML and handles feedback saves.
 
-    Regenerates the HTML on each page load so that refreshing the browser
-    picks up new eval outputs without restarting the server.
+    Regenerates the HTML on each page load so that refreshing the 浏览器
+    picks 上 新建 eval outputs without restarting the 服务器.
     """
 
     def __init__(
@@ -331,7 +367,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/" or self.path == "/index.html":
-            # Regenerate HTML on each request (re-scans workspace for new outputs)
+            #    Regenerate HTML on each 请求 (re-scans 工作区 对于 新建 outputs)
+
+
             runs = find_runs(self.workspace)
             benchmark = None
             if self.benchmark_path and self.benchmark_path.exists():
@@ -380,7 +418,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def log_message(self, format: str, *args: object) -> None:
-        # Suppress request logging to keep terminal clean
+        #    Suppress 请求 logging to keep terminal clean
+
+
         pass
 
 
@@ -435,14 +475,18 @@ def main() -> None:
         print(f"\n  Static viewer written to: {args.static}\n")
         sys.exit(0)
 
-    # Kill any existing process on the target port
+    #    Kill any existing 处理 on the target port
+
+
     port = args.port
     _kill_port(port)
     handler = partial(ReviewHandler, workspace, skill_name, feedback_path, previous, benchmark_path)
     try:
         server = HTTPServer(("127.0.0.1", port), handler)
     except OSError:
-        # Port still in use after kill attempt — find a free one
+        #    Port still in use after kill attempt — find a free one
+
+
         server = HTTPServer(("127.0.0.1", 0), handler)
         port = server.server_address[1]
 

@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
-"""Cross-platform config bootstrap script for DeerFlow."""
+#   !/usr/bin/env python3
+
+
+"""Cross-平台 配置 bootstrap script for DeerFlow."""
 
 from __future__ import annotations
 

@@ -1,61 +1,61 @@
-// 江苏城市足球联赛2025赛季 - 主JavaScript文件
+//    江苏城市足球联赛2025赛季 - 主JavaScript文件
 
 document.addEventListener('DOMContentLoaded', function() {
-    // 初始化加载动画
+    //    初始化加载动画
     initLoader();
     
-    // 初始化主题切换
+    //    初始化主题切换
     initThemeToggle();
     
-    // 初始化导航菜单
+    //    初始化导航菜单
     initNavigation();
     
-    // 初始化滚动监听
+    //    初始化滚动监听
     initScrollSpy();
     
-    // 渲染球队卡片
+    //    渲染球队卡片
     renderTeams();
     
-    // 渲染积分榜
+    //    渲染积分榜
     renderStandings();
     
-    // 渲染赛程表
+    //    渲染赛程表
     renderFixtures();
     
-    // 渲染数据统计
+    //    渲染数据统计
     renderStats();
     
-    // 渲染新闻动态
+    //    渲染新闻动态
     renderNews();
     
-    // 初始化标签页切换
+    //    初始化标签页切换
     initTabs();
     
-    // 初始化移动端菜单
+    //    初始化移动端菜单
     initMobileMenu();
 });
 
-// 加载动画
+//    加载动画
 function initLoader() {
     const loader = document.querySelector('.loader');
     
-    // 模拟加载延迟
+    //    模拟加载延迟
     setTimeout(() => {
         loader.classList.add('loaded');
         
-        // 动画结束后隐藏loader
+        //    动画结束后隐藏loader
         setTimeout(() => {
             loader.style.display = 'none';
         }, 300);
     }, 1500);
 }
 
-// 主题切换
+//    主题切换
 function initThemeToggle() {
     const themeToggle = document.querySelector('.btn-theme-toggle');
     const themeIcon = themeToggle.querySelector('i');
     
-    // 检查本地存储的主题偏好
+    //    检查本地存储的主题偏好
     const savedTheme = localStorage.getItem('theme') || 'light';
     document.documentElement.setAttribute('data-theme', savedTheme);
     updateThemeIcon(savedTheme);
@@ -68,7 +68,7 @@ function initThemeToggle() {
         localStorage.setItem('theme', newTheme);
         updateThemeIcon(newTheme);
         
-        // 添加切换动画
+        //    添加切换动画
         themeToggle.style.transform = 'scale(0.9)';
         setTimeout(() => {
             themeToggle.style.transform = '';
@@ -84,7 +84,7 @@ function initThemeToggle() {
     }
 }
 
-// 导航菜单
+//    导航菜单
 function initNavigation() {
     const navLinks = document.querySelectorAll('.nav-link');
     
@@ -96,17 +96,17 @@ function initNavigation() {
             const targetSection = document.querySelector(targetId);
             
             if (targetSection) {
-                // 更新活动链接
+                //    更新活动链接
                 navLinks.forEach(l => l.classList.remove('active'));
                 this.classList.add('active');
                 
-                // 平滑滚动到目标区域
+                //    平滑滚动到目标区域
                 window.scrollTo({
                     top: targetSection.offsetTop - 80,
                     behavior: 'smooth'
                 });
                 
-                // 如果是移动端，关闭菜单
+                //    如果是移动端，关闭菜单
                 const navMenu = document.querySelector('.nav-menu');
                 if (navMenu.classList.contains('active')) {
                     navMenu.classList.remove('active');
@@ -116,7 +116,7 @@ function initNavigation() {
     });
 }
 
-// 滚动监听
+//    滚动监听
 function initScrollSpy() {
     const sections = document.querySelectorAll('section[id]');
     const navLinks = document.querySelectorAll('.nav-link');
@@ -142,7 +142,7 @@ function initScrollSpy() {
     });
 }
 
-// 渲染球队卡片
+//    渲染球队卡片
 function renderTeams() {
     const teamsGrid = document.querySelector('.teams-grid');
     
@@ -154,7 +154,7 @@ function renderTeams() {
         const teamCard = document.createElement('div');
         teamCard.className = 'team-card';
         
-        // 获取球队统计数据
+        //    获取球队统计数据
         const standing = leagueData.standings.find(s => s.teamId === team.id);
         
         teamCard.innerHTML = `
@@ -180,7 +180,7 @@ function renderTeams() {
         `;
         
         teamCard.addEventListener('click', () => {
-            // 这里可以添加点击跳转到球队详情页的功能
+            //    这里可以添加点击跳转到球队详情页的功能
             alert(`查看 ${team.name} 的详细信息`);
         });
         
@@ -188,7 +188,7 @@ function renderTeams() {
     });
 }
 
-// 渲染积分榜
+//    渲染积分榜
 function renderStandings() {
     const standingsTable = document.querySelector('.standings-table tbody');
     
@@ -201,7 +201,7 @@ function renderStandings() {
         
         const row = document.createElement('tr');
         
-        // 根据排名添加特殊样式
+        //    根据排名添加特殊样式
         if (standing.rank <= 4) {
             row.classList.add('champions-league');
         } else if (standing.rank <= 6) {
@@ -232,7 +232,7 @@ function renderStandings() {
     });
 }
 
-// 渲染赛程表
+//    渲染赛程表
 function renderFixtures() {
     const fixturesList = document.querySelector('.fixtures-list');
     
@@ -240,7 +240,7 @@ function renderFixtures() {
     
     fixturesList.innerHTML = '';
     
-    // 按轮次分组
+    //    按轮次分组
     const fixturesByRound = {};
     leagueData.fixtures.forEach(fixture => {
         if (!fixturesByRound[fixture.round]) {
@@ -249,7 +249,7 @@ function renderFixtures() {
         fixturesByRound[fixture.round].push(fixture);
     });
     
-    // 渲染所有赛程
+    //    渲染所有赛程
     Object.keys(fixturesByRound).sort((a, b) => a - b).forEach(round => {
         const roundHeader = document.createElement('div');
         roundHeader.className = 'fixture-round-header';
@@ -313,7 +313,7 @@ function renderFixtures() {
     });
 }
 
-// 渲染数据统计
+//    渲染数据统计
 function renderStats() {
     renderScorers();
     renderAssists();
@@ -397,7 +397,7 @@ function renderTeamStats() {
     
     if (!teamStatsContainer) return;
     
-    // 计算球队统计数据
+    //    计算球队统计数据
     const teamStats = leagueData.standings.map(standing => {
         const team = getTeamById(standing.teamId);
         const goalsPerGame = (standing.goalsFor / standing.played).toFixed(2);
@@ -411,7 +411,7 @@ function renderTeamStats() {
             goalDifference: standing.goalDifference,
             goalsPerGame,
             concededPerGame,
-            cleanSheets: Math.floor(Math.random() * 5) // 模拟数据
+            cleanSheets: Math.floor(Math.random() * 5) //    模拟数据
         };
     }).sort((a, b) => a.rank - b.rank);
     
@@ -447,7 +447,7 @@ function renderTeamStats() {
     `;
 }
 
-// 渲染新闻动态
+//    渲染新闻动态
 function renderNews() {
     const newsGrid = document.querySelector('.news-grid');
     
@@ -490,27 +490,27 @@ function renderNews() {
     });
 }
 
-// 初始化标签页切换
+//    初始化标签页切换
 function initTabs() {
-    // 赛程标签页
+    //    赛程标签页
     const fixtureTabs = document.querySelectorAll('.fixtures-tabs .tab');
     const fixtureItems = document.querySelectorAll('.fixture-item');
     
     fixtureTabs.forEach(tab => {
         tab.addEventListener('click', () => {
-            // 更新活动标签
+            //    更新活动标签
             fixtureTabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
             
             const roundFilter = tab.getAttribute('data-round');
             
-            // 这里可以根据筛选条件显示不同的赛程
-            // 由于时间关系，这里只是简单的演示
+            //    这里可以根据筛选条件显示不同的赛程
+            //    由于时间关系，这里只是简单的演示
             console.log(`筛选赛程: ${roundFilter}`);
         });
     });
     
-    // 数据统计标签页
+    //    数据统计标签页
     const statsTabs = document.querySelectorAll('.stats-tab');
     const statsContents = document.querySelectorAll('.stats-tab-content');
     
@@ -518,11 +518,11 @@ function initTabs() {
         tab.addEventListener('click', () => {
             const tabId = tab.getAttribute('data-tab');
             
-            // 更新活动标签
+            //    更新活动标签
             statsTabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
             
-            // 显示对应内容
+            //    显示对应内容
             statsContents.forEach(content => {
                 content.classList.remove('active');
                 if (content.id === tabId) {
@@ -533,7 +533,7 @@ function initTabs() {
     });
 }
 
-// 初始化移动端菜单
+//    初始化移动端菜单
 function initMobileMenu() {
     const menuToggle = document.querySelector('.btn-menu-toggle');
     const navMenu = document.querySelector('.nav-menu');
@@ -542,7 +542,7 @@ function initMobileMenu() {
         menuToggle.addEventListener('click', () => {
             navMenu.classList.toggle('active');
             
-            // 更新菜单图标
+            //    更新菜单图标
             const icon = menuToggle.querySelector('i');
             if (navMenu.classList.contains('active')) {
                 icon.className = 'fas fa-times';
@@ -551,7 +551,7 @@ function initMobileMenu() {
             }
         });
         
-        // 点击菜单外区域关闭菜单
+        //    点击菜单外区域关闭菜单
         document.addEventListener('click', (e) => {
             if (!navMenu.contains(e.target) && !menuToggle.contains(e.target)) {
                 navMenu.classList.remove('active');
@@ -561,7 +561,7 @@ function initMobileMenu() {
     }
 }
 
-// 工具函数：加深颜色
+//    工具函数：加深颜色
 function darkenColor(color, percent) {
     const num = parseInt(color.replace("#", ""), 16);
     const amt = Math.round(2.55 * percent);
@@ -577,7 +577,7 @@ function darkenColor(color, percent) {
     ).toString(16).slice(1);
 }
 
-// 工具函数：格式化日期（简写）
+//    工具函数：格式化日期（简写）
 function formatDate(dateString) {
     const date = new Date(dateString);
     const month = date.getMonth() + 1;
@@ -585,14 +585,14 @@ function formatDate(dateString) {
     return `${month}月${day}日`;
 }
 
-// 工具函数：根据ID获取球队信息
+//    工具函数：根据ID获取球队信息
 function getTeamById(teamId) {
     return leagueData.teams.find(team => team.id === teamId);
 }
 
-// 添加一些交互效果
+//    添加一些交互效果
 document.addEventListener('DOMContentLoaded', () => {
-    // 为所有按钮添加点击效果
+    //    为所有按钮添加点击效果
     const buttons = document.querySelectorAll('.btn');
     buttons.forEach(button => {
         button.addEventListener('mousedown', () => {
@@ -608,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
     
-    // 为卡片添加悬停效果
+    //    为卡片添加悬停效果
     const cards = document.querySelectorAll('.team-card, .news-card');
     cards.forEach(card => {
         card.addEventListener('mouseenter', () => {

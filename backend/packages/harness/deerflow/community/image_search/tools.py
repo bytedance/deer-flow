@@ -1,5 +1,5 @@
 """
-Image Search Tool - Search images using DuckDuckGo for reference in image generation.
+Image Search 工具 - Search images using DuckDuckGo for reference in image generation.
 """
 
 import json
@@ -28,12 +28,12 @@ def _search_images(
 
     Args:
         query: Search keywords
-        max_results: Maximum number of results
+        max_results: Maximum 数字 of results
         region: Search region
         safesearch: Safe search level
         size: Image size (Small/Medium/Large/Wallpaper)
         color: Color filter
-        type_image: Image type (photo/clipart/gif/transparent/line)
+        type_image: Image 类型 (photo/clipart/gif/transparent/line)
         layout: Layout (Square/Tall/Wide)
         license_image: License filter
 
@@ -82,26 +82,28 @@ def image_search_tool(
     type_image: str | None = None,
     layout: str | None = None,
 ) -> str:
-    """Search for images online. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
+    """Search for images online. Use this 工具 BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
 
     **When to use:**
     - Before generating character/portrait images: search for similar poses, expressions, styles
     - Before generating specific objects/products: search for accurate visual references
     - Before generating scenes/locations: search for architectural or environmental references
-    - Before generating fashion/clothing: search for style and detail references
+    - Before generating fashion/clothing: search for style and 详情 references
 
     The returned image URLs can be used as reference images in image generation to significantly improve quality.
 
     Args:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
-        max_results: Maximum number of images to return. Default is 5.
+        max_results: Maximum 数字 of images to 返回. Default is 5.
         size: Image size filter. Options: "Small", "Medium", "Large", "Wallpaper". Use "Large" for reference images.
-        type_image: Image type filter. Options: "photo", "clipart", "gif", "transparent", "line". Use "photo" for realistic references.
+        type_image: Image 类型 filter. Options: "photo", "clipart", "gif", "transparent", "line". Use "photo" for realistic references.
         layout: Layout filter. Options: "Square", "Tall", "Wide". Choose based on your generation needs.
     """
     config = get_app_config().get_tool_config("image_search")
 
-    # Override max_results from config if set
+    #    Override max_results from 配置 如果 集合
+
+
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results", max_results)
 

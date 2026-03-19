@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 
 
 async def get_mcp_tools() -> list[BaseTool]:
-    """Get all tools from enabled MCP servers.
+    """Get all tools from 已启用 MCP servers.
 
     Returns:
-        List of LangChain tools from all enabled MCP servers.
+        List of LangChain tools from all 已启用 MCP servers.
     """
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -23,10 +23,18 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
+    #    NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+
+
+    #    to always read the 最新 configuration from disk. This ensures that changes
+
+
+    #    made through the Gateway API (which runs in a separate 处理) are immediately
+
+
+    #    reflected when initializing MCP tools.
+
+
     extensions_config = ExtensionsConfig.from_file()
     servers_config = build_servers_config(extensions_config)
 
@@ -35,10 +43,14 @@ async def get_mcp_tools() -> list[BaseTool]:
         return []
 
     try:
-        # Create the multi-server MCP client
+        #    Create the multi-服务器 MCP 客户端
+
+
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
-        # Inject initial OAuth headers for server connections (tool discovery/session init)
+        #    Inject initial OAuth headers 对于 服务器 connections (工具 discovery/会话 初始化)
+
+
         initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
@@ -55,7 +67,9 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
-        # Get all tools from all servers
+        #    Get all tools from all servers
+
+
         tools = await client.get_tools()
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 

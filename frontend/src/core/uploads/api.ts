@@ -1,5 +1,5 @@
 /**
- * API functions for file uploads
+ * API functions for 文件 uploads
  */
 
 import { getBackendBaseURL } from "../config";
@@ -40,7 +40,7 @@ async function readErrorDetail(
 }
 
 /**
- * Upload files to a thread
+ * Upload files to a 线程
  */
 export async function uploadFiles(
   threadId: string,
@@ -68,7 +68,7 @@ export async function uploadFiles(
 }
 
 /**
- * List all uploaded files for a thread
+ * List all uploaded files for a 线程
  */
 export async function listUploadedFiles(
   threadId: string,
@@ -87,7 +87,7 @@ export async function listUploadedFiles(
 }
 
 /**
- * Delete an uploaded file
+ * Delete an uploaded 文件
  */
 export async function deleteUploadedFile(
   threadId: string,

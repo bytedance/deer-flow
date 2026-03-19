@@ -43,7 +43,7 @@ export default function AgentChatPage() {
     context: { ...settings.context, agent_name: agent_name },
     onStart: () => {
       setIsNewThread(false);
-      // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
+      //    ! Important: Never use 下一个.js 路由器 对于 navigation in this case, otherwise it will cause the 线程 to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
         "",
@@ -91,7 +91,7 @@ export default function AgentChatPage() {
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
-            {/* Agent badge */}
+            {/* 代理 badge */}
             <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
               <span className="text-xs font-medium">

@@ -1,17 +1,19 @@
-"""DeerFlowClient — Embedded Python client for DeerFlow agent system.
+"""DeerFlowClient — Embedded Python 客户端 for DeerFlow 代理 系统.
 
-Provides direct programmatic access to DeerFlow's agent capabilities
+Provides direct programmatic access to DeerFlow's 代理 capabilities
 without requiring LangGraph Server or Gateway API processes.
 
 Usage:
-    from deerflow.client import DeerFlowClient
+    from deerflow.客户端 import DeerFlowClient
 
-    client = DeerFlowClient()
-    response = client.chat("Analyze this paper for me", thread_id="my-thread")
-    print(response)
+    客户端 = DeerFlowClient()
+    响应 = 客户端.聊天("Analyze this paper for me", thread_id="my-线程")
+    print(响应)
 
-    # Streaming
-    for event in client.stream("hello"):
+    #    Streaming
+
+
+    for event in 客户端.stream("hello"):
         print(event)
 """
 
@@ -47,16 +49,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StreamEvent:
-    """A single event from the streaming agent response.
+    """A single event from the streaming 代理 响应.
 
     Event types align with the LangGraph SSE protocol:
-        - ``"values"``: Full state snapshot (title, messages, artifacts).
-        - ``"messages-tuple"``: Per-message update (AI text, tool calls, tool results).
+        - ``"values"``: Full 状态 snapshot (title, messages, artifacts).
+        - ``"messages-tuple"``: Per-消息 更新 (AI text, 工具 calls, 工具 results).
         - ``"end"``: Stream finished.
 
     Attributes:
-        type: Event type.
-        data: Event payload. Contents vary by type.
+        类型: Event 类型.
+        数据: Event payload. Contents vary by 类型.
     """
 
     type: str
@@ -64,37 +66,43 @@ class StreamEvent:
 
 
 class DeerFlowClient:
-    """Embedded Python client for DeerFlow agent system.
+    """Embedded Python 客户端 for DeerFlow 代理 系统.
 
-    Provides direct programmatic access to DeerFlow's agent capabilities
+    Provides direct programmatic access to DeerFlow's 代理 capabilities
     without requiring LangGraph Server or Gateway API processes.
 
     Note:
         Multi-turn conversations require a ``checkpointer``. Without one,
-        each ``stream()`` / ``chat()`` call is stateless — ``thread_id``
-        is only used for file isolation (uploads / artifacts).
+        each ``stream()`` / ``聊天()`` call is stateless — ``thread_id``
+        is only used for 文件 isolation (uploads / artifacts).
 
-        The system prompt (including date, memory, and skills context) is
-        generated when the internal agent is first created and cached until
-        the configuration key changes. Call :meth:`reset_agent` to force
+        The 系统 提示词 (including date, 内存, and skills context) is
+        generated when the internal 代理 is 第一 created and cached until
+        the configuration 键 changes. Call :meth:`reset_agent` to force
         a refresh in long-running processes.
 
     Example::
 
-        from deerflow.client import DeerFlowClient
+        from deerflow.客户端 import DeerFlowClient
 
-        client = DeerFlowClient()
+        客户端 = DeerFlowClient()
 
-        # Simple one-shot
-        print(client.chat("hello"))
+        #    Simple one-shot
 
-        # Streaming
-        for event in client.stream("hello"):
-            print(event.type, event.data)
 
-        # Configuration queries
-        print(client.list_models())
-        print(client.list_skills())
+        print(客户端.聊天("hello"))
+
+        #    Streaming
+
+
+        for event in 客户端.stream("hello"):
+            print(event.类型, event.数据)
+
+        #    Configuration queries
+
+
+        print(客户端.list_models())
+        print(客户端.list_skills())
     """
 
     def __init__(
@@ -107,19 +115,19 @@ class DeerFlowClient:
         subagent_enabled: bool = False,
         plan_mode: bool = False,
     ):
-        """Initialize the client.
+        """Initialize the 客户端.
 
-        Loads configuration but defers agent creation to first use.
+        Loads configuration but defers 代理 creation to 第一 use.
 
         Args:
-            config_path: Path to config.yaml. Uses default resolution if None.
-            checkpointer: LangGraph checkpointer instance for state persistence.
+            config_path: Path to 配置.yaml. Uses 默认 resolution if None.
+            checkpointer: LangGraph checkpointer instance for 状态 persistence.
                 Required for multi-turn conversations on the same thread_id.
                 Without a checkpointer, each call is stateless.
-            model_name: Override the default model name from config.
-            thinking_enabled: Enable model's extended thinking.
+            model_name: Override the 默认 模型 名称 from 配置.
+            thinking_enabled: Enable 模型's extended thinking.
             subagent_enabled: Enable subagent delegation.
-            plan_mode: Enable TodoList middleware for plan mode.
+            plan_mode: Enable TodoList 中间件 for plan mode.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -131,27 +139,35 @@ class DeerFlowClient:
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
 
-        # Lazy agent — created on first call, recreated when config changes.
+        #    Lazy 代理 — created on 第一 call, recreated when 配置 changes.
+
+
         self._agent = None
         self._agent_config_key: tuple | None = None
 
     def reset_agent(self) -> None:
-        """Force the internal agent to be recreated on the next call.
+        """Force the internal 代理 to be recreated on the 下一个 call.
 
-        Use this after external changes (e.g. memory updates, skill
-        installations) that should be reflected in the system prompt
-        or tool set.
+        Use this after external changes (e.g. 内存 updates, skill
+        installations) that should be reflected in the 系统 提示词
+        or 工具 集合.
         """
         self._agent = None
         self._agent_config_key = None
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Internal helpers
+
+
+    #    ------------------------------------------------------------------
+
+
 
     @staticmethod
     def _atomic_write_json(path: Path, data: dict) -> None:
-        """Write JSON to *path* atomically (temp file + replace)."""
+        """Write JSON to *路径* atomically (temp 文件 + replace)."""
         fd = tempfile.NamedTemporaryFile(
             mode="w",
             dir=path.parent,
@@ -168,7 +184,7 @@ class DeerFlowClient:
             raise
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
-        """Build a RunnableConfig for agent invocation."""
+        """Build a RunnableConfig for 代理 invocation."""
         configurable = {
             "thread_id": thread_id,
             "model_name": overrides.get("model_name", self._model_name),
@@ -182,7 +198,7 @@ class DeerFlowClient:
         )
 
     def _ensure_agent(self, config: RunnableConfig):
-        """Create (or recreate) the agent when config-dependent params change."""
+        """Create (or recreate) the 代理 when 配置-dependent params change."""
         cfg = config.get("configurable", {})
         key = (
             cfg.get("model_name"),
@@ -223,14 +239,14 @@ class DeerFlowClient:
 
     @staticmethod
     def _get_tools(*, model_name: str | None, subagent_enabled: bool):
-        """Lazy import to avoid circular dependency at module level."""
+        """Lazy import to avoid circular dependency at 模块 level."""
         from deerflow.tools import get_available_tools
 
         return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
 
     @staticmethod
     def _serialize_message(msg) -> dict:
-        """Serialize a LangChain message to a plain dict for values events."""
+        """Serialize a LangChain 消息 to a plain 字典 for values events."""
         if isinstance(msg, AIMessage):
             d: dict[str, Any] = {"type": "ai", "content": msg.content, "id": getattr(msg, "id", None)}
             if msg.tool_calls:
@@ -252,7 +268,7 @@ class DeerFlowClient:
 
     @staticmethod
     def _extract_text(content) -> str:
-        """Extract plain text from AIMessage content (str or list of blocks)."""
+        """Extract plain text from AIMessage content (str or 列表 of blocks)."""
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -265,9 +281,15 @@ class DeerFlowClient:
             return "\n".join(parts) if parts else ""
         return str(content)
 
-    # ------------------------------------------------------------------
-    # Public API — conversation
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — conversation
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def stream(
         self,
@@ -278,8 +300,8 @@ class DeerFlowClient:
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn, yielding events incrementally.
 
-        Each call sends one user message and yields events until the agent
-        finishes its turn. A ``checkpointer`` must be provided at init time
+        Each call sends one 用户 消息 and yields events until the 代理
+        finishes its turn. A ``checkpointer`` must be provided at 初始化 time
         for multi-turn context to be preserved across calls.
 
         Event types align with the LangGraph SSE protocol so that
@@ -287,18 +309,18 @@ class DeerFlowClient:
         without changing their event-handling logic.
 
         Args:
-            message: User message text.
-            thread_id: Thread ID for conversation context. Auto-generated if None.
-            **kwargs: Override client defaults (model_name, thinking_enabled,
+            消息: 用户 消息 text.
+            thread_id: 线程 ID for conversation context. Auto-generated if None.
+            **kwargs: Override 客户端 defaults (model_name, thinking_enabled,
                 plan_mode, subagent_enabled, recursion_limit).
 
         Yields:
             StreamEvent with one of:
-            - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
-            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
-            - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
-            - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
-            - type="end"             data={}
+            - 类型="values"          数据={"title": str|None, "messages": [...], "artifacts": [...]}
+            - 类型="messages-tuple"  数据={"类型": "ai", "content": str, "标识符": str}
+            - 类型="messages-tuple"  数据={"类型": "ai", "content": "", "标识符": str, "tool_calls": [...]}
+            - 类型="messages-tuple"  数据={"类型": "工具", "content": str, "名称": str, "tool_call_id": str, "标识符": str}
+            - 类型="end"             数据={}
         """
         if thread_id is None:
             thread_id = str(uuid.uuid4())
@@ -352,7 +374,9 @@ class DeerFlowClient:
                         },
                     )
 
-            # Emit a values event for each state snapshot
+            #    Emit a values event 对于 each 状态 snapshot
+
+
             yield StreamEvent(
                 type="values",
                 data={
@@ -365,20 +389,20 @@ class DeerFlowClient:
         yield StreamEvent(type="end", data={})
 
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
-        """Send a message and return the final text response.
+        """Send a 消息 and 返回 the final text 响应.
 
         Convenience wrapper around :meth:`stream` that returns only the
-        **last** AI text from ``messages-tuple`` events. If the agent emits
+        **最后** AI text from ``messages-tuple`` events. If the 代理 emits
         multiple text segments in one turn, intermediate segments are
         discarded. Use :meth:`stream` directly to capture all events.
 
         Args:
-            message: User message text.
-            thread_id: Thread ID for conversation context. Auto-generated if None.
-            **kwargs: Override client defaults (same as stream()).
+            消息: 用户 消息 text.
+            thread_id: 线程 ID for conversation context. Auto-generated if None.
+            **kwargs: Override 客户端 defaults (same as stream()).
 
         Returns:
-            The last AI message text, or empty string if no response.
+            The 最后 AI 消息 text, or empty 字符串 if no 响应.
         """
         last_text = ""
         for event in self.stream(message, thread_id=thread_id, **kwargs):
@@ -388,15 +412,21 @@ class DeerFlowClient:
                     last_text = content
         return last_text
 
-    # ------------------------------------------------------------------
-    # Public API — configuration queries
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — configuration queries
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def list_models(self) -> dict:
-        """List available models from configuration.
+        """List 可用的 models from configuration.
 
         Returns:
-            Dict with "models" key containing list of model info dicts,
+            Dict with "models" 键 containing 列表 of 模型 信息 dicts,
             matching the Gateway API ``ModelsListResponse`` schema.
         """
         return {
@@ -413,13 +443,13 @@ class DeerFlowClient:
         }
 
     def list_skills(self, enabled_only: bool = False) -> dict:
-        """List available skills.
+        """List 可用的 skills.
 
         Args:
-            enabled_only: If True, only return enabled skills.
+            enabled_only: If True, only 返回 已启用 skills.
 
         Returns:
-            Dict with "skills" key containing list of skill info dicts,
+            Dict with "skills" 键 containing 列表 of skill 信息 dicts,
             matching the Gateway API ``SkillsListResponse`` schema.
         """
         from deerflow.skills.loader import load_skills
@@ -438,23 +468,23 @@ class DeerFlowClient:
         }
 
     def get_memory(self) -> dict:
-        """Get current memory data.
+        """Get 当前 内存 数据.
 
         Returns:
-            Memory data dict (see src/agents/memory/updater.py for structure).
+            内存 数据 字典 (see src/agents/内存/updater.py for structure).
         """
         from deerflow.agents.memory.updater import get_memory_data
 
         return get_memory_data()
 
     def get_model(self, name: str) -> dict | None:
-        """Get a specific model's configuration by name.
+        """Get a specific 模型's configuration by 名称.
 
         Args:
-            name: Model name.
+            名称: 模型 名称.
 
         Returns:
-            Model info dict matching the Gateway API ``ModelResponse``
+            模型 信息 字典 matching the Gateway API ``ModelResponse``
             schema, or None if not found.
         """
         model = self._app_config.get_model_config(name)
@@ -468,35 +498,41 @@ class DeerFlowClient:
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
         }
 
-    # ------------------------------------------------------------------
-    # Public API — MCP configuration
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — MCP configuration
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def get_mcp_config(self) -> dict:
-        """Get MCP server configurations.
+        """Get MCP 服务器 configurations.
 
         Returns:
-            Dict with "mcp_servers" key mapping server name to config,
+            Dict with "mcp_servers" 键 mapping 服务器 名称 to 配置,
             matching the Gateway API ``McpConfigResponse`` schema.
         """
         config = get_extensions_config()
         return {"mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()}}
 
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
-        """Update MCP server configurations.
+        """Update MCP 服务器 configurations.
 
-        Writes to extensions_config.json and reloads the cache.
+        Writes to extensions_config.json and reloads the 缓存.
 
         Args:
-            mcp_servers: Dict mapping server name to config dict.
-                Each value should contain keys like enabled, type, command, args, env, url, etc.
+            mcp_servers: Dict mapping 服务器 名称 to 配置 字典.
+                Each 值 should contain keys like 已启用, 类型, command, args, env, 链接, etc.
 
         Returns:
-            Dict with "mcp_servers" key, matching the Gateway API
+            Dict with "mcp_servers" 键, matching the Gateway API
             ``McpConfigResponse`` schema.
 
         Raises:
-            OSError: If the config file cannot be written.
+            OSError: If the 配置 文件 cannot be written.
         """
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
@@ -515,18 +551,24 @@ class DeerFlowClient:
         reloaded = reload_extensions_config()
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
-    # ------------------------------------------------------------------
-    # Public API — skills management
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — skills management
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def get_skill(self, name: str) -> dict | None:
-        """Get a specific skill by name.
+        """Get a specific skill by 名称.
 
         Args:
-            name: Skill name.
+            名称: Skill 名称.
 
         Returns:
-            Skill info dict, or None if not found.
+            Skill 信息 字典, or None if not found.
         """
         from deerflow.skills.loader import load_skills
 
@@ -542,18 +584,18 @@ class DeerFlowClient:
         }
 
     def update_skill(self, name: str, *, enabled: bool) -> dict:
-        """Update a skill's enabled status.
+        """Update a skill's 已启用 status.
 
         Args:
-            name: Skill name.
-            enabled: New enabled status.
+            名称: Skill 名称.
+            已启用: New 已启用 status.
 
         Returns:
-            Updated skill info dict.
+            Updated skill 信息 字典.
 
         Raises:
             ValueError: If the skill is not found.
-            OSError: If the config file cannot be written.
+            OSError: If the 配置 文件 cannot be written.
         """
         from deerflow.skills.loader import load_skills
 
@@ -594,14 +636,14 @@ class DeerFlowClient:
         """Install a skill from a .skill archive (ZIP).
 
         Args:
-            skill_path: Path to the .skill file.
+            skill_path: Path to the .skill 文件.
 
         Returns:
-            Dict with success, skill_name, message.
+            Dict with 成功, skill_name, 消息.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the file is invalid.
+            FileNotFoundError: If the 文件 does not exist.
+            ValueError: If the 文件 is 无效.
         """
         from deerflow.skills.loader import get_skills_root_path
         from deerflow.skills.validation import _validate_skill_frontmatter
@@ -654,25 +696,31 @@ class DeerFlowClient:
 
         return {"success": True, "skill_name": skill_name, "message": f"Skill '{skill_name}' installed successfully"}
 
-    # ------------------------------------------------------------------
-    # Public API — memory management
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — 内存 management
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def reload_memory(self) -> dict:
-        """Reload memory data from file, forcing cache invalidation.
+        """Reload 内存 数据 from 文件, forcing 缓存 invalidation.
 
         Returns:
-            The reloaded memory data dict.
+            The reloaded 内存 数据 字典.
         """
         from deerflow.agents.memory.updater import reload_memory_data
 
         return reload_memory_data()
 
     def get_memory_config(self) -> dict:
-        """Get memory system configuration.
+        """Get 内存 系统 configuration.
 
         Returns:
-            Memory config dict.
+            内存 配置 字典.
         """
         from deerflow.config.memory_config import get_memory_config
 
@@ -688,47 +736,55 @@ class DeerFlowClient:
         }
 
     def get_memory_status(self) -> dict:
-        """Get memory status: config + current data.
+        """Get 内存 status: 配置 + 当前 数据.
 
         Returns:
-            Dict with "config" and "data" keys.
+            Dict with "配置" and "数据" keys.
         """
         return {
             "config": self.get_memory_config(),
             "data": self.get_memory(),
         }
 
-    # ------------------------------------------------------------------
-    # Public API — file uploads
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — 文件 uploads
+
+
+    #    ------------------------------------------------------------------
+
+
 
     @staticmethod
     def _get_uploads_dir(thread_id: str) -> Path:
-        """Get (and create) the uploads directory for a thread."""
+        """Get (and 创建) the uploads 目录 for a 线程."""
         base = get_paths().sandbox_uploads_dir(thread_id)
         base.mkdir(parents=True, exist_ok=True)
         return base
 
     def upload_files(self, thread_id: str, files: list[str | Path]) -> dict:
-        """Upload local files into a thread's uploads directory.
+        """Upload local files into a 线程's uploads 目录.
 
         For PDF, PPT, Excel, and Word files, they are also converted to Markdown.
 
         Args:
-            thread_id: Target thread ID.
-            files: List of local file paths to upload.
+            thread_id: Target 线程 ID.
+            files: List of local 文件 paths to upload.
 
         Returns:
-            Dict with success, files, message — matching the Gateway API
+            Dict with 成功, files, 消息 — matching the Gateway API
             ``UploadResponse`` schema.
 
         Raises:
-            FileNotFoundError: If any file does not exist.
-            ValueError: If any supplied path exists but is not a regular file.
+            FileNotFoundError: If any 文件 does not exist.
+            ValueError: If any supplied 路径 exists but is not a regular 文件.
         """
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
-        # Validate all files upfront to avoid partial uploads.
+        #    Validate all files upfront to avoid partial uploads.
+
+
         resolved_files = []
         convertible_extensions = {ext.lower() for ext in CONVERTIBLE_EXTENSIONS}
         has_convertible_file = False
@@ -754,8 +810,12 @@ class DeerFlowClient:
             else:
                 import concurrent.futures
 
-                # Reuse one worker when already inside an event loop to avoid
-                # creating a new ThreadPoolExecutor per converted file.
+                #    Reuse one worker when already inside an event 循环 to avoid
+
+
+                #    creating a 新建 ThreadPoolExecutor per converted 文件.
+
+
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
         def _convert_in_thread(path: Path):
@@ -805,14 +865,14 @@ class DeerFlowClient:
         }
 
     def list_uploads(self, thread_id: str) -> dict:
-        """List files in a thread's uploads directory.
+        """List files in a 线程's uploads 目录.
 
         Args:
-            thread_id: Thread ID.
+            thread_id: 线程 ID.
 
         Returns:
-            Dict with "files" and "count" keys, matching the Gateway API
-            ``list_uploaded_files`` response.
+            Dict with "files" and "计数" keys, matching the Gateway API
+            ``list_uploaded_files`` 响应.
         """
         uploads_dir = self._get_uploads_dir(thread_id)
         if not uploads_dir.exists():
@@ -839,19 +899,19 @@ class DeerFlowClient:
         return {"files": files, "count": len(files)}
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
-        """Delete a file from a thread's uploads directory.
+        """Delete a 文件 from a 线程's uploads 目录.
 
         Args:
-            thread_id: Thread ID.
-            filename: Filename to delete.
+            thread_id: 线程 ID.
+            filename: Filename to 删除.
 
         Returns:
-            Dict with success and message, matching the Gateway API
-            ``delete_uploaded_file`` response.
+            Dict with 成功 and 消息, matching the Gateway API
+            ``delete_uploaded_file`` 响应.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
-            PermissionError: If path traversal is detected.
+            FileNotFoundError: If the 文件 does not exist.
+            PermissionError: If 路径 traversal is detected.
         """
         uploads_dir = self._get_uploads_dir(thread_id)
         file_path = (uploads_dir / filename).resolve()
@@ -867,23 +927,29 @@ class DeerFlowClient:
         file_path.unlink()
         return {"success": True, "message": f"Deleted {filename}"}
 
-    # ------------------------------------------------------------------
-    # Public API — artifacts
-    # ------------------------------------------------------------------
+    #    ------------------------------------------------------------------
+
+
+    #    Public API — artifacts
+
+
+    #    ------------------------------------------------------------------
+
+
 
     def get_artifact(self, thread_id: str, path: str) -> tuple[bytes, str]:
-        """Read an artifact file produced by the agent.
+        """Read an artifact 文件 produced by the 代理.
 
         Args:
-            thread_id: Thread ID.
-            path: Virtual path (e.g. "mnt/user-data/outputs/file.txt").
+            thread_id: 线程 ID.
+            路径: Virtual 路径 (e.g. "mnt/用户-数据/outputs/文件.txt").
 
         Returns:
             Tuple of (file_bytes, mime_type).
 
         Raises:
             FileNotFoundError: If the artifact does not exist.
-            ValueError: If the path is invalid.
+            ValueError: If the 路径 is 无效.
         """
         virtual_prefix = "mnt/user-data"
         clean_path = path.lstrip("/")

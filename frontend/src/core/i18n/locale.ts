@@ -22,7 +22,7 @@ export function normalizeLocale(locale: string | null | undefined): Locale {
   return DEFAULT_LOCALE;
 }
 
-// Helper function to detect browser locale
+//    Helper 函数 to detect 浏览器 locale
 export function detectLocale(): Locale {
   if (typeof window === "undefined") {
     return DEFAULT_LOCALE;

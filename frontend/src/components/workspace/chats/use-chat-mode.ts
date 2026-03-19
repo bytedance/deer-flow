@@ -5,7 +5,7 @@ import { usePromptInputController } from "@/components/ai-elements/prompt-input"
 import { useI18n } from "@/core/i18n/hooks";
 
 /**
- * Hook to determine if the chat is in a specific mode based on URL parameters, and to set an initial prompt input value accordingly.
+ * Hook to determine if the 聊天 is in a specific mode based on URL parameters, and to 集合 an initial 提示词 输入 值 accordingly.
  */
 export function useSpecificChatMode() {
   const { t } = useI18n();

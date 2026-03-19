@@ -8,7 +8,7 @@ CheckpointerType = Literal["memory", "sqlite", "postgres"]
 
 
 class CheckpointerConfig(BaseModel):
-    """Configuration for LangGraph state persistence checkpointer."""
+    """Configuration for LangGraph 状态 persistence checkpointer."""
 
     type: CheckpointerType = Field(
         description="Checkpointer backend type. "
@@ -25,12 +25,14 @@ class CheckpointerConfig(BaseModel):
     )
 
 
-# Global configuration instance — None means no checkpointer is configured.
+#    Global configuration instance — None means no checkpointer is configured.
+
+
 _checkpointer_config: CheckpointerConfig | None = None
 
 
 def get_checkpointer_config() -> CheckpointerConfig | None:
-    """Get the current checkpointer configuration, or None if not configured."""
+    """Get the 当前 checkpointer configuration, or None if not configured."""
     return _checkpointer_config
 
 

@@ -23,7 +23,9 @@ _THREAD_DATA = {
 }
 
 
-# ---------- replace_virtual_path ----------
+#    ---------- replace_virtual_path ----------
+
+
 
 
 def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
@@ -34,7 +36,9 @@ def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 
-# ---------- mask_local_paths_in_output ----------
+#    ---------- mask_local_paths_in_output ----------
+
+
 
 
 def test_mask_local_paths_in_output_hides_host_paths() -> None:
@@ -46,7 +50,7 @@ def test_mask_local_paths_in_output_hides_host_paths() -> None:
 
 
 def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
-    """Skills host paths in bash output should be masked to virtual paths."""
+    """Skills host paths in bash 输出 should be masked to virtual paths."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
@@ -58,7 +62,9 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
 
 
-# ---------- _reject_path_traversal ----------
+#    ---------- _reject_path_traversal ----------
+
+
 
 
 def test_reject_path_traversal_blocks_dotdot() -> None:
@@ -77,13 +83,17 @@ def test_reject_path_traversal_blocks_backslash_dotdot() -> None:
 
 
 def test_reject_path_traversal_allows_normal_paths() -> None:
-    # Should not raise
+    #    Should not raise
+
+
     _reject_path_traversal("/mnt/user-data/workspace/file.txt")
     _reject_path_traversal("/mnt/skills/public/bootstrap/SKILL.md")
     _reject_path_traversal("/mnt/user-data/workspace/sub/dir/file.py")
 
 
-# ---------- validate_local_tool_path ----------
+#    ---------- validate_local_tool_path ----------
+
+
 
 
 def test_validate_local_tool_path_rejects_non_virtual_path() -> None:
@@ -92,25 +102,29 @@ def test_validate_local_tool_path_rejects_non_virtual_path() -> None:
 
 
 def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
-    """The bare /mnt/user-data root without trailing slash is not a valid sub-path."""
+    """The bare /mnt/用户-数据 root without trailing slash is not a 有效 sub-路径."""
     with pytest.raises(PermissionError, match="Only paths under"):
         validate_local_tool_path(VIRTUAL_PATH_PREFIX, _THREAD_DATA)
 
 
 def test_validate_local_tool_path_allows_user_data_paths() -> None:
-    # Should not raise — user-data paths are always allowed
+    #    Should not raise — 用户-数据 paths are always allowed
+
+
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA)
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/doc.pdf", _THREAD_DATA)
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/outputs/result.csv", _THREAD_DATA)
 
 
 def test_validate_local_tool_path_allows_user_data_write() -> None:
-    # read_only=False (default) should still work for user-data paths
+    #    read_only=False (默认) should still work 对于 用户-数据 paths
+
+
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
 
 
 def test_validate_local_tool_path_rejects_traversal_in_user_data() -> None:
-    """Path traversal via .. in user-data paths must be rejected."""
+    """Path traversal via .. in 用户-数据 paths must be rejected."""
     with pytest.raises(PermissionError, match="path traversal"):
         validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA)
 
@@ -130,11 +144,13 @@ def test_validate_local_tool_path_rejects_none_thread_data() -> None:
         validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", None)
 
 
-# ---------- _resolve_skills_path ----------
+#    ---------- _resolve_skills_path ----------
+
+
 
 
 def test_resolve_skills_path_resolves_correctly() -> None:
-    """Skills virtual path should resolve to host path."""
+    """Skills virtual 路径 should resolve to host 路径."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
@@ -144,7 +160,7 @@ def test_resolve_skills_path_resolves_correctly() -> None:
 
 
 def test_resolve_skills_path_resolves_root() -> None:
-    """Skills container root should resolve to host skills directory."""
+    """Skills container root should resolve to host skills 目录."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
@@ -154,7 +170,7 @@ def test_resolve_skills_path_resolves_root() -> None:
 
 
 def test_resolve_skills_path_raises_when_not_configured() -> None:
-    """Should raise FileNotFoundError when skills directory is not available."""
+    """Should raise FileNotFoundError when skills 目录 is not 可用的."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value=None),
@@ -163,11 +179,13 @@ def test_resolve_skills_path_raises_when_not_configured() -> None:
             _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
 
 
-# ---------- _resolve_and_validate_user_data_path ----------
+#    ---------- _resolve_and_validate_user_data_path ----------
+
+
 
 
 def test_resolve_and_validate_user_data_path_resolves_correctly(tmp_path: Path) -> None:
-    """Resolved path should land inside the correct thread directory."""
+    """Resolved 路径 should land inside the 正确 线程 目录."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     thread_data = {
@@ -180,7 +198,7 @@ def test_resolve_and_validate_user_data_path_resolves_correctly(tmp_path: Path) 
 
 
 def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) -> None:
-    """Even after resolution, path must stay within allowed roots."""
+    """Even after resolution, 路径 must stay within allowed roots."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     thread_data = {
@@ -188,12 +206,16 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
         "uploads_path": str(tmp_path / "uploads"),
         "outputs_path": str(tmp_path / "outputs"),
     }
-    # This path resolves outside the allowed roots
+    #    This 路径 resolves outside the allowed roots
+
+
     with pytest.raises(PermissionError):
         _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
 
 
-# ---------- replace_virtual_paths_in_command ----------
+#    ---------- replace_virtual_paths_in_command ----------
+
+
 
 
 def test_replace_virtual_paths_in_command_replaces_skills_paths() -> None:
@@ -209,7 +231,7 @@ def test_replace_virtual_paths_in_command_replaces_skills_paths() -> None:
 
 
 def test_replace_virtual_paths_in_command_replaces_both() -> None:
-    """Both user-data and skills paths should be replaced in the same command."""
+    """Both 用户-数据 and skills paths should be replaced in the same command."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/skills"),
@@ -222,7 +244,9 @@ def test_replace_virtual_paths_in_command_replaces_both() -> None:
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
 
 
-# ---------- validate_local_bash_command_paths ----------
+#    ---------- validate_local_bash_command_paths ----------
+
+
 
 
 def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
@@ -238,7 +262,7 @@ def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> 
 
 
 def test_validate_local_bash_command_paths_blocks_traversal_in_user_data() -> None:
-    """Bash commands with traversal in user-data paths should be blocked."""
+    """Bash commands with traversal in 用户-数据 paths should be blocked."""
     with pytest.raises(PermissionError, match="path traversal"):
         validate_local_bash_command_paths(
             "cat /mnt/user-data/workspace/../../etc/passwd",
@@ -256,7 +280,9 @@ def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
             )
 
 
-# ---------- Skills path tests ----------
+#    ---------- Skills 路径 tests ----------
+
+
 
 
 def test_is_skills_path_recognises_default_prefix() -> None:
@@ -270,7 +296,9 @@ def test_is_skills_path_recognises_default_prefix() -> None:
 def test_validate_local_tool_path_allows_skills_read_only() -> None:
     """read_file / ls should be able to access /mnt/skills paths."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
-        # Should not raise
+        #    Should not raise
+
+
         validate_local_tool_path(
             "/mnt/skills/public/bootstrap/SKILL.md",
             _THREAD_DATA,
@@ -299,23 +327,27 @@ def test_validate_local_bash_command_paths_allows_skills_path() -> None:
 
 
 def test_validate_local_bash_command_paths_still_blocks_other_paths() -> None:
-    """Paths outside virtual and system prefixes must still be blocked."""
+    """Paths outside virtual and 系统 prefixes must still be blocked."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         with pytest.raises(PermissionError, match="Unsafe absolute paths"):
             validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
 
 
 def test_validate_local_tool_path_skills_custom_container_path() -> None:
-    """Skills with a custom container_path in config should also work."""
+    """Skills with a custom container_path in 配置 should also work."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/custom/skills"):
-        # Should not raise
+        #    Should not raise
+
+
         validate_local_tool_path(
             "/custom/skills/public/my-skill/SKILL.md",
             _THREAD_DATA,
             read_only=True,
         )
 
-        # The default /mnt/skills should not match since container path is /custom/skills
+        #    The 默认 /mnt/skills should not match since container 路径 is /custom/skills
+
+
         with pytest.raises(PermissionError, match="Only paths under"):
             validate_local_tool_path(
                 "/mnt/skills/public/bootstrap/SKILL.md",

@@ -19,7 +19,9 @@ class Article:
     def to_markdown(self, including_title: bool = True) -> str:
         markdown = ""
         if including_title:
-            markdown += f"# {self.title}\n\n"
+            markdown += f"#   {self.title}\n\n"
+
+
 
         if self.html_content is None or not str(self.html_content).strip():
             markdown += "*No content available*\n"
@@ -48,7 +50,9 @@ class Article:
                 if text_part:
                     content.append({"type": "text", "text": text_part})
 
-        # If after processing all parts, content is still empty, provide a fallback message.
+        #    If after processing all parts, content is still empty, provide a 回退 消息.
+
+
         if not content:
             content = [{"type": "text", "text": "No content available"}]
 

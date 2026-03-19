@@ -27,7 +27,7 @@ export function useNotification(): UseNotificationReturn {
   const lastNotificationTime = useRef<Date>(new Date());
 
   useEffect(() => {
-    // Check if browser supports Notification API
+    //    Check 如果 浏览器 supports Notification API
     if ("Notification" in window) {
       setIsSupported(true);
       setPermission(Notification.permission);
@@ -76,7 +76,7 @@ export function useNotification(): UseNotificationReturn {
 
       const notification = new Notification(title, options);
 
-      // Optional: Add event listeners
+      //    Optional: Add event listeners
       notification.onclick = () => {
         window.focus();
         notification.close();

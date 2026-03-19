@@ -9,7 +9,7 @@ export async function detectLocaleServer(): Promise<Locale> {
     try {
       locale = decodeURIComponent(locale);
     } catch {
-      // Keep raw cookie value when decoding fails.
+      //    Keep raw cookie 值 when decoding fails.
     }
   }
 

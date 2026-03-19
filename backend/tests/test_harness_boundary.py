@@ -1,9 +1,9 @@
-"""Boundary check: harness layer must not import from app layer.
+"""Boundary 检查: harness layer must not import from app layer.
 
-The deerflow-harness package (packages/harness/deerflow/) is a standalone,
-publishable agent framework. It must never depend on the app layer (app/).
+The deerflow-harness 包 (packages/harness/deerflow/) is a standalone,
+publishable 代理 框架. It must never depend on the app layer (app/).
 
-This test scans all Python files in the harness package and fails if any
+This 测试 scans all Python files in the harness 包 and fails if any
 ``from app.`` or ``import app.`` statement is found.
 """
 

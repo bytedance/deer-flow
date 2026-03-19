@@ -1,4 +1,4 @@
-"""Subagent registry for managing available subagents."""
+"""Subagent registry for managing 可用的 subagents."""
 
 import logging
 from dataclasses import replace
@@ -10,19 +10,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_subagent_config(name: str) -> SubagentConfig | None:
-    """Get a subagent configuration by name, with config.yaml overrides applied.
+    """Get a subagent configuration by 名称, with 配置.yaml overrides applied.
 
     Args:
-        name: The name of the subagent.
+        名称: The 名称 of the subagent.
 
     Returns:
-        SubagentConfig if found (with any config.yaml overrides applied), None otherwise.
+        SubagentConfig if found (with any 配置.yaml overrides applied), None otherwise.
     """
     config = BUILTIN_SUBAGENTS.get(name)
     if config is None:
         return None
 
-    # Apply timeout override from config.yaml (lazy import to avoid circular deps)
+    #    Apply timeout override from 配置.yaml (lazy import to avoid circular deps)
+
+
     from deerflow.config.subagents_config import get_subagents_app_config
 
     app_config = get_subagents_app_config()
@@ -35,7 +37,7 @@ def get_subagent_config(name: str) -> SubagentConfig | None:
 
 
 def list_subagents() -> list[SubagentConfig]:
-    """List all available subagent configurations (with config.yaml overrides applied).
+    """List all 可用的 subagent configurations (with 配置.yaml overrides applied).
 
     Returns:
         List of all registered SubagentConfig instances.
@@ -44,7 +46,7 @@ def list_subagents() -> list[SubagentConfig]:
 
 
 def get_subagent_names() -> list[str]:
-    """Get all available subagent names.
+    """Get all 可用的 subagent names.
 
     Returns:
         List of subagent names.

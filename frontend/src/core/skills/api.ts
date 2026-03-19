@@ -47,7 +47,7 @@ export async function installSkill(
   });
 
   if (!response.ok) {
-    // Handle HTTP error responses (4xx, 5xx)
+    //    Handle HTTP 错误 responses (4xx, 5xx)
     const errorData = await response.json().catch(() => ({}));
     const errorMessage =
       errorData.detail ?? `HTTP ${response.status}: ${response.statusText}`;

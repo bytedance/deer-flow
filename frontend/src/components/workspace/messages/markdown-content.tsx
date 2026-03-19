@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { CitationLink } from "../citations/citation-link";
 
 function isExternalUrl(href: string | undefined): boolean {
-  return !!href && /^https?:\/\//.test(href);
+  return !!href && /^https?:\/\//   .测试(href);
 }
 
 export type MarkdownContentProps = {

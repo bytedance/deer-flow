@@ -14,7 +14,7 @@ export default tseslint.config(
       "*.js",
     ],
   },
-  ...compat.extends("next/core-web-vitals"),
+  ...compat.extends("下一个/core-web-vitals"),
   {
     files: ["**/*.ts", "**/*.tsx"],
     extends: [

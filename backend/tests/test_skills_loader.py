@@ -1,4 +1,4 @@
-"""Tests for recursive skills loading."""
+"""Tests for recursive skills 加载中."""
 
 from pathlib import Path
 
@@ -8,12 +8,14 @@ from deerflow.skills.loader import get_skills_root_path, load_skills
 def _write_skill(skill_dir: Path, name: str, description: str) -> None:
     """Write a minimal SKILL.md for tests."""
     skill_dir.mkdir(parents=True, exist_ok=True)
-    content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
+    content = f"---\nname: {name}\ndescription: {description}\n---\n\n#   {名称}\n"
+
+
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
 def test_get_skills_root_path_points_to_project_root_skills():
-    """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
+    """get_skills_root_path() should point to deer-flow/skills (sibling of 后端/), not 后端/packages/skills."""
     path = get_skills_root_path()
     assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
     assert (path.parent / "backend").is_dir(), (
@@ -22,7 +24,7 @@ def test_get_skills_root_path_points_to_project_root_skills():
 
 
 def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: Path):
-    """Nested skills should be discovered recursively with correct container paths."""
+    """Nested skills should be discovered recursively with 正确 container paths."""
     skills_root = tmp_path / "skills"
 
     _write_skill(skills_root / "public" / "root-skill", "root-skill", "Root skill")

@@ -1,4 +1,4 @@
-"""Tests for custom agent support."""
+"""Tests for custom 代理 support."""
 
 from __future__ import annotations
 
@@ -9,9 +9,15 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Helpers
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _make_paths(base_dir: Path):
@@ -22,7 +28,7 @@ def _make_paths(base_dir: Path):
 
 
 def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are helpful.") -> None:
-    """Write an agent directory with config.yaml and SOUL.md."""
+    """Write an 代理 目录 with 配置.yaml and SOUL.md."""
     agent_dir = base_dir / "agents" / name
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -36,9 +42,15 @@ def _write_agent(base_dir: Path, name: str, config: dict, soul: str = "You are h
     (agent_dir / "SOUL.md").write_text(soul, encoding="utf-8")
 
 
-# ===========================================================================
-# 1. Paths class – agent path methods
-# ===========================================================================
+#    ===========================================================================
+
+
+#    1. Paths 类 – 代理 路径 methods
+
+
+#    ===========================================================================
+
+
 
 
 class TestPaths:
@@ -65,9 +77,15 @@ class TestPaths:
         assert paths.agent_memory_file("my-agent") == tmp_path / "agents" / "my-agent" / "memory.json"
 
 
-# ===========================================================================
-# 2. AgentConfig – Pydantic parsing
-# ===========================================================================
+#    ===========================================================================
+
+
+#    2. AgentConfig – Pydantic parsing
+
+
+#    ===========================================================================
+
+
 
 
 class TestAgentConfig:
@@ -103,9 +121,15 @@ class TestAgentConfig:
         assert cfg.tool_groups is None
 
 
-# ===========================================================================
-# 3. load_agent_config
-# ===========================================================================
+#    ===========================================================================
+
+
+#    3. load_agent_config
+
+
+#    ===========================================================================
+
+
 
 
 class TestLoadAgentConfig:
@@ -130,7 +154,9 @@ class TestLoadAgentConfig:
                 load_agent_config("nonexistent-agent")
 
     def test_load_missing_config_yaml_raises(self, tmp_path):
-        # Create directory without config.yaml
+        #    Create 目录 without 配置.yaml
+
+
         (tmp_path / "agents" / "broken-agent").mkdir(parents=True)
 
         with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
@@ -140,7 +166,7 @@ class TestLoadAgentConfig:
                 load_agent_config("broken-agent")
 
     def test_load_config_infers_name_from_dir(self, tmp_path):
-        """Config without 'name' field should use directory name."""
+        """配置 without '名称' field should use 目录 名称."""
         agent_dir = tmp_path / "agents" / "inferred-name"
         agent_dir.mkdir(parents=True)
         (agent_dir / "config.yaml").write_text("description: My agent\n")
@@ -165,7 +191,7 @@ class TestLoadAgentConfig:
         assert cfg.tool_groups == ["file:read", "file:write"]
 
     def test_legacy_prompt_file_field_ignored(self, tmp_path):
-        """Unknown fields like the old prompt_file should be silently ignored."""
+        """Unknown fields like the 旧 prompt_file should be silently ignored."""
         agent_dir = tmp_path / "agents" / "legacy-agent"
         agent_dir.mkdir(parents=True)
         (agent_dir / "config.yaml").write_text("name: legacy-agent\nprompt_file: system.md\n")
@@ -179,9 +205,15 @@ class TestLoadAgentConfig:
         assert cfg.name == "legacy-agent"
 
 
-# ===========================================================================
-# 4. load_agent_soul
-# ===========================================================================
+#    ===========================================================================
+
+
+#    4. load_agent_soul
+
+
+#    ===========================================================================
+
+
 
 
 class TestLoadAgentSoul:
@@ -201,7 +233,9 @@ class TestLoadAgentSoul:
         agent_dir = tmp_path / "agents" / "no-soul"
         agent_dir.mkdir(parents=True)
         (agent_dir / "config.yaml").write_text("name: no-soul\n")
-        # No SOUL.md created
+        #    No SOUL.md created
+
+
 
         with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
             from deerflow.config.agents_config import AgentConfig, load_agent_soul
@@ -226,9 +260,15 @@ class TestLoadAgentSoul:
         assert soul is None
 
 
-# ===========================================================================
-# 5. list_custom_agents
-# ===========================================================================
+#    ===========================================================================
+
+
+#    5. list_custom_agents
+
+
+#    ===========================================================================
+
+
 
 
 class TestListCustomAgents:
@@ -254,9 +294,13 @@ class TestListCustomAgents:
         assert "agent-b" in names
 
     def test_skips_dirs_without_config_yaml(self, tmp_path):
-        # Valid agent
+        #    Valid 代理
+
+
         _write_agent(tmp_path, "valid-agent", {"name": "valid-agent"})
-        # Invalid dir (no config.yaml)
+        #    Invalid dir (no 配置.yaml)
+
+
         (tmp_path / "agents" / "invalid-dir").mkdir(parents=True)
 
         with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
@@ -268,7 +312,9 @@ class TestListCustomAgents:
         assert agents[0].name == "valid-agent"
 
     def test_skips_non_directory_entries(self, tmp_path):
-        # Create the agents dir with a file (not a dir)
+        #    Create the agents dir with a 文件 (not a dir)
+
+
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "not-a-dir.txt").write_text("hello")
@@ -296,14 +342,20 @@ class TestListCustomAgents:
         assert names == sorted(names)
 
 
-# ===========================================================================
-# 7. Memory isolation: _get_memory_file_path
-# ===========================================================================
+#    ===========================================================================
+
+
+#    7. 内存 isolation: _get_memory_file_path
+
+
+#    ===========================================================================
+
+
 
 
 class TestMemoryFilePath:
     def test_global_memory_path(self, tmp_path):
-        """None agent_name should return global memory file."""
+        """None agent_name should 返回 global 内存 文件."""
         import deerflow.agents.memory.updater as updater_mod
         from deerflow.config.memory_config import MemoryConfig
 
@@ -315,7 +367,7 @@ class TestMemoryFilePath:
         assert path == tmp_path / "memory.json"
 
     def test_agent_memory_path(self, tmp_path):
-        """Providing agent_name should return per-agent memory file."""
+        """Providing agent_name should 返回 per-代理 内存 文件."""
         import deerflow.agents.memory.updater as updater_mod
         from deerflow.config.memory_config import MemoryConfig
 
@@ -343,13 +395,19 @@ class TestMemoryFilePath:
         assert path_a != path_b
 
 
-# ===========================================================================
-# 8. Gateway API – Agents endpoints
-# ===========================================================================
+#    ===========================================================================
+
+
+#    8. Gateway API – Agents endpoints
+
+
+#    ===========================================================================
+
+
 
 
 def _make_test_app(tmp_path: Path):
-    """Create a FastAPI app with the agents router, patching paths to tmp_path."""
+    """Create a FastAPI app with the agents 路由器, patching paths to tmp_path."""
     from fastapi import FastAPI
 
     from app.gateway.routers.agents import router
@@ -361,13 +419,15 @@ def _make_test_app(tmp_path: Path):
 
 @pytest.fixture()
 def agent_client(tmp_path):
-    """TestClient with agents router, using tmp_path as base_dir."""
+    """TestClient with agents 路由器, using tmp_path as base_dir."""
     paths_instance = _make_paths(tmp_path)
 
     with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch("app.gateway.routers.agents.get_paths", return_value=paths_instance):
         app = _make_test_app(tmp_path)
         with TestClient(app) as client:
-            client._tmp_path = tmp_path  # type: ignore[attr-defined]
+            client._tmp_path = tmp_path  #    类型: ignore[attr-defined]
+
+
             yield client
 
 
@@ -400,7 +460,9 @@ class TestAgentsAPI:
         payload = {"name": "my-agent", "soul": "test"}
         agent_client.post("/api/agents", json=payload)
 
-        # Second create should fail
+        #    Second 创建 should fail
+
+
         response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 409
 
@@ -451,7 +513,9 @@ class TestAgentsAPI:
         response = agent_client.delete("/api/agents/del-me")
         assert response.status_code == 204
 
-        # Verify it's gone
+        #    Verify it's gone
+
+
         response = agent_client.get("/api/agents/del-me")
         assert response.status_code == 404
 
@@ -491,9 +555,15 @@ class TestAgentsAPI:
         assert not agent_dir.exists()
 
 
-# ===========================================================================
-# 9. Gateway API – User Profile endpoints
-# ===========================================================================
+#    ===========================================================================
+
+
+#    9. Gateway API – 用户 Profile endpoints
+
+
+#    ===========================================================================
+
+
 
 
 class TestUserProfileAPI:
@@ -503,18 +573,24 @@ class TestUserProfileAPI:
         assert response.json()["content"] is None
 
     def test_put_user_profile(self, agent_client, tmp_path):
-        content = "# User Profile\n\nI am a developer."
+        content = "#   用户 Profile\n\nI am a developer."
+
+
         response = agent_client.put("/api/user-profile", json={"content": content})
         assert response.status_code == 200
         assert response.json()["content"] == content
 
-        # File should be written to disk
+        #    File should be written to disk
+
+
         user_md = tmp_path / "USER.md"
         assert user_md.exists()
         assert user_md.read_text(encoding="utf-8") == content
 
     def test_get_user_profile_after_put(self, agent_client):
-        content = "# Profile\n\nI work on data science."
+        content = "#   Profile\n\nI work on data science."
+
+
         agent_client.put("/api/user-profile", json={"content": content})
 
         response = agent_client.get("/api/user-profile")

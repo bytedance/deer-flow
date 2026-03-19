@@ -28,11 +28,11 @@ export const streamdownPluginsWithWordAnimation = {
   ] as StreamdownProps["rehypePlugins"],
 };
 
-// Plugins for human messages - no autolink to prevent URL bleeding into adjacent text
+//    Plugins 对于 human messages - no autolink to prevent URL bleeding into adjacent text
 export const humanMessagePlugins = {
   remarkPlugins: [
-    // Use remark-gfm without autolink literals by not including it
-    // Only include math support for human messages
+    //    Use remark-gfm without autolink literals by not including it
+    //    Only include math support 对于 human messages
     [remarkMath, { singleDollarTextMath: true }],
   ] as StreamdownProps["remarkPlugins"],
   rehypePlugins: [

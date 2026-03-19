@@ -1,4 +1,4 @@
-"""Middleware to inject uploaded files information into agent context."""
+"""中间件 to inject uploaded files information into 代理 context."""
 
 import logging
 from pathlib import Path
@@ -15,39 +15,39 @@ logger = logging.getLogger(__name__)
 
 
 class UploadsMiddlewareState(AgentState):
-    """State schema for uploads middleware."""
+    """状态 schema for uploads 中间件."""
 
     uploaded_files: NotRequired[list[dict] | None]
 
 
 class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
-    """Middleware to inject uploaded files information into the agent context.
+    """中间件 to inject uploaded files information into the 代理 context.
 
-    Reads file metadata from the current message's additional_kwargs.files
-    (set by the frontend after upload) and prepends an <uploaded_files> block
-    to the last human message so the model knows which files are available.
+    Reads 文件 metadata from the 当前 消息's additional_kwargs.files
+    (集合 by the 前端 after upload) and prepends an <uploaded_files> block
+    to the 最后 human 消息 so the 模型 knows which files are 可用的.
     """
 
     state_schema = UploadsMiddlewareState
 
     def __init__(self, base_dir: str | None = None):
-        """Initialize the middleware.
+        """Initialize the 中间件.
 
         Args:
-            base_dir: Base directory for thread data. Defaults to Paths resolution.
+            base_dir: Base 目录 for 线程 数据. Defaults to Paths resolution.
         """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
 
     def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
-        """Create a formatted message listing uploaded files.
+        """Create a formatted 消息 listing uploaded files.
 
         Args:
-            new_files: Files uploaded in the current message.
-            historical_files: Files uploaded in previous messages.
+            new_files: Files uploaded in the 当前 消息.
+            historical_files: Files uploaded in 上一个 messages.
 
         Returns:
-            Formatted string inside <uploaded_files> tags.
+            Formatted 字符串 inside <uploaded_files> tags.
         """
         lines = ["<uploaded_files>"]
 
@@ -79,19 +79,19 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         return "\n".join(lines)
 
     def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
-        """Extract file info from message additional_kwargs.files.
+        """Extract 文件 信息 from 消息 additional_kwargs.files.
 
-        The frontend sends uploaded file metadata in additional_kwargs.files
+        The 前端 sends uploaded 文件 metadata in additional_kwargs.files
         after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
+        路径 (virtual 路径), status.
 
         Args:
-            message: The human message to inspect.
-            uploads_dir: Physical uploads directory used to verify file existence.
+            消息: The human 消息 to inspect.
+            uploads_dir: Physical uploads 目录 used to verify 文件 existence.
                          When provided, entries whose files no longer exist are skipped.
 
         Returns:
-            List of file dicts with virtual paths, or None if the field is absent or empty.
+            List of 文件 dicts with virtual paths, or None if the field is absent or empty.
         """
         kwargs_files = (message.additional_kwargs or {}).get("files")
         if not isinstance(kwargs_files, list) or not kwargs_files:
@@ -118,22 +118,22 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject uploaded files information before agent execution.
+        """Inject uploaded files information before 代理 execution.
 
-        New files come from the current message's additional_kwargs.files.
-        Historical files are scanned from the thread's uploads directory,
-        excluding the new ones.
+        New files come from the 当前 消息's additional_kwargs.files.
+        Historical files are scanned from the 线程's uploads 目录,
+        excluding the 新建 ones.
 
-        Prepends <uploaded_files> context to the last human message content.
+        Prepends <uploaded_files> context to the 最后 human 消息 content.
         The original additional_kwargs (including files metadata) is preserved
-        on the updated message so the frontend can read it from the stream.
+        on the updated 消息 so the 前端 can read it from the stream.
 
         Args:
-            state: Current agent state.
+            状态: Current 代理 状态.
             runtime: Runtime context containing thread_id.
 
         Returns:
-            State updates including uploaded files list.
+            状态 updates including uploaded files 列表.
         """
         messages = list(state.get("messages", []))
         if not messages:
@@ -145,14 +145,20 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
-        # Resolve uploads directory for existence checks
+        #    Resolve uploads 目录 对于 existence checks
+
+
         thread_id = runtime.context.get("thread_id")
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
-        # Get newly uploaded files from the current message's additional_kwargs.files
+        #    Get newly uploaded files from the 当前 消息's additional_kwargs.files
+
+
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
 
-        # Collect historical files from the uploads directory (all except the new ones)
+        #    Collect historical files from the uploads 目录 (all except the 新建 ones)
+
+
         new_filenames = {f["filename"] for f in new_files}
         historical_files: list[dict] = []
         if uploads_dir and uploads_dir.exists():
@@ -173,10 +179,14 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 
-        # Create files message and prepend to the last human message content
+        #    Create files 消息 and prepend to the 最后 human 消息 content
+
+
         files_message = self._create_files_message(new_files, historical_files)
 
-        # Extract original content - handle both string and list formats
+        #    Extract original content - 处理 both 字符串 and 列表 formats
+
+
         original_content = ""
         if isinstance(last_message.content, str):
             original_content = last_message.content
@@ -187,9 +197,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     text_parts.append(block.get("text", ""))
             original_content = "\n".join(text_parts)
 
-        # Create new message with combined content.
-        # Preserve additional_kwargs (including files metadata) so the frontend
-        # can read structured file info from the streamed message.
+        #    Create 新建 消息 with combined content.
+
+
+        #    Preserve additional_kwargs (including files metadata) so the 前端
+
+
+        #    can read structured 文件 信息 from the streamed 消息.
+
+
         updated_message = HumanMessage(
             content=f"{files_message}\n\n{original_content}",
             id=last_message.id,

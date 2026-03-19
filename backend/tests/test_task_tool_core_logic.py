@@ -1,4 +1,4 @@
-"""Core behavior tests for task tool orchestration."""
+"""Core behavior tests for task 工具 orchestration."""
 
 import importlib
 from enum import Enum
@@ -7,12 +7,16 @@ from unittest.mock import MagicMock
 
 from deerflow.subagents.config import SubagentConfig
 
-# Use module import so tests can patch the exact symbols referenced inside task_tool().
+#    Use 模块 import so tests can patch the exact symbols referenced inside task_tool().
+
+
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
 class FakeSubagentStatus(Enum):
-    # Match production enum values so branch comparisons behave identically.
+    #    Match production enum values so branch comparisons behave identically.
+
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -21,7 +25,9 @@ class FakeSubagentStatus(Enum):
 
 
 def _make_runtime() -> SimpleNamespace:
-    # Minimal ToolRuntime-like object; task_tool only reads these three attributes.
+    #    Minimal ToolRuntime-like 对象; task_tool only reads these three attributes.
+
+
     return SimpleNamespace(
         state={
             "sandbox": {"sandbox_id": "local"},
@@ -91,7 +97,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
             captured["task_id"] = task_id
             return task_id or "generated-task-id"
 
-    # Simulate two polling rounds: first running (with one message), then completed.
+    #    Simulate two polling rounds: 第一 running (with one 消息), then completed.
+
+
     responses = iter(
         [
             _make_result(FakeSubagentStatus.RUNNING, ai_messages=[{"id": "m1", "content": "phase-1"}]),
@@ -110,7 +118,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
-    # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
+    #    task_tool lazily imports from deerflow.tools at call time, so patch that 模块-level 函数.
+
+
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
 
     output = task_tool_module.task_tool.func(
@@ -207,7 +217,9 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
 
 def test_task_tool_polling_safety_timeout(monkeypatch):
     config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
+    #    Keep max_poll_count small 对于 测试 speed: (1 + 60) // 5 = 12
+
+
     config.timeout_seconds = 1
     events = []
 
@@ -365,11 +377,13 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     """Verify cleanup_background_task is NOT called on polling safety timeout.
 
     This prevents race conditions where the background task is still running
-    but the polling loop gives up. The cleanup should happen later when the
+    but the polling 循环 gives 上. The cleanup should happen later when the
     executor completes and sets a terminal status.
     """
     config = _make_subagent_config()
-    # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
+    #    Keep max_poll_count small 对于 测试 speed: (1 + 60) // 5 = 12
+
+
     config.timeout_seconds = 1
     events = []
     cleanup_calls = []
@@ -405,5 +419,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     )
 
     assert output.startswith("Task polling timed out after 0 minutes")
-    # cleanup should NOT be called because the task is still RUNNING
+    #    cleanup should NOT be called because the task is still RUNNING
+
+
     assert cleanup_calls == []

@@ -18,7 +18,7 @@ AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentResponse(BaseModel):
-    """Response model for a custom agent."""
+    """响应 模型 for a custom 代理."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
     description: str = Field(default="", description="Agent description")
@@ -28,13 +28,13 @@ class AgentResponse(BaseModel):
 
 
 class AgentsListResponse(BaseModel):
-    """Response model for listing all custom agents."""
+    """响应 模型 for listing all custom agents."""
 
     agents: list[AgentResponse]
 
 
 class AgentCreateRequest(BaseModel):
-    """Request body for creating a custom agent."""
+    """请求 body for creating a custom 代理."""
 
     name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
     description: str = Field(default="", description="Agent description")
@@ -44,7 +44,7 @@ class AgentCreateRequest(BaseModel):
 
 
 class AgentUpdateRequest(BaseModel):
-    """Request body for updating a custom agent."""
+    """请求 body for updating a custom 代理."""
 
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
@@ -53,13 +53,13 @@ class AgentUpdateRequest(BaseModel):
 
 
 def _validate_agent_name(name: str) -> None:
-    """Validate agent name against allowed pattern.
+    """Validate 代理 名称 against allowed pattern.
 
     Args:
-        name: The agent name to validate.
+        名称: The 代理 名称 to 验证.
 
     Raises:
-        HTTPException: 422 if the name is invalid.
+        HTTPException: 422 if the 名称 is 无效.
     """
     if not AGENT_NAME_PATTERN.match(name):
         raise HTTPException(
@@ -69,7 +69,7 @@ def _validate_agent_name(name: str) -> None:
 
 
 def _normalize_agent_name(name: str) -> str:
-    """Normalize agent name to lowercase for filesystem storage."""
+    """Normalize 代理 名称 to lowercase for filesystem storage."""
     return name.lower()
 
 
@@ -114,16 +114,16 @@ async def list_agents() -> AgentsListResponse:
     description="Validate an agent name and check if it is available (case-insensitive).",
 )
 async def check_agent_name(name: str) -> dict:
-    """Check whether an agent name is valid and not yet taken.
+    """Check whether an 代理 名称 is 有效 and not yet taken.
 
     Args:
-        name: The agent name to check.
+        名称: The 代理 名称 to 检查.
 
     Returns:
-        ``{"available": true/false, "name": "<normalized>"}``
+        ``{"可用的": true/false, "名称": "<normalized>"}``
 
     Raises:
-        HTTPException: 422 if the name is invalid.
+        HTTPException: 422 if the 名称 is 无效.
     """
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
@@ -138,16 +138,16 @@ async def check_agent_name(name: str) -> dict:
     description="Retrieve details and SOUL.md content for a specific custom agent.",
 )
 async def get_agent(name: str) -> AgentResponse:
-    """Get a specific custom agent by name.
+    """Get a specific custom 代理 by 名称.
 
     Args:
-        name: The agent name.
+        名称: The 代理 名称.
 
     Returns:
-        Agent details including SOUL.md content.
+        代理 details including SOUL.md content.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if 代理 not found.
     """
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
@@ -170,16 +170,16 @@ async def get_agent(name: str) -> AgentResponse:
     description="Create a new custom agent with its config and SOUL.md.",
 )
 async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
-    """Create a new custom agent.
+    """Create a 新建 custom 代理.
 
     Args:
-        request: The agent creation request.
+        请求: The 代理 creation 请求.
 
     Returns:
-        The created agent details.
+        The created 代理 details.
 
     Raises:
-        HTTPException: 409 if agent already exists, 422 if name is invalid.
+        HTTPException: 409 if 代理 already exists, 422 if 名称 is 无效.
     """
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
@@ -192,7 +192,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     try:
         agent_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write config.yaml
+        #    Write 配置.yaml
+
+
         config_data: dict = {"name": normalized_name}
         if request.description:
             config_data["description"] = request.description
@@ -205,7 +207,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         with open(config_file, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-        # Write SOUL.md
+        #    Write SOUL.md
+
+
         soul_file = agent_dir / "SOUL.md"
         soul_file.write_text(request.soul, encoding="utf-8")
 
@@ -217,7 +221,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     except HTTPException:
         raise
     except Exception as e:
-        # Clean up on failure
+        #    Clean 上 on 失败
+
+
         if agent_dir.exists():
             shutil.rmtree(agent_dir)
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
@@ -231,17 +237,17 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     description="Update an existing custom agent's config and/or SOUL.md.",
 )
 async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
-    """Update an existing custom agent.
+    """Update an existing custom 代理.
 
     Args:
-        name: The agent name.
-        request: The update request (all fields optional).
+        名称: The 代理 名称.
+        请求: The 更新 请求 (all fields optional).
 
     Returns:
-        The updated agent details.
+        The updated 代理 details.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if 代理 not found.
     """
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
@@ -254,7 +260,9 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     agent_dir = get_paths().agent_dir(name)
 
     try:
-        # Update config if any config fields changed
+        #    Update 配置 如果 any 配置 fields changed
+
+
         config_changed = any(v is not None for v in [request.description, request.model, request.tool_groups])
 
         if config_changed:
@@ -274,7 +282,9 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             with open(config_file, "w", encoding="utf-8") as f:
                 yaml.dump(updated, f, default_flow_style=False, allow_unicode=True)
 
-        # Update SOUL.md if provided
+        #    Update SOUL.md 如果 provided
+
+
         if request.soul is not None:
             soul_path = agent_dir / "SOUL.md"
             soul_path.write_text(request.soul, encoding="utf-8")
@@ -292,13 +302,13 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
 
 class UserProfileResponse(BaseModel):
-    """Response model for the global user profile (USER.md)."""
+    """响应 模型 for the global 用户 profile (USER.md)."""
 
     content: str | None = Field(default=None, description="USER.md content, or null if not yet created")
 
 
 class UserProfileUpdateRequest(BaseModel):
-    """Request body for setting the global user profile."""
+    """请求 body for setting the global 用户 profile."""
 
     content: str = Field(default="", description="USER.md content — describes the user's background and preferences")
 
@@ -310,7 +320,7 @@ class UserProfileUpdateRequest(BaseModel):
     description="Read the global USER.md file that is injected into all custom agents.",
 )
 async def get_user_profile() -> UserProfileResponse:
-    """Return the current USER.md content.
+    """Return the 当前 USER.md content.
 
     Returns:
         UserProfileResponse with content=None if USER.md does not exist yet.
@@ -336,7 +346,7 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     """Create or overwrite the global USER.md.
 
     Args:
-        request: The update request with the new USER.md content.
+        请求: The 更新 请求 with the 新建 USER.md content.
 
     Returns:
         UserProfileResponse with the saved content.
@@ -359,13 +369,13 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     description="Delete a custom agent and all its files (config, SOUL.md, memory).",
 )
 async def delete_agent(name: str) -> None:
-    """Delete a custom agent.
+    """Delete a custom 代理.
 
     Args:
-        name: The agent name.
+        名称: The 代理 名称.
 
     Raises:
-        HTTPException: 404 if agent not found.
+        HTTPException: 404 if 代理 not found.
     """
     _validate_agent_name(name)
     name = _normalize_agent_name(name)

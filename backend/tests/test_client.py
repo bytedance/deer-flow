@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: F401
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  #    noqa: F401
+
+
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -18,9 +20,15 @@ from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, Skil
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Fixtures
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 @pytest.fixture
@@ -39,14 +47,20 @@ def mock_app_config():
 
 @pytest.fixture
 def client(mock_app_config):
-    """Create a DeerFlowClient with mocked config loading."""
+    """Create a DeerFlowClient with mocked 配置 加载中."""
     with patch("deerflow.client.get_app_config", return_value=mock_app_config):
         return DeerFlowClient()
 
 
-# ---------------------------------------------------------------------------
-# __init__
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    __init__
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestClientInit:
@@ -86,9 +100,15 @@ class TestClientInit:
         assert c._checkpointer is cp
 
 
-# ---------------------------------------------------------------------------
-# list_models / list_skills / get_memory
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    list_models / list_skills / get_memory
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestConfigQueries:
@@ -97,7 +117,9 @@ class TestConfigQueries:
         assert "models" in result
         assert len(result["models"]) == 1
         assert result["models"][0]["name"] == "test-model"
-        # Verify Gateway-aligned fields are present
+        #    Verify Gateway-aligned fields are present
+
+
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
 
@@ -136,36 +158,42 @@ class TestConfigQueries:
         assert result == memory
 
 
-# ---------------------------------------------------------------------------
-# stream / chat
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    stream / 聊天
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _make_agent_mock(chunks: list[dict]):
-    """Create a mock agent whose .stream() yields the given chunks."""
+    """Create a mock 代理 whose .stream() yields the given chunks."""
     agent = MagicMock()
     agent.stream.return_value = iter(chunks)
     return agent
 
 
 def _ai_events(events):
-    """Filter messages-tuple events with type=ai and non-empty content."""
+    """Filter messages-tuple events with 类型=ai and non-empty content."""
     return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content")]
 
 
 def _tool_call_events(events):
-    """Filter messages-tuple events with type=ai and tool_calls."""
+    """Filter messages-tuple events with 类型=ai and tool_calls."""
     return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and "tool_calls" in e.data]
 
 
 def _tool_result_events(events):
-    """Filter messages-tuple events with type=tool."""
+    """Filter messages-tuple events with 类型=工具."""
     return [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
 
 
 class TestStream:
     def test_basic_message(self, client):
-        """stream() emits messages-tuple + values + end for a simple AI reply."""
+        """stream() emits messages-tuple + values + end for a 简单 AI reply."""
         ai = AIMessage(content="Hello!", id="ai-1")
         chunks = [
             {"messages": [HumanMessage(content="hi", id="h-1")]},
@@ -187,7 +215,7 @@ class TestStream:
         assert msg_events[0].data["content"] == "Hello!"
 
     def test_tool_call_and_result(self, client):
-        """stream() emits messages-tuple events for tool calls and results."""
+        """stream() emits messages-tuple events for 工具 calls and results."""
         ai = AIMessage(content="", id="ai-1", tool_calls=[{"name": "bash", "args": {"cmd": "ls"}, "id": "tc-1"}])
         tool = ToolMessage(content="file.txt", id="tm-1", tool_call_id="tc-1", name="bash")
         ai2 = AIMessage(content="Here are the files.", id="ai-2")
@@ -211,7 +239,7 @@ class TestStream:
         assert events[-1].type == "end"
 
     def test_values_event_with_title(self, client):
-        """stream() emits values event containing title when present in state."""
+        """stream() emits values event containing title when present in 状态."""
         ai = AIMessage(content="ok", id="ai-1")
         chunks = [
             {"messages": [HumanMessage(content="hi", id="h-1"), ai], "title": "Greeting"},
@@ -230,11 +258,13 @@ class TestStream:
         assert "messages" in values_events[-1].data
 
     def test_deduplication(self, client):
-        """Messages with the same id are not emitted twice."""
+        """Messages with the same 标识符 are not emitted twice."""
         ai = AIMessage(content="Hello!", id="ai-1")
         chunks = [
             {"messages": [HumanMessage(content="hi", id="h-1"), ai]},
-            {"messages": [HumanMessage(content="hi", id="h-1"), ai]},  # duplicate
+            {"messages": [HumanMessage(content="hi", id="h-1"), ai]},  #    duplicate
+
+
         ]
         agent = _make_agent_mock(chunks)
 
@@ -257,11 +287,13 @@ class TestStream:
         ):
             events = list(client.stream("hi"))
 
-        # Should not raise; end event proves it completed
+        #    Should not raise; end event proves it completed
+
+
         assert events[-1].type == "end"
 
     def test_list_content_blocks(self, client):
-        """stream() handles AIMessage with list-of-blocks content."""
+        """stream() handles AIMessage with 列表-of-blocks content."""
         ai = AIMessage(
             content=[
                 {"type": "thinking", "thinking": "hmm"},
@@ -285,7 +317,7 @@ class TestStream:
 
 class TestChat:
     def test_returns_last_message(self, client):
-        """chat() returns the last AI message text."""
+        """聊天() returns the 最后 AI 消息 text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")
         ai2 = AIMessage(content="final answer", id="ai-2")
         chunks = [
@@ -303,7 +335,7 @@ class TestChat:
         assert result == "final answer"
 
     def test_empty_response(self, client):
-        """chat() returns empty string if no AI message produced."""
+        """聊天() returns empty 字符串 if no AI 消息 produced."""
         chunks = [{"messages": []}]
         agent = _make_agent_mock(chunks)
 
@@ -316,9 +348,15 @@ class TestChat:
         assert result == ""
 
 
-# ---------------------------------------------------------------------------
-# _extract_text
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _extract_text
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestExtractText:
@@ -343,14 +381,20 @@ class TestExtractText:
         assert DeerFlowClient._extract_text(42) == "42"
 
 
-# ---------------------------------------------------------------------------
-# _ensure_agent
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _ensure_agent
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestEnsureAgent:
     def test_creates_agent(self, client):
-        """_ensure_agent creates an agent on first call."""
+        """_ensure_agent creates an 代理 on 第一 call."""
         mock_agent = MagicMock()
         config = client._get_runnable_config("t1")
 
@@ -399,7 +443,7 @@ class TestEnsureAgent:
         assert "checkpointer" not in mock_create_agent.call_args.kwargs
 
     def test_reuses_agent_same_config(self, client):
-        """_ensure_agent does not recreate if config key unchanged."""
+        """_ensure_agent does not recreate if 配置 键 unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
         client._agent_config_key = (None, True, False, False)
@@ -407,13 +451,21 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
 
-        # Should still be the same mock — no recreation
+        #    Should still be the same mock — no recreation
+
+
         assert client._agent is mock_agent
 
 
-# ---------------------------------------------------------------------------
-# get_model
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    get_model
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestGetModel:
@@ -440,9 +492,15 @@ class TestGetModel:
         assert client.get_model("nonexistent") is None
 
 
-# ---------------------------------------------------------------------------
-# MCP config
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    MCP 配置
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestMcpConfig:
@@ -460,7 +518,9 @@ class TestMcpConfig:
         assert result["mcp_servers"]["github"]["enabled"] is True
 
     def test_update_mcp_config(self, client):
-        # Set up current config with skills
+        #    Set 上 当前 配置 with skills
+
+
         current_config = MagicMock()
         current_config.skills = {}
 
@@ -474,7 +534,9 @@ class TestMcpConfig:
             tmp_path = Path(f.name)
 
         try:
-            # Pre-set agent to verify it gets invalidated
+            #    Pre-集合 代理 to verify it gets invalidated
+
+
             client._agent = MagicMock()
 
             with (
@@ -486,9 +548,13 @@ class TestMcpConfig:
 
             assert "mcp_servers" in result
             assert "new-server" in result["mcp_servers"]
-            assert client._agent is None  # M2: agent invalidated
+            assert client._agent is None  #    M2: 代理 invalidated
 
-            # Verify file was actually written
+
+
+            #    Verify 文件 was actually written
+
+
             with open(tmp_path) as f:
                 saved = json.load(f)
             assert "mcpServers" in saved
@@ -496,9 +562,15 @@ class TestMcpConfig:
             tmp_path.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Skills management
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Skills management
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestSkillsManagement:
@@ -536,7 +608,9 @@ class TestSkillsManagement:
             tmp_path = Path(f.name)
 
         try:
-            # Pre-set agent to verify it gets invalidated
+            #    Pre-集合 代理 to verify it gets invalidated
+
+
             client._agent = MagicMock()
 
             with (
@@ -547,7 +621,9 @@ class TestSkillsManagement:
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
-            assert client._agent is None  # M2: agent invalidated
+            assert client._agent is None  #    M2: 代理 invalidated
+
+
         finally:
             tmp_path.unlink()
 
@@ -560,7 +636,9 @@ class TestSkillsManagement:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
-            # Create a valid .skill archive
+            #    Create a 有效 .skill archive
+
+
             skill_dir = tmp_path / "my-skill"
             skill_dir.mkdir()
             (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: A skill\n---\nContent")
@@ -596,9 +674,15 @@ class TestSkillsManagement:
             tmp_path.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Memory management
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    内存 management
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestMemoryManagement:
@@ -646,9 +730,15 @@ class TestMemoryManagement:
         assert "data" in result
 
 
-# ---------------------------------------------------------------------------
-# Uploads
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Uploads
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestUploads:
@@ -656,7 +746,9 @@ class TestUploads:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
-            # Create a source file
+            #    Create a source 文件
+
+
             src_file = tmp_path / "test.txt"
             src_file.write_text("hello")
 
@@ -747,7 +839,9 @@ class TestUploads:
             assert len(result["files"]) == 2
             names = {f["filename"] for f in result["files"]}
             assert names == {"a.txt", "b.txt"}
-            # Verify artifact_url is present
+            #    Verify artifact_url is present
+
+
             for f in result["files"]:
                 assert "artifact_url" in f
 
@@ -777,9 +871,15 @@ class TestUploads:
                     client.delete_upload("thread-1", "../../etc/passwd")
 
 
-# ---------------------------------------------------------------------------
-# Artifacts
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Artifacts
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestArtifacts:
@@ -828,18 +928,28 @@ class TestArtifacts:
                     client.get_artifact("t1", "mnt/user-data/../../../etc/passwd")
 
 
-# ===========================================================================
-# Scenario-based integration tests
-# ===========================================================================
-# These tests simulate realistic user workflows end-to-end, exercising
-# multiple methods in sequence to verify they compose correctly.
+#    ===========================================================================
+
+
+#    Scenario-based integration tests
+
+
+#    ===========================================================================
+
+
+#    These tests simulate realistic 用户 workflows end-to-end, exercising
+
+
+#    multiple methods in sequence to verify they compose correctly.
+
+
 
 
 class TestScenarioMultiTurnConversation:
-    """Scenario: User has a multi-turn conversation within a single thread."""
+    """Scenario: 用户 has a multi-turn conversation within a single 线程."""
 
     def test_two_turn_conversation(self, client):
-        """Two sequential chat() calls on the same thread_id produce
+        """Two sequential 聊天() calls on the same thread_id produce
         independent results (without checkpointer, each call is stateless)."""
         ai1 = AIMessage(content="I'm a helpful assistant.", id="ai-1")
         ai2 = AIMessage(content="Python is great!", id="ai-2")
@@ -886,37 +996,47 @@ class TestScenarioMultiTurnConversation:
         ):
             events = list(client.stream("search", thread_id="t-full"))
 
-        # Verify expected event types
+        #    Verify expected event types
+
+
         types = set(e.type for e in events)
         assert types == {"messages-tuple", "values", "end"}
         assert events[-1].type == "end"
 
-        # Verify tool_call data
+        #    Verify tool_call 数据
+
+
         tc_events = _tool_call_events(events)
         assert len(tc_events) == 1
         assert tc_events[0].data["tool_calls"][0]["name"] == "web_search"
         assert tc_events[0].data["tool_calls"][0]["args"] == {"query": "LangGraph"}
 
-        # Verify tool_result data
+        #    Verify tool_result 数据
+
+
         tr_events = _tool_result_events(events)
         assert len(tr_events) == 1
         assert tr_events[0].data["tool_call_id"] == "tc-1"
         assert "LangGraph" in tr_events[0].data["content"]
 
-        # Verify AI text
+        #    Verify AI text
+
+
         msg_events = _ai_events(events)
         assert any("framework" in e.data["content"] for e in msg_events)
 
-        # Verify values event contains title
+        #    Verify values event contains title
+
+
         values_events = [e for e in events if e.type == "values"]
         assert any(e.data.get("title") == "LangGraph Search" for e in values_events)
 
 
 class TestScenarioToolChain:
-    """Scenario: Agent chains multiple tool calls in sequence."""
+    """Scenario: 代理 chains multiple 工具 calls in sequence."""
 
     def test_multi_tool_chain(self, client):
-        """Agent calls bash → reads output → calls write_file → responds."""
+        """代理 calls bash → reads 输出 → calls write_file → responds."""
         ai_bash = AIMessage(
             content="",
             id="ai-1",
@@ -963,21 +1083,25 @@ class TestScenarioToolChain:
 
 
 class TestScenarioFileLifecycle:
-    """Scenario: Upload files → list them → use in chat → download artifact."""
+    """Scenario: Upload files → 列表 them → use in 聊天 → download artifact."""
 
     def test_upload_list_delete_lifecycle(self, client):
-        """Upload → list → verify → delete → list again."""
+        """Upload → 列表 → verify → 删除 → 列表 again."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
             uploads_dir.mkdir()
 
-            # Create source files
+            #    Create source files
+
+
             (tmp_path / "report.txt").write_text("quarterly report data")
             (tmp_path / "data.csv").write_text("a,b,c\n1,2,3")
 
             with patch.object(DeerFlowClient, "_get_uploads_dir", return_value=uploads_dir):
-                # Step 1: Upload
+                #    Step 1: Upload
+
+
                 result = client.upload_files(
                     "t-lifecycle",
                     [
@@ -989,22 +1113,28 @@ class TestScenarioFileLifecycle:
                 assert len(result["files"]) == 2
                 assert {f["filename"] for f in result["files"]} == {"report.txt", "data.csv"}
 
-                # Step 2: List
+                #    Step 2: List
+
+
                 listed = client.list_uploads("t-lifecycle")
                 assert listed["count"] == 2
                 assert all("virtual_path" in f for f in listed["files"])
 
-                # Step 3: Delete one
+                #    Step 3: Delete one
+
+
                 del_result = client.delete_upload("t-lifecycle", "report.txt")
                 assert del_result["success"] is True
 
-                # Step 4: Verify deletion
+                #    Step 4: Verify deletion
+
+
                 listed = client.list_uploads("t-lifecycle")
                 assert listed["count"] == 1
                 assert listed["files"][0]["filename"] == "data.csv"
 
     def test_upload_then_read_artifact(self, client):
-        """Upload a file, simulate agent producing artifact, read it back."""
+        """Upload a 文件, simulate 代理 producing artifact, read it back."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
@@ -1013,7 +1143,9 @@ class TestScenarioFileLifecycle:
             outputs_dir = user_data_dir / "outputs"
             outputs_dir.mkdir(parents=True)
 
-            # Upload phase
+            #    Upload phase
+
+
             src_file = tmp_path / "input.txt"
             src_file.write_text("raw data to process")
 
@@ -1021,10 +1153,14 @@ class TestScenarioFileLifecycle:
                 uploaded = client.upload_files("t-artifact", [src_file])
                 assert len(uploaded["files"]) == 1
 
-            # Simulate agent writing an artifact
+            #    Simulate 代理 writing an artifact
+
+
             (outputs_dir / "analysis.json").write_text('{"result": "processed"}')
 
-            # Retrieve artifact
+            #    Retrieve artifact
+
+
             mock_paths = MagicMock()
             mock_paths.sandbox_user_data_dir.return_value = user_data_dir
 
@@ -1036,16 +1172,20 @@ class TestScenarioFileLifecycle:
 
 
 class TestScenarioConfigManagement:
-    """Scenario: Query and update configuration through a management session."""
+    """Scenario: Query and 更新 configuration through a management 会话."""
 
     def test_model_and_skill_discovery(self, client):
-        """List models → get specific model → list skills → get specific skill."""
-        # List models
+        """List models → get specific 模型 → 列表 skills → get specific skill."""
+        #    List models
+
+
         result = client.list_models()
         assert len(result["models"]) >= 1
         model_name = result["models"][0]["name"]
 
-        # Get specific model
+        #    Get specific 模型
+
+
         model_cfg = MagicMock()
         model_cfg.name = model_name
         model_cfg.display_name = None
@@ -1056,7 +1196,9 @@ class TestScenarioConfigManagement:
         detail = client.get_model(model_name)
         assert detail["name"] == model_name
 
-        # List skills
+        #    List skills
+
+
         skill = MagicMock()
         skill.name = "web-search"
         skill.description = "Search the web"
@@ -1068,19 +1210,23 @@ class TestScenarioConfigManagement:
             skills_result = client.list_skills()
         assert len(skills_result["skills"]) == 1
 
-        # Get specific skill
+        #    Get specific skill
+
+
         with patch("deerflow.skills.loader.load_skills", return_value=[skill]):
             detail = client.get_skill("web-search")
         assert detail is not None
         assert detail["enabled"] is True
 
     def test_mcp_update_then_skill_toggle(self, client):
-        """Update MCP config → toggle skill → verify both invalidate agent."""
+        """Update MCP 配置 → toggle skill → verify both invalidate 代理."""
         with tempfile.TemporaryDirectory() as tmp:
             config_file = Path(tmp) / "extensions_config.json"
             config_file.write_text("{}")
 
-            # --- MCP update ---
+            #    --- MCP 更新 ---
+
+
             current_config = MagicMock()
             current_config.skills = {}
 
@@ -1089,7 +1235,9 @@ class TestScenarioConfigManagement:
             reloaded_config = MagicMock()
             reloaded_config.mcp_servers = {"my-mcp": reloaded_server}
 
-            client._agent = MagicMock()  # Simulate existing agent
+            client._agent = MagicMock()  #    Simulate existing 代理
+
+
             with (
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
                 patch("deerflow.client.get_extensions_config", return_value=current_config),
@@ -1097,9 +1245,13 @@ class TestScenarioConfigManagement:
             ):
                 mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True}})
             assert "my-mcp" in mcp_result["mcp_servers"]
-            assert client._agent is None  # Agent invalidated
+            assert client._agent is None  #    代理 invalidated
 
-            # --- Skill toggle ---
+
+
+            #    --- Skill toggle ---
+
+
             skill = MagicMock()
             skill.name = "code-gen"
             skill.description = "Generate code"
@@ -1118,7 +1270,9 @@ class TestScenarioConfigManagement:
             ext_config.mcp_servers = {}
             ext_config.skills = {}
 
-            client._agent = MagicMock()  # Simulate re-created agent
+            client._agent = MagicMock()  #    Simulate re-created 代理
+
+
             with (
                 patch("deerflow.skills.loader.load_skills", side_effect=[[skill], [toggled]]),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
@@ -1127,14 +1281,16 @@ class TestScenarioConfigManagement:
             ):
                 skill_result = client.update_skill("code-gen", enabled=False)
             assert skill_result["enabled"] is False
-            assert client._agent is None  # Agent invalidated again
+            assert client._agent is None  #    代理 invalidated again
+
+
 
 
 class TestScenarioAgentRecreation:
-    """Scenario: Config changes trigger agent recreation at the right times."""
+    """Scenario: 配置 changes trigger 代理 recreation at the 右 times."""
 
     def test_different_model_triggers_rebuild(self, client):
-        """Switching model_name between calls forces agent rebuild."""
+        """Switching model_name between calls forces 代理 rebuild."""
         agents_created = []
 
         def fake_create_agent(**kwargs):
@@ -1162,7 +1318,7 @@ class TestScenarioAgentRecreation:
         assert first_agent is not second_agent
 
     def test_same_config_reuses_agent(self, client):
-        """Repeated calls with identical config do not rebuild."""
+        """Repeated calls with identical 配置 do not rebuild."""
         agents_created = []
 
         def fake_create_agent(**kwargs):
@@ -1186,7 +1342,7 @@ class TestScenarioAgentRecreation:
         assert len(agents_created) == 1
 
     def test_reset_agent_forces_rebuild(self, client):
-        """reset_agent() clears cache, next call rebuilds."""
+        """reset_agent() clears 缓存, 下一个 call rebuilds."""
         agents_created = []
 
         def fake_create_agent(**kwargs):
@@ -1210,7 +1366,7 @@ class TestScenarioAgentRecreation:
         assert len(agents_created) == 2
 
     def test_per_call_override_triggers_rebuild(self, client):
-        """stream() with model_name override creates a different agent config."""
+        """stream() with model_name override creates a different 代理 配置."""
         ai = AIMessage(content="ok", id="ai-1")
         agent = _make_agent_mock([{"messages": [ai]}])
 
@@ -1225,7 +1381,9 @@ class TestScenarioAgentRecreation:
             list(client.stream("hi", thread_id="t1"))
             list(client.stream("hi", thread_id="t1", model_name="other-model"))
 
-        # Two different config keys should have been created
+        #    Two different 配置 keys should have been created
+
+
         assert len(agents_created) == 2
         assert agents_created[0] != agents_created[1]
 
@@ -1234,7 +1392,7 @@ class TestScenarioThreadIsolation:
     """Scenario: Operations on different threads don't interfere."""
 
     def test_uploads_isolated_per_thread(self, client):
-        """Files uploaded to thread-A are not visible in thread-B."""
+        """Files uploaded to 线程-A are not 可见 in 线程-B."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_a = tmp_path / "thread-a" / "uploads"
@@ -1258,7 +1416,7 @@ class TestScenarioThreadIsolation:
             assert files_b["count"] == 0
 
     def test_artifacts_isolated_per_thread(self, client):
-        """Artifacts in thread-A are not accessible from thread-B."""
+        """Artifacts in 线程-A are not accessible from 线程-B."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
@@ -1280,10 +1438,10 @@ class TestScenarioThreadIsolation:
 
 
 class TestScenarioMemoryWorkflow:
-    """Scenario: Memory query → reload → status check."""
+    """Scenario: 内存 query → reload → status 检查."""
 
     def test_memory_full_lifecycle(self, client):
-        """get_memory → reload → get_status covers the full memory API."""
+        """get_memory → reload → get_status covers the full 内存 API."""
         initial_data = {"version": "1.0", "facts": [{"id": "f1", "content": "User likes Python"}]}
         updated_data = {
             "version": "1.0",
@@ -1323,11 +1481,13 @@ class TestScenarioSkillInstallAndUse:
     """Scenario: Install a skill → verify it appears → toggle it."""
 
     def test_install_then_toggle(self, client):
-        """Install .skill archive → list to verify → disable → verify disabled."""
+        """Install .skill archive → 列表 to verify → disable → verify 已禁用."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
-            # Create .skill archive
+            #    Create .skill archive
+
+
             skill_src = tmp_path / "my-analyzer"
             skill_src.mkdir()
             (skill_src / "SKILL.md").write_text("---\nname: my-analyzer\ndescription: Analyze code\nlicense: MIT\n---\nAnalysis skill")
@@ -1338,7 +1498,9 @@ class TestScenarioSkillInstallAndUse:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            # Step 1: Install
+            #    Step 1: Install
+
+
             with (
                 patch("deerflow.skills.loader.get_skills_root_path", return_value=skills_root),
                 patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "my-analyzer")),
@@ -1347,7 +1509,9 @@ class TestScenarioSkillInstallAndUse:
             assert result["success"] is True
             assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
 
-            # Step 2: List and find it
+            #    Step 2: List and find it
+
+
             installed_skill = MagicMock()
             installed_skill.name = "my-analyzer"
             installed_skill.description = "Analyze code"
@@ -1359,7 +1523,9 @@ class TestScenarioSkillInstallAndUse:
                 skills_result = client.list_skills()
             assert any(s["name"] == "my-analyzer" for s in skills_result["skills"])
 
-            # Step 3: Disable it
+            #    Step 3: Disable it
+
+
             disabled_skill = MagicMock()
             disabled_skill.name = "my-analyzer"
             disabled_skill.description = "Analyze code"
@@ -1385,10 +1551,10 @@ class TestScenarioSkillInstallAndUse:
 
 
 class TestScenarioEdgeCases:
-    """Scenario: Edge cases and error boundaries in realistic workflows."""
+    """Scenario: Edge cases and 错误 boundaries in realistic workflows."""
 
     def test_empty_stream_response(self, client):
-        """Agent produces no messages — only values + end events."""
+        """代理 produces no messages — only values + end events."""
         agent = _make_agent_mock([{"messages": []}])
 
         with (
@@ -1397,13 +1563,15 @@ class TestScenarioEdgeCases:
         ):
             events = list(client.stream("hi", thread_id="t-empty"))
 
-        # values event (empty messages) + end
+        #    values event (empty messages) + end
+
+
         assert len(events) == 2
         assert events[0].type == "values"
         assert events[-1].type == "end"
 
     def test_chat_on_empty_response(self, client):
-        """chat() returns empty string for no-message response."""
+        """聊天() returns empty 字符串 for no-消息 响应."""
         agent = _make_agent_mock([{"messages": []}])
 
         with (
@@ -1419,8 +1587,12 @@ class TestScenarioEdgeCases:
         ai = AIMessage(content="ok", id="ai-1")
         chunks = [
             {"messages": [ai], "title": "First Title"},
-            {"messages": [], "title": "First Title"},  # same title repeated
-            {"messages": [], "title": "Second Title"},  # different title
+            {"messages": [], "title": "First Title"},  #    same title repeated
+
+
+            {"messages": [], "title": "Second Title"},  #    different title
+
+
         ]
         agent = _make_agent_mock(chunks)
 
@@ -1430,7 +1602,9 @@ class TestScenarioEdgeCases:
         ):
             events = list(client.stream("hi", thread_id="t-titles"))
 
-        # Every chunk produces a values event with the title
+        #    Every chunk produces a values event with the title
+
+
         values_events = [e for e in events if e.type == "values"]
         assert len(values_events) == 3
         assert values_events[0].data["title"] == "First Title"
@@ -1438,7 +1612,7 @@ class TestScenarioEdgeCases:
         assert values_events[2].data["title"] == "Second Title"
 
     def test_concurrent_tool_calls_in_single_message(self, client):
-        """Agent produces multiple tool_calls in one AIMessage — emitted as single messages-tuple."""
+        """代理 produces multiple tool_calls in one AIMessage — emitted as single messages-tuple."""
         ai = AIMessage(
             content="",
             id="ai-1",
@@ -1458,13 +1632,15 @@ class TestScenarioEdgeCases:
             events = list(client.stream("do things", thread_id="t-parallel"))
 
         tc_events = _tool_call_events(events)
-        assert len(tc_events) == 1  # One messages-tuple event for the AIMessage
+        assert len(tc_events) == 1  #    One messages-tuple event 对于 the AIMessage
+
+
         tool_calls = tc_events[0].data["tool_calls"]
         assert len(tool_calls) == 3
         assert {tc["id"] for tc in tool_calls} == {"tc-1", "tc-2", "tc-3"}
 
     def test_upload_convertible_file_conversion_failure(self, client):
-        """Upload a .pdf file where conversion fails — file still uploaded, no markdown."""
+        """Upload a .pdf 文件 where conversion fails — 文件 still uploaded, no markdown."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
@@ -1483,20 +1659,30 @@ class TestScenarioEdgeCases:
             assert result["success"] is True
             assert len(result["files"]) == 1
             assert result["files"][0]["filename"] == "doc.pdf"
-            assert "markdown_file" not in result["files"][0]  # Conversion failed gracefully
-            assert (uploads_dir / "doc.pdf").exists()  # File still uploaded
+            assert "markdown_file" not in result["files"][0]  #    Conversion failed gracefully
 
 
-# ---------------------------------------------------------------------------
-# Gateway conformance — validate client output against Gateway Pydantic models
-# ---------------------------------------------------------------------------
+            assert (uploads_dir / "doc.pdf").exists()  #    File still uploaded
+
+
+
+
+#    ---------------------------------------------------------------------------
+
+
+#    Gateway conformance — 验证 客户端 输出 against Gateway Pydantic models
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestGatewayConformance:
-    """Validate that DeerFlowClient return dicts conform to Gateway Pydantic response models.
+    """Validate that DeerFlowClient 返回 dicts conform to Gateway Pydantic 响应 models.
 
-    Each test calls a client method, then parses the result through the
-    corresponding Gateway response model. If the client drifts (missing or
+    Each 测试 calls a 客户端 方法, then parses the 结果 through the
+    corresponding Gateway 响应 模型. If the 客户端 drifts (missing or
     wrong-typed fields), Pydantic raises ``ValidationError`` and CI catches it.
     """
 

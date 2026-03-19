@@ -11,7 +11,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
 
 
 def _detect_mode_with_config(config_content: str) -> str:
-    """Write config content into a temp project root and execute detect_sandbox_mode."""
+    """Write 配置 content into a temp 项目 root and 执行 detect_sandbox_mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_root = Path(tmpdir)
         (tmp_root / "config.yaml").write_text(config_content)
@@ -27,7 +27,7 @@ def _detect_mode_with_config(config_content: str) -> str:
 
 
 def test_detect_mode_defaults_to_local_when_config_missing():
-    """No config file should default to local mode."""
+    """No 配置 文件 should 默认 to local mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
         command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmpdir}' && detect_sandbox_mode"
         output = subprocess.check_output(["bash", "-lc", command], text=True).strip()
@@ -71,17 +71,19 @@ def test_detect_mode_ignores_commented_provisioner_url():
     config = """
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  # provisioner_url: http://provisioner:8002
+  #    provisioner_url: http://provisioner:8002
+
+
 """.strip()
 
     assert _detect_mode_with_config(config) == "aio"
 
 
 def test_detect_mode_unknown_provider_falls_back_to_local():
-    """Unknown sandbox provider should default to local mode."""
+    """Unknown sandbox provider should 默认 to local mode."""
     config = """
 sandbox:
-  use: custom.module:UnknownProvider
+  use: custom.模块:UnknownProvider
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"

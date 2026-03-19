@@ -1,9 +1,9 @@
 """Core behaviour tests for UploadsMiddleware.
 
 Covers:
-- _files_from_kwargs: parsing, validation, existence check, virtual-path construction
-- _create_files_message: output format with new-only and new+historical files
-- before_agent: full injection pipeline (string & list content, preserved
+- _files_from_kwargs: parsing, validation, existence 检查, virtual-路径 construction
+- _create_files_message: 输出 format with 新建-only and 新建+historical files
+- before_agent: full injection pipeline (字符串 & 列表 content, preserved
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
@@ -18,9 +18,15 @@ from deerflow.config.paths import Paths
 THREAD_ID = "thread-abc123"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Helpers
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _middleware(tmp_path: Path) -> UploadsMiddleware:
@@ -46,9 +52,15 @@ def _human(content, files=None, **extra_kwargs):
     return HumanMessage(content=content, additional_kwargs=additional_kwargs)
 
 
-# ---------------------------------------------------------------------------
-# _files_from_kwargs
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _files_from_kwargs
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestFilesFromKwargs:
@@ -78,7 +90,7 @@ class TestFilesFromKwargs:
         assert mw._files_from_kwargs(msg) is None
 
     def test_always_uses_virtual_path(self, tmp_path):
-        """path field must be /mnt/user-data/uploads/<filename> regardless of what the frontend sent."""
+        """路径 field must be /mnt/用户-数据/uploads/<filename> regardless of what the 前端 sent."""
         mw = _middleware(tmp_path)
         msg = _human(
             "hi",
@@ -91,7 +103,9 @@ class TestFilesFromKwargs:
     def test_skips_file_that_does_not_exist_on_disk(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
-        # file is NOT written to disk
+        #    文件 is NOT written to disk
+
+
         msg = _human("hi", files=[{"filename": "missing.txt", "size": 50, "path": "/mnt/user-data/uploads/missing.txt"}])
         assert mw._files_from_kwargs(msg, uploads_dir) is None
 
@@ -122,7 +136,7 @@ class TestFilesFromKwargs:
         assert [f["filename"] for f in result] == ["present.txt"]
 
     def test_no_existence_check_when_uploads_dir_is_none(self, tmp_path):
-        """Without an uploads_dir argument the existence check is skipped entirely."""
+        """Without an uploads_dir 参数 the existence 检查 is skipped entirely."""
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": "phantom.txt", "size": 10, "path": "/mnt/user-data/uploads/phantom.txt"}])
         result = mw._files_from_kwargs(msg, uploads_dir=None)
@@ -144,9 +158,15 @@ class TestFilesFromKwargs:
         assert result[0]["size"] == 0
 
 
-# ---------------------------------------------------------------------------
-# _create_files_message
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _create_files_message
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestCreateFilesMessage:
@@ -196,9 +216,15 @@ class TestCreateFilesMessage:
         assert "</uploaded_files>" in msg
 
 
-# ---------------------------------------------------------------------------
-# before_agent
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    before_agent
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestBeforeAgent:
@@ -221,7 +247,9 @@ class TestBeforeAgent:
 
     def test_returns_none_when_all_files_missing_from_disk(self, tmp_path):
         mw = _middleware(tmp_path)
-        _uploads_dir(tmp_path)  # directory exists but is empty
+        _uploads_dir(tmp_path)  #    目录 exists but is empty
+
+
         msg = _human("hi", files=[{"filename": "ghost.txt", "size": 10, "path": "/mnt/user-data/uploads/ghost.txt"}])
         state = self._state(msg)
         assert mw.before_agent(state, _runtime()) is None
@@ -322,9 +350,13 @@ class TestBeforeAgent:
     def test_no_historical_scan_when_thread_id_is_none(self, tmp_path):
         mw = _middleware(tmp_path)
         msg = _human("go", files=[{"filename": "f.txt", "size": 1, "path": "/mnt/user-data/uploads/f.txt"}])
-        # thread_id=None → _files_from_kwargs skips existence check, no dir scan
+        #    thread_id=None → _files_from_kwargs skips existence 检查, no dir scan
+
+
         result = mw.before_agent(self._state(msg), _runtime(thread_id=None))
-        # With no existence check, the file passes through and injection happens
+        #    With no existence 检查, the 文件 passes through and injection happens
+
+
         assert result is not None
         content = result["messages"][-1].content
         assert "previous messages" not in content

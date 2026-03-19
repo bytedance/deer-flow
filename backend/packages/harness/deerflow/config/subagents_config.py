@@ -1,4 +1,4 @@
-"""Configuration for the subagent system loaded from config.yaml."""
+"""Configuration for the subagent 系统 loaded from 配置.yaml."""
 
 import logging
 
@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class SubagentOverrideConfig(BaseModel):
-    """Per-agent configuration overrides."""
+    """Per-代理 configuration overrides."""
 
     timeout_seconds: int | None = Field(
         default=None,
@@ -18,7 +18,7 @@ class SubagentOverrideConfig(BaseModel):
 
 
 class SubagentsAppConfig(BaseModel):
-    """Configuration for the subagent system."""
+    """Configuration for the subagent 系统."""
 
     timeout_seconds: int = Field(
         default=900,
@@ -31,13 +31,13 @@ class SubagentsAppConfig(BaseModel):
     )
 
     def get_timeout_for(self, agent_name: str) -> int:
-        """Get the effective timeout for a specific agent.
+        """Get the effective timeout for a specific 代理.
 
         Args:
-            agent_name: The name of the subagent.
+            agent_name: The 名称 of the subagent.
 
         Returns:
-            The timeout in seconds, using per-agent override if set, otherwise global default.
+            The timeout in seconds, using per-代理 override if 集合, otherwise global 默认.
         """
         override = self.agents.get(agent_name)
         if override is not None and override.timeout_seconds is not None:
@@ -49,7 +49,7 @@ _subagents_config: SubagentsAppConfig = SubagentsAppConfig()
 
 
 def get_subagents_app_config() -> SubagentsAppConfig:
-    """Get the current subagents configuration."""
+    """Get the 当前 subagents configuration."""
     return _subagents_config
 
 

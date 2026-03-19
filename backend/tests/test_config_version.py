@@ -1,4 +1,4 @@
-"""Tests for config version check and upgrade logic."""
+"""Tests for 配置 version 检查 and upgrade logic."""
 
 from __future__ import annotations
 
@@ -12,11 +12,13 @@ from deerflow.config.app_config import AppConfig
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
-    """Write user config.yaml and config.example.yaml to a temp dir, return config path."""
+    """Write 用户 配置.yaml and 配置.示例.yaml to a temp dir, 返回 配置 路径."""
     config_path = tmpdir / "config.yaml"
     example_path = tmpdir / "config.example.yaml"
 
-    # Minimal valid config needs sandbox
+    #    Minimal 有效 配置 needs sandbox
+
+
     defaults = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
     }
@@ -33,11 +35,13 @@ def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) ->
 
 
 def test_missing_version_treated_as_zero(caplog):
-    """Config without config_version should be treated as version 0."""
+    """配置 without config_version should be treated as version 0."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = _make_config_files(
             Path(tmpdir),
-            user_config={},  # no config_version
+            user_config={},  #    no config_version
+
+
             example_config={"config_version": 1},
         )
         with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
@@ -51,7 +55,7 @@ def test_missing_version_treated_as_zero(caplog):
 
 
 def test_matching_version_no_warning(caplog):
-    """Config with matching version should not emit a warning."""
+    """配置 with matching version should not emit a 警告."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = _make_config_files(
             Path(tmpdir),
@@ -67,7 +71,7 @@ def test_matching_version_no_warning(caplog):
 
 
 def test_outdated_version_emits_warning(caplog):
-    """Config with lower version should emit a warning."""
+    """配置 with lower version should emit a 警告."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = _make_config_files(
             Path(tmpdir),
@@ -85,12 +89,14 @@ def test_outdated_version_emits_warning(caplog):
 
 
 def test_no_example_file_no_warning(caplog):
-    """If config.example.yaml doesn't exist, no warning should be emitted."""
+    """If 配置.示例.yaml doesn't exist, no 警告 should be emitted."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = Path(tmpdir) / "config.yaml"
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump({"sandbox": {"use": "test"}}, f)
-        # No config.example.yaml created
+        #    No 配置.示例.yaml created
+
+
 
         with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
             AppConfig._check_config_version({}, config_path)
@@ -98,19 +104,23 @@ def test_no_example_file_no_warning(caplog):
 
 
 def test_string_config_version_does_not_raise_type_error(caplog):
-    """config_version stored as a YAML string should not raise TypeError on comparison."""
+    """config_version stored as a YAML 字符串 should not raise TypeError on comparison."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = _make_config_files(
             Path(tmpdir),
-            user_config={"config_version": "1"},  # string, as YAML can produce
+            user_config={"config_version": "1"},  #    字符串, as YAML can produce
+
+
             example_config={"config_version": 2},
         )
-        # Must not raise TypeError: '<' not supported between instances of 'str' and 'int'
+        #    Must not raise TypeError: '<' not supported between instances of 'str' and 'int'
+
+
         AppConfig._check_config_version({"config_version": "1"}, config_path)
 
 
 def test_newer_user_version_no_warning(caplog):
-    """If user has a newer version than example (edge case), no warning."""
+    """If 用户 has a newer version than 示例 (edge case), no 警告."""
     with tempfile.TemporaryDirectory() as tmpdir:
         config_path = _make_config_files(
             Path(tmpdir),

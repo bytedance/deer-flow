@@ -47,16 +47,16 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       deselect();
     }
 
-    // Update artifacts from the current thread
+    //    Update artifacts from the 当前 线程
     setArtifacts(thread.values.artifacts);
 
-    // DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
-    // if (
-    //   selectedArtifact &&
-    //   !thread.values.artifacts?.includes(selectedArtifact)
-    // ) {
-    //   deselect();
-    // }
+    //    DO NOT automatically deselect the artifact when switching threads, because the artifacts auto discovering is not work now.
+    //    如果 (
+    //      selectedArtifact &&
+    //      !线程.values.artifacts?.includes(selectedArtifact)
+    //    ) {
+    //      deselect();
+    //    }
 
     if (
       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&

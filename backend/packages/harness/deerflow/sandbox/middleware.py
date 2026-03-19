@@ -19,23 +19,23 @@ class SandboxMiddlewareState(AgentState):
 
 
 class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
-    """Create a sandbox environment and assign it to an agent.
+    """Create a sandbox 环境 and assign it to an 代理.
 
     Lifecycle Management:
-    - With lazy_init=True (default): Sandbox is acquired on first tool call
-    - With lazy_init=False: Sandbox is acquired on first agent invocation (before_agent)
-    - Sandbox is reused across multiple turns within the same thread
-    - Sandbox is NOT released after each agent call to avoid wasteful recreation
+    - With lazy_init=True (默认): Sandbox is acquired on 第一 工具 call
+    - With lazy_init=False: Sandbox is acquired on 第一 代理 invocation (before_agent)
+    - Sandbox is reused across multiple turns within the same 线程
+    - Sandbox is NOT released after each 代理 call to avoid wasteful recreation
     - Cleanup happens at application shutdown via SandboxProvider.shutdown()
     """
 
     state_schema = SandboxMiddlewareState
 
     def __init__(self, lazy_init: bool = True):
-        """Initialize sandbox middleware.
+        """Initialize sandbox 中间件.
 
         Args:
-            lazy_init: If True, defer sandbox acquisition until first tool call.
+            lazy_init: If True, defer sandbox acquisition until 第一 工具 call.
                       If False, acquire sandbox eagerly in before_agent().
                       Default is True for optimal performance.
         """
@@ -50,11 +50,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        # Skip acquisition if lazy_init is enabled
+        #    Skip acquisition 如果 lazy_init is 已启用
+
+
         if self._lazy_init:
             return super().before_agent(state, runtime)
 
-        # Eager initialization (original behavior)
+        #    Eager initialization (original behavior)
+
+
         if "sandbox" not in state or state["sandbox"] is None:
             thread_id = runtime.context["thread_id"]
             sandbox_id = self._acquire_sandbox(thread_id)
@@ -77,5 +81,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             get_sandbox_provider().release(sandbox_id)
             return None
 
-        # No sandbox to release
+        #    No sandbox to release
+
+
         return super().after_agent(state, runtime)

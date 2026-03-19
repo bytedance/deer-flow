@@ -1,4 +1,4 @@
-"""Abstract base class for sandbox provisioning backends."""
+"""Abstract base 类 for sandbox provisioning backends."""
 
 from __future__ import annotations
 
@@ -40,15 +40,15 @@ class SandboxBackend(ABC):
 
     Two implementations:
     - LocalContainerBackend: starts Docker/Apple Container locally, manages ports
-    - RemoteSandboxBackend: connects to a pre-existing URL (K8s service, external)
+    - RemoteSandboxBackend: connects to a pre-existing URL (K8s 服务, external)
     """
 
     @abstractmethod
     def create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
-        """Create/provision a new sandbox.
+        """Create/provision a 新建 sandbox.
 
         Args:
-            thread_id: Thread ID for which the sandbox is being created. Useful for backends that want to organize sandboxes by thread.
+            thread_id: 线程 ID for which the sandbox is being created. Useful for backends that want to organize sandboxes by 线程.
             sandbox_id: Deterministic sandbox identifier.
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
                 Ignored by backends that don't manage containers (e.g., remote).
@@ -63,19 +63,19 @@ class SandboxBackend(ABC):
         """Destroy/cleanup a sandbox and release its resources.
 
         Args:
-            info: The sandbox metadata to destroy.
+            信息: The sandbox metadata to destroy.
         """
         ...
 
     @abstractmethod
     def is_alive(self, info: SandboxInfo) -> bool:
-        """Quick check whether a sandbox is still alive.
+        """Quick 检查 whether a sandbox is still alive.
 
-        This should be a lightweight check (e.g., container inspect)
-        rather than a full health check.
+        This should be a lightweight 检查 (e.g., container inspect)
+        rather than a full health 检查.
 
         Args:
-            info: The sandbox metadata to check.
+            信息: The sandbox metadata to 检查.
 
         Returns:
             True if the sandbox appears to be alive.
@@ -86,8 +86,8 @@ class SandboxBackend(ABC):
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Try to discover an existing sandbox by its deterministic ID.
 
-        Used for cross-process recovery: when another process started a sandbox,
-        this process can discover it by the deterministic container name or URL.
+        Used for cross-处理 recovery: when another 处理 started a sandbox,
+        this 处理 can discover it by the deterministic container 名称 or URL.
 
         Args:
             sandbox_id: The deterministic sandbox ID to look for.

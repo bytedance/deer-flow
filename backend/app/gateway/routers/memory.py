@@ -1,4 +1,4 @@
-"""Memory API router for retrieving and managing global memory data."""
+"""内存 API 路由器 for retrieving and managing global 内存 数据."""
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -10,14 +10,14 @@ router = APIRouter(prefix="/api", tags=["memory"])
 
 
 class ContextSection(BaseModel):
-    """Model for context sections (user and history)."""
+    """模型 for context sections (用户 and history)."""
 
     summary: str = Field(default="", description="Summary content")
     updatedAt: str = Field(default="", description="Last update timestamp")
 
 
 class UserContext(BaseModel):
-    """Model for user context."""
+    """模型 for 用户 context."""
 
     workContext: ContextSection = Field(default_factory=ContextSection)
     personalContext: ContextSection = Field(default_factory=ContextSection)
@@ -25,7 +25,7 @@ class UserContext(BaseModel):
 
 
 class HistoryContext(BaseModel):
-    """Model for history context."""
+    """模型 for history context."""
 
     recentMonths: ContextSection = Field(default_factory=ContextSection)
     earlierContext: ContextSection = Field(default_factory=ContextSection)
@@ -33,7 +33,7 @@ class HistoryContext(BaseModel):
 
 
 class Fact(BaseModel):
-    """Model for a memory fact."""
+    """模型 for a 内存 fact."""
 
     id: str = Field(..., description="Unique identifier for the fact")
     content: str = Field(..., description="Fact content")
@@ -44,7 +44,7 @@ class Fact(BaseModel):
 
 
 class MemoryResponse(BaseModel):
-    """Response model for memory data."""
+    """响应 模型 for 内存 数据."""
 
     version: str = Field(default="1.0", description="Memory schema version")
     lastUpdated: str = Field(default="", description="Last update timestamp")
@@ -54,7 +54,7 @@ class MemoryResponse(BaseModel):
 
 
 class MemoryConfigResponse(BaseModel):
-    """Response model for memory configuration."""
+    """响应 模型 for 内存 configuration."""
 
     enabled: bool = Field(..., description="Whether memory is enabled")
     storage_path: str = Field(..., description="Path to memory storage file")
@@ -66,7 +66,7 @@ class MemoryConfigResponse(BaseModel):
 
 
 class MemoryStatusResponse(BaseModel):
-    """Response model for memory status."""
+    """响应 模型 for 内存 status."""
 
     config: MemoryConfigResponse
     data: MemoryResponse
@@ -79,30 +79,30 @@ class MemoryStatusResponse(BaseModel):
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
 async def get_memory() -> MemoryResponse:
-    """Get the current global memory data.
+    """Get the 当前 global 内存 数据.
 
     Returns:
-        The current memory data with user context, history, and facts.
+        The 当前 内存 数据 with 用户 context, history, and facts.
 
-    Example Response:
+    Example 响应:
         ```json
         {
             "version": "1.0",
             "lastUpdated": "2024-01-15T10:30:00Z",
-            "user": {
-                "workContext": {"summary": "Working on DeerFlow project", "updatedAt": "..."},
-                "personalContext": {"summary": "Prefers concise responses", "updatedAt": "..."},
-                "topOfMind": {"summary": "Building memory API", "updatedAt": "..."}
+            "用户": {
+                "workContext": {"摘要": "Working on DeerFlow 项目", "updatedAt": "..."},
+                "personalContext": {"摘要": "Prefers concise responses", "updatedAt": "..."},
+                "topOfMind": {"摘要": "Building 内存 API", "updatedAt": "..."}
             },
             "history": {
-                "recentMonths": {"summary": "Recent development activities", "updatedAt": "..."},
-                "earlierContext": {"summary": "", "updatedAt": ""},
-                "longTermBackground": {"summary": "", "updatedAt": ""}
+                "recentMonths": {"摘要": "Recent development activities", "updatedAt": "..."},
+                "earlierContext": {"摘要": "", "updatedAt": ""},
+                "longTermBackground": {"摘要": "", "updatedAt": ""}
             },
             "facts": [
                 {
-                    "id": "fact_abc123",
-                    "content": "User prefers TypeScript over JavaScript",
+                    "标识符": "fact_abc123",
+                    "content": "用户 prefers TypeScript over JavaScript",
                     "category": "preference",
                     "confidence": 0.9,
                     "createdAt": "2024-01-15T10:30:00Z",
@@ -123,13 +123,13 @@ async def get_memory() -> MemoryResponse:
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
 async def reload_memory() -> MemoryResponse:
-    """Reload memory data from file.
+    """Reload 内存 数据 from 文件.
 
-    This forces a reload of the memory data from the storage file,
-    useful when the file has been modified externally.
+    This forces a reload of the 内存 数据 from the storage 文件,
+    useful when the 文件 has been modified externally.
 
     Returns:
-        The reloaded memory data.
+        The reloaded 内存 数据.
     """
     memory_data = reload_memory_data()
     return MemoryResponse(**memory_data)
@@ -142,16 +142,16 @@ async def reload_memory() -> MemoryResponse:
     description="Retrieve the current memory system configuration.",
 )
 async def get_memory_config_endpoint() -> MemoryConfigResponse:
-    """Get the memory system configuration.
+    """Get the 内存 系统 configuration.
 
     Returns:
-        The current memory configuration settings.
+        The 当前 内存 configuration settings.
 
-    Example Response:
+    Example 响应:
         ```json
         {
-            "enabled": true,
-            "storage_path": ".deer-flow/memory.json",
+            "已启用": true,
+            "storage_path": ".deer-flow/内存.json",
             "debounce_seconds": 30,
             "max_facts": 100,
             "fact_confidence_threshold": 0.7,
@@ -179,10 +179,10 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     description="Retrieve both memory configuration and current data in a single request.",
 )
 async def get_memory_status() -> MemoryStatusResponse:
-    """Get the memory system status including configuration and data.
+    """Get the 内存 系统 status including configuration and 数据.
 
     Returns:
-        Combined memory configuration and current data.
+        Combined 内存 configuration and 当前 数据.
     """
     config = get_memory_config()
     memory_data = get_memory_data()

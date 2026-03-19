@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 
 const extensionMap: Record<string, string> = {
-  // Text
+  //    Text
   txt: "text",
   csv: "csv",
   log: "text",
@@ -18,7 +18,7 @@ const extensionMap: Record<string, string> = {
   properties: "text",
   props: "text",
 
-  // JavaScript/TypeScript ecosystem
+  //    JavaScript/TypeScript ecosystem
   js: "javascript",
   jsx: "jsx",
   ts: "typescript",
@@ -28,7 +28,7 @@ const extensionMap: Record<string, string> = {
   mts: "typescript",
   cts: "typescript",
 
-  // Web
+  //    Web
   html: "html",
   htm: "html",
   css: "css",
@@ -39,19 +39,19 @@ const extensionMap: Record<string, string> = {
   svelte: "svelte",
   astro: "astro",
 
-  // Python
+  //    Python
   py: "python",
   pyi: "python",
   pyw: "python",
 
-  // Java/JVM
+  //    Java/JVM
   java: "java",
   kt: "kotlin",
   kts: "kotlin",
   scala: "scala",
   groovy: "groovy",
 
-  // C/C++
+  //    C/C++
   c: "c",
   h: "c",
   cpp: "cpp",
@@ -61,29 +61,29 @@ const extensionMap: Record<string, string> = {
   hxx: "cpp",
   hh: "cpp",
 
-  // C#
+  //    C#
   cs: "csharp",
 
-  // Go
+  //    Go
   go: "go",
 
-  // Rust
+  //    Rust
   rs: "rust",
 
-  // Ruby
+  //    Ruby
   rb: "ruby",
   rake: "ruby",
 
-  // PHP
+  //    PHP
   php: "php",
 
-  // Shell/Bash
+  //    Shell/Bash
   sh: "bash",
   bash: "bash",
   zsh: "zsh",
   fish: "fish",
 
-  // Config & Data
+  //    配置 & Data
   json: "json",
   jsonc: "jsonc",
   json5: "json5",
@@ -94,15 +94,15 @@ const extensionMap: Record<string, string> = {
   ini: "ini",
   env: "dotenv",
 
-  // Markdown & Docs
+  //    Markdown & Docs
   md: "markdown",
   mdx: "mdx",
   rst: "rst",
 
-  // SQL
+  //    SQL
   sql: "sql",
 
-  // Other languages
+  //    Other languages
   swift: "swift",
   dart: "dart",
   lua: "lua",
@@ -117,23 +117,23 @@ const extensionMap: Record<string, string> = {
   clj: "clojure",
   cljs: "clojure",
 
-  // Infrastructure
+  //    Infrastructure
   dockerfile: "dockerfile",
   docker: "docker",
   tf: "terraform",
   tfvars: "terraform",
   hcl: "hcl",
 
-  // Build & Config
+  //    Build & 配置
   makefile: "makefile",
   cmake: "cmake",
   gradle: "groovy",
 
-  // Git
+  //    Git
   gitignore: "git-commit",
   gitattributes: "git-commit",
 
-  // Misc
+  //    Misc
   graphql: "graphql",
   gql: "graphql",
   proto: "protobuf",

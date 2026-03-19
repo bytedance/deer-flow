@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
-"""Improve a skill description based on eval results.
+#   !/usr/bin/env python3
 
-Takes eval results (from run_eval.py) and generates an improved description
+
+"""Improve a skill 描述 based on eval results.
+
+Takes eval results (from run_eval.py) and generates an improved 描述
 by calling `claude -p` as a subprocess (same auth pattern as run_eval.py —
-uses the session's Claude Code auth, no separate ANTHROPIC_API_KEY needed).
+uses the 会话's Claude Code auth, no separate ANTHROPIC_API_KEY needed).
 """
 
 import argparse
@@ -18,18 +20,24 @@ from scripts.utils import parse_skill_md
 
 
 def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
-    """Run `claude -p` with the prompt on stdin and return the text response.
+    """Run `claude -p` with the 提示词 on stdin and 返回 the text 响应.
 
-    Prompt goes over stdin (not argv) because it embeds the full SKILL.md
+    提示词 goes over stdin (not argv) because it embeds the full SKILL.md
     body and can easily exceed comfortable argv length.
     """
     cmd = ["claude", "-p", "--output-format", "text"]
     if model:
         cmd.extend(["--model", model])
 
-    # Remove CLAUDECODE env var to allow nesting claude -p inside a
-    # Claude Code session. The guard is for interactive terminal conflicts;
-    # programmatic subprocess usage is safe. Same pattern as run_eval.py.
+    #    Remove CLAUDECODE env var to allow nesting claude -p inside a
+
+
+    #    Claude Code 会话. The guard is 对于 interactive terminal conflicts;
+
+
+    #    programmatic subprocess usage is safe. Same pattern as run_eval.py.
+
+
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
     result = subprocess.run(
@@ -58,7 +66,7 @@ def improve_description(
     log_dir: Path | None = None,
     iteration: int | None = None,
 ) -> str:
-    """Call Claude to improve the description based on eval results."""
+    """Call Claude to improve the 描述 based on eval results."""
     failed_triggers = [
         r for r in eval_results["results"]
         if r["should_trigger"] and not r["pass"]
@@ -68,7 +76,9 @@ def improve_description(
         if not r["should_trigger"] and not r["pass"]
     ]
 
-    # Build scores summary
+    #    Build scores 摘要
+
+
     train_score = f"{eval_results['summary']['passed']}/{eval_results['summary']['total']}"
     if test_results:
         test_score = f"{test_results['summary']['passed']}/{test_results['summary']['total']}"
@@ -76,11 +86,11 @@ def improve_description(
     else:
         scores_summary = f"Train: {train_score}"
 
-    prompt = f"""You are optimizing a skill description for a Claude Code skill called "{skill_name}". A "skill" is sort of like a prompt, but with progressive disclosure -- there's a title and description that Claude sees when deciding whether to use the skill, and then if it does use the skill, it reads the .md file which has lots more details and potentially links to other resources in the skill folder like helper files and scripts and additional documentation or examples.
+    prompt = f"""You are optimizing a skill 描述 for a Claude Code skill called "{skill_name}". A "skill" is sort of like a 提示词, but with progressive disclosure -- there's a title and 描述 that Claude sees when deciding whether to use the skill, and then if it does use the skill, it reads the .md 文件 which has lots more details and potentially links to other resources in the skill 文件夹 like helper files and scripts and additional documentation or examples.
 
-The description appears in Claude's "available_skills" list. When a user sends a query, Claude decides whether to invoke the skill based solely on the title and on this description. Your goal is to write a description that triggers for relevant queries, and doesn't trigger for irrelevant ones.
+The 描述 appears in Claude's "available_skills" 列表. When a 用户 sends a query, Claude decides whether to invoke the skill based solely on the title and on this 描述. Your goal is to write a 描述 that triggers for relevant queries, and doesn't trigger for irrelevant ones.
 
-Here's the current description:
+Here's the 当前 描述:
 <current_description>
 "{current_description}"
 </current_description>
@@ -124,22 +134,22 @@ Skill content (for context on what the skill does):
 {skill_content}
 </skill_content>
 
-Based on the failures, write a new and improved description that is more likely to trigger correctly. When I say "based on the failures", it's a bit of a tricky line to walk because we don't want to overfit to the specific cases you're seeing. So what I DON'T want you to do is produce an ever-expanding list of specific queries that this skill should or shouldn't trigger for. Instead, try to generalize from the failures to broader categories of user intent and situations where this skill would be useful or not useful. The reason for this is twofold:
+Based on the failures, write a 新建 and improved 描述 that is more likely to trigger correctly. When I say "based on the failures", it's a bit of a tricky line to walk because we don't want to overfit to the specific cases you're seeing. So what I DON'T want you to do is produce an ever-expanding 列表 of specific queries that this skill should or shouldn't trigger for. Instead, try to generalize from the failures to broader categories of 用户 intent and situations where this skill would be useful or not useful. The reason for this is twofold:
 
 1. Avoid overfitting
-2. The list might get loooong and it's injected into ALL queries and there might be a lot of skills, so we don't want to blow too much space on any given description.
+2. The 列表 might get loooong and it's injected into ALL queries and there might be a lot of skills, so we don't want to blow too much space on any given 描述.
 
-Concretely, your description should not be more than about 100-200 words, even if that comes at the cost of accuracy. There is a hard limit of 1024 characters — descriptions over that will be truncated, so stay comfortably under it.
+Concretely, your 描述 should not be more than about 100-200 words, even if that comes at the cost of accuracy. There is a hard limit of 1024 characters — descriptions over that will be truncated, so stay comfortably under it.
 
 Here are some tips that we've found to work well in writing these descriptions:
 - The skill should be phrased in the imperative -- "Use this skill for" rather than "this skill does"
-- The skill description should focus on the user's intent, what they are trying to achieve, vs. the implementation details of how the skill works.
-- The description competes with other skills for Claude's attention — make it distinctive and immediately recognizable.
-- If you're getting lots of failures after repeated attempts, change things up. Try different sentence structures or wordings.
+- The skill 描述 should focus on the 用户's intent, what they are trying to achieve, vs. the implementation details of how the skill works.
+- The 描述 competes with other skills for Claude's attention — make it distinctive and immediately recognizable.
+- If you're getting lots of failures after repeated attempts, change things 上. Try different sentence structures or wordings.
 
-I'd encourage you to be creative and mix up the style in different iterations since you'll have multiple opportunities to try different approaches and we'll just grab the highest-scoring one at the end. 
+I'd encourage you to be creative and mix 上 the style in different iterations since you'll have multiple opportunities to try different approaches and we'll just grab the highest-scoring one at the end. 
 
-Please respond with only the new description text in <new_description> tags, nothing else."""
+Please respond with only the 新建 描述 text in <new_description> tags, nothing else."""
 
     text = _call_claude(prompt, model)
 
@@ -155,11 +165,21 @@ Please respond with only the new description text in <new_description> tags, not
         "over_limit": len(description) > 1024,
     }
 
-    # Safety net: the prompt already states the 1024-char hard limit, but if
-    # the model blew past it anyway, make one fresh single-turn call that
-    # quotes the too-long version and asks for a shorter rewrite. (The old
-    # SDK path did this as a true multi-turn; `claude -p` is one-shot, so we
-    # inline the prior output into the new prompt instead.)
+    #    Safety net: the 提示词 already states the 1024-char hard limit, but 如果
+
+
+    #    the 模型 blew past it anyway, make one fresh single-turn call that
+
+
+    #    quotes the too-long version and asks 对于 a shorter rewrite. (The 旧
+
+
+    #    SDK 路径 did this as a true multi-turn; `claude -p` is one-shot, so we
+
+
+    #    inline the prior 输出 into the 新建 提示词 instead.)
+
+
     if len(description) > 1024:
         shorten_prompt = (
             f"{prompt}\n\n"
@@ -229,7 +249,9 @@ def main():
     if args.verbose:
         print(f"Improved: {new_description}", file=sys.stderr)
 
-    # Output as JSON with both the new description and updated history
+    #    Output as JSON with both the 新建 描述 and updated history
+
+
     output = {
         "description": new_description,
         "history": history + [{

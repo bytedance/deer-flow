@@ -16,19 +16,19 @@ def _normalize_presented_filepath(
     runtime: ToolRuntime[ContextT, ThreadState],
     filepath: str,
 ) -> str:
-    """Normalize a presented file path to the `/mnt/user-data/outputs/*` contract.
+    """Normalize a presented 文件 路径 to the `/mnt/用户-数据/outputs/*` contract.
 
     Accepts either:
-    - A virtual sandbox path such as `/mnt/user-data/outputs/report.md`
-    - A host-side thread outputs path such as
-      `/app/backend/.deer-flow/threads/<thread>/user-data/outputs/report.md`
+    - A virtual sandbox 路径 such as `/mnt/用户-数据/outputs/report.md`
+    - A host-side 线程 outputs 路径 such as
+      `/app/后端/.deer-flow/threads/<线程>/用户-数据/outputs/report.md`
 
     Returns:
-        The normalized virtual path.
+        The normalized virtual 路径.
 
     Raises:
-        ValueError: If runtime metadata is missing or the path is outside the
-            current thread's outputs directory.
+        ValueError: If runtime metadata is missing or the 路径 is outside the
+            当前 线程's outputs 目录.
     """
     if runtime.state is None:
         raise ValueError("Thread runtime state is not available")
@@ -65,24 +65,24 @@ def present_file_tool(
     filepaths: list[str],
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """Make files visible to the user for viewing and rendering in the client interface.
+    """Make files 可见 to the 用户 for viewing and rendering in the 客户端 接口.
 
-    When to use the present_files tool:
+    When to use the present_files 工具:
 
-    - Making any file available for the user to view, download, or interact with
+    - Making any 文件 可用的 for the 用户 to view, download, or interact with
     - Presenting multiple related files at once
-    - After creating files that should be presented to the user
+    - After creating files that should be presented to the 用户
 
-    When NOT to use the present_files tool:
-    - When you only need to read file contents for your own processing
-    - For temporary or intermediate files not meant for user viewing
+    When NOT to use the present_files 工具:
+    - When you only need to read 文件 contents for your own processing
+    - For temporary or intermediate files not meant for 用户 viewing
 
     Notes:
-    - You should call this tool after creating files and moving them to the `/mnt/user-data/outputs` directory.
-    - This tool can be safely called in parallel with other tools. State updates are handled by a reducer to prevent conflicts.
+    - You should call this 工具 after creating files and moving them to the `/mnt/用户-数据/outputs` 目录.
+    - This 工具 can be safely called in 并行 with other tools. 状态 updates are handled by a reducer to prevent conflicts.
 
     Args:
-        filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
+        filepaths: List of absolute 文件 paths to present to the 用户. **Only** files in `/mnt/用户-数据/outputs` can be presented.
     """
     try:
         normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
@@ -91,7 +91,9 @@ def present_file_tool(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
 
-    # The merge_artifacts reducer will handle merging and deduplication
+    #    The merge_artifacts reducer will 处理 merging and deduplication
+
+
     return Command(
         update={
             "artifacts": normalized_paths,

@@ -7,20 +7,26 @@ from PIL import Image
 
 def validate_image(image_path: str) -> bool:
     """
-    Validate if an image file can be opened and is not corrupted.
+    Validate if an image 文件 can be opened and is not corrupted.
     
     Args:
-        image_path: Path to the image file
+        image_path: Path to the image 文件
         
     Returns:
-        True if the image is valid and can be opened, False otherwise
+        True if the image is 有效 and can be opened, False otherwise
     """
     try:
         with Image.open(image_path) as img:
-            img.verify()  # Verify that it's a valid image
-        # Re-open to check if it can be fully loaded (verify() may not catch all issues)
+            img.verify()  #    Verify that it's a 有效 image
+
+
+        #    Re-打开 to 检查 如果 it can be fully loaded (verify() may not catch all issues)
+
+
         with Image.open(image_path) as img:
-            img.load()  # Force load the image data
+            img.load()  #    Force load the image 数据
+
+
         return True
     except Exception as e:
         print(f"Warning: Image '{image_path}' is invalid or corrupted: {e}")
@@ -38,7 +44,9 @@ def generate_image(
     parts = []
     i = 0
     
-    # Filter out invalid reference images
+    #    Filter out 无效 reference images
+
+
     valid_reference_images = []
     for ref_img in reference_images:
         if validate_image(ref_img):
@@ -82,7 +90,9 @@ def generate_image(
     image_parts = [part for part in parts if part.get("inlineData", False)]
     if len(image_parts) == 1:
         base64_image = image_parts[0]["inlineData"]["data"]
-        # Save the image to a file
+        #    Save the image to a 文件
+
+
         with open(output_file, "wb") as f:
             f.write(base64.b64decode(base64_image))
         return f"Successfully generated image to {output_file}"

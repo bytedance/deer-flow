@@ -12,12 +12,12 @@ import {
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
-  // Locale meta
+  //    Locale meta
   locale: {
     localName: "中文",
   },
 
-  // Common
+  //    Common
   common: {
     home: "首页",
     settings: "设置",
@@ -45,7 +45,7 @@ export const zhCN: Translations = {
     create: "创建",
   },
 
-  // Welcome
+  //    Welcome
   welcome: {
     greeting: "你好，欢迎回来！",
     description:
@@ -56,7 +56,7 @@ export const zhCN: Translations = {
       "创建你的 Agent Skill 来释放 DeerFlow 的潜力。通过自定义技能，DeerFlow\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
   },
 
-  // Clipboard
+  //    Clipboard
   clipboard: {
     copyToClipboard: "复制到剪贴板",
     copiedToClipboard: "已复制到剪贴板",
@@ -64,7 +64,7 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
-  // Input Box
+  //    Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
     createSkillPrompt:
@@ -147,7 +147,7 @@ export const zhCN: Translations = {
     ],
   },
 
-  // Sidebar
+  //    Sidebar
   sidebar: {
     newChat: "新对话",
     chats: "对话",
@@ -156,7 +156,7 @@ export const zhCN: Translations = {
     agents: "智能体",
   },
 
-  // Agents
+  //    Agents
   agents: {
     title: "智能体",
     description: "创建和管理具有专属 Prompt 与能力的自定义智能体。",
@@ -185,13 +185,13 @@ export const zhCN: Translations = {
     backToGallery: "返回 Gallery",
   },
 
-  // Breadcrumb
+  //    Breadcrumb
   breadcrumb: {
     workspace: "工作区",
     chats: "对话",
   },
 
-  // Workspace
+  //    Workspace
   workspace: {
     officialWebsite: "访问 DeerFlow 官方网站",
     githubTooltip: "访问 DeerFlow 的 Github 仓库",
@@ -202,18 +202,18 @@ export const zhCN: Translations = {
     about: "关于 DeerFlow",
   },
 
-  // Conversation
+  //    Conversation
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
   },
 
-  // Chats
+  //    Chats
   chats: {
     searchChats: "搜索对话",
   },
 
-  // Page titles (document title)
+  //    Page titles (document title)
   pages: {
     appName: "DeerFlow",
     chats: "对话",
@@ -221,7 +221,7 @@ export const zhCN: Translations = {
     untitled: "未命名",
   },
 
-  // Tool calls
+  //    工具 calls
   toolCalls: {
     moreSteps: (count: number) => `查看其他 ${count} 个步骤`,
     lessSteps: "隐藏步骤",
@@ -257,7 +257,7 @@ export const zhCN: Translations = {
     failed: "子任务失败",
   },
 
-  // Settings
+  //    Settings
   settings: {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",

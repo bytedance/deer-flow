@@ -17,11 +17,11 @@ def setup_agent(
     description: str,
     runtime: ToolRuntime,
 ) -> Command:
-    """Setup the custom DeerFlow agent.
+    """Setup the custom DeerFlow 代理.
 
     Args:
-        soul: Full SOUL.md content defining the agent's personality and behavior.
-        description: One-line description of what the agent does.
+        soul: Full SOUL.md content defining the 代理's personality and behavior.
+        描述: One-line 描述 of what the 代理 does.
     """
 
     agent_name: str | None = runtime.context.get("agent_name")
@@ -32,7 +32,9 @@ def setup_agent(
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         if agent_name:
-            # If agent_name is provided, we are creating a custom agent in the agents/ directory
+            #    If agent_name is provided, we are creating a custom 代理 in the agents/ 目录
+
+
             config_data: dict = {"name": agent_name}
             if description:
                 config_data["description"] = description
@@ -56,7 +58,9 @@ def setup_agent(
         import shutil
 
         if agent_name and agent_dir.exists():
-            # Cleanup the custom agent directory only if it was created but an error occurred during setup
+            #    Cleanup the custom 代理 目录 only 如果 it was created but an 错误 occurred during 设置
+
+
             shutil.rmtree(agent_dir)
         logger.error(f"[agent_creator] Failed to create agent '{agent_name}': {e}", exc_info=True)
         return Command(update={"messages": [ToolMessage(content=f"Error: {e}", tool_call_id=runtime.tool_call_id)]})

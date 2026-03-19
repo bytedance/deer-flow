@@ -1,5 +1,5 @@
 /**
- * React hooks for file uploads
+ * React hooks for 文件 uploads
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,7 +22,7 @@ export function useUploadFiles(threadId: string) {
   return useMutation<UploadResponse, Error, File[]>({
     mutationFn: (files: File[]) => uploadFiles(threadId, files),
     onSuccess: () => {
-      // Invalidate the uploaded files list
+      //    Invalidate the uploaded files 列表
       void queryClient.invalidateQueries({
         queryKey: ["uploads", "list", threadId],
       });
@@ -31,7 +31,7 @@ export function useUploadFiles(threadId: string) {
 }
 
 /**
- * Hook to list uploaded files
+ * Hook to 列表 uploaded files
  */
 export function useUploadedFiles(threadId: string) {
   return useQuery({
@@ -42,7 +42,7 @@ export function useUploadedFiles(threadId: string) {
 }
 
 /**
- * Hook to delete an uploaded file
+ * Hook to 删除 an uploaded 文件
  */
 export function useDeleteUploadedFile(threadId: string) {
   const queryClient = useQueryClient();
@@ -50,7 +50,7 @@ export function useDeleteUploadedFile(threadId: string) {
   return useMutation({
     mutationFn: (filename: string) => deleteUploadedFile(threadId, filename),
     onSuccess: () => {
-      // Invalidate the uploaded files list
+      //    Invalidate the uploaded files 列表
       void queryClient.invalidateQueries({
         queryKey: ["uploads", "list", threadId],
       });
@@ -59,8 +59,8 @@ export function useDeleteUploadedFile(threadId: string) {
 }
 
 /**
- * Hook to handle file uploads in submit flow
- * Returns a function that uploads files and returns their info
+ * Hook to 处理 文件 uploads in submit flow
+ * Returns a 函数 that uploads files and returns their 信息
  */
 export function useUploadFilesOnSubmit(threadId: string) {
   const uploadMutation = useUploadFiles(threadId);

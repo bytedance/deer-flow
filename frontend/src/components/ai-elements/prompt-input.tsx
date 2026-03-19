@@ -71,9 +71,9 @@ import {
   useState,
 } from "react";
 
-// ============================================================================
-// Provider Context & Types
-// ============================================================================
+//    ============================================================================
+//    Provider Context & Types
+//    ============================================================================
 
 export type AttachmentsContext = {
   files: (FileUIPart & { id: string })[];
@@ -93,7 +93,7 @@ export type TextInputContext = {
 export type PromptInputControllerProps = {
   textInput: TextInputContext;
   attachments: AttachmentsContext;
-  /** INTERNAL: Allows PromptInput to register its file textInput + "open" callback */
+  /** INTERNAL: Allows PromptInput to register its 文件 textInput + "打开" callback */
   __registerFileInput: (
     ref: RefObject<HTMLInputElement | null>,
     open: () => void,
@@ -117,7 +117,7 @@ export const usePromptInputController = () => {
   return ctx;
 };
 
-// Optional variants (do NOT throw). Useful for dual-mode components.
+//    Optional variants (do NOT throw). Useful 对于 dual-mode components.
 const useOptionalPromptInputController = () =>
   useContext(PromptInputController);
 
@@ -139,18 +139,18 @@ export type PromptInputProviderProps = PropsWithChildren<{
 }>;
 
 /**
- * Optional global provider that lifts PromptInput state outside of PromptInput.
+ * Optional global provider that lifts PromptInput 状态 outside of PromptInput.
  * If you don't use it, PromptInput stays fully self-managed.
  */
 export function PromptInputProvider({
   initialInput: initialTextInput = "",
   children,
 }: PromptInputProviderProps) {
-  // ----- textInput state
+  //    ----- textInput 状态
   const [textInput, setTextInput] = useState(initialTextInput);
   const clearInput = useCallback(() => setTextInput(""), []);
 
-  // ----- attachments state (global when wrapped)
+  //    ----- attachments 状态 (global when wrapped)
   const [attachmentFiles, setAttachmentFiles] = useState<
     (FileUIPart & { id: string })[]
   >([]);
@@ -197,11 +197,11 @@ export function PromptInputProvider({
     });
   }, []);
 
-  // Keep a ref to attachments for cleanup on unmount (avoids stale closure)
+  //    Keep a ref to attachments 对于 cleanup on unmount (avoids stale closure)
   const attachmentsRef = useRef(attachmentFiles);
   attachmentsRef.current = attachmentFiles;
 
-  // Cleanup blob URLs on unmount to prevent memory leaks
+  //    Cleanup blob URLs on unmount to prevent 内存 leaks
   useEffect(() => {
     return () => {
       for (const f of attachmentsRef.current) {
@@ -258,14 +258,14 @@ export function PromptInputProvider({
   );
 }
 
-// ============================================================================
-// Component Context & Hooks
-// ============================================================================
+//    ============================================================================
+//    Component Context & Hooks
+//    ============================================================================
 
 const LocalAttachmentsContext = createContext<AttachmentsContext | null>(null);
 
 export const usePromptInputAttachments = () => {
-  // Dual-mode: prefer provider if present, otherwise use local
+  //    Dual-mode: prefer provider 如果 present, otherwise use local
   const provider = useOptionalProviderAttachments();
   const local = useContext(LocalAttachmentsContext);
   const context = provider ?? local;
@@ -439,16 +439,16 @@ export type PromptInputProps = Omit<
   HTMLAttributes<HTMLFormElement>,
   "onSubmit" | "onError"
 > & {
-  accept?: string; // e.g., "image/*" or leave undefined for any
+  accept?: string; //    e.g., "image/*" or leave 未定义 对于 any
   disabled?: boolean;
   multiple?: boolean;
-  // When true, accepts drops anywhere on document. Default false (opt-in).
+  //    When true, accepts drops anywhere on document. Default false (opt-in).
   globalDrop?: boolean;
-  // Render a hidden input with given name and keep it in sync for native form posts. Default false.
+  //    Render a 隐藏 输入 with given 名称 and keep it in sync 对于 native form posts. Default false.
   syncHiddenInput?: boolean;
-  // Minimal constraints
+  //    Minimal constraints
   maxFiles?: number;
-  maxFileSize?: number; // bytes
+  maxFileSize?: number; //    bytes
   onError?: (err: {
     code: "max_files" | "max_file_size" | "accept";
     message: string;
@@ -473,19 +473,19 @@ export const PromptInput = ({
   children,
   ...props
 }: PromptInputProps) => {
-  // Try to use a provider controller if present
+  //    Try to use a provider controller 如果 present
   const controller = useOptionalPromptInputController();
   const usingProvider = !!controller;
 
-  // Refs
+  //    Refs
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
 
-  // ----- Local attachments (only used when no provider)
+  //    ----- Local attachments (only used when no provider)
   const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
   const files = usingProvider ? controller.attachments.files : items;
 
-  // Keep a ref to files for cleanup on unmount (avoids stale closure)
+  //    Keep a ref to files 对于 cleanup on unmount (avoids stale closure)
   const filesRef = useRef(files);
   filesRef.current = files;
 
@@ -506,7 +506,7 @@ export const PromptInput = ({
 
       return patterns.some((pattern) => {
         if (pattern.endsWith("/*")) {
-          const prefix = pattern.slice(0, -1); // e.g: image/* -> image/
+          const prefix = pattern.slice(0, -1); //    e.g: image/* -> image/
           return f.type.startsWith(prefix);
         }
         return f.type === pattern;
@@ -598,25 +598,25 @@ export const PromptInput = ({
     ? controller.attachments.openFileDialog
     : openFileDialogLocal;
 
-  // Let provider know about our hidden file input so external menus can call openFileDialog()
+  //    Let provider know about our 隐藏 文件 输入 so external menus can call openFileDialog()
   useEffect(() => {
     if (!usingProvider) return;
     controller.__registerFileInput(inputRef, () => inputRef.current?.click());
   }, [usingProvider, controller]);
 
-  // Note: File input cannot be programmatically set for security reasons
-  // The syncHiddenInput prop is no longer functional
+  //    Note: File 输入 cannot be programmatically 集合 对于 安全 reasons
+  //    The syncHiddenInput prop is no longer functional
   useEffect(() => {
     if (syncHiddenInput && inputRef.current && files.length === 0) {
       inputRef.current.value = "";
     }
   }, [files, syncHiddenInput]);
 
-  // Attach drop handlers on nearest form and document (opt-in)
+  //    Attach drop handlers on nearest form and document (opt-in)
   useEffect(() => {
     const form = formRef.current;
     if (!form) return;
-    if (globalDrop) return; // when global drop is on, let the document-level handler own drops
+    if (globalDrop) return; //    when global drop is on, let the document-level handler own drops
 
     const onDragOver = (e: DragEvent) => {
       if (e.dataTransfer?.types?.includes("Files")) {
@@ -671,7 +671,7 @@ export const PromptInput = ({
         }
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup only on unmount; filesRef always current
+    //    eslint-disable-下一个-line react-hooks/exhaustive-deps -- cleanup only on unmount; filesRef always 当前
     [usingProvider],
   );
 
@@ -679,7 +679,7 @@ export const PromptInput = ({
     if (event.currentTarget.files) {
       add(event.currentTarget.files);
     }
-    // Reset input value to allow selecting files that were previously removed
+    //    Reset 输入 值 to allow selecting files that were previously removed
     event.currentTarget.value = "";
   };
 
@@ -723,18 +723,18 @@ export const PromptInput = ({
           return (formData.get("message") as string) || "";
         })();
 
-    // Reset form immediately after capturing text to avoid race condition
-    // where user input during async blob conversion would be lost
+    //    Reset form immediately after capturing text to avoid race condition
+    //    where 用户 输入 during 异步 blob conversion would be lost
     if (!usingProvider) {
       form.reset();
     }
 
-    // Convert blob URLs to data URLs asynchronously
+    //    Convert blob URLs to 数据 URLs asynchronously
     Promise.all(
       files.map(async ({ id, ...item }) => {
         if (item.url && item.url.startsWith("blob:")) {
           const dataUrl = await convertBlobUrlToDataUrl(item.url);
-          // If conversion failed, keep the original blob URL
+          //    If conversion failed, keep the original blob URL
           return {
             ...item,
             url: dataUrl ?? item.url,
@@ -747,7 +747,7 @@ export const PromptInput = ({
         try {
           const result = onSubmit({ text, files: convertedFiles }, event);
 
-          // Handle both sync and async onSubmit
+          //    Handle both sync and 异步 onSubmit
           if (result instanceof Promise) {
             result
               .then(() => {
@@ -757,25 +757,25 @@ export const PromptInput = ({
                 }
               })
               .catch(() => {
-                // Don't clear on error - user may want to retry
+                //    Don't clear on 错误 - 用户 may want to retry
               });
           } else {
-            // Sync function completed without throwing, clear attachments
+            //    Sync 函数 completed without throwing, clear attachments
             clear();
             if (usingProvider) {
               controller.textInput.clear();
             }
           }
         } catch {
-          // Don't clear on error - user may want to retry
+          //    Don't clear on 错误 - 用户 may want to retry
         }
       })
       .catch(() => {
-        // Don't clear on error - user may want to retry
+        //    Don't clear on 错误 - 用户 may want to retry
       });
   };
 
-  // Render with or without local provider
+  //    Render with or without local provider
   const inner = (
     <>
       <input
@@ -841,7 +841,7 @@ export const PromptInputTextarea = ({
       }
       e.preventDefault();
 
-      // Check if the submit button is disabled before submitting
+      //    Check 如果 the submit button is 已禁用 before submitting
       const form = e.currentTarget.form;
       const submitButton = form?.querySelector(
         'button[type="submit"]',
@@ -853,7 +853,7 @@ export const PromptInputTextarea = ({
       form?.requestSubmit();
     }
 
-    // Remove last attachment when Backspace is pressed and textarea is empty
+    //    Remove 最后 attachment when Backspace is pressed and textarea is empty
     if (
       e.key === "Backspace" &&
       e.currentTarget.value === "" &&
@@ -1017,8 +1017,8 @@ export const PromptInputActionMenuItem = ({
   <DropdownMenuItem className={cn(className)} {...props} />
 );
 
-// Note: Actions that perform side-effects (like opening a file dialog)
-// are provided in opt-in modules (e.g., prompt-input-attachments).
+//    Note: Actions that perform side-effects (like opening a 文件 dialog)
+//    are provided in opt-in modules (e.g., 提示词-输入-attachments).
 
 export type PromptInputSubmitProps = ComponentProps<typeof InputGroupButton> & {
   status?: ChatStatus;

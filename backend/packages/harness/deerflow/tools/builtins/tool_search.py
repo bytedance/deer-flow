@@ -1,12 +1,12 @@
-"""Tool search — deferred tool discovery at runtime.
+"""工具 search — deferred 工具 discovery at runtime.
 
 Contains:
 - DeferredToolRegistry: stores deferred tools and handles regex search
-- tool_search: the LangChain tool the agent calls to discover deferred tools
+- tool_search: the LangChain 工具 the 代理 calls to discover deferred tools
 
-The agent sees deferred tool names in <available-deferred-tools> but cannot
-call them until it fetches their full schema via the tool_search tool.
-Source-agnostic: no mention of MCP or tool origin.
+The 代理 sees deferred 工具 names in <可用的-deferred-tools> but cannot
+call them until it fetches their full schema via the tool_search 工具.
+Source-agnostic: no mention of MCP or 工具 origin.
 """
 
 import json
@@ -20,19 +20,25 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 
 logger = logging.getLogger(__name__)
 
-MAX_RESULTS = 5  # Max tools returned per search
+MAX_RESULTS = 5  #    Max tools returned per search
 
 
-# ── Registry ──
+
+
+#    ── Registry ──
+
+
 
 
 @dataclass
 class DeferredToolEntry:
-    """Lightweight metadata for a deferred tool (no full schema in context)."""
+    """Lightweight metadata for a deferred 工具 (no full schema in context)."""
 
     name: str
     description: str
-    tool: BaseTool  # Full tool object, returned only on search match
+    tool: BaseTool  #    Full 工具 对象, returned only on search match
+
+
 
 
 class DeferredToolRegistry:
@@ -51,15 +57,15 @@ class DeferredToolRegistry:
         )
 
     def search(self, query: str) -> list[BaseTool]:
-        """Search deferred tools by regex pattern against name + description.
+        """Search deferred tools by regex pattern against 名称 + 描述.
 
         Supports three query forms (aligned with Claude Code):
-          - "select:name1,name2" — exact name match
-          - "+keyword rest" — name must contain keyword, rank by rest
-          - "keyword query" — regex match against name + description
+          - "select:name1,name2" — exact 名称 match
+          - "+keyword rest" — 名称 must contain keyword, rank by rest
+          - "keyword query" — regex match against 名称 + 描述
 
         Returns:
-            List of matched BaseTool objects (up to MAX_RESULTS).
+            List of matched BaseTool objects (上 to MAX_RESULTS).
         """
         if query.startswith("select:"):
             names = {n.strip() for n in query[7:].split(",")}
@@ -76,7 +82,9 @@ class DeferredToolRegistry:
                 )
             return [e.tool for e in candidates][:MAX_RESULTS]
 
-        # General regex search
+        #    General regex search
+
+
         try:
             regex = re.compile(query, re.IGNORECASE)
         except re.error:
@@ -108,7 +116,9 @@ def _regex_score(pattern: str, entry: DeferredToolEntry) -> int:
     return len(regex.findall(f"{entry.name} {entry.description}"))
 
 
-# ── Singleton ──
+#    ── Singleton ──
+
+
 
 _registry: DeferredToolRegistry | None = None
 
@@ -128,30 +138,32 @@ def reset_deferred_registry() -> None:
     _registry = None
 
 
-# ── Tool ──
+#    ── 工具 ──
+
+
 
 
 @tool
 def tool_search(query: str) -> str:
     """Fetches full schema definitions for deferred tools so they can be called.
 
-    Deferred tools appear by name in <available-deferred-tools> in the system
-    prompt. Until fetched, only the name is known — there is no parameter
-    schema, so the tool cannot be invoked. This tool takes a query, matches
-    it against the deferred tool list, and returns the matched tools' complete
-    definitions. Once a tool's schema appears in that result, it is callable.
+    Deferred tools appear by 名称 in <可用的-deferred-tools> in the 系统
+    提示词. Until fetched, only the 名称 is known — there is no 参数
+    schema, so the 工具 cannot be invoked. This 工具 takes a query, matches
+    it against the deferred 工具 列表, and returns the matched tools' complete
+    definitions. Once a 工具's schema appears in that 结果, it is callable.
 
     Query forms:
-      - "select:Read,Edit,Grep" — fetch these exact tools by name
-      - "notebook jupyter" — keyword search, up to max_results best matches
-      - "+slack send" — require "slack" in the name, rank by remaining terms
+      - "select:Read,Edit,Grep" — fetch these exact tools by 名称
+      - "notebook jupyter" — keyword search, 上 to max_results best matches
+      - "+slack send" — require "slack" in the 名称, rank by remaining terms
 
     Args:
         query: Query to find deferred tools. Use "select:<tool_name>" for
                direct selection, or keywords to search.
 
     Returns:
-        Matched tool definitions as JSON array.
+        Matched 工具 definitions as JSON 数组.
     """
     registry = get_deferred_registry()
     if registry is None:
@@ -161,8 +173,12 @@ def tool_search(query: str) -> str:
     if not matched_tools:
         return f"No tools found matching: {query}"
 
-    # Use LangChain's built-in serialization to produce OpenAI function format.
-    # This is model-agnostic: all LLMs understand this standard schema.
+    #    Use LangChain's built-in serialization to produce OpenAI 函数 format.
+
+
+    #    This is 模型-agnostic: all LLMs understand this standard schema.
+
+
     tool_defs = [convert_to_openai_function(t) for t in matched_tools[:MAX_RESULTS]]
 
     return json.dumps(tool_defs, indent=2, ensure_ascii=False)

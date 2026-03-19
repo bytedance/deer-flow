@@ -649,7 +649,7 @@ const MagicBento: React.FC<BentoProps> = ({
                   const x = e.clientX - rect.left;
                   const y = e.clientY - rect.top;
 
-                  // Calculate the maximum distance from click point to any corner
+                  //    Calculate the maximum distance from click point to any corner
                   const maxDistance = Math.max(
                     Math.hypot(x, y),
                     Math.hypot(x - rect.width, y),

@@ -43,7 +43,7 @@ const getHandleCoordsByPosition = (
   node: InternalNode<Node>,
   handlePosition: Position
 ) => {
-  // Choose the handle type based on position - Left is for target, Right is for source
+  //    Choose the 处理 类型 based on position - Left is 对于 target, Right is 对于 source
   const handleType = handlePosition === Position.Left ? "target" : "source";
 
   const handle = node.internals.handleBounds?.[handleType]?.find(
@@ -57,9 +57,9 @@ const getHandleCoordsByPosition = (
   let offsetX = handle.width / 2;
   let offsetY = handle.height / 2;
 
-  // this is a tiny detail to make the markerEnd of an edge visible.
-  // The handle position that gets calculated has the origin top-left, so depending which side we are using, we add a little offset
-  // when the handlePosition is Position.Right for example, we need to add an offset as big as the handle itself in order to get the correct position
+  //    this is a tiny 详情 to make the markerEnd of an edge 可见.
+  //    The 处理 position that gets calculated has the origin 顶部-左, so depending which side we are using, we add a little offset
+  //    when the handlePosition is Position.Right 对于 示例, we need to add an offset as big as the 处理 itself in order to get the 正确 position
   switch (handlePosition) {
     case Position.Left:
       offsetX = 0;

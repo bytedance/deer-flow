@@ -1,10 +1,10 @@
-"""Configuration for automatic thread title generation."""
+"""Configuration for automatic 线程 title generation."""
 
 from pydantic import BaseModel, Field
 
 
 class TitleConfig(BaseModel):
-    """Configuration for automatic thread title generation."""
+    """Configuration for automatic 线程 title generation."""
 
     enabled: bool = Field(
         default=True,
@@ -32,12 +32,14 @@ class TitleConfig(BaseModel):
     )
 
 
-# Global configuration instance
+#    Global configuration instance
+
+
 _title_config: TitleConfig = TitleConfig()
 
 
 def get_title_config() -> TitleConfig:
-    """Get the current title configuration."""
+    """Get the 当前 title configuration."""
     return _title_config
 
 

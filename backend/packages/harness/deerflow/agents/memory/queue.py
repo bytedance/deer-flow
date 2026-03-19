@@ -1,4 +1,4 @@
-"""Memory update queue with debounce mechanism."""
+"""内存 更新 queue with debounce mechanism."""
 
 import threading
 import time
@@ -11,7 +11,7 @@ from deerflow.config.memory_config import get_memory_config
 
 @dataclass
 class ConversationContext:
-    """Context for a conversation to be processed for memory update."""
+    """Context for a conversation to be processed for 内存 更新."""
 
     thread_id: str
     messages: list[Any]
@@ -20,7 +20,7 @@ class ConversationContext:
 
 
 class MemoryUpdateQueue:
-    """Queue for memory updates with debounce mechanism.
+    """Queue for 内存 updates with debounce mechanism.
 
     This queue collects conversation contexts and processes them after
     a configurable debounce period. Multiple conversations received within
@@ -28,19 +28,19 @@ class MemoryUpdateQueue:
     """
 
     def __init__(self):
-        """Initialize the memory update queue."""
+        """Initialize the 内存 更新 queue."""
         self._queue: list[ConversationContext] = []
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
 
     def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None) -> None:
-        """Add a conversation to the update queue.
+        """Add a conversation to the 更新 queue.
 
         Args:
-            thread_id: The thread ID.
+            thread_id: The 线程 ID.
             messages: The conversation messages.
-            agent_name: If provided, memory is stored per-agent. If None, uses global memory.
+            agent_name: If provided, 内存 is stored per-代理. If None, uses global 内存.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -53,12 +53,18 @@ class MemoryUpdateQueue:
         )
 
         with self._lock:
-            # Check if this thread already has a pending update
-            # If so, replace it with the newer one
+            #    Check 如果 this 线程 already has a 待处理 更新
+
+
+            #    If so, replace it with the newer one
+
+
             self._queue = [c for c in self._queue if c.thread_id != thread_id]
             self._queue.append(context)
 
-            # Reset or start the debounce timer
+            #    Reset or 开始 the debounce timer
+
+
             self._reset_timer()
 
         print(f"Memory update queued for thread {thread_id}, queue size: {len(self._queue)}")
@@ -67,11 +73,15 @@ class MemoryUpdateQueue:
         """Reset the debounce timer."""
         config = get_memory_config()
 
-        # Cancel existing timer if any
+        #    Cancel existing timer 如果 any
+
+
         if self._timer is not None:
             self._timer.cancel()
 
-        # Start new timer
+        #    Start 新建 timer
+
+
         self._timer = threading.Timer(
             config.debounce_seconds,
             self._process_queue,
@@ -83,12 +93,16 @@ class MemoryUpdateQueue:
 
     def _process_queue(self) -> None:
         """Process all queued conversation contexts."""
-        # Import here to avoid circular dependency
+        #    Import here to avoid circular dependency
+
+
         from deerflow.agents.memory.updater import MemoryUpdater
 
         with self._lock:
             if self._processing:
-                # Already processing, reschedule
+                #    Already processing, reschedule
+
+
                 self._reset_timer()
                 return
 
@@ -120,7 +134,9 @@ class MemoryUpdateQueue:
                 except Exception as e:
                     print(f"Error updating memory for thread {context.thread_id}: {e}")
 
-                # Small delay between updates to avoid rate limiting
+                #    Small delay between updates to avoid rate limiting
+
+
                 if len(contexts_to_process) > 1:
                     time.sleep(0.5)
 
@@ -154,7 +170,7 @@ class MemoryUpdateQueue:
 
     @property
     def pending_count(self) -> int:
-        """Get the number of pending updates."""
+        """Get the 数字 of 待处理 updates."""
         with self._lock:
             return len(self._queue)
 
@@ -165,16 +181,18 @@ class MemoryUpdateQueue:
             return self._processing
 
 
-# Global singleton instance
+#    Global singleton instance
+
+
 _memory_queue: MemoryUpdateQueue | None = None
 _queue_lock = threading.Lock()
 
 
 def get_memory_queue() -> MemoryUpdateQueue:
-    """Get the global memory update queue singleton.
+    """Get the global 内存 更新 queue singleton.
 
     Returns:
-        The memory update queue instance.
+        The 内存 更新 queue instance.
     """
     global _memory_queue
     with _queue_lock:
@@ -184,7 +202,7 @@ def get_memory_queue() -> MemoryUpdateQueue:
 
 
 def reset_memory_queue() -> None:
-    """Reset the global memory queue.
+    """Reset the global 内存 queue.
 
     This is useful for testing.
     """

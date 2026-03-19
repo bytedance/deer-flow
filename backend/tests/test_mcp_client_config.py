@@ -1,4 +1,4 @@
-"""Core behavior tests for MCP client server config building."""
+"""Core behavior tests for MCP 客户端 服务器 配置 building."""
 
 import pytest
 

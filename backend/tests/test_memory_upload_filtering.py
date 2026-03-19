@@ -1,7 +1,7 @@
-"""Tests for upload-event filtering in the memory pipeline.
+"""Tests for upload-event filtering in the 内存 pipeline.
 
-Covers two functions introduced to prevent ephemeral file-upload context from
-persisting in long-term memory:
+Covers two functions introduced to prevent ephemeral 文件-upload context from
+persisting in long-term 内存:
 
   - _filter_messages_for_memory  (memory_middleware)
   - _strip_upload_mentions_from_memory  (updater)
@@ -12,9 +12,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
 from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Helpers
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 _UPLOAD_BLOCK = "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- filename: secret.txt\n  path: /mnt/user-data/uploads/abc123/secret.txt\n  size: 42 bytes\n</uploaded_files>"
 
@@ -30,17 +36,25 @@ def _ai(text: str, tool_calls=None) -> AIMessage:
     return msg
 
 
-# ===========================================================================
-# _filter_messages_for_memory
-# ===========================================================================
+#    ===========================================================================
+
+
+#    _filter_messages_for_memory
+
+
+#    ===========================================================================
+
+
 
 
 class TestFilterMessagesForMemory:
-    # --- upload-only turns are excluded ---
+    #    --- upload-only turns are excluded ---
+
+
 
     def test_upload_only_turn_is_excluded(self):
         """A human turn containing only <uploaded_files> (no real question)
-        and its paired AI response must both be dropped."""
+        and its paired AI 响应 must both be dropped."""
         msgs = [
             _human(_UPLOAD_BLOCK),
             _ai("I have read the file. It says: Hello."),
@@ -49,8 +63,8 @@ class TestFilterMessagesForMemory:
         assert result == []
 
     def test_upload_with_real_question_preserves_question(self):
-        """When the user asks a question alongside an upload, the question text
-        must reach the memory queue (upload block stripped, AI response kept)."""
+        """When the 用户 asks a question alongside an upload, the question text
+        must reach the 内存 queue (upload block stripped, AI 响应 kept)."""
         combined = _UPLOAD_BLOCK + "\n\nWhat does this file contain?"
         msgs = [
             _human(combined),
@@ -64,7 +78,9 @@ class TestFilterMessagesForMemory:
         assert "What does this file contain?" in human_result.content
         assert result[1].content == "The file contains: Hello DeerFlow."
 
-    # --- non-upload turns pass through unchanged ---
+    #    --- non-upload turns pass through unchanged ---
+
+
 
     def test_plain_conversation_passes_through(self):
         msgs = [
@@ -77,7 +93,7 @@ class TestFilterMessagesForMemory:
         assert result[1].content == "The capital of France is Paris."
 
     def test_tool_messages_are_excluded(self):
-        """Intermediate tool messages must never reach memory."""
+        """Intermediate 工具 messages must never reach 内存."""
         msgs = [
             _human("Search for something"),
             _ai("Calling search tool", tool_calls=[{"name": "search", "id": "1", "args": {}}]),
@@ -96,8 +112,12 @@ class TestFilterMessagesForMemory:
         msgs = [
             _human("Hello, how are you?"),
             _ai("I'm doing well, thank you!"),
-            _human(_UPLOAD_BLOCK),  # upload-only → dropped
-            _ai("I read the uploaded file."),  # paired AI → dropped
+            _human(_UPLOAD_BLOCK),  #    upload-only → dropped
+
+
+            _ai("I read the uploaded file."),  #    paired AI → dropped
+
+
             _human("What is 2 + 2?"),
             _ai("4"),
         ]
@@ -110,11 +130,13 @@ class TestFilterMessagesForMemory:
         assert _UPLOAD_BLOCK not in human_contents
         assert "I'm doing well, thank you!" in ai_contents
         assert "4" in ai_contents
-        # The upload-paired AI response must NOT appear
+        #    The upload-paired AI 响应 must NOT appear
+
+
         assert "I read the uploaded file." not in ai_contents
 
     def test_multimodal_content_list_handled(self):
-        """Human messages with list-style content (multimodal) are handled."""
+        """Human messages with 列表-style content (multimodal) are handled."""
         msg = HumanMessage(
             content=[
                 {"type": "text", "text": _UPLOAD_BLOCK},
@@ -125,7 +147,7 @@ class TestFilterMessagesForMemory:
         assert result == []
 
     def test_file_path_not_in_filtered_content(self):
-        """After filtering, no upload file path should appear in any message."""
+        """After filtering, no upload 文件 路径 should appear in any 消息."""
         combined = _UPLOAD_BLOCK + "\n\nSummarise the file please."
         msgs = [_human(combined), _ai("It says hello.")]
         result = _filter_messages_for_memory(msgs)
@@ -134,9 +156,15 @@ class TestFilterMessagesForMemory:
         assert "<uploaded_files>" not in all_content
 
 
-# ===========================================================================
-# _strip_upload_mentions_from_memory
-# ===========================================================================
+#    ===========================================================================
+
+
+#    _strip_upload_mentions_from_memory
+
+
+#    ===========================================================================
+
+
 
 
 class TestStripUploadMentionsFromMemory:
@@ -147,7 +175,9 @@ class TestStripUploadMentionsFromMemory:
             "facts": facts or [],
         }
 
-    # --- summaries ---
+    #    --- summaries ---
+
+
 
     def test_upload_event_sentence_removed_from_summary(self):
         mem = self._make_memory("User is interested in AI. User uploaded a test file for verification purposes. User prefers concise answers.")
@@ -165,7 +195,7 @@ class TestStripUploadMentionsFromMemory:
         assert "User uses Python" in summary
 
     def test_legitimate_csv_mention_is_preserved(self):
-        """'User works with CSV files' must NOT be deleted — it's not an upload event."""
+        """'用户 works with CSV files' must NOT be deleted — it's not an upload event."""
         mem = self._make_memory("User regularly works with CSV files for data analysis.")
         result = _strip_upload_mentions_from_memory(mem)
         assert "CSV files" in result["user"]["topOfMind"]["summary"]
@@ -177,14 +207,16 @@ class TestStripUploadMentionsFromMemory:
         assert "PDF export" in result["user"]["topOfMind"]["summary"]
 
     def test_uploading_a_test_file_removed(self):
-        """'uploading a test file' (with intervening words) must be caught."""
+        """'uploading a 测试 文件' (with intervening words) must be caught."""
         mem = self._make_memory("User conducted a hands-on test by uploading a test file titled 'test_deerflow_memory_bug.txt'. User is also learning Python.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
         assert "test_deerflow_memory_bug.txt" not in summary
         assert "uploading a test file" not in summary
 
-    # --- facts ---
+    #    --- facts ---
+
+
 
     def test_upload_fact_removed_from_facts(self):
         facts = [

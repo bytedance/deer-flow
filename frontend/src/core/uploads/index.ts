@@ -1,5 +1,5 @@
 /**
- * File uploads module
+ * File uploads 模块
  */
 
 export * from "./api";

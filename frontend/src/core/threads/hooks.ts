@@ -40,10 +40,10 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
-  // Track the thread ID that is currently streaming to handle thread changes during streaming
+  //    Track the 线程 ID that is currently streaming to 处理 线程 changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
-  // Ref to track current thread ID across async callbacks without causing re-renders,
-  // and to allow access to the current thread id in onUpdateEvent
+  //    Ref to track 当前 线程 ID across 异步 callbacks without causing re-renders,
+  //    and to allow access to the 当前 线程 标识符 in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
 
@@ -53,7 +53,7 @@ export function useThreadStream({
     onToolEnd,
   });
 
-  // Keep listeners ref updated with latest callbacks
+  //    Keep listeners ref updated with 最新 callbacks
   useEffect(() => {
     listeners.current = { onStart, onFinish, onToolEnd };
   }, [onStart, onFinish, onToolEnd]);
@@ -61,7 +61,7 @@ export function useThreadStream({
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
     if (!normalizedThreadId) {
-      // Just reset for new thread creation when threadId becomes null/undefined
+      //    Just reset 对于 新建 线程 creation when threadId becomes 空值/未定义
       startedRef.current = false;
       setOnStreamThreadId(normalizedThreadId);
     }
@@ -154,14 +154,14 @@ export function useThreadStream({
     },
   });
 
-  // Optimistic messages shown before the server stream responds
+  //    Optimistic messages shown before the 服务器 stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const sendInFlightRef = useRef(false);
-  // Track message count before sending so we know when server has responded
+  //    Track 消息 计数 before sending so we know when 服务器 has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 
-  // Clear optimistic when server messages arrive (count increases)
+  //    Clear optimistic when 服务器 messages arrive (计数 increases)
   useEffect(() => {
     if (
       optimisticMessages.length > 0 &&
@@ -184,10 +184,10 @@ export function useThreadStream({
 
       const text = message.text.trim();
 
-      // Capture current count before showing optimistic messages
+      //    Capture 当前 计数 before showing optimistic messages
       prevMsgCountRef.current = thread.messages.length;
 
-      // Build optimistic files list with uploading status
+      //    Build optimistic files 列表 with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
         (f) => ({
           filename: f.filename ?? "",
@@ -196,7 +196,7 @@ export function useThreadStream({
         }),
       );
 
-      // Create optimistic human message (shown immediately)
+      //    Create optimistic human 消息 (shown immediately)
       const optimisticHumanMsg: Message = {
         type: "human",
         id: `opt-human-${Date.now()}`,
@@ -207,7 +207,7 @@ export function useThreadStream({
 
       const newOptimistic: Message[] = [optimisticHumanMsg];
       if (optimisticFiles.length > 0) {
-        // Mock AI message while files are being uploaded
+        //    Mock AI 消息 当 files are being uploaded
         newOptimistic.push({
           type: "ai",
           id: `opt-ai-${Date.now()}`,
@@ -222,19 +222,19 @@ export function useThreadStream({
       let uploadedFileInfo: UploadedFileInfo[] = [];
 
       try {
-        // Upload files first if any
+        //    Upload files 第一 如果 any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            // Convert FileUIPart to File objects by fetching blob URLs
+            //    Convert FileUIPart to File objects by fetching blob URLs
             const filePromises = message.files.map(async (fileUIPart) => {
               if (fileUIPart.url && fileUIPart.filename) {
                 try {
-                  // Fetch the blob URL to get the file data
+                  //    Fetch the blob URL to get the 文件 数据
                   const response = await fetch(fileUIPart.url);
                   const blob = await response.blob();
 
-                  // Create a File object from the blob
+                  //    Create a File 对象 from the blob
                   return new File([blob], fileUIPart.filename, {
                     type: fileUIPart.mediaType || blob.type,
                   });
@@ -269,7 +269,7 @@ export function useThreadStream({
               const uploadResponse = await uploadFiles(threadId, files);
               uploadedFileInfo = uploadResponse.files;
 
-              // Update optimistic human message with uploaded status + paths
+              //    Update optimistic human 消息 with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
                 (info) => ({
                   filename: info.filename,
@@ -306,7 +306,7 @@ export function useThreadStream({
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
+        //    Build files metadata 对于 submission (included in additional_kwargs)
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
           (info) => ({
             filename: info.filename,
@@ -361,7 +361,7 @@ export function useThreadStream({
     [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
   );
 
-  // Merge thread with optimistic messages for display
+  //    Merge 线程 with optimistic messages 对于 display
   const mergedThread =
     optimisticMessages.length > 0
       ? ({
@@ -389,8 +389,8 @@ export function useThreads(
       const initialOffset = params.offset ?? 0;
       const DEFAULT_PAGE_SIZE = 50;
 
-      // Preserve prior semantics: if a non-positive limit is explicitly provided,
-      // delegate to a single search call with the original parameters.
+      //    Preserve prior semantics: 如果 a non-positive limit is explicitly provided,
+      //    delegate to a single search call with the original parameters.
       if (maxResults !== undefined && maxResults <= 0) {
         const response = await apiClient.threads.search<AgentThreadState>(params);
         return response as AgentThread[];

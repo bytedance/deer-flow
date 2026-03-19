@@ -1,8 +1,10 @@
-#!/usr/bin/env python3
-"""Run the eval + improve loop until all pass or max iterations reached.
+#   !/usr/bin/env python3
 
-Combines run_eval.py and improve_description.py in a loop, tracking history
-and returning the best description found. Supports train/test split to prevent
+
+"""Run the eval + improve 循环 until all pass or max iterations reached.
+
+Combines run_eval.py and improve_description.py in a 循环, tracking history
+and returning the best 描述 found. Supports train/测试 split to prevent
 overfitting.
 """
 
@@ -22,22 +24,30 @@ from scripts.utils import parse_skill_md
 
 
 def split_eval_set(eval_set: list[dict], holdout: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
-    """Split eval set into train and test sets, stratified by should_trigger."""
+    """Split eval 集合 into train and 测试 sets, stratified by should_trigger."""
     random.seed(seed)
 
-    # Separate by should_trigger
+    #    Separate by should_trigger
+
+
     trigger = [e for e in eval_set if e["should_trigger"]]
     no_trigger = [e for e in eval_set if not e["should_trigger"]]
 
-    # Shuffle each group
+    #    Shuffle each 组
+
+
     random.shuffle(trigger)
     random.shuffle(no_trigger)
 
-    # Calculate split points
+    #    Calculate split points
+
+
     n_trigger_test = max(1, int(len(trigger) * holdout))
     n_no_trigger_test = max(1, int(len(no_trigger) * holdout))
 
-    # Split
+    #    Split
+
+
     test_set = trigger[:n_trigger_test] + no_trigger[:n_no_trigger_test]
     train_set = trigger[n_trigger_test:] + no_trigger[n_no_trigger_test:]
 
@@ -59,12 +69,14 @@ def run_loop(
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
 ) -> dict:
-    """Run the eval + improvement loop."""
+    """Run the eval + 改进 循环."""
     project_root = find_project_root()
     name, original_description, content = parse_skill_md(skill_path)
     current_description = description_override or original_description
 
-    # Split into train/test if holdout > 0
+    #    Split into train/测试 如果 holdout > 0
+
+
     if holdout > 0:
         train_set, test_set = split_eval_set(eval_set, holdout)
         if verbose:
@@ -83,7 +95,9 @@ def run_loop(
             print(f"Description: {current_description}", file=sys.stderr)
             print(f"{'='*60}", file=sys.stderr)
 
-        # Evaluate train + test together in one batch for parallelism
+        #    Evaluate train + 测试 together in one batch 对于 parallelism
+
+
         all_queries = train_set + test_set
         t0 = time.time()
         all_results = run_eval(
@@ -99,7 +113,9 @@ def run_loop(
         )
         eval_elapsed = time.time() - t0
 
-        # Split results back into train/test by matching queries
+        #    Split results back into train/测试 by matching queries
+
+
         train_queries_set = {q["query"] for q in train_set}
         train_result_list = [r for r in all_results["results"] if r["query"] in train_queries_set]
         test_result_list = [r for r in all_results["results"] if r["query"] not in train_queries_set]
@@ -129,14 +145,18 @@ def run_loop(
             "test_failed": test_summary["failed"] if test_summary else None,
             "test_total": test_summary["total"] if test_summary else None,
             "test_results": test_results["results"] if test_results else None,
-            # For backward compat with report generator
+            #    For backward compat with report generator
+
+
             "passed": train_summary["passed"],
             "failed": train_summary["failed"],
             "total": train_summary["total"],
             "results": train_results["results"],
         })
 
-        # Write live report if path provided
+        #    Write live report 如果 路径 provided
+
+
         if live_report_path:
             partial_output = {
                 "original_description": original_description,
@@ -186,12 +206,16 @@ def run_loop(
                 print(f"\nMax iterations reached ({max_iterations}).", file=sys.stderr)
             break
 
-        # Improve the description based on train results
+        #    Improve the 描述 based on train results
+
+
         if verbose:
             print(f"\nImproving description...", file=sys.stderr)
 
         t0 = time.time()
-        # Strip test scores from history so improvement model can't see them
+        #    Strip 测试 scores from history so 改进 模型 can't see them
+
+
         blinded_history = [
             {k: v for k, v in h.items() if not k.startswith("test_")}
             for h in history
@@ -213,7 +237,9 @@ def run_loop(
 
         current_description = new_description
 
-    # Find the best iteration by TEST score (or train if no test set)
+    #    Find the best iteration by TEST score (or train 如果 no 测试 集合)
+
+
     if test_set:
         best = max(history, key=lambda h: h["test_passed"] or 0)
         best_score = f"{best['test_passed']}/{best['test_total']}"
@@ -267,20 +293,26 @@ def main():
 
     name, _, _ = parse_skill_md(skill_path)
 
-    # Set up live report path
+    #    Set 上 live report 路径
+
+
     if args.report != "none":
         if args.report == "auto":
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             live_report_path = Path(tempfile.gettempdir()) / f"skill_description_report_{skill_path.name}_{timestamp}.html"
         else:
             live_report_path = Path(args.report)
-        # Open the report immediately so the user can watch
+        #    Open the report immediately so the 用户 can watch
+
+
         live_report_path.write_text("<html><body><h1>Starting optimization loop...</h1><meta http-equiv='refresh' content='5'></body></html>")
         webbrowser.open(str(live_report_path))
     else:
         live_report_path = None
 
-    # Determine output directory (create before run_loop so logs can be written)
+    #    Determine 输出 目录 (创建 before run_loop so logs can be written)
+
+
     if args.results_dir:
         timestamp = time.strftime("%Y-%m-%d_%H%M%S")
         results_dir = Path(args.results_dir) / timestamp
@@ -306,13 +338,17 @@ def main():
         log_dir=log_dir,
     )
 
-    # Save JSON output
+    #    Save JSON 输出
+
+
     json_output = json.dumps(output, indent=2)
     print(json_output)
     if results_dir:
         (results_dir / "results.json").write_text(json_output)
 
-    # Write final HTML report (without auto-refresh)
+    #    Write final HTML report (without auto-refresh)
+
+
     if live_report_path:
         live_report_path.write_text(generate_html(output, auto_refresh=False, skill_name=name))
         print(f"\nReport: {live_report_path}", file=sys.stderr)

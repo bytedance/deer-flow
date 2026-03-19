@@ -1,4 +1,4 @@
-"""Core behavior tests for present_files path normalization."""
+"""Core behavior tests for present_files 路径 normalization."""
 
 import importlib
 from types import SimpleNamespace

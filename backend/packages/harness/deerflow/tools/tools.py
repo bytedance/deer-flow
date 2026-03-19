@@ -16,7 +16,9 @@ BUILTIN_TOOLS = [
 
 SUBAGENT_TOOLS = [
     task_tool,
-    # task_status_tool is no longer exposed to LLM (backend handles polling internally)
+    #    task_status_tool is no longer exposed to LLM (后端 handles polling internally)
+
+
 ]
 
 
@@ -26,48 +28,68 @@ def get_available_tools(
     model_name: str | None = None,
     subagent_enabled: bool = False,
 ) -> list[BaseTool]:
-    """Get all available tools from config.
+    """Get all 可用的 tools from 配置.
 
     Note: MCP tools should be initialized at application startup using
-    `initialize_mcp_tools()` from deerflow.mcp module.
+    `initialize_mcp_tools()` from deerflow.mcp 模块.
 
     Args:
-        groups: Optional list of tool groups to filter by.
-        include_mcp: Whether to include tools from MCP servers (default: True).
-        model_name: Optional model name to determine if vision tools should be included.
+        groups: Optional 列表 of 工具 groups to filter by.
+        include_mcp: Whether to include tools from MCP servers (默认: True).
+        model_name: Optional 模型 名称 to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
 
     Returns:
-        List of available tools.
+        List of 可用的 tools.
     """
     config = get_app_config()
     loaded_tools = [resolve_variable(tool.use, BaseTool) for tool in config.tools if groups is None or tool.group in groups]
 
-    # Conditionally add tools based on config
+    #    Conditionally add tools based on 配置
+
+
     builtin_tools = BUILTIN_TOOLS.copy()
 
-    # Add subagent tools only if enabled via runtime parameter
+    #    Add subagent tools only 如果 已启用 via runtime 参数
+
+
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
         logger.info("Including subagent tools (task)")
 
-    # If no model_name specified, use the first model (default)
+    #    If no model_name specified, use the 第一 模型 (默认)
+
+
     if model_name is None and config.models:
         model_name = config.models[0].name
 
-    # Add view_image_tool only if the model supports vision
+    #    Add view_image_tool only 如果 the 模型 supports vision
+
+
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
+    #    Get cached MCP tools 如果 已启用
+
+
+    #    NOTE: We use ExtensionsConfig.from_file() instead of 配置.extensions
+
+
+    #    to always read the 最新 configuration from disk. This ensures that changes
+
+
+    #    made through the Gateway API (which runs in a separate 处理) are immediately
+
+
+    #    reflected when 加载中 MCP tools.
+
+
     mcp_tools = []
-    # Reset deferred registry upfront to prevent stale state from previous calls
+    #    Reset deferred registry upfront to prevent stale 状态 from 上一个 calls
+
+
     reset_deferred_registry()
     if include_mcp:
         try:
@@ -80,8 +102,12 @@ def get_available_tools(
                 if mcp_tools:
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # When tool_search is enabled, register MCP tools in the
-                    # deferred registry and add tool_search to builtin tools.
+                    #    When tool_search is 已启用, register MCP tools in the
+
+
+                    #    deferred registry and add tool_search to builtin tools.
+
+
                     if config.tool_search.enabled:
                         from deerflow.tools.builtins.tool_search import DeferredToolRegistry, set_deferred_registry
                         from deerflow.tools.builtins.tool_search import tool_search as tool_search_tool

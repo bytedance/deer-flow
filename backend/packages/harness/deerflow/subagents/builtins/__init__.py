@@ -8,7 +8,9 @@ __all__ = [
     "BASH_AGENT_CONFIG",
 ]
 
-# Registry of built-in subagents
+#    Registry of built-in subagents
+
+
 BUILTIN_SUBAGENTS = {
     "general-purpose": GENERAL_PURPOSE_CONFIG,
     "bash": BASH_AGENT_CONFIG,

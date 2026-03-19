@@ -36,8 +36,8 @@ export function groupMessages<T>(
 
   const groups: MessageGroup[] = [];
 
-  // Returns the last group if it can still accept tool messages
-  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  //    Returns the 最后 组 如果 it can still accept 工具 messages
+  //    (i.e. it's an in-flight processing 组, not a terminal human/assistant 组).
   function lastOpenGroup() {
     const last = groups[groups.length - 1];
     if (
@@ -63,8 +63,8 @@ export function groupMessages<T>(
 
     if (message.type === "tool") {
       if (isClarificationToolMessage(message)) {
-        // Add to the preceding processing group to preserve tool-call association,
-        // then also open a standalone clarification group for prominent display.
+        //    Add to the preceding processing 组 to preserve 工具-call association,
+        //    then also 打开 a standalone clarification 组 对于 prominent display.
         lastOpenGroup()?.messages.push(message);
         groups.push({
           id: message.id,
@@ -100,7 +100,7 @@ export function groupMessages<T>(
         });
       } else if (hasReasoning(message) || hasToolCalls(message)) {
         const lastGroup = groups[groups.length - 1];
-        // Accumulate consecutive intermediate AI messages into one processing group.
+        //    Accumulate consecutive intermediate AI messages into one processing 组.
         if (lastGroup?.type !== "assistant:processing") {
           groups.push({
             id: message.id,
@@ -112,8 +112,8 @@ export function groupMessages<T>(
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
+      //    Not an 否则-如果: a 消息 with reasoning + content (but no 工具 calls) goes
+      //    into the processing 组 above AND gets its own assistant bubble here.
       if (hasContent(message) && !hasToolCalls(message)) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
@@ -219,7 +219,7 @@ export function hasReasoning(message: Message) {
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
-    // Compatible with the Anthropic gateway
+    //    Compatible with the Anthropic gateway
     return (part as unknown as { type: "thinking" })?.type === "thinking";
   }
   return false;
@@ -280,18 +280,18 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 /**
- * Represents a file stored in message additional_kwargs.files.
- * Used for optimistic UI (uploading state) and structured file metadata.
+ * Represents a 文件 stored in 消息 additional_kwargs.files.
+ * Used for optimistic UI (uploading 状态) and structured 文件 metadata.
  */
 export interface FileInMessage {
   filename: string;
-  size: number; // bytes
-  path?: string; // virtual path, may not be set during upload
+  size: number; //    bytes
+  path?: string; //    virtual 路径, may not be 集合 during upload
   status?: "uploading" | "uploaded";
 }
 
 /**
- * Strip <uploaded_files> tag from message content.
+ * Strip <uploaded_files> tag from 消息 content.
  * Returns the content with the tag removed.
  */
 export function stripUploadedFilesTag(content: string): string {
@@ -301,9 +301,9 @@ export function stripUploadedFilesTag(content: string): string {
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  // Match <uploaded_files>...</uploaded_files> tag
+  //    Match <uploaded_files>...</uploaded_files> tag
   const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
-  // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
+  //    eslint-disable-下一个-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
   if (!match) {
@@ -312,18 +312,18 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   const uploadedFilesContent = match[1];
 
-  // Check if it's "No files have been uploaded yet."
+  //    Check 如果 it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
     return [];
   }
 
-  // Check if the backend reported no new files were uploaded in this message
+  //    Check 如果 the 后端 reported no 新建 files were uploaded in this 消息
   if (uploadedFilesContent?.includes("(empty)")) {
     return [];
   }
 
-  // Parse file list
-  // Format: - filename (size)\n  Path: /path/to/file
+  //    Parse 文件 列表
+  //    Format: - filename (size)\n  Path: /路径/to/文件
   const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
   const files: FileInMessage[] = [];
   let fileMatch;

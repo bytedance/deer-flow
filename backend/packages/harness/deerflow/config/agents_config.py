@@ -16,7 +16,7 @@ AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class AgentConfig(BaseModel):
-    """Configuration for a custom agent."""
+    """Configuration for a custom 代理."""
 
     name: str
     description: str = ""
@@ -25,17 +25,17 @@ class AgentConfig(BaseModel):
 
 
 def load_agent_config(name: str | None) -> AgentConfig | None:
-    """Load the custom or default agent's config from its directory.
+    """Load the custom or 默认 代理's 配置 from its 目录.
 
     Args:
-        name: The agent name.
+        名称: The 代理 名称.
 
     Returns:
         AgentConfig instance.
 
     Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
-        ValueError: If config.yaml cannot be parsed.
+        FileNotFoundError: If the 代理 目录 or 配置.yaml does not exist.
+        ValueError: If 配置.yaml cannot be parsed.
     """
 
     if name is None:
@@ -58,11 +58,15 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
     except yaml.YAMLError as e:
         raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
 
-    # Ensure name is set from directory name if not in file
+    #    Ensure 名称 is 集合 from 目录 名称 如果 not in 文件
+
+
     if "name" not in data:
         data["name"] = name
 
-    # Strip unknown fields before passing to Pydantic (e.g. legacy prompt_file)
+    #    Strip unknown fields before passing to Pydantic (e.g. 遗留 prompt_file)
+
+
     known_fields = set(AgentConfig.model_fields.keys())
     data = {k: v for k, v in data.items() if k in known_fields}
 
@@ -70,16 +74,16 @@ def load_agent_config(name: str | None) -> AgentConfig | None:
 
 
 def load_agent_soul(agent_name: str | None) -> str | None:
-    """Read the SOUL.md file for a custom agent, if it exists.
+    """Read the SOUL.md 文件 for a custom 代理, if it exists.
 
-    SOUL.md defines the agent's personality, values, and behavioral guardrails.
-    It is injected into the lead agent's system prompt as additional context.
+    SOUL.md defines the 代理's personality, values, and behavioral guardrails.
+    It is injected into the lead 代理's 系统 提示词 as additional context.
 
     Args:
-        agent_name: The name of the agent or None for the default agent.
+        agent_name: The 名称 of the 代理 or None for the 默认 代理.
 
     Returns:
-        The SOUL.md content as a string, or None if the file does not exist.
+        The SOUL.md content as a 字符串, or None if the 文件 does not exist.
     """
     agent_dir = get_paths().agent_dir(agent_name) if agent_name else get_paths().base_dir
     soul_path = agent_dir / SOUL_FILENAME
@@ -90,10 +94,10 @@ def load_agent_soul(agent_name: str | None) -> str | None:
 
 
 def list_custom_agents() -> list[AgentConfig]:
-    """Scan the agents directory and return all valid custom agents.
+    """Scan the agents 目录 and 返回 all 有效 custom agents.
 
     Returns:
-        List of AgentConfig for each valid agent directory found.
+        List of AgentConfig for each 有效 代理 目录 found.
     """
     agents_dir = get_paths().agents_dir
 

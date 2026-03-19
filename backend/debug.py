@@ -1,18 +1,20 @@
-#!/usr/bin/env python
+#   !/usr/bin/env python
+
+
 """
 Debug script for lead_agent.
-Run this file directly in VS Code with breakpoints.
+Run this 文件 directly in VS Code with breakpoints.
 
 Requirements:
-    Run with `uv run` from the backend/ directory so that the uv workspace
+    Run with `uv 运行` from the 后端/ 目录 so that the uv 工作区
     resolves deerflow-harness and app packages correctly:
 
-        cd backend && PYTHONPATH=. uv run python debug.py
+        cd 后端 && PYTHONPATH=. uv 运行 python 调试.py
 
 Usage:
-    1. Set breakpoints in agent.py or other files
+    1. Set breakpoints in 代理.py or other files
     2. Press F5 or use "Run and Debug" panel
-    3. Input messages in the terminal to interact with the agent
+    3. Input messages in the terminal to interact with the 代理
 """
 
 import asyncio
@@ -33,7 +35,9 @@ logging.basicConfig(
 
 
 async def main():
-    # Initialize MCP tools at startup
+    #    Initialize MCP tools at startup
+
+
     try:
         from deerflow.mcp import initialize_mcp_tools
 
@@ -41,13 +45,17 @@ async def main():
     except Exception as e:
         print(f"Warning: Failed to initialize MCP tools: {e}")
 
-    # Create agent with default config
+    #    Create 代理 with 默认 配置
+
+
     config = {
         "configurable": {
             "thread_id": "debug-thread-001",
             "thinking_enabled": True,
             "is_plan_mode": True,
-            # Uncomment to use a specific model
+            #    Uncomment to use a specific 模型
+
+
             "model_name": "kimi-k2.5",
         }
     }
@@ -68,11 +76,15 @@ async def main():
                 print("Goodbye!")
                 break
 
-            # Invoke the agent
+            #    Invoke the 代理
+
+
             state = {"messages": [HumanMessage(content=user_input)]}
             result = await agent.ainvoke(state, config=config, context={"thread_id": "debug-thread-001"})
 
-            # Print the response
+            #    Print the 响应
+
+
             if result.get("messages"):
                 last_message = result["messages"][-1]
                 print(f"\nAgent: {last_message.content}")

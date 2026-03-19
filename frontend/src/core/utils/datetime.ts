@@ -18,7 +18,7 @@ export function formatTimeAgo(date: Date | string | number, locale?: Locale) {
   const effectiveLocale =
     locale ??
     (getLocaleFromCookie() as Locale | null) ??
-    // Fallback when cookie is missing (or on first render)
+    //    Fallback when cookie is missing (or on 第一 render)
     detectLocale();
   return formatDistanceToNow(date, {
     addSuffix: true,

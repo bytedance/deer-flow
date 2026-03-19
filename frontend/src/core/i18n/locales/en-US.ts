@@ -12,12 +12,12 @@ import {
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
-  // Locale meta
+  //    Locale meta
   locale: {
     localName: "English",
   },
 
-  // Common
+  //    Common
   common: {
     home: "Home",
     settings: "Settings",
@@ -45,7 +45,7 @@ export const enUS: Translations = {
     create: "Create",
   },
 
-  // Welcome
+  //    Welcome
   welcome: {
     greeting: "Hello, again!",
     description:
@@ -56,7 +56,7 @@ export const enUS: Translations = {
       "Create your own skill to release the power of DeerFlow. With customized skills,\nDeerFlow can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
   },
 
-  // Clipboard
+  //    Clipboard
   clipboard: {
     copyToClipboard: "Copy to clipboard",
     copiedToClipboard: "Copied to clipboard",
@@ -64,7 +64,7 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
-  // Input Box
+  //    Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
     createSkillPrompt:
@@ -153,7 +153,7 @@ export const enUS: Translations = {
     ],
   },
 
-  // Sidebar
+  //    Sidebar
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
@@ -162,7 +162,7 @@ export const enUS: Translations = {
     agents: "Agents",
   },
 
-  // Agents
+  //    Agents
   agents: {
     title: "Agents",
     description:
@@ -196,13 +196,13 @@ export const enUS: Translations = {
     backToGallery: "Back to Gallery",
   },
 
-  // Breadcrumb
+  //    Breadcrumb
   breadcrumb: {
     workspace: "Workspace",
     chats: "Chats",
   },
 
-  // Workspace
+  //    Workspace
   workspace: {
     officialWebsite: "DeerFlow's official website",
     githubTooltip: "DeerFlow on Github",
@@ -213,18 +213,18 @@ export const enUS: Translations = {
     about: "About DeerFlow",
   },
 
-  // Conversation
+  //    Conversation
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
   },
 
-  // Chats
+  //    Chats
   chats: {
     searchChats: "Search chats",
   },
 
-  // Page titles (document title)
+  //    Page titles (document title)
   pages: {
     appName: "DeerFlow",
     chats: "Chats",
@@ -232,7 +232,7 @@ export const enUS: Translations = {
     untitled: "Untitled",
   },
 
-  // Tool calls
+  //    工具 calls
   toolCalls: {
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
@@ -255,7 +255,7 @@ export const enUS: Translations = {
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
   },
 
-  // Subtasks
+  //    Subtasks
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
@@ -270,7 +270,7 @@ export const enUS: Translations = {
     failed: "Subtask failed",
   },
 
-  // Settings
+  //    Settings
   settings: {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",

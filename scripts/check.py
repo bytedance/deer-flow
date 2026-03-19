@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
-"""Cross-platform dependency checker for DeerFlow."""
+#   !/usr/bin/env python3
+
+
+"""Cross-平台 dependency checker for DeerFlow."""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ from typing import Optional
 
 
 def run_command(command: list[str]) -> Optional[str]:
-    """Run a command and return trimmed stdout, or None on failure."""
+    """Run a command and 返回 trimmed stdout, or None on 失败."""
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError):

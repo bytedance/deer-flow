@@ -1,4 +1,4 @@
-"""Tests for the IM channel system (MessageBus, ChannelStore, ChannelManager)."""
+"""Tests for the IM channel 系统 (MessageBus, ChannelStore, ChannelManager)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from app.channels.store import ChannelStore
 
 
 def _run(coro):
-    """Run an async coroutine synchronously."""
+    """Run an 异步 coroutine synchronously."""
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(coro)
@@ -37,9 +37,15 @@ async def _wait_for(condition, *, timeout=5.0, interval=0.05):
     raise TimeoutError(f"Condition not met within {timeout}s")
 
 
-# ---------------------------------------------------------------------------
-# MessageBus tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    MessageBus tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestMessageBus:
@@ -141,9 +147,15 @@ class TestMessageBus:
         assert msg.metadata == {}
 
 
-# ---------------------------------------------------------------------------
-# ChannelStore tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    ChannelStore tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestChannelStore:
@@ -205,13 +217,19 @@ class TestChannelStore:
         assert store.get_thread_id("x", "y") is None
 
 
-# ---------------------------------------------------------------------------
-# Channel base class tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Channel base 类 tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class DummyChannel(Channel):
-    """Concrete test implementation of Channel."""
+    """Concrete 测试 implementation of Channel."""
 
     def __init__(self, bus, config=None):
         super().__init__(name="dummy", bus=bus, config=config or {})
@@ -270,9 +288,15 @@ class TestChannelBase:
         _run(go())
 
 
-# ---------------------------------------------------------------------------
-# _extract_response_text tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    _extract_response_text tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestExtractResponseText:
@@ -341,7 +365,7 @@ class TestExtractResponseText:
         assert _extract_response_text(result) == "您想了解哪方面？"
 
     def test_clarification_over_empty_ai(self):
-        """When AI content is empty but ask_clarification tool message exists, use the tool message."""
+        """When AI content is empty but ask_clarification 工具 消息 exists, use the 工具 消息."""
         from app.channels.manager import _extract_response_text
 
         result = {
@@ -353,7 +377,7 @@ class TestExtractResponseText:
         assert _extract_response_text(result) == "Could you clarify?"
 
     def test_does_not_leak_previous_turn_text(self):
-        """When current turn AI has no text (only tool calls), do not return previous turn's text."""
+        """When 当前 turn AI has no text (only 工具 calls), do not 返回 上一个 turn's text."""
         from app.channels.manager import _extract_response_text
 
         result = {
@@ -369,26 +393,40 @@ class TestExtractResponseText:
                 {"type": "tool", "name": "present_files", "content": "ok"},
             ]
         }
-        # Should return "" (no text in current turn), NOT "Hi there!" from previous turn
+        #    Should 返回 "" (no text in 当前 turn), NOT "Hi there!" from 上一个 turn
+
+
         assert _extract_response_text(result) == ""
 
 
-# ---------------------------------------------------------------------------
-# ChannelManager tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    ChannelManager tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
-    """Create a mock langgraph_sdk async client."""
+    """Create a mock langgraph_sdk 异步 客户端."""
     mock_client = MagicMock()
 
-    # threads.create() returns a Thread-like dict
+    #    threads.创建() returns a 线程-like 字典
+
+
     mock_client.threads.create = AsyncMock(return_value={"thread_id": thread_id})
 
-    # threads.get() returns thread info (succeeds by default)
+    #    threads.get() returns 线程 信息 (succeeds by 默认)
+
+
     mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id})
 
-    # runs.wait() returns the final state with messages
+    #    runs.wait() returns the final 状态 with messages
+
+
     if run_result is None:
         run_result = {
             "messages": [
@@ -439,18 +477,28 @@ class TestChannelManager:
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
-            # Thread should be created on the LangGraph Server
+            #    线程 should be created on the LangGraph Server
+
+
             mock_client.threads.create.assert_called_once()
 
-            # Thread ID should be stored
+            #    线程 ID should be stored
+
+
             thread_id = store.get_thread_id("test", "chat1")
             assert thread_id == "test-thread-123"
 
-            # runs.wait should be called with the thread_id
+            #    runs.wait should be called with the thread_id
+
+
             mock_client.runs.wait.assert_called_once()
             call_args = mock_client.runs.wait.call_args
-            assert call_args[0][0] == "test-thread-123"  # thread_id
-            assert call_args[0][1] == "lead_agent"  # assistant_id
+            assert call_args[0][0] == "test-thread-123"  #    thread_id
+
+
+            assert call_args[0][1] == "lead_agent"  #    assistant_id
+
+
             assert call_args[1]["input"]["messages"][0]["content"] == "hi"
 
             assert len(outbound_received) == 1
@@ -677,7 +725,9 @@ class TestChannelManager:
             await _wait_for(lambda: any(m.is_final for m in outbound_received))
             await manager.stop()
 
-            # Should have at least one intermediate and one final message
+            #    Should have at least one intermediate and one final 消息
+
+
             final_msgs = [m for m in outbound_received if m.is_final]
             assert len(final_msgs) == 1
             assert final_msgs[0].thread_ts == "om-source-1"
@@ -754,13 +804,15 @@ class TestChannelManager:
             assert new_thread != "old-thread"
             assert "New conversation started" in outbound_received[0].text
 
-            # threads.create should be called for /new
+            #    threads.创建 should be called 对于 /新建
+
+
             mock_client.threads.create.assert_called_once()
 
         _run(go())
 
     def test_each_topic_creates_new_thread(self):
-        """Messages with distinct topic_ids should each create a new DeerFlow thread."""
+        """Messages with distinct topic_ids should each 创建 a 新建 DeerFlow 线程."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -768,7 +820,9 @@ class TestChannelManager:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            # Return a different thread_id for each create call
+            #    Return a different thread_id 对于 each 创建 call
+
+
             thread_ids = iter(["thread-1", "thread-2"])
 
             async def create_thread(**kwargs):
@@ -786,7 +840,9 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages with different topic_ids (e.g. group chat, each starts a new topic)
+            #    Send two messages with different topic_ids (e.g. 组 聊天, each starts a 新建 topic)
+
+
             for i, text in enumerate(["first", "second"]):
                 await bus.publish_inbound(
                     InboundMessage(
@@ -800,10 +856,14 @@ class TestChannelManager:
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create should be called twice (different topics)
+            #    threads.创建 should be called twice (different topics)
+
+
             assert mock_client.threads.create.call_count == 2
 
-            # runs.wait should be called twice with different thread_ids
+            #    runs.wait should be called twice with different thread_ids
+
+
             assert mock_client.runs.wait.call_count == 2
             wait_thread_ids = [c[0][0] for c in mock_client.runs.wait.call_args_list]
             assert "thread-1" in wait_thread_ids
@@ -812,7 +872,7 @@ class TestChannelManager:
         _run(go())
 
     def test_same_topic_reuses_thread(self):
-        """Messages with the same topic_id should reuse the same DeerFlow thread."""
+        """Messages with the same topic_id should reuse the same DeerFlow 线程."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -831,7 +891,9 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages with the same topic_id (simulates replies in a thread)
+            #    Send two messages with the same topic_id (simulates replies in a 线程)
+
+
             for text in ["first message", "follow-up"]:
                 msg = InboundMessage(
                     channel_name="test",
@@ -845,10 +907,14 @@ class TestChannelManager:
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create should be called only ONCE (second message reuses the thread)
+            #    threads.创建 should be called only ONCE (second 消息 reuses the 线程)
+
+
             mock_client.threads.create.assert_called_once()
 
-            # Both runs.wait calls should use the same thread_id
+            #    Both runs.wait calls should use the same thread_id
+
+
             assert mock_client.runs.wait.call_count == 2
             for call in mock_client.runs.wait.call_args_list:
                 assert call[0][0] == "topic-thread-1"
@@ -856,7 +922,7 @@ class TestChannelManager:
         _run(go())
 
     def test_none_topic_reuses_thread(self):
-        """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
+        """Messages with topic_id=None should reuse the same 线程 (e.g. Telegram private 聊天)."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -875,7 +941,9 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages with topic_id=None (simulates Telegram private chat)
+            #    Send two messages with topic_id=None (simulates Telegram private 聊天)
+
+
             for text in ["hello", "what did I just say?"]:
                 msg = InboundMessage(
                     channel_name="telegram",
@@ -889,10 +957,14 @@ class TestChannelManager:
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create should be called only ONCE (second message reuses the thread)
+            #    threads.创建 should be called only ONCE (second 消息 reuses the 线程)
+
+
             mock_client.threads.create.assert_called_once()
 
-            # Both runs.wait calls should use the same thread_id
+            #    Both runs.wait calls should use the same thread_id
+
+
             assert mock_client.runs.wait.call_count == 2
             for call in mock_client.runs.wait.call_args_list:
                 assert call[0][0] == "private-thread-1"
@@ -900,7 +972,7 @@ class TestChannelManager:
         _run(go())
 
     def test_different_topics_get_different_threads(self):
-        """Messages with different topic_ids should create separate threads."""
+        """Messages with different topic_ids should 创建 separate threads."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -920,7 +992,9 @@ class TestChannelManager:
             bus.subscribe_outbound(lambda msg: None)
             await manager.start()
 
-            # Send messages with different topic_ids
+            #    Send messages with different topic_ids
+
+
             for topic in ["topic-1", "topic-2"]:
                 msg = InboundMessage(
                     channel_name="test",
@@ -934,19 +1008,29 @@ class TestChannelManager:
             await _wait_for(lambda: mock_client.runs.wait.call_count >= 2)
             await manager.stop()
 
-            # threads.create called twice (different topics)
+            #    threads.创建 called twice (different topics)
+
+
             assert mock_client.threads.create.call_count == 2
 
-            # runs.wait used different thread_ids
+            #    runs.wait used different thread_ids
+
+
             wait_thread_ids = [c[0][0] for c in mock_client.runs.wait.call_args_list]
             assert set(wait_thread_ids) == {"thread-A", "thread-B"}
 
         _run(go())
 
 
-# ---------------------------------------------------------------------------
-# ChannelService tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    ChannelService tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestExtractArtifacts:
@@ -986,7 +1070,7 @@ class TestExtractArtifacts:
         assert _extract_artifacts(result) == []
 
     def test_only_extracts_after_last_human_message(self):
-        """Artifacts from previous turns (before the last human message) should be ignored."""
+        """Artifacts from 上一个 turns (before the 最后 human 消息) should be ignored."""
         from app.channels.manager import _extract_artifacts
 
         result = {
@@ -1011,7 +1095,9 @@ class TestExtractArtifacts:
                 {"type": "tool", "name": "present_files", "content": "ok"},
             ]
         }
-        # Should only return chart.png (from the last turn)
+        #    Should only 返回 chart.png (from the 最后 turn)
+
+
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png"]
 
     def test_multiple_files_in_single_call(self):
@@ -1096,7 +1182,7 @@ class TestHandleChatWithArtifacts:
         _run(go())
 
     def test_artifacts_only_no_text(self):
-        """When agent produces artifacts but no text, the artifacts should be the response."""
+        """When 代理 produces artifacts but no text, the artifacts should be the 响应."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -1136,7 +1222,9 @@ class TestHandleChatWithArtifacts:
             await manager.stop()
 
             assert len(outbound_received) == 1
-            # Should NOT be the "(No response from agent)" fallback
+            #    Should NOT be the "(No 响应 from 代理)" 回退
+
+
             assert outbound_received[0].text != "(No response from agent)"
             assert "output.csv" in outbound_received[0].text
             assert outbound_received[0].artifacts == ["/mnt/user-data/outputs/output.csv"]
@@ -1144,7 +1232,7 @@ class TestHandleChatWithArtifacts:
         _run(go())
 
     def test_only_last_turn_artifacts_returned(self):
-        """Only artifacts from the current turn's present_files calls should be included."""
+        """Only artifacts from the 当前 turn's present_files calls should be included."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -1152,7 +1240,9 @@ class TestHandleChatWithArtifacts:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            # Turn 1: produces report.md
+            #    Turn 1: produces report.md
+
+
             turn1_result = {
                 "messages": [
                     {"type": "human", "content": "make report"},
@@ -1166,7 +1256,9 @@ class TestHandleChatWithArtifacts:
                     {"type": "tool", "name": "present_files", "content": "ok"},
                 ],
             }
-            # Turn 2: accumulated messages include turn 1's artifacts, but only chart.png is new
+            #    Turn 2: accumulated messages include turn 1's artifacts, but only chart.png is 新建
+
+
             turn2_result = {
                 "messages": [
                     {"type": "human", "content": "make report"},
@@ -1198,7 +1290,9 @@ class TestHandleChatWithArtifacts:
             bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
             await manager.start()
 
-            # Send two messages with the same topic_id (same thread)
+            #    Send two messages with the same topic_id (same 线程)
+
+
             for text in ["make report", "add chart"]:
                 msg = InboundMessage(
                     channel_name="test",
@@ -1214,11 +1308,15 @@ class TestHandleChatWithArtifacts:
 
             assert len(outbound_received) == 2
 
-            # Turn 1: should include report.md
+            #    Turn 1: should include report.md
+
+
             assert "report.md" in outbound_received[0].text
             assert outbound_received[0].artifacts == ["/mnt/user-data/outputs/report.md"]
 
-            # Turn 2: should include ONLY chart.png (report.md is from previous turn)
+            #    Turn 2: should include ONLY chart.png (report.md is from 上一个 turn)
+
+
             assert "chart.png" in outbound_received[1].text
             assert "report.md" not in outbound_received[1].text
             assert outbound_received[1].artifacts == ["/mnt/user-data/outputs/chart.png"]
@@ -1458,9 +1556,15 @@ class TestChannelService:
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
 
-# ---------------------------------------------------------------------------
-# Slack send retry tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Slack send retry tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestSlackSendRetry:
@@ -1510,9 +1614,15 @@ class TestSlackSendRetry:
         _run(go())
 
 
-# ---------------------------------------------------------------------------
-# Telegram send retry tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Telegram send retry tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestTelegramSendRetry:
@@ -1568,9 +1678,15 @@ class TestTelegramSendRetry:
         _run(go())
 
 
-# ---------------------------------------------------------------------------
-# Telegram private-chat thread context tests
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Telegram private-聊天 线程 context tests
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
@@ -1591,7 +1707,7 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
 
 
 class TestTelegramPrivateChatThread:
-    """Verify that private chats use topic_id=None (single thread per chat)."""
+    """Verify that private chats use topic_id=None (single 线程 per 聊天)."""
 
     def test_private_chat_no_reply_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
@@ -1725,13 +1841,19 @@ class TestTelegramPrivateChatThread:
         _run(go())
 
 
-# ---------------------------------------------------------------------------
-# Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn library)
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn 库)
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 class TestSlackMarkdownConversion:
-    """Verify that the SlackChannel.send() path applies mrkdwn conversion."""
+    """Verify that the SlackChannel.send() 路径 applies mrkdwn conversion."""
 
     def test_bold_converted(self):
         from app.channels.slack import _slack_md_converter
@@ -1749,6 +1871,10 @@ class TestSlackMarkdownConversion:
     def test_heading_converted(self):
         from app.channels.slack import _slack_md_converter
 
-        result = _slack_md_converter.convert("# Title")
+        result = _slack_md_converter.convert("#   Title")
+
+
         assert "*Title*" in result
-        assert "#" not in result
+        assert "#  " not in result
+
+

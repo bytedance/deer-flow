@@ -38,7 +38,7 @@ export default function ChatPage() {
     isMock,
     onStart: () => {
       setIsNewThread(false);
-      // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
+      //    ! Important: Never use 下一个.js 路由器 对于 navigation in this case, otherwise it will cause the 线程 to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${threadId}`);
     },
     onFinish: (state) => {

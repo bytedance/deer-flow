@@ -1,4 +1,4 @@
-"""Tests for lead agent runtime model resolution behavior."""
+"""Tests for lead 代理 runtime 模型 resolution behavior."""
 
 from __future__ import annotations
 

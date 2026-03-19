@@ -1,4 +1,4 @@
-"""Tests for the tool_search (deferred tool loading) feature."""
+"""Tests for the tool_search (deferred 工具 加载中) 功能."""
 
 import json
 import sys
@@ -14,15 +14,17 @@ from deerflow.tools.builtins.tool_search import (
     set_deferred_registry,
 )
 
-# ── Fixtures ──
+#    ── Fixtures ──
+
+
 
 
 def _make_mock_tool(name: str, description: str):
-    """Create a minimal LangChain tool for testing."""
+    """Create a minimal LangChain 工具 for testing."""
 
     @langchain_tool(name)
     def mock_tool(arg: str) -> str:
-        """Mock tool."""
+        """Mock 工具."""
         return f"{name}: {arg}"
 
     mock_tool.description = description
@@ -31,7 +33,7 @@ def _make_mock_tool(name: str, description: str):
 
 @pytest.fixture
 def registry():
-    """Create a fresh DeferredToolRegistry with test tools."""
+    """Create a fresh DeferredToolRegistry with 测试 tools."""
     reg = DeferredToolRegistry()
     reg.register(_make_mock_tool("github_create_issue", "Create a new issue in a GitHub repository"))
     reg.register(_make_mock_tool("github_list_repos", "List repositories for a GitHub user"))
@@ -44,13 +46,15 @@ def registry():
 
 @pytest.fixture(autouse=True)
 def _reset_singleton():
-    """Reset the module-level singleton before/after each test."""
+    """Reset the 模块-level singleton before/after each 测试."""
     reset_deferred_registry()
     yield
     reset_deferred_registry()
 
 
-# ── ToolSearchConfig Tests ──
+#    ── ToolSearchConfig Tests ──
+
+
 
 
 class TestToolSearchConfig:
@@ -71,7 +75,9 @@ class TestToolSearchConfig:
         assert config.enabled is False
 
 
-# ── DeferredToolRegistry Tests ──
+#    ── DeferredToolRegistry Tests ──
+
+
 
 
 class TestDeferredToolRegistry:
@@ -105,7 +111,9 @@ class TestDeferredToolRegistry:
     def test_search_plus_keyword_with_ranking(self, registry):
         results = registry.search("+github issue")
         assert len(results) == 2
-        # "github_create_issue" should rank higher (has "issue" in name)
+        #    "github_create_issue" should rank higher (has "问题" in 名称)
+
+
         assert results[0].name == "github_create_issue"
 
     def test_search_regex_keyword(self, registry):
@@ -124,15 +132,21 @@ class TestDeferredToolRegistry:
         assert len(results) == 2
 
     def test_search_invalid_regex_falls_back_to_literal(self, registry):
-        # "[" is invalid regex, should be escaped and used as literal
+        #    "[" is 无效 regex, should be escaped and used as literal
+
+
         results = registry.search("[")
         assert results == []
 
     def test_search_name_match_ranks_higher(self, registry):
-        # "issue" appears in both github_create_issue (name) and sentry_list_issues (name+desc)
+        #    "问题" appears in both github_create_issue (名称) and sentry_list_issues (名称+desc)
+
+
         results = registry.search("issue")
         names = [t.name for t in results]
-        # Both should be found (both have "issue" in name)
+        #    Both should be found (both have "问题" in 名称)
+
+
         assert "github_create_issue" in names
         assert "sentry_list_issues" in names
 
@@ -141,7 +155,9 @@ class TestDeferredToolRegistry:
         for i in range(10):
             reg.register(_make_mock_tool(f"tool_{i}", f"Tool number {i}"))
         results = reg.search("tool")
-        assert len(results) <= 5  # MAX_RESULTS = 5
+        assert len(results) <= 5  #    MAX_RESULTS = 5
+
+
 
     def test_search_empty_registry(self):
         reg = DeferredToolRegistry()
@@ -152,7 +168,9 @@ class TestDeferredToolRegistry:
         assert len(reg) == 0
 
 
-# ── Singleton Tests ──
+#    ── Singleton Tests ──
+
+
 
 
 class TestSingleton:
@@ -169,7 +187,9 @@ class TestSingleton:
         assert get_deferred_registry() is None
 
 
-# ── tool_search Tool Tests ──
+#    ── tool_search 工具 Tests ──
+
+
 
 
 class TestToolSearchTool:
@@ -203,7 +223,9 @@ class TestToolSearchTool:
         result = tool_search.invoke({"query": "select:slack_send_message"})
         parsed = json.loads(result)
         func_def = parsed[0]
-        # OpenAI function format should have these keys
+        #    OpenAI 函数 format should have these keys
+
+
         assert "name" in func_def
         assert "description" in func_def
         assert "parameters" in func_def
@@ -219,25 +241,31 @@ class TestToolSearchTool:
         assert names == {"github_create_issue", "github_list_repos"}
 
 
-# ── Prompt Section Tests ──
+#    ── 提示词 Section Tests ──
+
+
 
 
 class TestDeferredToolsPromptSection:
     @pytest.fixture(autouse=True)
     def _mock_app_config(self, monkeypatch):
-        """Provide a minimal AppConfig mock so tests don't need config.yaml."""
+        """Provide a minimal AppConfig mock so tests don't need 配置.yaml."""
         from unittest.mock import MagicMock
 
         from deerflow.config.tool_search_config import ToolSearchConfig
 
         mock_config = MagicMock()
-        mock_config.tool_search = ToolSearchConfig()  # disabled by default
+        mock_config.tool_search = ToolSearchConfig()  #    已禁用 by 默认
+
+
         monkeypatch.setattr("deerflow.config.get_app_config", lambda: mock_config)
 
     def test_empty_when_disabled(self):
         from deerflow.agents.lead_agent.prompt import get_deferred_tools_prompt_section
 
-        # tool_search.enabled defaults to False
+        #    tool_search.已启用 defaults to False
+
+
         section = get_deferred_tools_prompt_section()
         assert section == ""
 
@@ -270,11 +298,15 @@ class TestDeferredToolsPromptSection:
         assert "github_create_issue" in section
         assert "slack_send_message" in section
         assert "sentry_list_issues" in section
-        # Should only have names, no descriptions
+        #    Should only have names, no descriptions
+
+
         assert "Create a new issue" not in section
 
 
-# ── DeferredToolFilterMiddleware Tests ──
+#    ── DeferredToolFilterMiddleware Tests ──
+
+
 
 
 class TestDeferredToolFilterMiddleware:
@@ -282,8 +314,8 @@ class TestDeferredToolFilterMiddleware:
     def _ensure_middlewares_package(self):
         """Remove mock entries injected by test_subagent_executor.py.
 
-        That file replaces deerflow.agents and deerflow.agents.middlewares with
-        MagicMock objects in sys.modules (session-scoped) to break circular imports.
+        That 文件 replaces deerflow.agents and deerflow.agents.middlewares with
+        MagicMock objects in sys.modules (会话-scoped) to break circular imports.
         We must clear those mocks so real submodule imports work.
         """
         from unittest.mock import MagicMock
@@ -303,9 +335,13 @@ class TestDeferredToolFilterMiddleware:
         set_deferred_registry(registry)
         middleware = DeferredToolFilterMiddleware()
 
-        # Build a mock tools list: 2 active + 1 deferred
+        #    Build a mock tools 列表: 2 活跃 + 1 deferred
+
+
         active_tool = _make_mock_tool("my_active_tool", "An active tool")
-        deferred_tool = registry.entries[0].tool  # github_create_issue
+        deferred_tool = registry.entries[0].tool  #    github_create_issue
+
+
 
         class FakeRequest:
             def __init__(self, tools):
@@ -359,5 +395,7 @@ class TestDeferredToolFilterMiddleware:
         request = FakeRequest(tools=[dict_tool, active_tool])
         filtered = middleware._filter_tools(request)
 
-        # dict_tool has no .name attr → getattr returns None → not in deferred_names → kept
+        #    dict_tool has no .名称 attr → getattr returns None → not in deferred_names → kept
+
+
         assert len(filtered.tools) == 2

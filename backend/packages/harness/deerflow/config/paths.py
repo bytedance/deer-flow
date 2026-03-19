@@ -2,7 +2,9 @@ import os
 import re
 from pathlib import Path
 
-# Virtual path prefix seen by agents inside the sandbox
+#    Virtual 路径 prefix seen by agents inside the sandbox
+
+
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
@@ -10,28 +12,28 @@ _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 class Paths:
     """
-    Centralized path configuration for DeerFlow application data.
+    Centralized 路径 configuration for DeerFlow application 数据.
 
     Directory layout (host side):
         {base_dir}/
-        ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
+        ├── 内存.json
+        ├── USER.md          <-- global 用户 profile (injected into all agents)
         ├── agents/
         │   └── {agent_name}/
-        │       ├── config.yaml
-        │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
-        │       └── memory.json
+        │       ├── 配置.yaml
+        │       ├── SOUL.md  <-- 代理 personality/identity (injected alongside lead 提示词)
+        │       └── 内存.json
         └── threads/
             └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+                └── 用户-数据/         <-- mounted as /mnt/用户-数据/ inside sandbox
+                    ├── 工作区/     <-- /mnt/用户-数据/工作区/
+                    ├── uploads/       <-- /mnt/用户-数据/uploads/
+                    └── outputs/       <-- /mnt/用户-数据/outputs/
 
     BaseDir resolution (in priority order):
-        1. Constructor argument `base_dir`
-        2. DEER_FLOW_HOME environment variable
-        3. Local dev fallback: cwd/.deer-flow  (when cwd is the backend/ dir)
+        1. Constructor 参数 `base_dir`
+        2. DEER_FLOW_HOME 环境 变量
+        3. Local dev 回退: cwd/.deer-flow  (when cwd is the 后端/ dir)
         4. Default: $HOME/.deer-flow
     """
 
@@ -40,14 +42,14 @@ class Paths:
 
     @property
     def host_base_dir(self) -> Path:
-        """Host-visible base dir for Docker volume mount sources.
+        """Host-可见 base dir for Docker volume mount sources.
 
         When running inside Docker with a mounted Docker socket (DooD), the Docker
         daemon runs on the host and resolves mount paths against the host filesystem.
-        Set DEER_FLOW_HOST_BASE_DIR to the host-side path that corresponds to this
+        Set DEER_FLOW_HOST_BASE_DIR to the host-side 路径 that corresponds to this
         container's base_dir so that sandbox container volume mounts work correctly.
 
-        Falls back to base_dir when the env var is not set (native/local execution).
+        Falls back to base_dir when the env var is not 集合 (native/local execution).
         """
         if env := os.getenv("DEER_FLOW_HOST_BASE_DIR"):
             return Path(env)
@@ -55,7 +57,7 @@ class Paths:
 
     @property
     def base_dir(self) -> Path:
-        """Root directory for all application data."""
+        """Root 目录 for all application 数据."""
         if self._base_dir is not None:
             return self._base_dir
 
@@ -70,37 +72,37 @@ class Paths:
 
     @property
     def memory_file(self) -> Path:
-        """Path to the persisted memory file: `{base_dir}/memory.json`."""
+        """Path to the persisted 内存 文件: `{base_dir}/内存.json`."""
         return self.base_dir / "memory.json"
 
     @property
     def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
+        """Path to the global 用户 profile 文件: `{base_dir}/USER.md`."""
         return self.base_dir / "USER.md"
 
     @property
     def agents_dir(self) -> Path:
-        """Root directory for all custom agents: `{base_dir}/agents/`."""
+        """Root 目录 for all custom agents: `{base_dir}/agents/`."""
         return self.base_dir / "agents"
 
     def agent_dir(self, name: str) -> Path:
-        """Directory for a specific agent: `{base_dir}/agents/{name}/`."""
+        """Directory for a specific 代理: `{base_dir}/agents/{名称}/`."""
         return self.agents_dir / name.lower()
 
     def agent_memory_file(self, name: str) -> Path:
-        """Per-agent memory file: `{base_dir}/agents/{name}/memory.json`."""
+        """Per-代理 内存 文件: `{base_dir}/agents/{名称}/内存.json`."""
         return self.agent_dir(name) / "memory.json"
 
     def thread_dir(self, thread_id: str) -> Path:
         """
-        Host path for a thread's data: `{base_dir}/threads/{thread_id}/`
+        Host 路径 for a 线程's 数据: `{base_dir}/threads/{thread_id}/`
 
-        This directory contains a `user-data/` subdirectory that is mounted
-        as `/mnt/user-data/` inside the sandbox.
+        This 目录 contains a `用户-数据/` subdirectory that is mounted
+        as `/mnt/用户-数据/` inside the sandbox.
 
         Raises:
-            ValueError: If `thread_id` contains unsafe characters (path separators
-                        or `..`) that could cause directory traversal.
+            ValueError: If `thread_id` contains unsafe characters (路径 separators
+                        or `..`) that could cause 目录 traversal.
         """
         if not _SAFE_THREAD_ID_RE.match(thread_id):
             raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
@@ -108,44 +110,44 @@ class Paths:
 
     def sandbox_work_dir(self, thread_id: str) -> Path:
         """
-        Host path for the agent's workspace directory.
-        Host: `{base_dir}/threads/{thread_id}/user-data/workspace/`
-        Sandbox: `/mnt/user-data/workspace/`
+        Host 路径 for the 代理's 工作区 目录.
+        Host: `{base_dir}/threads/{thread_id}/用户-数据/工作区/`
+        Sandbox: `/mnt/用户-数据/工作区/`
         """
         return self.thread_dir(thread_id) / "user-data" / "workspace"
 
     def sandbox_uploads_dir(self, thread_id: str) -> Path:
         """
-        Host path for user-uploaded files.
-        Host: `{base_dir}/threads/{thread_id}/user-data/uploads/`
-        Sandbox: `/mnt/user-data/uploads/`
+        Host 路径 for 用户-uploaded files.
+        Host: `{base_dir}/threads/{thread_id}/用户-数据/uploads/`
+        Sandbox: `/mnt/用户-数据/uploads/`
         """
         return self.thread_dir(thread_id) / "user-data" / "uploads"
 
     def sandbox_outputs_dir(self, thread_id: str) -> Path:
         """
-        Host path for agent-generated artifacts.
-        Host: `{base_dir}/threads/{thread_id}/user-data/outputs/`
-        Sandbox: `/mnt/user-data/outputs/`
+        Host 路径 for 代理-generated artifacts.
+        Host: `{base_dir}/threads/{thread_id}/用户-数据/outputs/`
+        Sandbox: `/mnt/用户-数据/outputs/`
         """
         return self.thread_dir(thread_id) / "user-data" / "outputs"
 
     def sandbox_user_data_dir(self, thread_id: str) -> Path:
         """
-        Host path for the user-data root.
-        Host: `{base_dir}/threads/{thread_id}/user-data/`
-        Sandbox: `/mnt/user-data/`
+        Host 路径 for the 用户-数据 root.
+        Host: `{base_dir}/threads/{thread_id}/用户-数据/`
+        Sandbox: `/mnt/用户-数据/`
         """
         return self.thread_dir(thread_id) / "user-data"
 
     def ensure_thread_dirs(self, thread_id: str) -> None:
-        """Create all standard sandbox directories for a thread.
+        """Create all standard sandbox directories for a 线程.
 
         Directories are created with mode 0o777 so that sandbox containers
-        (which may run as a different UID than the host backend process) can
+        (which may 运行 as a different UID than the host 后端 处理) can
         write to the volume-mounted paths without "Permission denied" errors.
         The explicit chmod() call is necessary because Path.mkdir(mode=...) is
-        subject to the process umask and may not yield the intended permissions.
+        subject to the 处理 umask and may not yield the intended permissions.
         """
         for d in [
             self.sandbox_work_dir(thread_id),
@@ -156,26 +158,30 @@ class Paths:
             d.chmod(0o777)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
-        """Resolve a sandbox virtual path to the actual host filesystem path.
+        """Resolve a sandbox virtual 路径 to the actual host filesystem 路径.
 
         Args:
-            thread_id: The thread ID.
-            virtual_path: Virtual path as seen inside the sandbox, e.g.
-                          ``/mnt/user-data/outputs/report.pdf``.
+            thread_id: The 线程 ID.
+            virtual_path: Virtual 路径 as seen inside the sandbox, e.g.
+                          ``/mnt/用户-数据/outputs/report.pdf``.
                           Leading slashes are stripped before matching.
 
         Returns:
-            The resolved absolute host filesystem path.
+            The resolved absolute host filesystem 路径.
 
         Raises:
-            ValueError: If the path does not start with the expected virtual
-                        prefix or a path-traversal attempt is detected.
+            ValueError: If the 路径 does not 开始 with the expected virtual
+                        prefix or a 路径-traversal attempt is detected.
         """
         stripped = virtual_path.lstrip("/")
         prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
-        # Require an exact segment-boundary match to avoid prefix confusion
-        # (e.g. reject paths like "mnt/user-dataX/...").
+        #    Require an exact segment-boundary match to avoid prefix confusion
+
+
+        #    (e.g. reject paths like "mnt/用户-dataX/...").
+
+
         if stripped != prefix and not stripped.startswith(prefix + "/"):
             raise ValueError(f"Path must start with /{prefix}")
 
@@ -191,7 +197,9 @@ class Paths:
         return actual
 
 
-# ── Singleton ────────────────────────────────────────────────────────────
+#    ── Singleton ────────────────────────────────────────────────────────────
+
+
 
 _paths: Paths | None = None
 
@@ -205,9 +213,9 @@ def get_paths() -> Paths:
 
 
 def resolve_path(path: str) -> Path:
-    """Resolve *path* to an absolute ``Path``.
+    """Resolve *路径* to an absolute ``Path``.
 
-    Relative paths are resolved relative to the application base directory.
+    Relative paths are resolved relative to the application base 目录.
     Absolute paths are returned as-is (after normalisation).
     """
     p = Path(path)

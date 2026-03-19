@@ -19,7 +19,7 @@ def _make_runtime(thread_id="test-thread"):
 
 
 def _make_state(tool_calls=None, content=""):
-    """Build a minimal AgentState dict with an AIMessage."""
+    """Build a minimal AgentState 字典 with an AIMessage."""
     msg = AIMessage(content=content, tool_calls=tool_calls or [])
     return {"messages": [msg]}
 
@@ -63,7 +63,9 @@ class TestLoopDetection:
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
-        # First two identical calls — no warning
+        #    First two identical calls — no 警告
+
+
         for _ in range(2):
             result = mw._apply(_make_state(tool_calls=call), runtime)
             assert result is None
@@ -76,7 +78,9 @@ class TestLoopDetection:
         for _ in range(2):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Third identical call triggers warning
+        #    Third identical call triggers 警告
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
         msgs = result["messages"]
@@ -85,21 +89,27 @@ class TestLoopDetection:
         assert "LOOP DETECTED" in msgs[0].content
 
     def test_warn_only_injected_once(self):
-        """Warning for the same hash should only be injected once per thread."""
+        """警告 for the same hash should only be injected once per 线程."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
-        # First two — no warning
+        #    First two — no 警告
+
+
         for _ in range(2):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Third — warning injected
+        #    Third — 警告 injected
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
         assert "LOOP DETECTED" in result["messages"][0].content
 
-        # Fourth — warning already injected, should return None
+        #    Fourth — 警告 already injected, should 返回 None
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is None
 
@@ -111,12 +121,16 @@ class TestLoopDetection:
         for _ in range(3):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Fourth call triggers hard stop
+        #    Fourth call triggers hard 停止
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
         msgs = result["messages"]
         assert len(msgs) == 1
-        # Hard stop strips tool_calls
+        #    Hard 停止 strips tool_calls
+
+
         assert isinstance(msgs[0], AIMessage)
         assert msgs[0].tool_calls == []
         assert _HARD_STOP_MSG in msgs[0].content
@@ -125,7 +139,9 @@ class TestLoopDetection:
         mw = LoopDetectionMiddleware(warn_threshold=2)
         runtime = _make_runtime()
 
-        # Each call is different
+        #    Each call is different
+
+
         for i in range(10):
             result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
             assert result is None
@@ -135,15 +151,21 @@ class TestLoopDetection:
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
-        # Fill with 2 identical calls
+        #    Fill with 2 identical calls
+
+
         mw._apply(_make_state(tool_calls=call), runtime)
         mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Push them out of the window with different calls
+        #    Push them out of the window with different calls
+
+
         for i in range(5):
             mw._apply(_make_state(tool_calls=[_bash_call(f"other_{i}")]), runtime)
 
-        # Now the original call should be fresh again — no warning
+        #    Now the original call should be fresh again — no 警告
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is None
 
@@ -155,7 +177,9 @@ class TestLoopDetection:
         mw._apply(_make_state(tool_calls=call), runtime)
         mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Would trigger warning, but reset first
+        #    Would trigger 警告, but reset 第一
+
+
         mw.reset()
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is None
@@ -174,23 +198,31 @@ class TestLoopDetection:
         assert result is None
 
     def test_thread_id_from_runtime_context(self):
-        """Thread ID should come from runtime.context, not state."""
+        """线程 ID should come from runtime.context, not 状态."""
         mw = LoopDetectionMiddleware(warn_threshold=2)
         runtime_a = _make_runtime("thread-A")
         runtime_b = _make_runtime("thread-B")
         call = [_bash_call("ls")]
 
-        # One call on thread A
+        #    One call on 线程 A
+
+
         mw._apply(_make_state(tool_calls=call), runtime_a)
-        # One call on thread B
+        #    One call on 线程 B
+
+
         mw._apply(_make_state(tool_calls=call), runtime_b)
 
-        # Second call on thread A — triggers warning (2 >= warn_threshold)
+        #    Second call on 线程 A — triggers 警告 (2 >= warn_threshold)
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime_a)
         assert result is not None
         assert "LOOP DETECTED" in result["messages"][0].content
 
-        # Second call on thread B — also triggers (independent tracking)
+        #    Second call on 线程 B — also triggers (independent tracking)
+
+
         result = mw._apply(_make_state(tool_calls=call), runtime_b)
         assert result is not None
         assert "LOOP DETECTED" in result["messages"][0].content
@@ -200,12 +232,16 @@ class TestLoopDetection:
         mw = LoopDetectionMiddleware(warn_threshold=2, max_tracked_threads=3)
         call = [_bash_call("ls")]
 
-        # Fill up 3 threads
+        #    Fill 上 3 threads
+
+
         for i in range(3):
             runtime = _make_runtime(f"thread-{i}")
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        # Add a 4th thread — should evict thread-0
+        #    Add a 4th 线程 — should evict 线程-0
+
+
         runtime_new = _make_runtime("thread-new")
         mw._apply(_make_state(tool_calls=call), runtime_new)
 
@@ -214,14 +250,16 @@ class TestLoopDetection:
         assert len(mw._history) == 3
 
     def test_thread_safe_mutations(self):
-        """Verify lock is used for mutations (basic structural test)."""
+        """Verify lock is used for mutations (basic structural 测试)."""
         mw = LoopDetectionMiddleware()
-        # The middleware should have a lock attribute
+        #    The 中间件 should have a lock attribute
+
+
         assert hasattr(mw, "_lock")
         assert isinstance(mw._lock, type(mw._lock))
 
     def test_fallback_thread_id_when_missing(self):
-        """When runtime context has no thread_id, should use 'default'."""
+        """When runtime context has no thread_id, should use '默认'."""
         mw = LoopDetectionMiddleware(warn_threshold=2)
         runtime = MagicMock()
         runtime.context = {}

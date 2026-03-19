@@ -1,4 +1,4 @@
-"""MCP client using langchain-mcp-adapters."""
+"""MCP 客户端 using langchain-mcp-adapters."""
 
 import logging
 from typing import Any
@@ -9,14 +9,14 @@ logger = logging.getLogger(__name__)
 
 
 def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, Any]:
-    """Build server parameters for MultiServerMCPClient.
+    """Build 服务器 parameters for MultiServerMCPClient.
 
     Args:
-        server_name: Name of the MCP server.
-        config: Configuration for the MCP server.
+        server_name: Name of the MCP 服务器.
+        配置: Configuration for the MCP 服务器.
 
     Returns:
-        Dictionary of server parameters for langchain-mcp-adapters.
+        Dictionary of 服务器 parameters for langchain-mcp-adapters.
     """
     transport_type = config.type or "stdio"
     params: dict[str, Any] = {"transport": transport_type}
@@ -26,14 +26,18 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             raise ValueError(f"MCP server '{server_name}' with stdio transport requires 'command' field")
         params["command"] = config.command
         params["args"] = config.args
-        # Add environment variables if present
+        #    Add 环境 variables 如果 present
+
+
         if config.env:
             params["env"] = config.env
     elif transport_type in ("sse", "http"):
         if not config.url:
             raise ValueError(f"MCP server '{server_name}' with {transport_type} transport requires 'url' field")
         params["url"] = config.url
-        # Add headers if present
+        #    Add headers 如果 present
+
+
         if config.headers:
             params["headers"] = config.headers
     else:
@@ -49,7 +53,7 @@ def build_servers_config(extensions_config: ExtensionsConfig) -> dict[str, dict[
         extensions_config: Extensions configuration containing all MCP servers.
 
     Returns:
-        Dictionary mapping server names to their parameters.
+        Dictionary mapping 服务器 names to their parameters.
     """
     enabled_servers = extensions_config.get_enabled_mcp_servers()
 

@@ -1,16 +1,18 @@
 """Async checkpointer factory.
 
-Provides an **async context manager** for long-running async servers that need
+Provides an **异步 context manager** for long-running 异步 servers that need
 proper resource cleanup.
 
-Supported backends: memory, sqlite, postgres.
+Supported backends: 内存, sqlite, postgres.
 
 Usage (e.g. FastAPI lifespan)::
 
     from deerflow.agents.checkpointer.async_provider import make_checkpointer
 
-    async with make_checkpointer() as checkpointer:
-        app.state.checkpointer = checkpointer  # InMemorySaver if not configured
+    异步 with make_checkpointer() as checkpointer:
+        app.状态.checkpointer = checkpointer  #    InMemorySaver 如果 not configured
+
+
 
 For sync usage see :mod:`deerflow.agents.checkpointer.provider`.
 """
@@ -33,14 +35,20 @@ from deerflow.config.app_config import get_app_config
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Async factory
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Async factory
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 @contextlib.asynccontextmanager
 async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
-    """Async context manager that constructs and tears down a checkpointer."""
+    """Async context manager that constructs and tears 下 a checkpointer."""
     if config.type == "memory":
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -56,7 +64,9 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
         import pathlib
 
         conn_str = _resolve_sqlite_conn_str(config.connection_string or "store.db")
-        # Only create parent directories for real filesystem paths
+        #    Only 创建 parent directories 对于 real filesystem paths
+
+
         if conn_str != ":memory:" and not conn_str.startswith("file:"):
             pathlib.Path(conn_str).parent.mkdir(parents=True, exist_ok=True)
         async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
@@ -81,20 +91,26 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
     raise ValueError(f"Unknown checkpointer type: {config.type!r}")
 
 
-# ---------------------------------------------------------------------------
-# Public async context manager
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Public 异步 context manager
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 @contextlib.asynccontextmanager
 async def make_checkpointer() -> AsyncIterator[Checkpointer]:
     """Async context manager that yields a checkpointer for the caller's lifetime.
-    Resources are opened on enter and closed on exit — no global state::
+    Resources are opened on enter and closed on exit — no global 状态::
 
-        async with make_checkpointer() as checkpointer:
-            app.state.checkpointer = checkpointer
+        异步 with make_checkpointer() as checkpointer:
+            app.状态.checkpointer = checkpointer
 
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *配置.yaml*.
     """
 
     config = get_app_config()

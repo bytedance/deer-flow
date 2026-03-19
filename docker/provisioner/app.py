@@ -1,28 +1,28 @@
 """DeerFlow Sandbox Provisioner Service.
 
 Dynamically creates and manages per-sandbox Pods in Kubernetes.
-Each ``sandbox_id`` gets its own Pod + NodePort Service.  The backend
+Each ``sandbox_id`` gets its own Pod + NodePort Service.  The 后端
 accesses sandboxes directly via ``{NODE_HOST}:{NodePort}``.
 
 The provisioner connects to the host machine's Kubernetes cluster via a
-mounted kubeconfig (``~/.kube/config``).  Sandbox Pods run on the host
-K8s and are accessed by the backend via ``{NODE_HOST}:{NodePort}``.
+mounted kubeconfig (``~/.kube/配置``).  Sandbox Pods 运行 on the host
+K8s and are accessed by the 后端 via ``{NODE_HOST}:{NodePort}``.
 
 Endpoints:
-    POST   /api/sandboxes              — Create a sandbox Pod + Service
-    DELETE /api/sandboxes/{sandbox_id} — Destroy a sandbox Pod + Service
-    GET    /api/sandboxes/{sandbox_id} — Get sandbox status & URL
-    GET    /api/sandboxes              — List all sandboxes
-    GET    /health                     — Provisioner health check
+    POST   /接口/sandboxes              — Create a sandbox Pod + Service
+    DELETE /接口/sandboxes/{sandbox_id} — Destroy a sandbox Pod + Service
+    GET    /接口/sandboxes/{sandbox_id} — Get sandbox status & URL
+    GET    /接口/sandboxes              — List all sandboxes
+    GET    /health                     — Provisioner health 检查
 
 Architecture (docker-compose-dev):
     ┌────────────┐  HTTP  ┌─────────────┐  K8s API  ┌──────────────┐
     │ remote     │ ─────▸ │ provisioner │ ────────▸ │  host K8s    │
-    │ _backend   │        │ :8002       │           │  API server  │
+    │ _backend   │        │ :8002       │           │  API 服务器  │
     └────────────┘        └─────────────┘           └──────┬───────┘
                                                            │ creates
                           ┌─────────────┐           ┌──────▼───────┐
-                          │   backend   │ ────────▸ │   sandbox    │
+                          │   后端   │ ────────▸ │   sandbox    │
                           │             │  direct   │   Pod(s)     │
                           └─────────────┘ NodePort  └──────────────┘
 """
@@ -41,7 +41,9 @@ from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel
 
-# Suppress only the InsecureRequestWarning from urllib3
+#    Suppress only the InsecureRequestWarning from urllib3
+
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-# ── Configuration (all tuneable via environment variables) ───────────────
+#    ── Configuration (all tuneable via 环境 variables) ───────────────
+
+
 
 K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "deer-flow")
 SANDBOX_IMAGE = os.environ.get(
@@ -60,25 +64,37 @@ SANDBOX_IMAGE = os.environ.get(
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 
-# Path to the kubeconfig *inside* the provisioner container.
-# Typically the host's ~/.kube/config is mounted here.
+#    Path to the kubeconfig *inside* the provisioner container.
+
+
+#    Typically the host's ~/.kube/配置 is mounted here.
+
+
 KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
 
-# The hostname / IP that the *backend container* uses to reach NodePort
-# services on the host Kubernetes node.  On Docker Desktop for macOS this
-# is ``host.docker.internal``; on Linux it may be the host's LAN IP.
+#    The hostname / IP that the *后端 container* uses to reach NodePort
+
+
+#    services on the host Kubernetes node.  On Docker Desktop 对于 macOS this
+
+
+#    is ``host.docker.internal``; on Linux it may be the host's LAN IP.
+
+
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
 
-# ── K8s client setup ────────────────────────────────────────────────────
+#    ── K8s 客户端 设置 ────────────────────────────────────────────────────
+
+
 
 core_v1: k8s_client.CoreV1Api | None = None
 
 
 def _init_k8s_client() -> k8s_client.CoreV1Api:
-    """Load kubeconfig from the mounted host config and return a CoreV1Api.
+    """Load kubeconfig from the mounted host 配置 and 返回 a CoreV1Api.
 
-    Tries the mounted kubeconfig first, then falls back to in-cluster
-    config (useful if the provisioner itself runs inside K8s).
+    Tries the mounted kubeconfig 第一, then falls back to in-cluster
+    配置 (useful if the provisioner itself runs inside K8s).
     """
     if os.path.exists(KUBECONFIG_PATH):
         if os.path.isdir(KUBECONFIG_PATH):
@@ -104,14 +120,22 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
                 f"No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}"
             ) from exc
 
-    # When connecting from inside Docker to the host's K8s API, the
-    # kubeconfig may reference ``localhost`` or ``127.0.0.1``.  We
-    # optionally rewrite the server address so it reaches the host.
+    #    When connecting from inside Docker to the host's K8s API, the
+
+
+    #    kubeconfig may reference ``localhost`` or ``127.0.0.1``.  We
+
+
+    #    optionally rewrite the 服务器 address so it reaches the host.
+
+
     k8s_api_server = os.environ.get("K8S_API_SERVER")
     if k8s_api_server:
         configuration = k8s_client.Configuration.get_default_copy()
         configuration.host = k8s_api_server
-        # Self-signed certs are common for local clusters
+        #    Self-signed certs are common 对于 local clusters
+
+
         configuration.verify_ssl = False
         api_client = k8s_client.ApiClient(configuration)
         return k8s_client.CoreV1Api(api_client)
@@ -120,7 +144,7 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
 
 
 def _wait_for_kubeconfig(timeout: int = 30) -> None:
-    """Wait for kubeconfig file if configured, then continue with fallback support."""
+    """Wait for kubeconfig 文件 if configured, then continue with 回退 support."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(KUBECONFIG_PATH):
@@ -165,7 +189,9 @@ def _ensure_namespace() -> None:
             raise
 
 
-# ── FastAPI lifespan ─────────────────────────────────────────────────────
+#    ── FastAPI lifespan ─────────────────────────────────────────────────────
+
+
 
 
 @asynccontextmanager
@@ -181,7 +207,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 
 
-# ── Request / Response models ───────────────────────────────────────────
+#    ── 请求 / 响应 models ───────────────────────────────────────────
+
+
 
 
 class CreateSandboxRequest(BaseModel):
@@ -191,11 +219,15 @@ class CreateSandboxRequest(BaseModel):
 
 class SandboxResponse(BaseModel):
     sandbox_id: str
-    sandbox_url: str  # Direct access URL, e.g. http://host.docker.internal:{NodePort}
+    sandbox_url: str  #    Direct access URL, e.g. http://host.docker.internal:{NodePort}
+
+
     status: str
 
 
-# ── K8s resource helpers ─────────────────────────────────────────────────
+#    ── K8s resource helpers ─────────────────────────────────────────────────
+
+
 
 
 def _pod_name(sandbox_id: str) -> str:
@@ -329,7 +361,9 @@ def _build_service(sandbox_id: str) -> k8s_client.V1Service:
                     port=8080,
                     target_port=8080,
                     protocol="TCP",
-                    # nodePort omitted → K8s auto-allocates from the range
+                    #    nodePort omitted → K8s auto-allocates from the range
+
+
                 )
             ],
             selector={
@@ -360,12 +394,14 @@ def _get_pod_phase(sandbox_id: str) -> str:
         return "NotFound"
 
 
-# ── API endpoints ────────────────────────────────────────────────────────
+#    ── API endpoints ────────────────────────────────────────────────────────
+
+
 
 
 @app.get("/health")
 async def health():
-    """Provisioner health check."""
+    """Provisioner health 检查."""
     return {"status": "ok"}
 
 
@@ -383,7 +419,9 @@ async def create_sandbox(req: CreateSandboxRequest):
         f"Received request to create sandbox '{sandbox_id}' for thread '{thread_id}'"
     )
 
-    # ── Fast path: sandbox already exists ────────────────────────────
+    #    ── Fast 路径: sandbox already exists ────────────────────────────
+
+
     existing_port = _get_node_port(sandbox_id)
     if existing_port:
         return SandboxResponse(
@@ -392,23 +430,31 @@ async def create_sandbox(req: CreateSandboxRequest):
             status=_get_pod_phase(sandbox_id),
         )
 
-    # ── Create Pod ───────────────────────────────────────────────────
+    #    ── Create Pod ───────────────────────────────────────────────────
+
+
     try:
         core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id))
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
-        if exc.status != 409:  # 409 = AlreadyExists
+        if exc.status != 409:  #    409 = AlreadyExists
+
+
             raise HTTPException(
                 status_code=500, detail=f"Pod creation failed: {exc.reason}"
             )
 
-    # ── Create Service ───────────────────────────────────────────────
+    #    ── Create Service ───────────────────────────────────────────────
+
+
     try:
         core_v1.create_namespaced_service(K8S_NAMESPACE, _build_service(sandbox_id))
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:
-            # Roll back the Pod on failure
+            #    Roll back the Pod on 失败
+
+
             try:
                 core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
             except ApiException:
@@ -417,7 +463,9 @@ async def create_sandbox(req: CreateSandboxRequest):
                 status_code=500, detail=f"Service creation failed: {exc.reason}"
             )
 
-    # ── Read the auto-allocated NodePort ─────────────────────────────
+    #    ── Read the auto-allocated NodePort ─────────────────────────────
+
+
     node_port: int | None = None
     for _ in range(20):
         node_port = _get_node_port(sandbox_id)
@@ -442,7 +490,9 @@ async def destroy_sandbox(sandbox_id: str):
     """Destroy a sandbox Pod + Service."""
     errors: list[str] = []
 
-    # Delete Service
+    #    Delete Service
+
+
     try:
         core_v1.delete_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
         logger.info(f"Deleted Service {_svc_name(sandbox_id)}")
@@ -450,7 +500,9 @@ async def destroy_sandbox(sandbox_id: str):
         if exc.status != 404:
             errors.append(f"service: {exc.reason}")
 
-    # Delete Pod
+    #    Delete Pod
+
+
     try:
         core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
         logger.info(f"Deleted Pod {_pod_name(sandbox_id)}")
@@ -468,7 +520,7 @@ async def destroy_sandbox(sandbox_id: str):
 
 @app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
 async def get_sandbox(sandbox_id: str):
-    """Return current status and URL for a sandbox."""
+    """Return 当前 status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
     if not node_port:
         raise HTTPException(status_code=404, detail=f"Sandbox '{sandbox_id}' not found")

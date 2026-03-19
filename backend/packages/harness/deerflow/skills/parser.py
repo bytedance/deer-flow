@@ -6,14 +6,14 @@ from .types import Skill
 
 def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
     """
-    Parse a SKILL.md file and extract metadata.
+    Parse a SKILL.md 文件 and extract metadata.
 
     Args:
-        skill_file: Path to the SKILL.md file
+        skill_file: Path to the SKILL.md 文件
         category: Category of the skill ('public' or 'custom')
 
     Returns:
-        Skill object if parsing succeeds, None otherwise
+        Skill 对象 if parsing succeeds, None otherwise
     """
     if not skill_file.exists() or skill_file.name != "SKILL.md":
         return None
@@ -21,8 +21,12 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
     try:
         content = skill_file.read_text(encoding="utf-8")
 
-        # Extract YAML front matter
-        # Pattern: ---\nkey: value\n---
+        #    Extract YAML front matter
+
+
+        #    Pattern: ---\nkey: 值\n---
+
+
         front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
 
         if not front_matter_match:
@@ -30,7 +34,9 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
 
         front_matter = front_matter_match.group(1)
 
-        # Parse YAML front matter (simple key-value parsing)
+        #    Parse YAML front matter (简单 键-值 parsing)
+
+
         metadata = {}
         for line in front_matter.split("\n"):
             line = line.strip()
@@ -40,7 +46,9 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
                 key, value = line.split(":", 1)
                 metadata[key.strip()] = value.strip()
 
-        # Extract required fields
+        #    Extract required fields
+
+
         name = metadata.get("name")
         description = metadata.get("description")
 
@@ -57,7 +65,9 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
             skill_file=skill_file,
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
-            enabled=True,  # Default to enabled, actual state comes from config file
+            enabled=True,  #    Default to 已启用, actual 状态 comes from 配置 文件
+
+
         )
 
     except Exception as e:

@@ -1,8 +1,8 @@
 """
 Data Analysis Script using DuckDB.
 
-Analyzes Excel (.xlsx/.xls) and CSV files using DuckDB's in-process SQL engine.
-Supports schema inspection, SQL queries, statistical summaries, and result export.
+Analyzes Excel (.xlsx/.xls) and CSV files using DuckDB's in-处理 SQL engine.
+Supports schema inspection, SQL queries, statistical summaries, and 结果 export.
 """
 
 import argparse
@@ -25,17 +25,21 @@ except ImportError:
     import duckdb
 
 try:
-    import openpyxl  # noqa: F401
+    import openpyxl  #    noqa: F401
+
+
 except ImportError:
     os.system(f"{sys.executable} -m pip install openpyxl -q")
 
-# Cache directory for persistent DuckDB databases
+#    Cache 目录 对于 persistent DuckDB databases
+
+
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
 TABLE_MAP_SUFFIX = ".table_map.json"
 
 
 def compute_files_hash(files: list[str]) -> str:
-    """Compute a combined SHA256 hash of all input files for cache key."""
+    """Compute a combined SHA256 hash of all 输入 files for 缓存 键."""
     hasher = hashlib.sha256()
     for file_path in sorted(files):
         try:
@@ -43,31 +47,33 @@ def compute_files_hash(files: list[str]) -> str:
                 while chunk := f.read(8192):
                     hasher.update(chunk)
         except OSError:
-            # Include path as fallback if file can't be read
+            #    Include 路径 as 回退 如果 文件 can't be read
+
+
             hasher.update(file_path.encode())
     return hasher.hexdigest()
 
 
 def get_cache_db_path(files_hash: str) -> str:
-    """Get the path to the cached DuckDB database file."""
+    """Get the 路径 to the cached DuckDB 数据库 文件."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
 
 
 def get_table_map_path(files_hash: str) -> str:
-    """Get the path to the cached table map JSON file."""
+    """Get the 路径 to the cached table map JSON 文件."""
     return os.path.join(CACHE_DIR, f"{files_hash}{TABLE_MAP_SUFFIX}")
 
 
 def save_table_map(files_hash: str, table_map: dict[str, str]) -> None:
-    """Save table map to a JSON file alongside the cached DB."""
+    """Save table map to a JSON 文件 alongside the cached DB."""
     path = get_table_map_path(files_hash)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(table_map, f, ensure_ascii=False)
 
 
 def load_table_map(files_hash: str) -> dict[str, str] | None:
-    """Load table map from cache. Returns None if not found."""
+    """Load table map from 缓存. Returns None if not found."""
     path = get_table_map_path(files_hash)
     if not os.path.exists(path):
         return None
@@ -79,7 +85,7 @@ def load_table_map(files_hash: str) -> dict[str, str] | None:
 
 
 def sanitize_table_name(name: str) -> str:
-    """Sanitize a sheet/file name into a valid SQL table name."""
+    """Sanitize a sheet/文件 名称 into a 有效 SQL table 名称."""
     sanitized = re.sub(r"[^\w]", "_", name)
     if sanitized and sanitized[0].isdigit():
         sanitized = f"t_{sanitized}"
@@ -115,7 +121,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
-    """Load all sheets from an Excel file into DuckDB tables."""
+    """Load all sheets from an Excel 文件 into DuckDB tables."""
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -125,7 +131,9 @@ def _load_excel(
     for sheet_name in sheet_names:
         table_name = sanitize_table_name(sheet_name)
 
-        # Handle duplicate table names
+        #    Handle duplicate table names
+
+
         original_table_name = table_name
         counter = 1
         while table_name in table_map.values():
@@ -157,11 +165,13 @@ def _load_excel(
 def _load_csv(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
-    """Load a CSV file into a DuckDB table."""
+    """Load a CSV 文件 into a DuckDB table."""
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     table_name = sanitize_table_name(base_name)
 
-    # Handle duplicate table names
+    #    Handle duplicate table names
+
+
     original_table_name = table_name
     counter = 1
     while table_name in table_map.values():
@@ -193,11 +203,15 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         output_parts.append(f'Table: {original_name} (SQL name: "{table_name}")')
         output_parts.append(f"{'=' * 60}")
 
-        # Get row count
+        #    Get row 计数
+
+
         row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         output_parts.append(f"Rows: {row_count}")
 
-        # Get column info
+        #    Get column 信息
+
+
         columns = con.execute(f'DESCRIBE "{table_name}"').fetchall()
         output_parts.append(f"\nColumns ({len(columns)}):")
         output_parts.append(f"{'Name':<30} {'Type':<15} {'Nullable'}")
@@ -206,7 +220,9 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
             col_name, col_type, nullable = col[0], col[1], col[2]
             output_parts.append(f"{col_name:<30} {col_type:<15} {nullable}")
 
-        # Get non-null counts per column
+        #    Get non-空值 counts per column
+
+
         col_names = [col[0] for col in columns]
         non_null_parts = []
         for c in col_names:
@@ -220,7 +236,9 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         except Exception:
             pass
 
-        # Sample data (first 5 rows)
+        #    Sample 数据 (第一 5 rows)
+
+
         output_parts.append(f"\nSample data (first 5 rows):")
         try:
             sample = con.execute(f'SELECT * FROM "{table_name}" LIMIT 5').fetchdf()
@@ -243,14 +261,18 @@ def action_query(
     table_map: dict[str, str],
     output_file: str | None = None,
 ) -> str:
-    """Execute a SQL query and return/export results."""
-    # Replace original sheet/file names with sanitized table names in SQL
+    """Execute a SQL query and 返回/export results."""
+    #    Replace original sheet/文件 names with sanitized table names in SQL
+
+
     modified_sql = sql
     for original_name, table_name in sorted(
         table_map.items(), key=lambda x: len(x[0]), reverse=True
     ):
         if original_name != table_name:
-            # Replace occurrences not already quoted
+            #    Replace occurrences not already quoted
+
+
             modified_sql = re.sub(
                 rf"\b{re.escape(original_name)}\b",
                 f'"{table_name}"',
@@ -270,11 +292,15 @@ def action_query(
         print(error_msg)
         return error_msg
 
-    # Format output
+    #    Format 输出
+
+
     if output_file:
         return _export_results(columns, rows, output_file)
 
-    # Print as table
+    #    Print as table
+
+
     return _format_table(columns, rows)
 
 
@@ -285,17 +311,23 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
         print(msg)
         return msg
 
-    # Calculate column widths
+    #    Calculate column widths
+
+
     col_widths = [len(str(c)) for c in columns]
     for row in rows:
         for i, val in enumerate(row):
             col_widths[i] = max(col_widths[i], len(str(val)))
 
-    # Cap column width
+    #    Cap column width
+
+
     max_width = 40
     col_widths = [min(w, max_width) for w in col_widths]
 
-    # Build table
+    #    Build table
+
+
     parts = []
     header = " | ".join(str(c).ljust(col_widths[i]) for i, c in enumerate(columns))
     separator = "-+-".join("-" * col_widths[i] for i in range(len(columns)))
@@ -314,7 +346,7 @@ def _format_table(columns: list[str], rows: list[tuple]) -> str:
 
 
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
-    """Export query results to a file (CSV, JSON, or Markdown)."""
+    """Export query results to a 文件 (CSV, JSON, or Markdown)."""
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
 
@@ -332,7 +364,9 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             record = {}
             for i, col in enumerate(columns):
                 val = row[i]
-                # Handle non-JSON-serializable types
+                #    Handle non-JSON-serializable types
+
+
                 if hasattr(val, "isoformat"):
                     val = val.isoformat()
                 elif isinstance(val, (bytes, bytearray)):
@@ -344,10 +378,14 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
 
     elif ext == ".md":
         with open(output_file, "w", encoding="utf-8") as f:
-            # Header
+            #    Header
+
+
             f.write("| " + " | ".join(columns) + " |\n")
             f.write("| " + " | ".join("---" for _ in columns) + " |\n")
-            # Rows
+            #    Rows
+
+
             for row in rows:
                 f.write(
                     "| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |\n"
@@ -367,8 +405,10 @@ def action_summary(
     table_name: str,
     table_map: dict[str, str],
 ) -> str:
-    """Generate statistical summary for a table."""
-    # Resolve table name
+    """Generate statistical 摘要 for a table."""
+    #    Resolve table 名称
+
+
     resolved = table_map.get(table_name, table_name)
 
     try:
@@ -403,14 +443,16 @@ def action_summary(
         col_name, col_type = col[0], col[1].upper()
         output_parts.append(f"\n--- {col_name} ({col[1]}) ---")
 
-        # Check base type (strip parameterized parts)
+        #    Check base 类型 (strip parameterized parts)
+
+
         base_type = re.sub(r"\(.*\)", "", col_type).strip()
 
         if base_type in numeric_types:
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
+                        COUNT("{col_name}") as 计数,
                         AVG("{col_name}")::DOUBLE as mean,
                         STDDEV("{col_name}")::DOUBLE as std,
                         MIN("{col_name}") as min,
@@ -443,7 +485,7 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
+                        COUNT("{col_name}") as 计数,
                         COUNT(DISTINCT "{col_name}") as unique_count,
                         MODE("{col_name}") as mode_val,
                         COUNT(*) - COUNT("{col_name}") as null_count
@@ -454,7 +496,9 @@ def action_summary(
                 output_parts.append(f"  top     : {stats[2]}")
                 output_parts.append(f"  nulls   : {stats[3]}")
 
-                # Show top 5 values
+                #    Show 顶部 5 values
+
+
                 top_vals = con.execute(f"""
                     SELECT "{col_name}", COUNT(*) as freq
                     FROM "{resolved}"
@@ -510,19 +554,25 @@ def main():
     )
     args = parser.parse_args()
 
-    # Validate arguments
+    #    Validate arguments
+
+
     if args.action == "query" and not args.sql:
         parser.error("--sql is required for 'query' action")
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
 
-    # Compute file hash for caching
+    #    Compute 文件 hash 对于 caching
+
+
     files_hash = compute_files_hash(args.files)
     db_path = get_cache_db_path(files_hash)
     cached_table_map = load_table_map(files_hash)
 
     if cached_table_map and os.path.exists(db_path):
-        # Cache hit: connect to existing DB
+        #    Cache hit: connect to existing DB
+
+
         logger.info(f"Cache hit! Using cached database: {db_path}")
         con = duckdb.connect(db_path, read_only=True)
         table_map = cached_table_map
@@ -530,27 +580,35 @@ def main():
             f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
         )
     else:
-        # Cache miss: load files and persist to DB
+        #    Cache miss: load files and persist to DB
+
+
         logger.info("Loading files (first time, will cache for future use)...")
         con = duckdb.connect(db_path)
         table_map = load_files(con, args.files)
 
         if not table_map:
             logger.error("No tables were loaded. Check file paths and formats.")
-            # Clean up empty DB file
+            #    Clean 上 empty DB 文件
+
+
             con.close()
             if os.path.exists(db_path):
                 os.remove(db_path)
             sys.exit(1)
 
-        # Save table map for future cache lookups
+        #    Save table map 对于 future 缓存 lookups
+
+
         save_table_map(files_hash, table_map)
         logger.info(
             f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
         )
         logger.info(f"Cached database saved to: {db_path}")
 
-    # Perform action
+    #    Perform action
+
+
     if args.action == "inspect":
         action_inspect(con, table_map)
     elif args.action == "query":

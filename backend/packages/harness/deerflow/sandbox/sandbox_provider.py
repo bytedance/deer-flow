@@ -6,32 +6,32 @@ from deerflow.sandbox.sandbox import Sandbox
 
 
 class SandboxProvider(ABC):
-    """Abstract base class for sandbox providers"""
+    """Abstract base 类 for sandbox providers"""
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None) -> str:
-        """Acquire a sandbox environment and return its ID.
+        """Acquire a sandbox 环境 and 返回 its ID.
 
         Returns:
-            The ID of the acquired sandbox environment.
+            The ID of the acquired sandbox 环境.
         """
         pass
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
-        """Get a sandbox environment by ID.
+        """Get a sandbox 环境 by ID.
 
         Args:
-            sandbox_id: The ID of the sandbox environment to retain.
+            sandbox_id: The ID of the sandbox 环境 to retain.
         """
         pass
 
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
-        """Release a sandbox environment.
+        """Release a sandbox 环境.
 
         Args:
-            sandbox_id: The ID of the sandbox environment to destroy.
+            sandbox_id: The ID of the sandbox 环境 to destroy.
         """
         pass
 
@@ -43,7 +43,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     """Get the sandbox provider singleton.
 
     Returns a cached singleton instance. Use `reset_sandbox_provider()` to clear
-    the cache, or `shutdown_sandbox_provider()` to properly shutdown and clear.
+    the 缓存, or `shutdown_sandbox_provider()` to properly shutdown and clear.
 
     Returns:
         A sandbox provider instance.
@@ -60,10 +60,10 @@ def reset_sandbox_provider() -> None:
     """Reset the sandbox provider singleton.
 
     This clears the cached instance without calling shutdown.
-    The next call to `get_sandbox_provider()` will create a new instance.
+    The 下一个 call to `get_sandbox_provider()` will 创建 a 新建 instance.
     Useful for testing or when switching configurations.
 
-    Note: If the provider has active sandboxes, they will be orphaned.
+    Note: If the provider has 活跃 sandboxes, they will be orphaned.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
@@ -73,9 +73,9 @@ def reset_sandbox_provider() -> None:
 def shutdown_sandbox_provider() -> None:
     """Shutdown and reset the sandbox provider.
 
-    This properly shuts down the provider (releasing all sandboxes)
+    This properly shuts 下 the provider (releasing all sandboxes)
     before clearing the singleton. Call this when the application
-    is shutting down or when you need to completely reset the sandbox system.
+    is shutting 下 or when you need to completely reset the sandbox 系统.
     """
     global _default_sandbox_provider
     if _default_sandbox_provider is not None:

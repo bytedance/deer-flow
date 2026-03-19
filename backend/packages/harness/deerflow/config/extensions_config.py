@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class McpOAuthConfig(BaseModel):
-    """OAuth configuration for an MCP server (HTTP/SSE transports)."""
+    """OAuth configuration for an MCP 服务器 (HTTP/SSE transports)."""
 
     enabled: bool = Field(default=True, description="Whether OAuth token injection is enabled")
     token_url: str = Field(description="OAuth token endpoint URL")
@@ -32,7 +32,7 @@ class McpOAuthConfig(BaseModel):
 
 
 class McpServerConfig(BaseModel):
-    """Configuration for a single MCP server."""
+    """Configuration for a single MCP 服务器."""
 
     enabled: bool = Field(default=True, description="Whether this MCP server is enabled")
     type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
@@ -47,7 +47,7 @@ class McpServerConfig(BaseModel):
 
 
 class SkillStateConfig(BaseModel):
-    """Configuration for a single skill's state."""
+    """Configuration for a single skill's 状态."""
 
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
@@ -68,20 +68,20 @@ class ExtensionsConfig(BaseModel):
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
-        """Resolve the extensions config file path.
+        """Resolve the extensions 配置 文件 路径.
 
         Priority:
-        1. If provided `config_path` argument, use it.
-        2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, check for `extensions_config.json` in the current directory, then in the parent directory.
-        4. For backward compatibility, also check for `mcp_config.json` if `extensions_config.json` is not found.
-        5. If not found, return None (extensions are optional).
+        1. If provided `config_path` 参数, use it.
+        2. If provided `DEER_FLOW_EXTENSIONS_CONFIG_PATH` 环境 变量, use it.
+        3. Otherwise, 检查 for `extensions_config.json` in the 当前 目录, then in the parent 目录.
+        4. For backward compatibility, also 检查 for `mcp_config.json` if `extensions_config.json` is not found.
+        5. If not found, 返回 None (extensions are optional).
 
         Args:
-            config_path: Optional path to extensions config file.
+            config_path: Optional 路径 to extensions 配置 文件.
 
         Returns:
-            Path to the extensions config file if found, otherwise None.
+            Path to the extensions 配置 文件 if found, otherwise None.
         """
         if config_path:
             path = Path(config_path)
@@ -94,17 +94,23 @@ class ExtensionsConfig(BaseModel):
                 raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
             return path
         else:
-            # Check if the extensions_config.json is in the current directory
+            #    Check 如果 the extensions_config.json is in the 当前 目录
+
+
             path = Path(os.getcwd()) / "extensions_config.json"
             if path.exists():
                 return path
 
-            # Check if the extensions_config.json is in the parent directory of CWD
+            #    Check 如果 the extensions_config.json is in the parent 目录 of CWD
+
+
             path = Path(os.getcwd()).parent / "extensions_config.json"
             if path.exists():
                 return path
 
-            # Backward compatibility: check for mcp_config.json
+            #    Backward compatibility: 检查 对于 mcp_config.json
+
+
             path = Path(os.getcwd()) / "mcp_config.json"
             if path.exists():
                 return path
@@ -113,24 +119,28 @@ class ExtensionsConfig(BaseModel):
             if path.exists():
                 return path
 
-            # Extensions are optional, so return None if not found
+            #    Extensions are optional, so 返回 None 如果 not found
+
+
             return None
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> "ExtensionsConfig":
-        """Load extensions config from JSON file.
+        """Load extensions 配置 from JSON 文件.
 
         See `resolve_config_path` for more details.
 
         Args:
-            config_path: Path to the extensions config file.
+            config_path: Path to the extensions 配置 文件.
 
         Returns:
-            ExtensionsConfig: The loaded config, or empty config if file not found.
+            ExtensionsConfig: The loaded 配置, or empty 配置 if 文件 not found.
         """
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
-            # Return empty config if extensions config file is not found
+            #    Return empty 配置 如果 extensions 配置 文件 is not found
+
+
             return cls(mcp_servers={}, skills={})
 
         try:
@@ -145,24 +155,30 @@ class ExtensionsConfig(BaseModel):
 
     @classmethod
     def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
-        """Recursively resolve environment variables in the config.
+        """Recursively resolve 环境 variables in the 配置.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Environment variables are resolved using the `os.getenv` 函数. Example: $OPENAI_API_KEY
 
         Args:
-            config: The config to resolve environment variables in.
+            配置: The 配置 to resolve 环境 variables in.
 
         Returns:
-            The config with environment variables resolved.
+            The 配置 with 环境 variables resolved.
         """
         for key, value in config.items():
             if isinstance(value, str):
                 if value.startswith("$"):
                     env_value = os.getenv(value[1:])
                     if env_value is None:
-                        # Unresolved placeholder — store empty string so downstream
-                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
-                        # token as an actual environment value.
+                        #    Unresolved placeholder — store empty 字符串 so downstream
+
+
+                        #    consumers (e.g. MCP servers) don't receive the literal "$VAR"
+
+
+                        #    token as an actual 环境 值.
+
+
                         config[key] = ""
                     else:
                         config[key] = env_value
@@ -175,26 +191,28 @@ class ExtensionsConfig(BaseModel):
         return config
 
     def get_enabled_mcp_servers(self) -> dict[str, McpServerConfig]:
-        """Get only the enabled MCP servers.
+        """Get only the 已启用 MCP servers.
 
         Returns:
-            Dictionary of enabled MCP servers.
+            Dictionary of 已启用 MCP servers.
         """
         return {name: config for name, config in self.mcp_servers.items() if config.enabled}
 
     def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
-        """Check if a skill is enabled.
+        """Check if a skill is 已启用.
 
         Args:
             skill_name: Name of the skill
             skill_category: Category of the skill
 
         Returns:
-            True if enabled, False otherwise
+            True if 已启用, False otherwise
         """
         skill_config = self.skills.get(skill_name)
         if skill_config is None:
-            # Default to enable for public & custom skill
+            #    Default to enable 对于 public & custom skill
+
+
             return skill_category in ("public", "custom")
         return skill_config.enabled
 
@@ -203,10 +221,10 @@ _extensions_config: ExtensionsConfig | None = None
 
 
 def get_extensions_config() -> ExtensionsConfig:
-    """Get the extensions config instance.
+    """Get the extensions 配置 instance.
 
     Returns a cached singleton instance. Use `reload_extensions_config()` to reload
-    from file, or `reset_extensions_config()` to clear the cache.
+    from 文件, or `reset_extensions_config()` to clear the 缓存.
 
     Returns:
         The cached ExtensionsConfig instance.
@@ -218,14 +236,14 @@ def get_extensions_config() -> ExtensionsConfig:
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
-    """Reload the extensions config from file and update the cached instance.
+    """Reload the extensions 配置 from 文件 and 更新 the cached instance.
 
-    This is useful when the config file has been modified and you want
-    to pick up the changes without restarting the application.
+    This is useful when the 配置 文件 has been modified and you want
+    to pick 上 the changes without restarting the application.
 
     Args:
-        config_path: Optional path to extensions config file. If not provided,
-                     uses the default resolution strategy.
+        config_path: Optional 路径 to extensions 配置 文件. If not provided,
+                     uses the 默认 resolution strategy.
 
     Returns:
         The newly loaded ExtensionsConfig instance.
@@ -236,10 +254,10 @@ def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig
 
 
 def reset_extensions_config() -> None:
-    """Reset the cached extensions config instance.
+    """Reset the cached extensions 配置 instance.
 
-    This clears the singleton cache, causing the next call to
-    `get_extensions_config()` to reload from file. Useful for testing
+    This clears the singleton 缓存, causing the 下一个 call to
+    `get_extensions_config()` to reload from 文件. Useful for testing
     or when switching between different configurations.
     """
     global _extensions_config
@@ -247,12 +265,12 @@ def reset_extensions_config() -> None:
 
 
 def set_extensions_config(config: ExtensionsConfig) -> None:
-    """Set a custom extensions config instance.
+    """Set a custom extensions 配置 instance.
 
-    This allows injecting a custom or mock config for testing purposes.
+    This allows injecting a custom or mock 配置 for testing purposes.
 
     Args:
-        config: The ExtensionsConfig instance to use.
+        配置: The ExtensionsConfig instance to use.
     """
     global _extensions_config
     _extensions_config = config

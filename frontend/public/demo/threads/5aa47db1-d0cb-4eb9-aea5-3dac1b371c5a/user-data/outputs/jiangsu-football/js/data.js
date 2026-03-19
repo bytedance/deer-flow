@@ -1,7 +1,7 @@
-// 江苏城市足球联赛2025赛季 - 数据文件
+//    江苏城市足球联赛2025赛季 - 数据文件
 
 const leagueData = {
-    // 联赛信息
+    //    联赛信息
     leagueInfo: {
         name: "江苏城市足球联赛",
         season: "2025赛季",
@@ -13,7 +13,7 @@ const leagueData = {
         endDate: "2025-10-31"
     },
 
-    // 参赛球队
+    //    参赛球队
     teams: [
         {
             id: 1,
@@ -161,7 +161,7 @@ const leagueData = {
         }
     ],
 
-    // 积分榜数据
+    //    积分榜数据
     standings: [
         {
             rank: 1,
@@ -309,7 +309,7 @@ const leagueData = {
         }
     ],
 
-    // 赛程数据
+    //    赛程数据
     fixtures: [
         {
             id: 1,
@@ -517,7 +517,7 @@ const leagueData = {
         }
     ],
 
-    // 球员数据
+    //    球员数据
     players: {
         scorers: [
             {
@@ -726,7 +726,7 @@ const leagueData = {
         ]
     },
 
-    // 新闻数据
+    //    新闻数据
     news: [
         {
             id: 1,
@@ -779,24 +779,24 @@ const leagueData = {
     ]
 };
 
-// 工具函数：根据ID获取球队信息
+//    工具函数：根据ID获取球队信息
 function getTeamById(teamId) {
     return leagueData.teams.find(team => team.id === teamId);
 }
 
-// 工具函数：格式化日期
+//    工具函数：格式化日期
 function formatDate(dateString) {
     const date = new Date(dateString);
     const options = { weekday: 'short', month: 'short', day: 'numeric' };
     return date.toLocaleDateString('zh-CN', options);
 }
 
-// 工具函数：格式化时间
+//    工具函数：格式化时间
 function formatTime(timeString) {
     return timeString;
 }
 
-// 导出数据
+//    导出数据
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = leagueData;
 }

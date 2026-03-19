@@ -10,9 +10,15 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    Helpers
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def _make_app_config(models: list[ModelConfig]) -> AppConfig:
@@ -51,7 +57,9 @@ class FakeChatModel(BaseChatModel):
     captured_kwargs: dict = {}
 
     def __init__(self, **kwargs):
-        # Store kwargs before pydantic processes them
+        #    Store kwargs before pydantic processes them
+
+
         FakeChatModel.captured_kwargs = dict(kwargs)
         super().__init__(**kwargs)
 
@@ -59,10 +67,14 @@ class FakeChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "fake"
 
-    def _generate(self, *args, **kwargs):  # type: ignore[override]
+    def _generate(self, *args, **kwargs):  #    类型: ignore[override]
+
+
         raise NotImplementedError
 
-    def _stream(self, *args, **kwargs):  # type: ignore[override]
+    def _stream(self, *args, **kwargs):  #    类型: ignore[override]
+
+
         raise NotImplementedError
 
 
@@ -73,9 +85,15 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     monkeypatch.setattr(factory_module, "is_tracing_enabled", lambda: False)
 
 
-# ---------------------------------------------------------------------------
-# Model selection
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    模型 selection
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_uses_first_model_when_name_is_none(monkeypatch):
@@ -85,7 +103,9 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
     FakeChatModel.captured_kwargs = {}
     factory_module.create_chat_model(name=None)
 
-    # resolve_class is called — if we reach here without ValueError, the correct model was used
+    #    resolve_class is called — 如果 we reach here without ValueError, the 正确 模型 was used
+
+
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
 
 
@@ -98,9 +118,15 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
-# ---------------------------------------------------------------------------
-# thinking_enabled=True
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    thinking_enabled=True
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_thinking_enabled_raises_when_not_supported_but_when_thinking_enabled_is_set(monkeypatch):
@@ -115,8 +141,8 @@ def test_thinking_enabled_raises_when_not_supported_but_when_thinking_enabled_is
 
 
 def test_thinking_enabled_raises_for_empty_when_thinking_enabled_explicitly_set(monkeypatch):
-    """supports_thinking guard fires when when_thinking_enabled is set to an empty dict —
-    the user explicitly provided the section, so the guard must still fire even though
+    """supports_thinking guard fires when when_thinking_enabled is 集合 to an empty 字典 —
+    the 用户 explicitly provided the section, so the guard must still fire even though
     effective_wte would be falsy."""
     cfg = _make_app_config([_make_model("no-think-empty", supports_thinking=False, when_thinking_enabled={})])
     _patch_factory(monkeypatch, cfg)
@@ -137,14 +163,20 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("max_tokens") == 16000
 
 
-# ---------------------------------------------------------------------------
-# thinking_enabled=False — disable logic
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    thinking_enabled=False — disable logic
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_thinking_disabled_openai_gateway_format(monkeypatch):
     """When thinking is configured via extra_body (OpenAI-compatible gateway),
-    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=minimal."""
+    disabling must inject extra_body.thinking.类型=已禁用 and reasoning_effort=minimal."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
     cfg = _make_app_config(
         [
@@ -171,12 +203,14 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
     assert captured.get("reasoning_effort") == "minimal"
-    assert "thinking" not in captured  # must NOT set the direct thinking param
+    assert "thinking" not in captured  #    must NOT 集合 the direct thinking param
+
+
 
 
 def test_thinking_disabled_langchain_anthropic_format(monkeypatch):
     """When thinking is configured as a direct param (langchain_anthropic),
-    disabling must inject thinking.type=disabled WITHOUT touching extra_body or reasoning_effort."""
+    disabling must inject thinking.类型=已禁用 WITHOUT touching extra_body or reasoning_effort."""
     wte = {"thinking": {"type": "enabled", "budget_tokens": 8000}}
     cfg = _make_app_config(
         [
@@ -204,12 +238,14 @@ def test_thinking_disabled_langchain_anthropic_format(monkeypatch):
 
     assert captured.get("thinking") == {"type": "disabled"}
     assert "extra_body" not in captured
-    # reasoning_effort must be cleared (supports_reasoning_effort=False)
+    #    reasoning_effort must be cleared (supports_reasoning_effort=False)
+
+
     assert captured.get("reasoning_effort") is None
 
 
 def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
-    """If when_thinking_enabled is not set, disabling thinking must not inject any kwargs."""
+    """If when_thinking_enabled is not 集合, disabling thinking must not inject any kwargs."""
     cfg = _make_app_config([_make_model("plain", supports_thinking=True, when_thinking_enabled=None)])
     _patch_factory(monkeypatch, cfg)
 
@@ -226,13 +262,21 @@ def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
 
     assert "extra_body" not in captured
     assert "thinking" not in captured
-    # reasoning_effort not forced (supports_reasoning_effort defaults to False → cleared)
+    #    reasoning_effort not forced (supports_reasoning_effort defaults to False → cleared)
+
+
     assert captured.get("reasoning_effort") is None
 
 
-# ---------------------------------------------------------------------------
-# reasoning_effort stripping
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    reasoning_effort stripping
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_reasoning_effort_cleared_when_not_supported(monkeypatch):
@@ -278,18 +322,28 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
 
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
-    # When supports_reasoning_effort=True, it should NOT be cleared to None
-    # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
+    #    When supports_reasoning_effort=True, it should NOT be cleared to None
+
+
+    #    The disable 路径 sets it to "minimal"; supports_reasoning_effort=True keeps it
+
+
     assert captured.get("reasoning_effort") == "minimal"
 
 
-# ---------------------------------------------------------------------------
-# thinking shortcut field
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    thinking shortcut field
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_thinking_shortcut_enables_thinking_when_thinking_enabled(monkeypatch):
-    """thinking shortcut alone should act as when_thinking_enabled with a `thinking` key."""
+    """thinking shortcut alone should act as when_thinking_enabled with a `thinking` 键."""
     thinking_settings = {"type": "enabled", "budget_tokens": 8000}
     cfg = _make_app_config(
         [
@@ -318,7 +372,7 @@ def test_thinking_shortcut_enables_thinking_when_thinking_enabled(monkeypatch):
 
 
 def test_thinking_shortcut_disables_thinking_when_thinking_disabled(monkeypatch):
-    """thinking shortcut should participate in the disable path (langchain_anthropic format)."""
+    """thinking shortcut should participate in the disable 路径 (langchain_anthropic format)."""
     thinking_settings = {"type": "enabled", "budget_tokens": 8000}
     cfg = _make_app_config(
         [
@@ -376,13 +430,15 @@ def test_thinking_shortcut_merges_with_when_thinking_enabled(monkeypatch):
 
     factory_module.create_chat_model(name="merge-model", thinking_enabled=True)
 
-    # Both the thinking shortcut and when_thinking_enabled settings should be applied
+    #    Both the thinking shortcut and when_thinking_enabled settings should be applied
+
+
     assert captured.get("thinking") == thinking_settings
     assert captured.get("max_tokens") == 16000
 
 
 def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
-    """thinking shortcut must not be passed raw to the model constructor (excluded from model_dump)."""
+    """thinking shortcut must not be passed raw to the 模型 constructor (excluded from model_dump)."""
     thinking_settings = {"type": "enabled", "budget_tokens": 8000}
     cfg = _make_app_config(
         [
@@ -408,17 +464,25 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 
     factory_module.create_chat_model(name="no-leak", thinking_enabled=False)
 
-    # The disable path should have set thinking to disabled (not the raw enabled shortcut)
+    #    The disable 路径 should have 集合 thinking to 已禁用 (not the raw 已启用 shortcut)
+
+
     assert captured.get("thinking") == {"type": "disabled"}
 
 
-# ---------------------------------------------------------------------------
-# OpenAI-compatible providers (MiniMax, Novita, etc.)
-# ---------------------------------------------------------------------------
+#    ---------------------------------------------------------------------------
+
+
+#    OpenAI-compatible providers (MiniMax, Novita, etc.)
+
+
+#    ---------------------------------------------------------------------------
+
+
 
 
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
-    """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
+    """OpenAI-compatible providers like MiniMax should pass base_url through to the 模型."""
     model = ModelConfig(
         name="minimax-m2.5",
         display_name="MiniMax M2.5",
@@ -491,10 +555,14 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    # Create first model
+    #    Create 第一 模型
+
+
     factory_module.create_chat_model(name="minimax-m2.5")
     assert captured.get("model") == "MiniMax-M2.5"
 
-    # Create second model
+    #    Create second 模型
+
+
     factory_module.create_chat_model(name="minimax-m2.5-highspeed")
     assert captured.get("model") == "MiniMax-M2.5-highspeed"

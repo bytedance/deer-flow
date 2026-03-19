@@ -1,4 +1,4 @@
-"""Tests for deerflow.config.tracing_config."""
+"""Tests for deerflow.配置.tracing_config."""
 
 from __future__ import annotations
 

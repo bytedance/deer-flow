@@ -9,7 +9,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# File extensions that should be converted to markdown
+#    File extensions that should be converted to markdown
+
+
 CONVERTIBLE_EXTENSIONS = {
     ".pdf",
     ".ppt",
@@ -22,13 +24,13 @@ CONVERTIBLE_EXTENSIONS = {
 
 
 async def convert_file_to_markdown(file_path: Path) -> Path | None:
-    """Convert a file to markdown using markitdown.
+    """Convert a 文件 to markdown using markitdown.
 
     Args:
-        file_path: Path to the file to convert.
+        file_path: Path to the 文件 to convert.
 
     Returns:
-        Path to the markdown file if conversion was successful, None otherwise.
+        Path to the markdown 文件 if conversion was successful, None otherwise.
     """
     try:
         from markitdown import MarkItDown
@@ -36,7 +38,9 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         md = MarkItDown()
         result = md.convert(str(file_path))
 
-        # Save as .md file with same name
+        #    Save as .md 文件 with same 名称
+
+
         md_path = file_path.with_suffix(".md")
         md_path.write_text(result.text_content, encoding="utf-8")
 

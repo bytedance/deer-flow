@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api", tags=["mcp"])
 
 
 class McpOAuthConfigResponse(BaseModel):
-    """OAuth configuration for an MCP server."""
+    """OAuth configuration for an MCP 服务器."""
 
     enabled: bool = Field(default=True, description="Whether OAuth token injection is enabled")
     token_url: str = Field(default="", description="OAuth token endpoint URL")
@@ -32,7 +32,7 @@ class McpOAuthConfigResponse(BaseModel):
 
 
 class McpServerConfigResponse(BaseModel):
-    """Response model for MCP server configuration."""
+    """响应 模型 for MCP 服务器 configuration."""
 
     enabled: bool = Field(default=True, description="Whether this MCP server is enabled")
     type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
@@ -46,7 +46,7 @@ class McpServerConfigResponse(BaseModel):
 
 
 class McpConfigResponse(BaseModel):
-    """Response model for MCP configuration."""
+    """响应 模型 for MCP configuration."""
 
     mcp_servers: dict[str, McpServerConfigResponse] = Field(
         default_factory=dict,
@@ -55,7 +55,7 @@ class McpConfigResponse(BaseModel):
 
 
 class McpConfigUpdateRequest(BaseModel):
-    """Request model for updating MCP configuration."""
+    """请求 模型 for updating MCP configuration."""
 
     mcp_servers: dict[str, McpServerConfigResponse] = Field(
         ...,
@@ -70,21 +70,21 @@ class McpConfigUpdateRequest(BaseModel):
     description="Retrieve the current Model Context Protocol (MCP) server configurations.",
 )
 async def get_mcp_configuration() -> McpConfigResponse:
-    """Get the current MCP configuration.
+    """Get the 当前 MCP configuration.
 
     Returns:
-        The current MCP configuration with all servers.
+        The 当前 MCP configuration with all servers.
 
     Example:
         ```json
         {
             "mcp_servers": {
                 "github": {
-                    "enabled": true,
+                    "已启用": true,
                     "command": "npx",
-                    "args": ["-y", "@modelcontextprotocol/server-github"],
+                    "args": ["-y", "@modelcontextprotocol/服务器-github"],
                     "env": {"GITHUB_TOKEN": "ghp_xxx"},
-                    "description": "GitHub MCP server for repository operations"
+                    "描述": "GitHub MCP 服务器 for repository operations"
                 }
             }
         }
@@ -105,62 +105,78 @@ async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfig
     """Update the MCP configuration.
 
     This will:
-    1. Save the new configuration to the mcp_config.json file
-    2. Reload the configuration cache
-    3. Reset MCP tools cache to trigger reinitialization
+    1. Save the 新建 configuration to the mcp_config.json 文件
+    2. Reload the configuration 缓存
+    3. Reset MCP tools 缓存 to trigger reinitialization
 
     Args:
-        request: The new MCP configuration to save.
+        请求: The 新建 MCP configuration to save.
 
     Returns:
         The updated MCP configuration.
 
     Raises:
-        HTTPException: 500 if the configuration file cannot be written.
+        HTTPException: 500 if the configuration 文件 cannot be written.
 
-    Example Request:
+    Example 请求:
         ```json
         {
             "mcp_servers": {
                 "github": {
-                    "enabled": true,
+                    "已启用": true,
                     "command": "npx",
-                    "args": ["-y", "@modelcontextprotocol/server-github"],
+                    "args": ["-y", "@modelcontextprotocol/服务器-github"],
                     "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"},
-                    "description": "GitHub MCP server for repository operations"
+                    "描述": "GitHub MCP 服务器 for repository operations"
                 }
             }
         }
         ```
     """
     try:
-        # Get the current config path (or determine where to save it)
+        #    Get the 当前 配置 路径 (or determine where to 保存 it)
+
+
         config_path = ExtensionsConfig.resolve_config_path()
 
-        # If no config file exists, create one in the parent directory (project root)
+        #    If no 配置 文件 exists, 创建 one in the parent 目录 (项目 root)
+
+
         if config_path is None:
             config_path = Path.cwd().parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        # Load current config to preserve skills configuration
+        #    Load 当前 配置 to preserve skills configuration
+
+
         current_config = get_extensions_config()
 
-        # Convert request to dict format for JSON serialization
+        #    Convert 请求 to 字典 format 对于 JSON serialization
+
+
         config_data = {
             "mcpServers": {name: server.model_dump() for name, server in request.mcp_servers.items()},
             "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
         }
 
-        # Write the configuration to file
+        #    Write the configuration to 文件
+
+
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
 
-        # NOTE: No need to reload/reset cache here - LangGraph Server (separate process)
-        # will detect config file changes via mtime and reinitialize MCP tools automatically
+        #    NOTE: No need to reload/reset 缓存 here - LangGraph Server (separate 处理)
 
-        # Reload the configuration and update the global cache
+
+        #    will detect 配置 文件 changes via mtime and reinitialize MCP tools automatically
+
+
+
+        #    Reload the configuration and 更新 the global 缓存
+
+
         reloaded_config = reload_extensions_config()
         return McpConfigResponse(mcp_servers={name: McpServerConfigResponse(**server.model_dump()) for name, server in reloaded_config.mcp_servers.items()})
 

@@ -16,18 +16,22 @@ def generate_ppt(
     Generate a PowerPoint presentation from slide images.
 
     Args:
-        plan_file: Path to JSON file containing presentation plan
+        plan_file: Path to JSON 文件 containing presentation plan
         slide_images: List of paths to slide images in order
-        output_file: Path to output PPTX file
+        output_file: Path to 输出 PPTX 文件
 
     Returns:
-        Status message
+        Status 消息
     """
-    # Load presentation plan
+    #    Load presentation plan
+
+
     with open(plan_file, "r", encoding="utf-8") as f:
         plan = json.load(f)
 
-    # Determine slide dimensions based on aspect ratio
+    #    Determine slide dimensions based on aspect ratio
+
+
     aspect_ratio = plan.get("aspect_ratio", "16:9")
     if aspect_ratio == "16:9":
         slide_width = Inches(13.333)
@@ -36,67 +40,97 @@ def generate_ppt(
         slide_width = Inches(10)
         slide_height = Inches(7.5)
     else:
-        # Default to 16:9
+        #    Default to 16:9
+
+
         slide_width = Inches(13.333)
         slide_height = Inches(7.5)
 
-    # Create presentation with specified dimensions
+    #    Create presentation with specified dimensions
+
+
     prs = Presentation()
     prs.slide_width = slide_width
     prs.slide_height = slide_height
 
-    # Get blank layout
-    blank_layout = prs.slide_layouts[6]  # Blank layout
+    #    Get blank layout
 
-    # Add each slide image
+
+    blank_layout = prs.slide_layouts[6]  #    Blank layout
+
+
+
+    #    Add each slide image
+
+
     slides_info = plan.get("slides", [])
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
             return f"Error: Slide image not found: {image_path}"
 
-        # Add a blank slide
+        #    Add a blank slide
+
+
         slide = prs.slides.add_slide(blank_layout)
 
-        # Load and process image
+        #    Load and 处理 image
+
+
         with Image.open(image_path) as img:
-            # Convert to RGB if necessary (for PNG with transparency)
+            #    Convert to RGB 如果 necessary (对于 PNG with transparency)
+
+
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
 
-            # Calculate dimensions to fill slide while maintaining aspect ratio
+            #    Calculate dimensions to fill slide 当 maintaining aspect ratio
+
+
             img_width, img_height = img.size
             img_aspect = img_width / img_height
             slide_aspect = slide_width / slide_height
 
-            # Convert to EMU for calculations
+            #    Convert to EMU 对于 calculations
+
+
             slide_width_emu = int(slide_width)
             slide_height_emu = int(slide_height)
 
             if img_aspect > slide_aspect:
-                # Image is wider - fit to width
+                #    Image is wider - fit to width
+
+
                 new_width_emu = slide_width_emu
                 new_height_emu = int(slide_width_emu / img_aspect)
                 left = Inches(0)
                 top = Inches((slide_height_emu - new_height_emu) / 914400)
             else:
-                # Image is taller - fit to height
+                #    Image is taller - fit to height
+
+
                 new_height_emu = slide_height_emu
                 new_width_emu = int(slide_height_emu * img_aspect)
                 left = Inches((slide_width_emu - new_width_emu) / 914400)
                 top = Inches(0)
 
-            # Save processed image to bytes
+            #    Save processed image to bytes
+
+
             img_bytes = BytesIO()
             img.save(img_bytes, format="JPEG", quality=95)
             img_bytes.seek(0)
 
-            # Add image to slide
+            #    Add image to slide
+
+
             slide.shapes.add_picture(
                 img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
             )
 
-        # Add speaker notes if available in plan
+        #    Add speaker notes 如果 可用的 in plan
+
+
         if i < len(slides_info):
             slide_info = slides_info[i]
             notes = []
@@ -118,7 +152,9 @@ def generate_ppt(
                 if text_frame is not None:
                     text_frame.text = "\n".join(notes)
 
-    # Save presentation
+    #    Save presentation
+
+
     prs.save(output_file)
 
     return f"Successfully generated presentation with {len(slide_images)} slides to {output_file}"

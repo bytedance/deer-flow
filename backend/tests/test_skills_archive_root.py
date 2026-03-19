@@ -9,11 +9,13 @@ def _write_skill(skill_dir: Path) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         """---
-name: demo-skill
-description: Demo skill
+名称: demo-skill
+描述: Demo skill
 ---
 
-# Demo Skill
+#    Demo Skill
+
+
 """,
         encoding="utf-8",
     )

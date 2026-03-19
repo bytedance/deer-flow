@@ -2,14 +2,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ToolGroupConfig(BaseModel):
-    """Config section for a tool group"""
+    """配置 section for a 工具 组"""
 
     name: str = Field(..., description="Unique name for the tool group")
     model_config = ConfigDict(extra="allow")
 
 
 class ToolConfig(BaseModel):
-    """Config section for a tool"""
+    """配置 section for a 工具"""
 
     name: str = Field(..., description="Unique name for the tool")
     group: str = Field(..., description="Group name for the tool")

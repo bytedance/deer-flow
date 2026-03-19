@@ -19,29 +19,35 @@ class ViewedImageData(TypedDict):
 
 
 def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[str]:
-    """Reducer for artifacts list - merges and deduplicates artifacts."""
+    """Reducer for artifacts 列表 - merges and deduplicates artifacts."""
     if existing is None:
         return new or []
     if new is None:
         return existing
-    # Use dict.fromkeys to deduplicate while preserving order
+    #    Use 字典.fromkeys to deduplicate 当 preserving order
+
+
     return list(dict.fromkeys(existing + new))
 
 
 def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
-    """Reducer for viewed_images dict - merges image dictionaries.
+    """Reducer for viewed_images 字典 - merges image dictionaries.
 
-    Special case: If new is an empty dict {}, it clears the existing images.
-    This allows middlewares to clear the viewed_images state after processing.
+    Special case: If 新建 is an empty 字典 {}, it clears the existing images.
+    This allows middlewares to clear the viewed_images 状态 after processing.
     """
     if existing is None:
         return new or {}
     if new is None:
         return existing
-    # Special case: empty dict means clear all viewed images
+    #    Special case: empty 字典 means clear all viewed images
+
+
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
+    #    Merge dictionaries, 新建 values override existing ones 对于 same keys
+
+
     return {**existing, **new}
 
 
@@ -52,4 +58,6 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  #    image_path -> {base64, mime_type}
+
+

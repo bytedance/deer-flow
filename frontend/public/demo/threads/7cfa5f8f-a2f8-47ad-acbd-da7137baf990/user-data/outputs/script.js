@@ -1,11 +1,11 @@
-// 2026 Horizons - Interactive Features
+//    2026 Horizons - Interactive Features
 
 document.addEventListener('DOMContentLoaded', function() {
-    // Theme Toggle
+    //    Theme Toggle
     const themeToggle = document.getElementById('themeToggle');
     const themeIcon = themeToggle.querySelector('i');
     
-    // Check for saved theme or prefer-color-scheme
+    //    Check 对于 saved theme or prefer-color-scheme
     const savedTheme = localStorage.getItem('theme');
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     
@@ -28,7 +28,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Smooth scroll for navigation links
+    //    Smooth scroll 对于 navigation links
     document.querySelectorAll('a[href^="#"]').forEach(anchor => {
         anchor.addEventListener('click', function(e) {
             e.preventDefault();
@@ -49,14 +49,14 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
-    // Navbar scroll effect
+    //    Navbar scroll effect
     const navbar = document.querySelector('.navbar');
     let lastScrollTop = 0;
     
     window.addEventListener('scroll', function() {
         const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
         
-        // Hide/show navbar on scroll
+        //    Hide/show navbar on scroll
         if (scrollTop > lastScrollTop && scrollTop > 100) {
             navbar.style.transform = 'translateY(-100%)';
         } else {
@@ -65,7 +65,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         lastScrollTop = scrollTop;
         
-        // Add shadow when scrolled
+        //    Add shadow when scrolled
         if (scrollTop > 10) {
             navbar.style.boxShadow = 'var(--shadow-md)';
         } else {
@@ -73,7 +73,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Animate elements on scroll
+    //    Animate elements on scroll
     const observerOptions = {
         threshold: 0.1,
         rootMargin: '0px 0px -50px 0px'
@@ -88,12 +88,12 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }, observerOptions);
     
-    // Observe elements to animate
+    //    Observe elements to animate
     document.querySelectorAll('.trend-card, .opportunity-card, .challenge-card, .highlight-card').forEach(el => {
         observer.observe(el);
     });
     
-    // Stats counter animation
+    //    Stats counter animation
     const stats = document.querySelectorAll('.stat-number');
     
     const statsObserver = new IntersectionObserver(function(entries) {
@@ -125,7 +125,7 @@ document.addEventListener('DOMContentLoaded', function() {
         statsObserver.observe(stat);
     });
     
-    // Hover effects for cards
+    //    Hover effects 对于 cards
     document.querySelectorAll('.trend-card, .opportunity-card, .challenge-card').forEach(card => {
         card.addEventListener('mouseenter', function() {
             this.style.zIndex = '10';
@@ -136,20 +136,20 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
-    // Current year in footer
+    //    Current year in footer
     const currentYear = new Date().getFullYear();
     const yearElement = document.querySelector('.copyright p');
     if (yearElement) {
         yearElement.textContent = yearElement.textContent.replace('2026', currentYear);
     }
     
-    // Initialize animations
+    //    Initialize animations
     setTimeout(() => {
         document.body.style.opacity = '1';
     }, 100);
 });
 
-// Add CSS for initial load
+//    Add CSS 对于 initial load
 const style = document.createElement('style');
 style.textContent = `
     body {

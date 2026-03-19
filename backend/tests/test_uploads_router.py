@@ -80,21 +80,27 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
     ):
-        # These filenames must be rejected outright
+        #    These filenames must be rejected outright
+
+
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
             result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
             assert result.success is True
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
 
-        # Path-traversal prefixes are stripped to the basename and accepted safely
+        #    Path-traversal prefixes are stripped to the basename and accepted safely
+
+
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
         assert result.success is True
         assert len(result.files) == 1
         assert result.files[0]["filename"] == "passwd"
 
-    # Only the safely normalised file should exist
+    #    Only the safely normalised 文件 should exist
+
+
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
 
 

@@ -1,4 +1,4 @@
-"""Tests for InfoQuest client and tools."""
+"""Tests for InfoQuest 客户端 and tools."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -10,14 +10,18 @@ from deerflow.community.infoquest.infoquest_client import InfoQuestClient
 class TestInfoQuestClient:
     def test_infoquest_client_initialization(self):
         """Test InfoQuestClient initialization with different parameters."""
-        # Test with default parameters
+        #    Test with 默认 parameters
+
+
         client = InfoQuestClient()
         assert client.fetch_time == -1
         assert client.fetch_timeout == -1
         assert client.fetch_navigation_timeout == -1
         assert client.search_time_range == -1
 
-        # Test with custom parameters
+        #    Test with custom parameters
+
+
         client = InfoQuestClient(fetch_time=10, fetch_timeout=30, fetch_navigation_timeout=60, search_time_range=24)
         assert client.fetch_time == 10
         assert client.fetch_timeout == 30
@@ -57,7 +61,7 @@ class TestInfoQuestClient:
 
     @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_fetch_empty_response(self, mock_post):
-        """Test fetch operation with empty response."""
+        """Test fetch operation with empty 响应."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.text = ""
@@ -96,14 +100,16 @@ class TestInfoQuestClient:
         client = InfoQuestClient()
         result = client.web_search("test query")
 
-        # Check if result is a valid JSON string with expected content
+        #    Check 如果 结果 is a 有效 JSON 字符串 with expected content
+
+
         result_data = json.loads(result)
         assert len(result_data) == 1
         assert result_data[0]["title"] == "Test Result"
         assert result_data[0]["url"] == "https://example.com"
 
     def test_clean_results(self):
-        """Test clean_results method with sample raw results."""
+        """Test clean_results 方法 with sample raw results."""
         raw_results = [
             {
                 "content": {
@@ -124,7 +130,7 @@ class TestInfoQuestClient:
         assert cleaned[1]["title"] == "Test News"
 
     def test_clean_results_with_image_search(self):
-        """Test clean_results_with_image_search method with sample raw results."""
+        """Test clean_results_with_image_search 方法 with sample raw results."""
         raw_results = [{"content": {"results": {"images_results": [{"image_url": "https://example.com/image1.jpg", "thumbnail_url": "https://example.com/thumb1.jpg", "url": "https://example.com/page1"}]}}}]
         cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
 
@@ -135,7 +141,7 @@ class TestInfoQuestClient:
 
     @patch("deerflow.community.infoquest.tools._get_infoquest_client")
     def test_web_search_tool(self, mock_get_client):
-        """Test web_search_tool function."""
+        """Test web_search_tool 函数."""
         mock_client = MagicMock()
         mock_client.web_search.return_value = json.dumps([])
         mock_get_client.return_value = mock_client
@@ -148,20 +154,22 @@ class TestInfoQuestClient:
 
     @patch("deerflow.community.infoquest.tools._get_infoquest_client")
     def test_web_fetch_tool(self, mock_get_client):
-        """Test web_fetch_tool function."""
+        """Test web_fetch_tool 函数."""
         mock_client = MagicMock()
         mock_client.fetch.return_value = "<html><body>Test content</body></html>"
         mock_get_client.return_value = mock_client
 
         result = tools.web_fetch_tool.run("https://example.com")
 
-        assert result == "# Untitled\n\nTest content"
+        assert result == "#   Untitled\n\nTest content"
+
+
         mock_get_client.assert_called_once()
         mock_client.fetch.assert_called_once_with("https://example.com")
 
     @patch("deerflow.community.infoquest.tools.get_app_config")
     def test_get_infoquest_client(self, mock_get_app_config):
-        """Test _get_infoquest_client function with config."""
+        """Test _get_infoquest_client 函数 with 配置."""
         mock_config = MagicMock()
         mock_config.get_tool_config.side_effect = [MagicMock(model_extra={"search_time_range": 24}), MagicMock(model_extra={"fetch_time": 10, "timeout": 30, "navigation_timeout": 60})]
         mock_get_app_config.return_value = mock_config
@@ -175,7 +183,7 @@ class TestInfoQuestClient:
 
     @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_web_search_api_error(self, mock_post):
-        """Test web_search operation with API error."""
+        """Test web_search operation with API 错误."""
         mock_post.side_effect = Exception("Connection error")
 
         client = InfoQuestClient()

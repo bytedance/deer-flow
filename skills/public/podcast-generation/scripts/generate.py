@@ -13,7 +13,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Types
+#    Types
+
+
 class ScriptLine:
     def __init__(self, speaker: Literal["male", "female"] = "male", paragraph: str = ""):
         self.speaker = speaker
@@ -51,7 +53,9 @@ def text_to_speech(text: str, voice_type: str) -> Optional[bytes]:
 
     url = "https://openspeech.bytedance.com/api/v1/tts"
 
-    # Authentication: Bearer token with semicolon separator
+    #    Authentication: Bearer token with semicolon separator
+
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer;{access_token}",
@@ -60,7 +64,9 @@ def text_to_speech(text: str, voice_type: str) -> Optional[bytes]:
     payload = {
         "app": {
             "appid": app_id,
-            "token": "access_token",  # literal string, not the actual token
+            "token": "access_token",  #    literal 字符串, not the actual token
+
+
             "cluster": cluster,
         },
         "user": {"uid": "podcast-generator"},
@@ -70,7 +76,9 @@ def text_to_speech(text: str, voice_type: str) -> Optional[bytes]:
             "speed_ratio": 1.2,
         },
         "request": {
-            "reqid": str(uuid.uuid4()),  # must be unique UUID
+            "reqid": str(uuid.uuid4()),  #    must be unique UUID
+
+
             "text": text,
             "text_type": "plain",
             "operation": "query",
@@ -100,14 +108,20 @@ def text_to_speech(text: str, voice_type: str) -> Optional[bytes]:
 
 
 def _process_line(args: tuple[int, ScriptLine, int]) -> tuple[int, Optional[bytes]]:
-    """Process a single script line for TTS. Returns (index, audio_bytes)."""
+    """Process a single script line for TTS. Returns (索引, audio_bytes)."""
     i, line, total = args
 
-    # Select voice based on speaker gender
+    #    Select voice based on speaker gender
+
+
     if line.speaker == "male":
-        voice_type = "zh_male_yangguangqingnian_moon_bigtts"  # Male voice
+        voice_type = "zh_male_yangguangqingnian_moon_bigtts"  #    Male voice
+
+
     else:
-        voice_type = "zh_female_sajiaonvyou_moon_bigtts"  # Female voice
+        voice_type = "zh_female_sajiaonvyou_moon_bigtts"  #    Female voice
+
+
 
     logger.info(f"Processing line {i + 1}/{total} ({line.speaker})")
     audio = text_to_speech(line.paragraph, voice_type)
@@ -125,7 +139,9 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
     total = len(script.lines)
     tasks = [(i, line, total) for i, line in enumerate(script.lines)]
 
-    # Use ThreadPoolExecutor for parallel TTS generation
+    #    Use ThreadPoolExecutor 对于 并行 TTS generation
+
+
     results: dict[int, Optional[bytes]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_process_line, task): task[0] for task in tasks}
@@ -133,7 +149,9 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
             idx, audio = future.result()
             results[idx] = audio
 
-    # Collect results in order, skipping failed ones
+    #    Collect results in order, skipping failed ones
+
+
     audio_chunks = []
     for i in range(total):
         audio = results.get(i)
@@ -145,7 +163,7 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
 
 
 def mix_audio(audio_chunks: list[bytes]) -> bytes:
-    """Combine audio chunks into a single audio file."""
+    """Combine audio chunks into a single audio 文件."""
     logger.info("Mixing audio chunks...")
     output = b"".join(audio_chunks)
     logger.info("Audio mixing complete")
@@ -154,7 +172,9 @@ def mix_audio(audio_chunks: list[bytes]) -> bytes:
 
 def generate_markdown(script: Script, title: str = "Podcast Script") -> str:
     """Generate a markdown script from the podcast script."""
-    lines = [f"# {title}", ""]
+    lines = [f"#   {title}", ""]
+
+
 
     for line in script.lines:
         speaker_name = "**Host (Male)**" if line.speaker == "male" else "**Host (Female)**"
@@ -169,9 +189,11 @@ def generate_podcast(
     output_file: str,
     transcript_file: Optional[str] = None,
 ) -> str:
-    """Generate a podcast from a script JSON file."""
+    """Generate a podcast from a script JSON 文件."""
 
-    # Read script JSON
+    #    Read script JSON
+
+
     with open(script_file, "r", encoding="utf-8") as f:
         script_json = json.load(f)
 
@@ -181,7 +203,9 @@ def generate_podcast(
     script = Script.from_dict(script_json)
     logger.info(f"Loaded script with {len(script.lines)} lines")
 
-    # Generate transcript markdown if requested
+    #    Generate transcript markdown 如果 requested
+
+
     if transcript_file:
         title = script_json.get("title", "Podcast Script")
         markdown_content = generate_markdown(script, title)
@@ -192,16 +216,22 @@ def generate_podcast(
             f.write(markdown_content)
         logger.info(f"Generated transcript to {transcript_file}")
 
-    # Convert to audio
+    #    Convert to audio
+
+
     audio_chunks = tts_node(script)
 
     if not audio_chunks:
         raise Exception("Failed to generate any audio")
 
-    # Mix audio
+    #    Mix audio
+
+
     output_audio = mix_audio(audio_chunks)
 
-    # Save output
+    #    Save 输出
+
+
     output_dir = os.path.dirname(output_file)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)

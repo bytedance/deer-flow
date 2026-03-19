@@ -23,7 +23,7 @@ class _OAuthToken:
 
 
 class OAuthTokenManager:
-    """Acquire/cache/refresh OAuth tokens for MCP servers."""
+    """Acquire/缓存/refresh OAuth tokens for MCP servers."""
 
     def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
         self._oauth_by_server = oauth_by_server
@@ -70,7 +70,9 @@ class OAuthTokenManager:
         return token.expires_at <= now + timedelta(seconds=max(oauth.refresh_skew_seconds, 0))
 
     async def _fetch_token(self, oauth: McpOAuthConfig) -> _OAuthToken:
-        import httpx  # pyright: ignore[reportMissingImports]
+        import httpx  #    pyright: ignore[reportMissingImports]
+
+
 
         data: dict[str, str] = {
             "grant_type": oauth.grant_type,
@@ -120,7 +122,7 @@ class OAuthTokenManager:
 
 
 def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
-    """Build a tool interceptor that injects OAuth Authorization headers."""
+    """Build a 工具 interceptor that injects OAuth Authorization headers."""
     token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
     if not token_manager.has_oauth_servers():
         return None
@@ -138,7 +140,7 @@ def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | N
 
 
 async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict[str, str]:
-    """Get initial OAuth Authorization headers for MCP server connections."""
+    """Get initial OAuth Authorization headers for MCP 服务器 connections."""
     token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
     if not token_manager.has_oauth_servers():
         return {}

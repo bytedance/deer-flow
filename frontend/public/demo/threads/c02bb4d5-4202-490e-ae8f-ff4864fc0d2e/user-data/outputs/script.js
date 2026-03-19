@@ -1,22 +1,22 @@
-// Pride and Prejudice - Interactive Features
+//    Pride and Prejudice - Interactive Features
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Navigation scroll effect
+    //    Navigation scroll effect
     initNavigation();
     
-    // Quotes slider
+    //    Quotes slider
     initQuotesSlider();
     
-    // Scroll reveal animations
+    //    Scroll reveal animations
     initScrollReveal();
     
-    // Smooth scroll for anchor links
+    //    Smooth scroll 对于 anchor links
     initSmoothScroll();
 });
 
-// ============================================
-// NAVIGATION SCROLL EFFECT
-// ============================================
+//    ============================================
+//    NAVIGATION SCROLL EFFECT
+//    ============================================
 function initNavigation() {
     const nav = document.querySelector('.nav');
     let lastScroll = 0;
@@ -24,7 +24,7 @@ function initNavigation() {
     window.addEventListener('scroll', () => {
         const currentScroll = window.pageYOffset;
         
-        // Add/remove scrolled class
+        //    Add/remove scrolled 类
         if (currentScroll > 100) {
             nav.classList.add('scrolled');
         } else {
@@ -35,9 +35,9 @@ function initNavigation() {
     });
 }
 
-// ============================================
-// QUOTES SLIDER
-// ============================================
+//    ============================================
+//    QUOTES SLIDER
+//    ============================================
 function initQuotesSlider() {
     const quotes = document.querySelectorAll('.quote-card');
     const dots = document.querySelectorAll('.quote-dot');
@@ -45,11 +45,11 @@ function initQuotesSlider() {
     let autoSlideInterval;
     
     function showQuote(index) {
-        // Remove active class from all quotes and dots
+        //    Remove 活跃 类 from all quotes and dots
         quotes.forEach(quote => quote.classList.remove('active'));
         dots.forEach(dot => dot.classList.remove('active'));
         
-        // Add active class to current quote and dot
+        //    Add 活跃 类 to 当前 quote and dot
         quotes[index].classList.add('active');
         dots[index].classList.add('active');
         
@@ -61,7 +61,7 @@ function initQuotesSlider() {
         showQuote(nextIndex);
     }
     
-    // Dot click handlers
+    //    Dot click handlers
     dots.forEach((dot, index) => {
         dot.addEventListener('click', () => {
             showQuote(index);
@@ -69,7 +69,7 @@ function initQuotesSlider() {
         });
     });
     
-    // Auto-slide functionality
+    //    Auto-slide functionality
     function startAutoSlide() {
         autoSlideInterval = setInterval(nextQuote, 6000);
     }
@@ -79,18 +79,18 @@ function initQuotesSlider() {
         startAutoSlide();
     }
     
-    // Start auto-slide
+    //    Start auto-slide
     startAutoSlide();
     
-    // Pause on hover
+    //    Pause on hover
     const slider = document.querySelector('.quotes-slider');
     slider.addEventListener('mouseenter', () => clearInterval(autoSlideInterval));
     slider.addEventListener('mouseleave', startAutoSlide);
 }
 
-// ============================================
-// SCROLL REVEAL ANIMATIONS
-// ============================================
+//    ============================================
+//    SCROLL REVEAL ANIMATIONS
+//    ============================================
 function initScrollReveal() {
     const revealElements = document.querySelectorAll(
         '.about-content, .character-card, .theme-item, .section-header'
@@ -104,7 +104,7 @@ function initScrollReveal() {
     const revealObserver = new IntersectionObserver((entries) => {
         entries.forEach((entry, index) => {
             if (entry.isIntersecting) {
-                // Add staggered delay for grid items
+                //    Add staggered delay 对于 grid items
                 const delay = entry.target.classList.contains('character-card') || 
                              entry.target.classList.contains('theme-item') 
                              ? index * 100 
@@ -129,9 +129,9 @@ function initScrollReveal() {
     });
 }
 
-// ============================================
-// SMOOTH SCROLL FOR ANCHOR LINKS
-// ============================================
+//    ============================================
+//    SMOOTH SCROLL FOR ANCHOR LINKS
+//    ============================================
 function initSmoothScroll() {
     document.querySelectorAll('a[href^="#"]').forEach(anchor => {
         anchor.addEventListener('click', function(e) {
@@ -151,9 +151,9 @@ function initSmoothScroll() {
     });
 }
 
-// ============================================
-// PARALLAX EFFECT FOR HERO
-// ============================================
+//    ============================================
+//    PARALLAX EFFECT FOR HERO
+//    ============================================
 window.addEventListener('scroll', () => {
     const scrolled = window.pageYOffset;
     const heroPattern = document.querySelector('.hero-pattern');
@@ -163,9 +163,9 @@ window.addEventListener('scroll', () => {
     }
 });
 
-// ============================================
-// CHARACTER CARD HOVER EFFECT
-// ============================================
+//    ============================================
+//    CHARACTER CARD HOVER EFFECT
+//    ============================================
 document.querySelectorAll('.character-card').forEach(card => {
     card.addEventListener('mouseenter', function() {
         this.style.zIndex = '10';

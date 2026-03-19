@@ -229,7 +229,7 @@ export default function Galaxy({
       gl.clearColor(0, 0, 0, 1);
     }
 
-    /** @type {Program | undefined} */
+    /** @类型 {Program | undefined} */
     let program;
 
     function resize() {

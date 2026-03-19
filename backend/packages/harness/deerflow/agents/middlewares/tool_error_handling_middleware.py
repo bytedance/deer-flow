@@ -1,4 +1,4 @@
-"""Tool error handling middleware and shared runtime middleware builders."""
+"""工具 错误 handling 中间件 and shared runtime 中间件 builders."""
 
 import logging
 from collections.abc import Awaitable, Callable
@@ -17,7 +17,7 @@ _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
-    """Convert tool exceptions into error ToolMessages so the run can continue."""
+    """Convert 工具 exceptions into 错误 ToolMessages so the 运行 can continue."""
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -43,7 +43,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         try:
             return handler(request)
         except GraphBubbleUp:
-            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            #    Preserve LangGraph control-flow signals (interrupt/pause/resume).
+
+
             raise
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
@@ -58,7 +60,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         try:
             return await handler(request)
         except GraphBubbleUp:
-            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            #    Preserve LangGraph control-flow signals (interrupt/pause/resume).
+
+
             raise
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
@@ -71,7 +75,7 @@ def _build_runtime_middlewares(
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
 ) -> list[AgentMiddleware]:
-    """Build shared base middlewares for agent execution."""
+    """Build shared base middlewares for 代理 execution."""
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -95,7 +99,7 @@ def _build_runtime_middlewares(
 
 
 def build_lead_runtime_middlewares(*, lazy_init: bool = True) -> list[AgentMiddleware]:
-    """Middlewares shared by lead agent runtime before lead-only middlewares."""
+    """Middlewares shared by lead 代理 runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         include_uploads=True,
         include_dangling_tool_call_patch=True,

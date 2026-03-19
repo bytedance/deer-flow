@@ -1,4 +1,4 @@
-"""Memory updater for reading, writing, and updating memory data."""
+"""内存 updater for reading, writing, and updating 内存 数据."""
 
 import json
 import re
@@ -17,14 +17,14 @@ from deerflow.models import create_chat_model
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
-    """Get the path to the memory file.
+    """Get the 路径 to the 内存 文件.
 
     Args:
-        agent_name: If provided, returns the per-agent memory file path.
-                    If None, returns the global memory file path.
+        agent_name: If provided, returns the per-代理 内存 文件 路径.
+                    If None, returns the global 内存 文件 路径.
 
     Returns:
-        Path to the memory file.
+        Path to the 内存 文件.
     """
     if agent_name is not None:
         return get_paths().agent_memory_file(agent_name)
@@ -32,13 +32,15 @@ def _get_memory_file_path(agent_name: str | None = None) -> Path:
     config = get_memory_config()
     if config.storage_path:
         p = Path(config.storage_path)
-        # Absolute path: use as-is; relative path: resolve against base_dir
+        #    Absolute 路径: use as-is; relative 路径: resolve against base_dir
+
+
         return p if p.is_absolute() else get_paths().base_dir / p
     return get_paths().memory_file
 
 
 def _create_empty_memory() -> dict[str, Any]:
-    """Create an empty memory structure."""
+    """Create an empty 内存 structure."""
     return {
         "version": "1.0",
         "lastUpdated": datetime.utcnow().isoformat() + "Z",
@@ -56,26 +58,32 @@ def _create_empty_memory() -> dict[str, Any]:
     }
 
 
-# Per-agent memory cache: keyed by agent_name (None = global)
-# Value: (memory_data, file_mtime)
+#    Per-代理 内存 缓存: keyed by agent_name (None = global)
+
+
+#    Value: (memory_data, file_mtime)
+
+
 _memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
 
 
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Get the current memory data (cached with file modification time check).
+    """Get the 当前 内存 数据 (cached with 文件 modification time 检查).
 
-    The cache is automatically invalidated if the memory file has been modified
-    since the last load, ensuring fresh data is always returned.
+    The 缓存 is automatically invalidated if the 内存 文件 has been modified
+    since the 最后 load, ensuring fresh 数据 is always returned.
 
     Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
+        agent_name: If provided, loads per-代理 内存. If None, loads global 内存.
 
     Returns:
-        The memory data dictionary.
+        The 内存 数据 dictionary.
     """
     file_path = _get_memory_file_path(agent_name)
 
-    # Get current file modification time
+    #    Get 当前 文件 modification time
+
+
     try:
         current_mtime = file_path.stat().st_mtime if file_path.exists() else None
     except OSError:
@@ -83,7 +91,9 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
 
     cached = _memory_cache.get(agent_name)
 
-    # Invalidate cache if file has been modified or doesn't exist
+    #    Invalidate 缓存 如果 文件 has been modified or doesn't exist
+
+
     if cached is None or cached[1] != current_mtime:
         memory_data = _load_memory_from_file(agent_name)
         _memory_cache[agent_name] = (memory_data, current_mtime)
@@ -93,13 +103,13 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
 
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
-    """Reload memory data from file, forcing cache invalidation.
+    """Reload 内存 数据 from 文件, forcing 缓存 invalidation.
 
     Args:
-        agent_name: If provided, reloads per-agent memory. If None, reloads global memory.
+        agent_name: If provided, reloads per-代理 内存. If None, reloads global 内存.
 
     Returns:
-        The reloaded memory data dictionary.
+        The reloaded 内存 数据 dictionary.
     """
     file_path = _get_memory_file_path(agent_name)
     memory_data = _load_memory_from_file(agent_name)
@@ -114,13 +124,13 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
 
 
 def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
-    """Load memory data from file.
+    """Load 内存 数据 from 文件.
 
     Args:
-        agent_name: If provided, loads per-agent memory file. If None, loads global.
+        agent_name: If provided, loads per-代理 内存 文件. If None, loads global.
 
     Returns:
-        The memory data dictionary.
+        The 内存 数据 dictionary.
     """
     file_path = _get_memory_file_path(agent_name)
 
@@ -136,9 +146,15 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
         return _create_empty_memory()
 
 
-# Matches sentences that describe a file-upload *event* rather than general
-# file-related work.  Deliberately narrow to avoid removing legitimate facts
-# such as "User works with CSV files" or "prefers PDF export".
+#    Matches sentences that describe a 文件-upload *event* rather than general
+
+
+#    文件-related work.  Deliberately narrow to avoid removing legitimate facts
+
+
+#    such as "用户 works with CSV files" or "prefers PDF export".
+
+
 _UPLOAD_SENTENCE_RE = re.compile(
     r"[^.!?]*\b(?:"
     r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
@@ -151,12 +167,14 @@ _UPLOAD_SENTENCE_RE = re.compile(
 
 
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries and facts.
+    """Remove sentences about 文件 uploads from all 内存 summaries and facts.
 
-    Uploaded files are session-scoped; persisting upload events in long-term
-    memory causes the agent to search for non-existent files in future sessions.
+    Uploaded files are 会话-scoped; persisting upload events in long-term
+    内存 causes the 代理 to search for non-existent files in future sessions.
     """
-    # Scrub summaries in user/history sections
+    #    Scrub summaries in 用户/history sections
+
+
     for section in ("user", "history"):
         section_data = memory_data.get(section, {})
         for _key, val in section_data.items():
@@ -165,7 +183,9 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
                 cleaned = re.sub(r"  +", " ", cleaned)
                 val["summary"] = cleaned
 
-    # Also remove any facts that describe upload events
+    #    Also remove any facts that describe upload events
+
+
     facts = memory_data.get("facts", [])
     if facts:
         memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
@@ -183,11 +203,11 @@ def _fact_content_key(content: Any) -> str | None:
 
 
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-    """Save memory data to file and update cache.
+    """Save 内存 数据 to 文件 and 更新 缓存.
 
     Args:
-        memory_data: The memory data to save.
-        agent_name: If provided, saves to per-agent memory file. If None, saves to global.
+        memory_data: The 内存 数据 to save.
+        agent_name: If provided, saves to per-代理 内存 文件. If None, saves to global.
 
     Returns:
         True if successful, False otherwise.
@@ -195,21 +215,31 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
     file_path = _get_memory_file_path(agent_name)
 
     try:
-        # Ensure directory exists
+        #    Ensure 目录 exists
+
+
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Update lastUpdated timestamp
+        #    Update lastUpdated timestamp
+
+
         memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
 
-        # Write atomically using temp file
+        #    Write atomically using temp 文件
+
+
         temp_path = file_path.with_suffix(".tmp")
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
-        # Rename temp file to actual file (atomic on most systems)
+        #    Rename temp 文件 to actual 文件 (atomic on most systems)
+
+
         temp_path.replace(file_path)
 
-        # Update cache and file modification time
+        #    Update 缓存 and 文件 modification time
+
+
         try:
             mtime = file_path.stat().st_mtime
         except OSError:
@@ -225,32 +255,32 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
 
 
 class MemoryUpdater:
-    """Updates memory using LLM based on conversation context."""
+    """Updates 内存 using LLM based on conversation context."""
 
     def __init__(self, model_name: str | None = None):
-        """Initialize the memory updater.
+        """Initialize the 内存 updater.
 
         Args:
-            model_name: Optional model name to use. If None, uses config or default.
+            model_name: Optional 模型 名称 to use. If None, uses 配置 or 默认.
         """
         self._model_name = model_name
 
     def _get_model(self):
-        """Get the model for memory updates."""
+        """Get the 模型 for 内存 updates."""
         config = get_memory_config()
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
     def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
-        """Update memory based on conversation messages.
+        """Update 内存 based on conversation messages.
 
         Args:
             messages: List of conversation messages.
-            thread_id: Optional thread ID for tracking source.
-            agent_name: If provided, updates per-agent memory. If None, updates global memory.
+            thread_id: Optional 线程 ID for tracking source.
+            agent_name: If provided, updates per-代理 内存. If None, updates global 内存.
 
         Returns:
-            True if update was successful, False otherwise.
+            True if 更新 was successful, False otherwise.
         """
         config = get_memory_config()
         if not config.enabled:
@@ -260,44 +290,68 @@ class MemoryUpdater:
             return False
 
         try:
-            # Get current memory
+            #    Get 当前 内存
+
+
             current_memory = get_memory_data(agent_name)
 
-            # Format conversation for prompt
+            #    Format conversation 对于 提示词
+
+
             conversation_text = format_conversation_for_update(messages)
 
             if not conversation_text.strip():
                 return False
 
-            # Build prompt
+            #    Build 提示词
+
+
             prompt = MEMORY_UPDATE_PROMPT.format(
                 current_memory=json.dumps(current_memory, indent=2),
                 conversation=conversation_text,
             )
 
-            # Call LLM
+            #    Call LLM
+
+
             model = self._get_model()
             response = model.invoke(prompt)
             response_text = str(response.content).strip()
 
-            # Parse response
-            # Remove markdown code blocks if present
+            #    Parse 响应
+
+
+            #    Remove markdown code blocks 如果 present
+
+
             if response_text.startswith("```"):
                 lines = response_text.split("\n")
                 response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
 
             update_data = json.loads(response_text)
 
-            # Apply updates
+            #    Apply updates
+
+
             updated_memory = self._apply_updates(current_memory, update_data, thread_id)
 
-            # Strip file-upload mentions from all summaries before saving.
-            # Uploaded files are session-scoped and won't exist in future sessions,
-            # so recording upload events in long-term memory causes the agent to
-            # try (and fail) to locate those files in subsequent conversations.
+            #    Strip 文件-upload mentions from all summaries before saving.
+
+
+            #    Uploaded files are 会话-scoped and won't exist in future sessions,
+
+
+            #    so recording upload events in long-term 内存 causes the 代理 to
+
+
+            #    try (and fail) to locate those files in subsequent conversations.
+
+
             updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
-            # Save
+            #    Save
+
+
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
@@ -313,20 +367,22 @@ class MemoryUpdater:
         update_data: dict[str, Any],
         thread_id: str | None = None,
     ) -> dict[str, Any]:
-        """Apply LLM-generated updates to memory.
+        """Apply LLM-generated updates to 内存.
 
         Args:
-            current_memory: Current memory data.
+            current_memory: Current 内存 数据.
             update_data: Updates from LLM.
-            thread_id: Optional thread ID for tracking.
+            thread_id: Optional 线程 ID for tracking.
 
         Returns:
-            Updated memory data.
+            Updated 内存 数据.
         """
         config = get_memory_config()
         now = datetime.utcnow().isoformat() + "Z"
 
-        # Update user sections
+        #    Update 用户 sections
+
+
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind"]:
             section_data = user_updates.get(section, {})
@@ -336,7 +392,9 @@ class MemoryUpdater:
                     "updatedAt": now,
                 }
 
-        # Update history sections
+        #    Update history sections
+
+
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
@@ -346,12 +404,16 @@ class MemoryUpdater:
                     "updatedAt": now,
                 }
 
-        # Remove facts
+        #    Remove facts
+
+
         facts_to_remove = set(update_data.get("factsToRemove", []))
         if facts_to_remove:
             current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
-        # Add new facts
+        #    Add 新建 facts
+
+
         existing_fact_keys = {
             fact_key
             for fact_key in (
@@ -382,9 +444,13 @@ class MemoryUpdater:
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
 
-        # Enforce max facts limit
+        #    Enforce max facts limit
+
+
         if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
+            #    Sort by confidence and keep 顶部 ones
+
+
             current_memory["facts"] = sorted(
                 current_memory["facts"],
                 key=lambda f: f.get("confidence", 0),
@@ -395,12 +461,12 @@ class MemoryUpdater:
 
 
 def update_memory_from_conversation(messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
-    """Convenience function to update memory from a conversation.
+    """Convenience 函数 to 更新 内存 from a conversation.
 
     Args:
         messages: List of conversation messages.
-        thread_id: Optional thread ID.
-        agent_name: If provided, updates per-agent memory. If None, updates global memory.
+        thread_id: Optional 线程 ID.
+        agent_name: If provided, updates per-代理 内存. If None, updates global 内存.
 
     Returns:
         True if successful, False otherwise.

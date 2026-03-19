@@ -12,16 +12,16 @@ class LocalSandbox(Sandbox):
         Initialize local sandbox.
 
         Args:
-            id: Sandbox identifier
+            标识符: Sandbox identifier
         """
         super().__init__(id)
 
     @staticmethod
     def _get_shell() -> str:
-        """Detect available shell executable with fallback.
+        """Detect 可用的 shell executable with 回退.
 
-        Returns the first available shell in order of preference:
-        /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
+        Returns the 第一 可用的 shell in order of preference:
+        /bin/zsh → /bin/bash → /bin/sh → 第一 `sh` found on PATH.
         Raises a RuntimeError if no suitable shell is found.
         """
         for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):

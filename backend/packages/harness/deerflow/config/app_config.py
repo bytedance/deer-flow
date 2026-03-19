@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class AppConfig(BaseModel):
-    """Config for the DeerFlow application"""
+    """配置 for the DeerFlow application"""
 
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
@@ -39,12 +39,12 @@ class AppConfig(BaseModel):
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
-        """Resolve the config file path.
+        """Resolve the 配置 文件 路径.
 
         Priority:
-        1. If provided `config_path` argument, use it.
-        2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, first check the `config.yaml` in the current directory, then fallback to `config.yaml` in the parent directory.
+        1. If provided `config_path` 参数, use it.
+        2. If provided `DEER_FLOW_CONFIG_PATH` 环境 变量, use it.
+        3. Otherwise, 第一 检查 the `配置.yaml` in the 当前 目录, then 回退 to `配置.yaml` in the parent 目录.
         """
         if config_path:
             path = Path(config_path)
@@ -57,10 +57,14 @@ class AppConfig(BaseModel):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
         else:
-            # Check if the config.yaml is in the current directory
+            #    Check 如果 the 配置.yaml is in the 当前 目录
+
+
             path = Path(os.getcwd()) / "config.yaml"
             if not path.exists():
-                # Check if the config.yaml is in the parent directory of CWD
+                #    Check 如果 the 配置.yaml is in the parent 目录 of CWD
+
+
                 path = Path(os.getcwd()).parent / "config.yaml"
                 if not path.exists():
                     raise FileNotFoundError("`config.yaml` file not found at the current directory nor its parent directory")
@@ -68,50 +72,66 @@ class AppConfig(BaseModel):
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:
-        """Load config from YAML file.
+        """Load 配置 from YAML 文件.
 
         See `resolve_config_path` for more details.
 
         Args:
-            config_path: Path to the config file.
+            config_path: Path to the 配置 文件.
 
         Returns:
-            AppConfig: The loaded config.
+            AppConfig: The loaded 配置.
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
 
-        # Check config version before processing
+        #    Check 配置 version before processing
+
+
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
 
-        # Load title config if present
+        #    Load title 配置 如果 present
+
+
         if "title" in config_data:
             load_title_config_from_dict(config_data["title"])
 
-        # Load summarization config if present
+        #    Load summarization 配置 如果 present
+
+
         if "summarization" in config_data:
             load_summarization_config_from_dict(config_data["summarization"])
 
-        # Load memory config if present
+        #    Load 内存 配置 如果 present
+
+
         if "memory" in config_data:
             load_memory_config_from_dict(config_data["memory"])
 
-        # Load subagents config if present
+        #    Load subagents 配置 如果 present
+
+
         if "subagents" in config_data:
             load_subagents_config_from_dict(config_data["subagents"])
 
-        # Load tool_search config if present
+        #    Load tool_search 配置 如果 present
+
+
         if "tool_search" in config_data:
             load_tool_search_config_from_dict(config_data["tool_search"])
 
-        # Load checkpointer config if present
+        #    Load checkpointer 配置 如果 present
+
+
         if "checkpointer" in config_data:
             load_checkpointer_config_from_dict(config_data["checkpointer"])
 
-        # Load extensions config separately (it's in a different file)
+        #    Load extensions 配置 separately (it's in a different 文件)
+
+
         extensions_config = ExtensionsConfig.from_file()
         config_data["extensions"] = extensions_config.model_dump()
 
@@ -120,9 +140,9 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
-        """Check if the user's config.yaml is outdated compared to config.example.yaml.
+        """Check if the 用户's 配置.yaml is outdated compared to 配置.示例.yaml.
 
-        Emits a warning if the user's config_version is lower than the example's.
+        Emits a 警告 if the 用户's config_version is lower than the 示例's.
         Missing config_version is treated as version 0 (pre-versioning).
         """
         try:
@@ -130,10 +150,14 @@ class AppConfig(BaseModel):
         except (TypeError, ValueError):
             user_version = 0
 
-        # Find config.example.yaml by searching config.yaml's directory and its parents
+        #    Find 配置.示例.yaml by searching 配置.yaml's 目录 and its parents
+
+
         example_path = None
         search_dir = config_path.parent
-        for _ in range(5):  # search up to 5 levels
+        for _ in range(5):  #    search 上 to 5 levels
+
+
             candidate = search_dir / "config.example.yaml"
             if candidate.exists():
                 example_path = candidate
@@ -166,15 +190,15 @@ class AppConfig(BaseModel):
 
     @classmethod
     def resolve_env_variables(cls, config: Any) -> Any:
-        """Recursively resolve environment variables in the config.
+        """Recursively resolve 环境 variables in the 配置.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Environment variables are resolved using the `os.getenv` 函数. Example: $OPENAI_API_KEY
 
         Args:
-            config: The config to resolve environment variables in.
+            配置: The 配置 to resolve 环境 variables in.
 
         Returns:
-            The config with environment variables resolved.
+            The 配置 with 环境 variables resolved.
         """
         if isinstance(config, str):
             if config.startswith("$"):
@@ -190,35 +214,35 @@ class AppConfig(BaseModel):
         return config
 
     def get_model_config(self, name: str) -> ModelConfig | None:
-        """Get the model config by name.
+        """Get the 模型 配置 by 名称.
 
         Args:
-            name: The name of the model to get the config for.
+            名称: The 名称 of the 模型 to get the 配置 for.
 
         Returns:
-            The model config if found, otherwise None.
+            The 模型 配置 if found, otherwise None.
         """
         return next((model for model in self.models if model.name == name), None)
 
     def get_tool_config(self, name: str) -> ToolConfig | None:
-        """Get the tool config by name.
+        """Get the 工具 配置 by 名称.
 
         Args:
-            name: The name of the tool to get the config for.
+            名称: The 名称 of the 工具 to get the 配置 for.
 
         Returns:
-            The tool config if found, otherwise None.
+            The 工具 配置 if found, otherwise None.
         """
         return next((tool for tool in self.tools if tool.name == name), None)
 
     def get_tool_group_config(self, name: str) -> ToolGroupConfig | None:
-        """Get the tool group config by name.
+        """Get the 工具 组 配置 by 名称.
 
         Args:
-            name: The name of the tool group to get the config for.
+            名称: The 名称 of the 工具 组 to get the 配置 for.
 
         Returns:
-            The tool group config if found, otherwise None.
+            The 工具 组 配置 if found, otherwise None.
         """
         return next((group for group in self.tool_groups if group.name == name), None)
 
@@ -227,10 +251,10 @@ _app_config: AppConfig | None = None
 
 
 def get_app_config() -> AppConfig:
-    """Get the DeerFlow config instance.
+    """Get the DeerFlow 配置 instance.
 
     Returns a cached singleton instance. Use `reload_app_config()` to reload
-    from file, or `reset_app_config()` to clear the cache.
+    from 文件, or `reset_app_config()` to clear the 缓存.
     """
     global _app_config
     if _app_config is None:
@@ -239,14 +263,14 @@ def get_app_config() -> AppConfig:
 
 
 def reload_app_config(config_path: str | None = None) -> AppConfig:
-    """Reload the config from file and update the cached instance.
+    """Reload the 配置 from 文件 and 更新 the cached instance.
 
-    This is useful when the config file has been modified and you want
-    to pick up the changes without restarting the application.
+    This is useful when the 配置 文件 has been modified and you want
+    to pick 上 the changes without restarting the application.
 
     Args:
-        config_path: Optional path to config file. If not provided,
-                     uses the default resolution strategy.
+        config_path: Optional 路径 to 配置 文件. If not provided,
+                     uses the 默认 resolution strategy.
 
     Returns:
         The newly loaded AppConfig instance.
@@ -257,10 +281,10 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
 
 
 def reset_app_config() -> None:
-    """Reset the cached config instance.
+    """Reset the cached 配置 instance.
 
-    This clears the singleton cache, causing the next call to
-    `get_app_config()` to reload from file. Useful for testing
+    This clears the singleton 缓存, causing the 下一个 call to
+    `get_app_config()` to reload from 文件. Useful for testing
     or when switching between different configurations.
     """
     global _app_config
@@ -268,12 +292,12 @@ def reset_app_config() -> None:
 
 
 def set_app_config(config: AppConfig) -> None:
-    """Set a custom config instance.
+    """Set a custom 配置 instance.
 
-    This allows injecting a custom or mock config for testing purposes.
+    This allows injecting a custom or mock 配置 for testing purposes.
 
     Args:
-        config: The AppConfig instance to use.
+        配置: The AppConfig instance to use.
     """
     global _app_config
     _app_config = config

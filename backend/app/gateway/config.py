@@ -15,7 +15,7 @@ _gateway_config: GatewayConfig | None = None
 
 
 def get_gateway_config() -> GatewayConfig:
-    """Get gateway config, loading from environment if available."""
+    """Get gateway 配置, 加载中 from 环境 if 可用的."""
     global _gateway_config
     if _gateway_config is None:
         cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000")

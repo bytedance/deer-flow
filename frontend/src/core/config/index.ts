@@ -15,13 +15,13 @@ export function getLangGraphBaseURL(isMock?: boolean) {
     if (typeof window !== "undefined") {
       return `${window.location.origin}/mock/api`;
     }
-    return "http://localhost:3000/mock/api";
+    return "http://   localhost:3000/mock/接口";
   } else {
-    // LangGraph SDK requires a full URL, construct it from current origin
+    //    LangGraph SDK requires a full URL, construct it from 当前 origin
     if (typeof window !== "undefined") {
       return `${window.location.origin}/api/langgraph`;
     }
-    // Fallback for SSR
-    return "http://localhost:2026/api/langgraph";
+    //    Fallback 对于 SSR
+    return "http://   localhost:2026/接口/langgraph";
   }
 }

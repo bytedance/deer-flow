@@ -28,11 +28,11 @@ _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
 
 def _get_skills_container_path() -> str:
-    """Get the skills container path from config, with fallback to default.
+    """Get the skills container 路径 from 配置, with 回退 to 默认.
 
-    Result is cached after the first successful config load.  If config loading
-    fails the default is returned *without* caching so that a later call can
-    pick up the real value once the config is available.
+    Result is cached after the 第一 successful 配置 load.  If 配置 加载中
+    fails the 默认 is returned *without* caching so that a later call can
+    pick 上 the real 值 once the 配置 is 可用的.
     """
     cached = getattr(_get_skills_container_path, "_cached", None)
     if cached is not None:
@@ -41,18 +41,20 @@ def _get_skills_container_path() -> str:
         from deerflow.config import get_app_config
 
         value = get_app_config().skills.container_path
-        _get_skills_container_path._cached = value  # type: ignore[attr-defined]
+        _get_skills_container_path._cached = value  #    类型: ignore[attr-defined]
+
+
         return value
     except Exception:
         return _DEFAULT_SKILLS_CONTAINER_PATH
 
 
 def _get_skills_host_path() -> str | None:
-    """Get the skills host filesystem path from config.
+    """Get the skills host filesystem 路径 from 配置.
 
-    Returns None if the skills directory does not exist or config cannot be
+    Returns None if the skills 目录 does not exist or 配置 cannot be
     loaded.  Only successful lookups are cached; failures are retried on the
-    next call so that a transiently unavailable skills directory does not
+    下一个 call so that a transiently unavailable skills 目录 does not
     permanently disable skills access.
     """
     cached = getattr(_get_skills_host_path, "_cached", None)
@@ -65,7 +67,9 @@ def _get_skills_host_path() -> str | None:
         skills_path = config.skills.get_skills_path()
         if skills_path.exists():
             value = str(skills_path)
-            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
+            _get_skills_host_path._cached = value  #    类型: ignore[attr-defined]
+
+
             return value
     except Exception:
         pass
@@ -73,22 +77,22 @@ def _get_skills_host_path() -> str | None:
 
 
 def _is_skills_path(path: str) -> bool:
-    """Check if a path is under the skills container path."""
+    """Check if a 路径 is under the skills container 路径."""
     skills_prefix = _get_skills_container_path()
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
 def _resolve_skills_path(path: str) -> str:
-    """Resolve a virtual skills path to a host filesystem path.
+    """Resolve a virtual skills 路径 to a host filesystem 路径.
 
     Args:
-        path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
+        路径: Virtual skills 路径 (e.g. /mnt/skills/public/bootstrap/SKILL.md)
 
     Returns:
-        Resolved host path.
+        Resolved host 路径.
 
     Raises:
-        FileNotFoundError: If skills directory is not configured or doesn't exist.
+        FileNotFoundError: If skills 目录 is not configured or doesn't exist.
     """
     skills_container = _get_skills_container_path()
     skills_host = _get_skills_host_path()
@@ -107,11 +111,11 @@ def _path_variants(path: str) -> set[str]:
 
 
 def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
-    """Sanitize an error message to avoid leaking host filesystem paths.
+    """Sanitize an 错误 消息 to avoid leaking host filesystem paths.
 
-    In local-sandbox mode, resolved host paths in the error string are masked
-    back to their virtual equivalents so that user-visible output never exposes
-    the host directory layout.
+    In local-sandbox mode, resolved host paths in the 错误 字符串 are masked
+    back to their virtual equivalents so that 用户-可见 输出 never exposes
+    the host 目录 layout.
     """
     msg = f"{type(error).__name__}: {error}"
     if runtime is not None and is_local_sandbox(runtime):
@@ -121,19 +125,19 @@ def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadStat
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
-    """Replace virtual /mnt/user-data paths with actual thread data paths.
+    """Replace virtual /mnt/用户-数据 paths with actual 线程 数据 paths.
 
     Mapping:
-        /mnt/user-data/workspace/* -> thread_data['workspace_path']/*
-        /mnt/user-data/uploads/* -> thread_data['uploads_path']/*
-        /mnt/user-data/outputs/* -> thread_data['outputs_path']/*
+        /mnt/用户-数据/工作区/* -> thread_data['workspace_path']/*
+        /mnt/用户-数据/uploads/* -> thread_data['uploads_path']/*
+        /mnt/用户-数据/outputs/* -> thread_data['outputs_path']/*
 
     Args:
-        path: The path that may contain virtual path prefix.
-        thread_data: The thread data containing actual paths.
+        路径: The 路径 that may contain virtual 路径 prefix.
+        thread_data: The 线程 数据 containing actual paths.
 
     Returns:
-        The path with virtual prefix replaced by actual path.
+        The 路径 with virtual prefix replaced by actual 路径.
     """
     if thread_data is None:
         return path
@@ -142,7 +146,9 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
     if not mappings:
         return path
 
-    # Longest-prefix-first replacement with segment-boundary checks.
+    #    Longest-prefix-第一 replacement with segment-boundary checks.
+
+
     for virtual_base, actual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
         if path == virtual_base:
             return actual_base
@@ -154,7 +160,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
 
 
 def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str, str]:
-    """Build virtual-to-actual path mappings for a thread."""
+    """Build virtual-to-actual 路径 mappings for a 线程."""
     mappings: dict[str, str] = {}
 
     workspace = thread_data.get("workspace_path")
@@ -168,7 +174,9 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     if outputs:
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
 
-    # Also map the virtual root when all known dirs share the same parent.
+    #    Also map the virtual root when all known dirs share the same parent.
+
+
     actual_dirs = [Path(p) for p in (workspace, uploads, outputs) if p]
     if actual_dirs:
         common_parent = str(Path(actual_dirs[0]).parent)
@@ -179,18 +187,20 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
 
 
 def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str, str]:
-    """Build actual-to-virtual mappings for output masking."""
+    """Build actual-to-virtual mappings for 输出 masking."""
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
-    """Mask host absolute paths from local sandbox output using virtual paths.
+    """Mask host absolute paths from local sandbox 输出 using virtual paths.
 
-    Handles both user-data paths (per-thread) and skills paths (global).
+    Handles both 用户-数据 paths (per-线程) and skills paths (global).
     """
     result = output
 
-    # Mask skills host paths
+    #    Mask skills host paths
+
+
     skills_host = _get_skills_host_path()
     skills_container = _get_skills_container_path()
     if skills_host:
@@ -209,7 +219,9 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
             result = pattern.sub(replace_skills, result)
 
-    # Mask user-data host paths
+    #    Mask 用户-数据 host paths
+
+
     if thread_data is None:
         return result
 
@@ -237,8 +249,10 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
 
 def _reject_path_traversal(path: str) -> None:
-    """Reject paths that contain '..' segments to prevent directory traversal."""
-    # Normalise to forward slashes, then check for '..' segments.
+    """Reject paths that contain '..' segments to prevent 目录 traversal."""
+    #    Normalise to forward slashes, then 检查 对于 '..' segments.
+
+
     normalised = path.replace("\\", "/")
     for segment in normalised.split("/"):
         if segment == "..":
@@ -246,38 +260,42 @@ def _reject_path_traversal(path: str) -> None:
 
 
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
-    """Validate that a virtual path is allowed for local-sandbox access.
+    """Validate that a virtual 路径 is allowed for local-sandbox access.
 
-    This function is a security gate — it checks whether *path* may be
+    This 函数 is a 安全 gate — it checks whether *路径* may be
     accessed and raises on violation.  It does **not** resolve the virtual
-    path to a host path; callers are responsible for resolution via
+    路径 to a host 路径; callers are responsible for resolution via
     ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
 
-    Allowed virtual-path families:
-      - ``/mnt/user-data/*``  — always allowed (read + write)
+    Allowed virtual-路径 families:
+      - ``/mnt/用户-数据/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
 
     Args:
-        path: The virtual path to validate.
-        thread_data: Thread data (must be present for local sandbox).
+        路径: The virtual 路径 to 验证.
+        thread_data: 线程 数据 (must be present for local sandbox).
         read_only: When True, skills paths are permitted.
 
     Raises:
-        SandboxRuntimeError: If thread data is missing.
-        PermissionError: If the path is not allowed or contains traversal.
+        SandboxRuntimeError: If 线程 数据 is missing.
+        PermissionError: If the 路径 is not allowed or contains traversal.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     _reject_path_traversal(path)
 
-    # Skills paths — read-only access only
+    #    Skills paths — read-only access only
+
+
     if _is_skills_path(path):
         if not read_only:
             raise PermissionError(f"Write access to skills path is not allowed: {path}")
         return
 
-    # User-data paths
+    #    用户-数据 paths
+
+
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
@@ -285,9 +303,9 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
-    """Verify that a resolved host path stays inside allowed per-thread roots.
+    """Verify that a resolved host 路径 stays inside allowed per-线程 roots.
 
-    Raises PermissionError if the path escapes workspace/uploads/outputs.
+    Raises PermissionError if the 路径 escapes 工作区/uploads/outputs.
     """
     allowed_roots = [
         Path(p).resolve()
@@ -313,9 +331,9 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
 
 
 def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
-    """Resolve a /mnt/user-data virtual path and validate it stays in bounds.
+    """Resolve a /mnt/用户-数据 virtual 路径 and 验证 it stays in bounds.
 
-    Returns the resolved host path string.
+    Returns the resolved host 路径 字符串.
     """
     resolved_str = replace_virtual_path(path, thread_data)
     resolved = Path(resolved_str).resolve()
@@ -326,10 +344,10 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
-    In local mode, commands must use virtual paths under /mnt/user-data for
-    user data access. Skills paths under /mnt/skills are allowed for reading.
-    A small allowlist of common system path prefixes is kept for executable
-    and device references (e.g. /bin/sh, /dev/null).
+    In local mode, commands must use virtual paths under /mnt/用户-数据 for
+    用户 数据 access. Skills paths under /mnt/skills are allowed for reading.
+    A small allowlist of common 系统 路径 prefixes is kept for executable
+    and 设备 references (e.g. /bin/sh, /dev/null).
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -341,7 +359,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             _reject_path_traversal(absolute_path)
             continue
 
-        # Allow skills container path (resolved by tools.py before passing to sandbox)
+        #    Allow skills container 路径 (resolved by tools.py before passing to sandbox)
+
+
         if _is_skills_path(absolute_path):
             _reject_path_traversal(absolute_path)
             continue
@@ -360,18 +380,20 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
-    """Replace all virtual paths (/mnt/user-data and /mnt/skills) in a command string.
+    """Replace all virtual paths (/mnt/用户-数据 and /mnt/skills) in a command 字符串.
 
     Args:
-        command: The command string that may contain virtual paths.
-        thread_data: The thread data containing actual paths.
+        command: The command 字符串 that may contain virtual paths.
+        thread_data: The 线程 数据 containing actual paths.
 
     Returns:
         The command with all virtual paths replaced.
     """
     result = command
 
-    # Replace skills paths
+    #    Replace skills paths
+
+
     skills_container = _get_skills_container_path()
     skills_host = _get_skills_host_path()
     if skills_host and skills_container in result:
@@ -382,7 +404,9 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
         result = skills_pattern.sub(replace_skills_match, result)
 
-    # Replace user-data paths
+    #    Replace 用户-数据 paths
+
+
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
 
@@ -395,7 +419,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
 
 def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
-    """Extract thread_data from runtime state."""
+    """Extract thread_data from runtime 状态."""
     if runtime is None:
         return None
     if runtime.state is None:
@@ -404,10 +428,10 @@ def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Threa
 
 
 def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool:
-    """Check if the current sandbox is a local sandbox.
+    """Check if the 当前 sandbox is a local sandbox.
 
     Path replacement is only needed for local sandbox since aio sandbox
-    already has /mnt/user-data mounted in the container.
+    already has /mnt/用户-数据 mounted in the container.
     """
     if runtime is None:
         return False
@@ -420,13 +444,13 @@ def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool
 
 
 def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> Sandbox:
-    """Extract sandbox instance from tool runtime.
+    """Extract sandbox instance from 工具 runtime.
 
     DEPRECATED: Use ensure_sandbox_initialized() for lazy initialization support.
-    This function assumes sandbox is already initialized and will raise error if not.
+    This 函数 assumes sandbox is already initialized and will raise 错误 if not.
 
     Raises:
-        SandboxRuntimeError: If runtime is not available or sandbox state is missing.
+        SandboxRuntimeError: If runtime is not 可用的 or sandbox 状态 is missing.
         SandboxNotFoundError: If sandbox with the given ID cannot be found.
     """
     if runtime is None:
@@ -443,26 +467,28 @@ def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = No
     if sandbox is None:
         raise SandboxNotFoundError(f"Sandbox with ID '{sandbox_id}' not found", sandbox_id=sandbox_id)
 
-    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for downstream use
+    runtime.context["sandbox_id"] = sandbox_id  #    Ensure sandbox_id is in context 对于 downstream use
+
+
     return sandbox
 
 
 def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
-    On first call, acquires a sandbox from the provider and stores it in runtime state.
-    Subsequent calls return the existing sandbox.
+    On 第一 call, acquires a sandbox from the provider and stores it in runtime 状态.
+    Subsequent calls 返回 the existing sandbox.
 
-    Thread-safety is guaranteed by the provider's internal locking mechanism.
+    线程-safety is guaranteed by the provider's internal locking mechanism.
 
     Args:
-        runtime: Tool runtime containing state and context.
+        runtime: 工具 runtime containing 状态 and context.
 
     Returns:
         Initialized sandbox instance.
 
     Raises:
-        SandboxRuntimeError: If runtime is not available or thread_id is missing.
+        SandboxRuntimeError: If runtime is not 可用的 or thread_id is missing.
         SandboxNotFoundError: If sandbox acquisition fails.
     """
     if runtime is None:
@@ -471,18 +497,26 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    # Check if sandbox already exists in state
+    #    Check 如果 sandbox already exists in 状态
+
+
     sandbox_state = runtime.state.get("sandbox")
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
             if sandbox is not None:
-                runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
-                return sandbox
-            # Sandbox was released, fall through to acquire new one
+                runtime.context["sandbox_id"] = sandbox_id  #    Ensure sandbox_id is in context 对于 releasing in after_agent
 
-    # Lazy acquisition: get thread_id and acquire sandbox
+
+                return sandbox
+            #    Sandbox was released, fall through to acquire 新建 one
+
+
+
+    #    Lazy acquisition: get thread_id and acquire sandbox
+
+
     thread_id = runtime.context.get("thread_id")
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
@@ -490,32 +524,40 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     provider = get_sandbox_provider()
     sandbox_id = provider.acquire(thread_id)
 
-    # Update runtime state - this persists across tool calls
+    #    Update runtime 状态 - this persists across 工具 calls
+
+
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
-    # Retrieve and return the sandbox
+    #    Retrieve and 返回 the sandbox
+
+
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
-    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+    runtime.context["sandbox_id"] = sandbox_id  #    Ensure sandbox_id is in context 对于 releasing in after_agent
+
+
     return sandbox
 
 
 def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] | None) -> None:
-    """Ensure thread data directories (workspace, uploads, outputs) exist.
+    """Ensure 线程 数据 directories (工作区, uploads, outputs) exist.
 
-    This function is called lazily when any sandbox tool is first used.
+    This 函数 is called lazily when any sandbox 工具 is 第一 used.
     For local sandbox, it creates the directories on the filesystem.
     For other sandboxes (like aio), directories are already mounted in the container.
 
     Args:
-        runtime: Tool runtime containing state and context.
+        runtime: 工具 runtime containing 状态 and context.
     """
     if runtime is None:
         return
 
-    # Only create directories for local sandbox
+    #    Only 创建 directories 对于 local sandbox
+
+
     if not is_local_sandbox(runtime):
         return
 
@@ -523,11 +565,15 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
     if thread_data is None:
         return
 
-    # Check if directories have already been created
+    #    Check 如果 directories have already been created
+
+
     if runtime.state.get("thread_directories_created"):
         return
 
-    # Create the three directories
+    #    Create the three directories
+
+
     import os
 
     for key in ["workspace_path", "uploads_path", "outputs_path"]:
@@ -535,22 +581,24 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
         if path:
             os.makedirs(path, exist_ok=True)
 
-    # Mark as created to avoid redundant operations
+    #    Mark as created to avoid redundant operations
+
+
     runtime.state["thread_directories_created"] = True
 
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a bash command in a Linux 环境.
 
 
-    - Use `python` to run Python code.
-    - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
-    - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - Use `python` to 运行 Python code.
+    - Prefer a 线程-local virtual 环境 in `/mnt/用户-数据/工作区/.venv`.
+    - Use `python -m pip` (inside the virtual 环境) to install Python packages.
 
     Args:
-        description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        command: The bash command to execute. Always use absolute paths for files and directories.
+        描述: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        command: The bash command to 执行. Always use absolute paths for files and directories.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -572,11 +620,11 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
 
 @tool("ls", parse_docstring=True)
 def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path: str) -> str:
-    """List the contents of a directory up to 2 levels deep in tree format.
+    """List the contents of a 目录 上 to 2 levels deep in tree format.
 
     Args:
-        description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the directory to list.
+        描述: Explain why you are listing this 目录 in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        路径: The **absolute** 路径 to the 目录 to 列表.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -611,13 +659,13 @@ def read_file_tool(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+    """Read the contents of a text 文件. Use this to examine source code, configuration files, logs, or any text-based 文件.
 
     Args:
-        description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
-        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
+        描述: Explain why you are reading this 文件 in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        路径: The **absolute** 路径 to the 文件 to read.
+        start_line: Optional starting line 数字 (1-indexed, inclusive). Use with end_line to read a specific range.
+        end_line: Optional ending line 数字 (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -656,12 +704,12 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file.
+    """Write text content to a 文件.
 
     Args:
-        description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        描述: Explain why you are writing to this 文件 in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        路径: The **absolute** 路径 to the 文件 to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
+        content: The content to write to the 文件. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -694,15 +742,15 @@ def str_replace_tool(
     new_str: str,
     replace_all: bool = False,
 ) -> str:
-    """Replace a substring in a file with another substring.
-    If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
+    """Replace a substring in a 文件 with another substring.
+    If `replace_all` is False (默认), the substring to replace must appear **exactly once** in the 文件.
 
     Args:
-        description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to replace the substring in. ALWAYS PROVIDE THIS PARAMETER SECOND.
+        描述: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        路径: The **absolute** 路径 to the 文件 to replace the substring in. ALWAYS PROVIDE THIS PARAMETER SECOND.
         old_str: The substring to replace. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        new_str: The new substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
-        replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
+        new_str: The 新建 substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
+        replace_all: Whether to replace all occurrences of the substring. If False, only the 第一 occurrence will be replaced. Default is False.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)

@@ -9,7 +9,7 @@ export async function main() {
   const host = url.host;
   const apiURL = new URL(
     `/api/langgraph/threads/${threadId}/history`,
-    `${url.protocol}//${host}`,
+    `${url.protocol}//   ${host}`,
   );
   const response = await fetch(apiURL, {
     method: "POST",
