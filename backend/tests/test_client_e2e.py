@@ -34,8 +34,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 # ---------------------------------------------------------------------------
 
 requires_llm = pytest.mark.skipif(
-    os.getenv("CI", "").lower() in ("true", "1"),
-    reason="Requires LLM API key — local only",
+    os.getenv("CI", "").lower() in ("true", "1") or not os.getenv("OPENAI_API_KEY"),
+    reason="Requires LLM API key — skipped in CI or when OPENAI_API_KEY is unset",
 )
 
 
@@ -115,9 +115,11 @@ def e2e_env(tmp_path, monkeypatch):
 
     set_summarization_config(SummarizationConfig(enabled=False))
 
-    # 6. Exclude async-only middlewares from the chain.
-    #    TitleMiddleware only implements aafter_model (async) with no sync
-    #    counterpart, which crashes DeerFlowClient's synchronous stream().
+    # 6. Exclude TitleMiddleware from the chain.
+    #    It triggers an extra LLM call to generate a thread title, which adds
+    #    non-determinism and cost to E2E tests (title generation is already
+    #    disabled via TitleConfig above, but the middleware still participates
+    #    in the chain and can interfere with event ordering).
     from deerflow.agents.lead_agent.agent import _build_middlewares as _original_build_middlewares
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 

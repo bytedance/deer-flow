@@ -129,6 +129,10 @@ def install_skill_from_archive(
     """
     logger.info("Installing skill from %s", zip_path)
     path = Path(zip_path)
+    if not path.is_file():
+        if not path.exists():
+            raise FileNotFoundError(f"Skill file not found: {zip_path}")
+        raise ValueError(f"Path is not a file: {zip_path}")
     if path.suffix != ".skill":
         raise ValueError("File must have .skill extension")
 

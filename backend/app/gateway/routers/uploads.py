@@ -114,7 +114,10 @@ async def upload_files(
 @router.get("/list", response_model=dict)
 async def list_uploaded_files(thread_id: str) -> dict:
     """List all files in a thread's uploads directory."""
-    uploads_dir = get_uploads_dir(thread_id)
+    try:
+        uploads_dir = get_uploads_dir(thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     result = list_files_in_dir(uploads_dir)
     enrich_file_listing(result, thread_id)
 
@@ -129,7 +132,10 @@ async def list_uploaded_files(thread_id: str) -> dict:
 @router.delete("/{filename}")
 async def delete_uploaded_file(thread_id: str, filename: str) -> dict:
     """Delete a file from a thread's uploads directory."""
-    uploads_dir = get_uploads_dir(thread_id)
+    try:
+        uploads_dir = get_uploads_dir(thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     try:
         return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
     except FileNotFoundError:

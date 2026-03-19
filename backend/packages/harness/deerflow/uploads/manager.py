@@ -26,12 +26,12 @@ def validate_thread_id(thread_id: str) -> None:
 
 def get_uploads_dir(thread_id: str) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
+    validate_thread_id(thread_id)
     return get_paths().sandbox_uploads_dir(thread_id)
 
 
 def ensure_uploads_dir(thread_id: str) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
-    validate_thread_id(thread_id)
     base = get_uploads_dir(thread_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
@@ -109,15 +109,15 @@ def list_files_in_dir(directory: Path) -> dict:
     Returns:
         Dict with "files" list (sorted by name) and "count".
     """
-    if not directory.exists():
+    if not directory.is_dir():
         return {"files": [], "count": 0}
 
     files = []
     with os.scandir(directory) as entries:
         for entry in sorted(entries, key=lambda e: e.name):
-            if not entry.is_file():
+            if not entry.is_file(follow_symlinks=False):
                 continue
-            st = entry.stat()
+            st = entry.stat(follow_symlinks=False)
             files.append({
                 "filename": entry.name,
                 "size": st.st_size,
