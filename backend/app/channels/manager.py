@@ -666,7 +666,15 @@ class ChannelManager:
         elif command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory")
         elif command == "help":
-            reply = "Available commands:\n/bootstrap — Start a bootstrap session (enables agent setup)\n/new — Start a new conversation\n/status — Show current thread info\n/models — List available models\n/memory — Show memory status\n/help — Show this help"
+            reply = (
+                "Available commands:\n"
+                "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/new — Start a new conversation\n"
+                "/status — Show current thread info\n"
+                "/models — List available models\n"
+                "/memory — Show memory status\n"
+                "/help — Show this help"
+            )
         else:
             reply = f"Unknown command: /{command}. Type /help for available commands."
 
