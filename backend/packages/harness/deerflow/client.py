@@ -36,10 +36,19 @@ from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.skills.installer import install_skill_from_archive
-from deerflow.uploads.manager import deduplicate_filename, delete_file_safe, ensure_uploads_dir, get_uploads_dir, list_files_in_dir
+from deerflow.uploads.manager import (
+    deduplicate_filename,
+    delete_file_safe,
+    enrich_file_listing,
+    ensure_uploads_dir,
+    get_uploads_dir,
+    list_files_in_dir,
+    upload_artifact_url,
+    upload_virtual_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -676,7 +685,6 @@ class DeerFlowClient:
         # Validate all files upfront to avoid partial uploads.
         resolved_files = []
         seen_names: set[str] = set()
-        convertible_extensions = {ext.lower() for ext in CONVERTIBLE_EXTENSIONS}
         has_convertible_file = False
         for f in files:
             p = Path(f)
@@ -687,7 +695,7 @@ class DeerFlowClient:
             dest_name = deduplicate_filename(p.name, seen_names)
             seen_names.add(dest_name)
             resolved_files.append((p, dest_name))
-            if not has_convertible_file and p.suffix.lower() in convertible_extensions:
+            if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
@@ -718,13 +726,13 @@ class DeerFlowClient:
                     "filename": dest_name,
                     "size": str(dest.stat().st_size),
                     "path": str(dest),
-                    "virtual_path": f"{VIRTUAL_PATH_PREFIX}/uploads/{dest_name}",
-                    "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{dest_name}",
+                    "virtual_path": upload_virtual_path(dest_name),
+                    "artifact_url": upload_artifact_url(thread_id, dest_name),
                 }
                 if dest_name != src_path.name:
                     info["original_filename"] = src_path.name
 
-                if src_path.suffix.lower() in convertible_extensions:
+                if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                     try:
                         if conversion_pool is not None:
                             md_path = conversion_pool.submit(_convert_in_thread, dest).result()
@@ -741,8 +749,8 @@ class DeerFlowClient:
                     if md_path is not None:
                         info["markdown_file"] = md_path.name
                         info["markdown_path"] = str(uploads_dir / md_path.name)
-                        info["markdown_virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
-                        info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
+                        info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
+                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
 
                 uploaded_files.append(info)
         finally:
@@ -767,15 +775,7 @@ class DeerFlowClient:
         """
         uploads_dir = get_uploads_dir(thread_id)
         result = list_files_in_dir(uploads_dir)
-
-        # Enrich with virtual paths and artifact URLs.
-        for f in result["files"]:
-            filename = f["filename"]
-            f["size"] = str(f["size"])  # Client returns str, shared returns int
-            f["virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
-            f["artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}"
-
-        return result
+        return enrich_file_listing(result, thread_id)
 
     def delete_upload(self, thread_id: str, filename: str) -> dict:
         """Delete a file from a thread's uploads directory.

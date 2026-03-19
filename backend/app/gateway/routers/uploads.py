@@ -5,9 +5,18 @@ import logging
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import delete_file_safe, ensure_uploads_dir, get_uploads_dir, list_files_in_dir, normalize_filename
+from deerflow.uploads.manager import (
+    delete_file_safe,
+    enrich_file_listing,
+    ensure_uploads_dir,
+    get_uploads_dir,
+    list_files_in_dir,
+    normalize_filename,
+    upload_artifact_url,
+    upload_virtual_path,
+)
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
@@ -35,7 +44,7 @@ async def upload_files(
         raise HTTPException(status_code=400, detail="No files provided")
 
     uploads_dir = ensure_uploads_dir(thread_id)
-    paths = get_paths()
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     uploaded_files = []
 
     sandbox_provider = get_sandbox_provider()
@@ -57,8 +66,7 @@ async def upload_files(
             file_path = uploads_dir / safe_filename
             file_path.write_bytes(content)
 
-            relative_path = str(paths.sandbox_uploads_dir(thread_id) / safe_filename)
-            virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{safe_filename}"
+            virtual_path = upload_virtual_path(safe_filename)
 
             if sandbox_id != "local":
                 sandbox.update_file(virtual_path, content)
@@ -66,27 +74,26 @@ async def upload_files(
             file_info = {
                 "filename": safe_filename,
                 "size": str(len(content)),
-                "path": relative_path,
+                "path": str(sandbox_uploads / safe_filename),
                 "virtual_path": virtual_path,
-                "artifact_url": f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{safe_filename}",
+                "artifact_url": upload_artifact_url(thread_id, safe_filename),
             }
 
-            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {relative_path}")
+            logger.info(f"Saved file: {safe_filename} ({len(content)} bytes) to {file_info['path']}")
 
             file_ext = file_path.suffix.lower()
             if file_ext in CONVERTIBLE_EXTENSIONS:
                 md_path = await convert_file_to_markdown(file_path)
                 if md_path:
-                    md_relative_path = str(paths.sandbox_uploads_dir(thread_id) / md_path.name)
-                    md_virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{md_path.name}"
+                    md_virtual_path = upload_virtual_path(md_path.name)
 
                     if sandbox_id != "local":
                         sandbox.update_file(md_virtual_path, md_path.read_bytes())
 
                     file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = md_relative_path
+                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
                     file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{md_path.name}"
+                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
 
             uploaded_files.append(file_info)
 
@@ -106,14 +113,12 @@ async def list_uploaded_files(thread_id: str) -> dict:
     """List all files in a thread's uploads directory."""
     uploads_dir = get_uploads_dir(thread_id)
     result = list_files_in_dir(uploads_dir)
+    enrich_file_listing(result, thread_id)
 
-    # Enrich with virtual paths and artifact URLs for Gateway API.
+    # Gateway additionally includes the sandbox-relative path.
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     for f in result["files"]:
-        filename = f["filename"]
-        f["size"] = str(f["size"])
-        f["path"] = str(get_paths().sandbox_uploads_dir(thread_id) / filename)
-        f["virtual_path"] = f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
-        f["artifact_url"] = f"/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/{filename}"
+        f["path"] = str(sandbox_uploads / f["filename"])
 
     return result
 

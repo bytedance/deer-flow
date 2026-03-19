@@ -129,14 +129,8 @@ def install_skill_from_archive(
     """
     logger.info("Installing skill from %s", zip_path)
     path = Path(zip_path)
-    if not path.is_file():
-        if not path.exists():
-            raise FileNotFoundError(f"Skill file not found: {zip_path}")
-        raise ValueError(f"Path is not a file: {zip_path}")
     if path.suffix != ".skill":
         raise ValueError("File must have .skill extension")
-    if not zipfile.is_zipfile(path):
-        raise ValueError("File is not a valid ZIP archive")
 
     if skills_root is None:
         skills_root = get_skills_root_path()
@@ -146,7 +140,14 @@ def install_skill_from_archive(
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
 
-        with zipfile.ZipFile(path, "r") as zf:
+        try:
+            zf = zipfile.ZipFile(path, "r")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Skill file not found: {zip_path}") from None
+        except (zipfile.BadZipFile, IsADirectoryError):
+            raise ValueError("File is not a valid ZIP archive") from None
+
+        with zf:
             safe_extract_skill_archive(zf, tmp_path)
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)

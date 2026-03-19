@@ -1860,7 +1860,7 @@ class TestInstallSkillSecurity:
     def test_directory_path_rejected(self, client):
         """Passing a directory instead of a file is rejected."""
         with tempfile.TemporaryDirectory() as tmp:
-            with pytest.raises(ValueError, match="not a file"):
+            with pytest.raises(ValueError, match=".skill extension"):
                 client.install_skill(tmp)
 
 
