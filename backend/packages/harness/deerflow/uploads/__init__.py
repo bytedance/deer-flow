@@ -9,6 +9,7 @@ from .manager import (
     upload_artifact_url,
     upload_virtual_path,
     validate_path_traversal,
+    validate_thread_id,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "upload_artifact_url",
     "upload_virtual_path",
     "enrich_file_listing",
+    "validate_thread_id",
 ]

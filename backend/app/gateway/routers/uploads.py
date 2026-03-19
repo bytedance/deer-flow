@@ -43,7 +43,10 @@ async def upload_files(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    uploads_dir = ensure_uploads_dir(thread_id)
+    try:
+        uploads_dir = ensure_uploads_dir(thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     uploaded_files = []
 

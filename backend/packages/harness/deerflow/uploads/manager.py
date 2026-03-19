@@ -5,9 +5,23 @@ Both Gateway and Client delegate to these functions.
 """
 
 import os
+import re
 from pathlib import Path
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+
+# thread_id must be alphanumeric, hyphens, underscores, or dots only.
+_SAFE_THREAD_ID = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def validate_thread_id(thread_id: str) -> None:
+    """Reject thread IDs containing characters unsafe for filesystem paths.
+
+    Raises:
+        ValueError: If thread_id is empty or contains unsafe characters.
+    """
+    if not thread_id or not _SAFE_THREAD_ID.match(thread_id):
+        raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
 def get_uploads_dir(thread_id: str) -> Path:
@@ -17,6 +31,7 @@ def get_uploads_dir(thread_id: str) -> Path:
 
 def ensure_uploads_dir(thread_id: str) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
+    validate_thread_id(thread_id)
     base = get_uploads_dir(thread_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
@@ -45,6 +60,8 @@ def normalize_filename(filename: str) -> str:
     # but they indicate a Windows-style path that should be stripped or rejected.
     if "\\" in safe:
         raise ValueError(f"Filename contains backslash: {filename!r}")
+    if len(safe.encode("utf-8")) > 255:
+        raise ValueError(f"Filename too long: {len(safe)} chars")
     return safe
 
 
