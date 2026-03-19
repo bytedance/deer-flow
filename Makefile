@@ -75,9 +75,13 @@ setup-sandbox:
 	fi; \
 	if command -v docker >/dev/null 2>&1; then \
 		echo "Pulling image using Docker..."; \
-		docker pull "$$IMAGE"; \
-		echo ""; \
-		echo "✓ Sandbox image pulled successfully"; \
+		if docker pull "$$IMAGE"; then \
+			echo ""; \
+			echo "✓ Sandbox image pulled successfully"; \
+		else \
+			echo ""; \
+			echo "⚠ Failed to pull sandbox image (this is OK for local sandbox mode)"; \
+		fi; \
 	else \
 		echo "✗ Neither Docker nor Apple Container is available"; \
 		echo "  Please install Docker: https://docs.docker.com/get-docker/"; \
