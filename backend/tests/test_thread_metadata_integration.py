@@ -4,11 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from app.channels.message_bus import InboundMessage, MessageBus
 from app.channels.store import ChannelStore
-from app.channels.manager import ChannelManager
 
 
 class TestThreadMetadataInjection:
