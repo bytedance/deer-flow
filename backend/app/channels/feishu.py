@@ -466,7 +466,33 @@ class FeishuChannel(Channel):
 
             # Parse message content
             content = json.loads(message.content)
-            text = content.get("text", "").strip()
+            
+            if "text" in content:
+                # Handle plain text messages
+                text = content["text"]
+            elif "content" in content and isinstance(content["content"], list):
+                # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
+                text_paragraphs: list[str] = []
+                for paragraph in content["content"]:
+                    if isinstance(paragraph, list):
+                        paragraph_text_parts: list[str] = []
+                        for element in paragraph:
+                            if isinstance(element, dict):
+                                # Include both normal text and @ mentions
+                                if element.get("tag") in ("text", "at"):
+                                    text_value = element.get("text", "")
+                                    if text_value:
+                                        paragraph_text_parts.append(text_value)
+                        if paragraph_text_parts:
+                            # Join text segments within a paragraph with spaces to avoid "helloworld"
+                            text_paragraphs.append(" ".join(paragraph_text_parts))
+                
+                # Join paragraphs with blank lines to preserve paragraph boundaries
+                text = "\n\n".join(text_paragraphs)
+            else:
+                text = ""
+            text = text.strip()
+            
             logger.info(
                 "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
                 chat_id,
