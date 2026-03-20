@@ -695,7 +695,6 @@ class DeerFlowClient:
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
             dest_name = deduplicate_filename(p.name, seen_names)
-            seen_names.add(dest_name)
             resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True

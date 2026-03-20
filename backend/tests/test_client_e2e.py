@@ -45,19 +45,25 @@ requires_llm = pytest.mark.skipif(
 
 
 def _make_e2e_config() -> AppConfig:
-    """Build a minimal AppConfig using real LLM credentials.
+    """Build a minimal AppConfig using real LLM credentials from environment.
 
-    Uses ``base_url`` (not the deprecated ``api_base``) for compatibility
-    with current langchain_openai.  The API key comes from the environment.
+    All LLM connection details come from environment variables so that both
+    internal CI and external contributors can run the tests:
+
+    - ``E2E_MODEL_NAME``  (default: ``volcengine-ark``)
+    - ``E2E_MODEL_USE``   (default: ``langchain_openai:ChatOpenAI``)
+    - ``E2E_MODEL_ID``    (default: ``ep-20251211175242-llcmh``)
+    - ``E2E_BASE_URL``    (default: ``https://ark-cn-beijing.bytedance.net/api/v3``)
+    - ``OPENAI_API_KEY``  (required for LLM tests)
     """
     return AppConfig(
         models=[
             ModelConfig(
-                name="volcengine-ark",
-                display_name="Volcengine ARK",
-                use="langchain_openai:ChatOpenAI",
-                model="ep-20251211175242-llcmh",
-                base_url="https://ark-cn-beijing.bytedance.net/api/v3",
+                name=os.getenv("E2E_MODEL_NAME", "volcengine-ark"),
+                display_name="E2E Test Model",
+                use=os.getenv("E2E_MODEL_USE", "langchain_openai:ChatOpenAI"),
+                model=os.getenv("E2E_MODEL_ID", "ep-20251211175242-llcmh"),
+                base_url=os.getenv("E2E_BASE_URL", "https://ark-cn-beijing.bytedance.net/api/v3"),
                 api_key=os.getenv("OPENAI_API_KEY", ""),
                 max_tokens=512,
                 temperature=0.7,
@@ -90,12 +96,8 @@ def e2e_env(tmp_path, monkeypatch):
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
 
     # 2. Inject a clean AppConfig via the global singleton.
-    #    Using set_app_config() ensures ALL callers of get_app_config() —
-    #    regardless of which module imported it — see our config.
-    from deerflow.config.app_config import set_app_config
-
     config = _make_e2e_config()
-    set_app_config(config)
+    monkeypatch.setattr("deerflow.config.app_config._app_config", config)
 
     # 3. Disable title generation (extra LLM call, non-deterministic)
     from deerflow.config.title_config import TitleConfig
@@ -622,7 +624,7 @@ class TestConfigManagement:
         assert "models" in result
         assert len(result["models"]) == 1
         assert result["models"][0]["name"] == "volcengine-ark"
-        assert result["models"][0]["display_name"] == "Volcengine ARK"
+        assert result["models"][0]["display_name"] == "E2E Test Model"
 
     def test_get_model_found(self, e2e_env):
         """get_model() returns the model when it exists."""

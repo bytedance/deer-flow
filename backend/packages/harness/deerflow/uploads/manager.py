@@ -7,6 +7,7 @@ Both Gateway and Client delegate to these functions.
 import os
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 
@@ -68,16 +69,17 @@ def normalize_filename(filename: str) -> str:
 def deduplicate_filename(name: str, seen: set[str]) -> str:
     """Generate a unique filename by appending ``_N`` suffix on collision.
 
-    Does NOT mutate *seen*.
+    Automatically adds the returned name to *seen* so callers don't need to.
 
     Args:
         name: Candidate filename.
-        seen: Set of filenames already claimed.
+        seen: Set of filenames already claimed (mutated in place).
 
     Returns:
-        A filename not present in *seen*.
+        A filename not present in *seen* (already added to *seen*).
     """
     if name not in seen:
+        seen.add(name)
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
     counter = 1
@@ -85,6 +87,7 @@ def deduplicate_filename(name: str, seen: set[str]) -> str:
     while candidate in seen:
         counter += 1
         candidate = f"{stem}_{counter}{suffix}"
+    seen.add(candidate)
     return candidate
 
 
@@ -108,6 +111,9 @@ def list_files_in_dir(directory: Path) -> dict:
 
     Returns:
         Dict with "files" list (sorted by name) and "count".
+        Each file entry has ``size`` as *int* (bytes).  Call
+        :func:`enrich_file_listing` to stringify sizes and add
+        virtual / artifact URLs.
     """
     if not directory.is_dir():
         return {"files": [], "count": 0}
@@ -163,8 +169,11 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
 
 
 def upload_artifact_url(thread_id: str, filename: str) -> str:
-    """Build the artifact URL for a file in a thread's uploads directory."""
-    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
+    """Build the artifact URL for a file in a thread's uploads directory.
+
+    *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
+    """
+    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{quote(filename, safe='')}"
 
 
 def upload_virtual_path(filename: str) -> str:

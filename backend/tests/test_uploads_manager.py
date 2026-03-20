@@ -45,22 +45,25 @@ class TestNormalizeFilename:
 
 class TestDeduplicateFilename:
     def test_no_collision(self):
-        seen = set()
+        seen: set[str] = set()
         assert deduplicate_filename("data.txt", seen) == "data.txt"
+        assert "data.txt" in seen
 
     def test_single_collision(self):
         seen = {"data.txt"}
         assert deduplicate_filename("data.txt", seen) == "data_1.txt"
+        assert "data_1.txt" in seen
 
     def test_triple_collision(self):
         seen = {"data.txt", "data_1.txt", "data_2.txt"}
         assert deduplicate_filename("data.txt", seen) == "data_3.txt"
+        assert "data_3.txt" in seen
 
-    def test_does_not_mutate_seen(self):
-        seen = {"data.txt"}
-        original = seen.copy()
-        deduplicate_filename("data.txt", seen)
-        assert seen == original
+    def test_mutates_seen(self):
+        seen: set[str] = set()
+        deduplicate_filename("a.txt", seen)
+        deduplicate_filename("a.txt", seen)
+        assert seen == {"a.txt", "a_1.txt"}
 
 
 # ---------------------------------------------------------------------------
