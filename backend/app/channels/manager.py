@@ -26,6 +26,12 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 
+CHANNEL_CAPABILITIES = {
+    "feishu": {"supports_streaming": True},
+    "slack": {"supports_streaming": False},
+    "telegram": {"supports_streaming": False},
+}
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
@@ -341,6 +347,10 @@ class ChannelManager:
         self._running = False
         self._task: asyncio.Task | None = None
 
+    @staticmethod
+    def _channel_supports_streaming(channel_name: str) -> bool:
+        return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
+
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
         users_layer = _as_dict(channel_layer.get("users"))
@@ -483,7 +493,7 @@ class ChannelManager:
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
         if extra_context:
             run_context.update(extra_context)
-        if msg.channel_name == "feishu":
+        if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
                 client,
                 msg,
