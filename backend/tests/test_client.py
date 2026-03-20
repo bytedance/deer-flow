@@ -28,6 +28,7 @@ def mock_app_config():
     """Provide a minimal AppConfig mock."""
     model = MagicMock()
     model.name = "test-model"
+    model.model = "test-model"
     model.supports_thinking = False
     model.supports_reasoning_effort = False
     model.model_dump.return_value = {"name": "test-model", "use": "langchain_openai:ChatOpenAI"}
@@ -98,6 +99,7 @@ class TestConfigQueries:
         assert len(result["models"]) == 1
         assert result["models"][0]["name"] == "test-model"
         # Verify Gateway-aligned fields are present
+        assert "model" in result["models"][0]
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
 
@@ -420,6 +422,7 @@ class TestGetModel:
     def test_found(self, client):
         model_cfg = MagicMock()
         model_cfg.name = "test-model"
+        model_cfg.model = "test-model"
         model_cfg.display_name = "Test Model"
         model_cfg.description = "A test model"
         model_cfg.supports_thinking = True
@@ -429,6 +432,7 @@ class TestGetModel:
         result = client.get_model("test-model")
         assert result == {
             "name": "test-model",
+            "model": "test-model",
             "display_name": "Test Model",
             "description": "A test model",
             "supports_thinking": True,
@@ -1048,6 +1052,7 @@ class TestScenarioConfigManagement:
         # Get specific model
         model_cfg = MagicMock()
         model_cfg.name = model_name
+        model_cfg.model = model_name
         model_cfg.display_name = None
         model_cfg.description = None
         model_cfg.supports_thinking = False
@@ -1503,6 +1508,7 @@ class TestGatewayConformance:
     def test_list_models(self, mock_app_config):
         model = MagicMock()
         model.name = "test-model"
+        model.model = "gpt-test"
         model.display_name = "Test Model"
         model.description = "A test model"
         model.supports_thinking = False
@@ -1515,10 +1521,12 @@ class TestGatewayConformance:
         parsed = ModelsListResponse(**result)
         assert len(parsed.models) == 1
         assert parsed.models[0].name == "test-model"
+        assert parsed.models[0].model == "gpt-test"
 
     def test_get_model(self, mock_app_config):
         model = MagicMock()
         model.name = "test-model"
+        model.model = "gpt-test"
         model.display_name = "Test Model"
         model.description = "A test model"
         model.supports_thinking = True
@@ -1532,6 +1540,7 @@ class TestGatewayConformance:
         assert result is not None
         parsed = ModelResponse(**result)
         assert parsed.name == "test-model"
+        assert parsed.model == "gpt-test"
 
     def test_list_skills(self, client):
         skill = MagicMock()

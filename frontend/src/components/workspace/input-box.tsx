@@ -702,9 +702,16 @@ export function InputBox({
           >
             <ModelSelectorTrigger asChild>
               <PromptInputButton>
-                <ModelSelectorName className="text-xs font-normal">
-                  {selectedModel?.display_name}
-                </ModelSelectorName>
+                <div className="flex min-w-0 flex-col items-start text-left">
+                  <ModelSelectorName className="text-xs font-normal">
+                    {selectedModel?.display_name}
+                  </ModelSelectorName>
+                  {selectedModel?.model && (
+                    <span className="text-muted-foreground w-full truncate text-[10px] leading-none">
+                      {selectedModel.model}
+                    </span>
+                  )}
+                </div>
               </PromptInputButton>
             </ModelSelectorTrigger>
             <ModelSelectorContent>
@@ -716,7 +723,12 @@ export function InputBox({
                     value={m.name}
                     onSelect={() => handleModelSelect(m.name)}
                   >
-                    <ModelSelectorName>{m.display_name}</ModelSelectorName>
+                    <div className="flex min-w-0 flex-1 flex-col">
+                      <ModelSelectorName>{m.display_name}</ModelSelectorName>
+                      <span className="text-muted-foreground truncate text-[10px]">
+                        {m.model}
+                      </span>
+                    </div>
                     {m.name === context.model_name ? (
                       <CheckIcon className="ml-auto size-4" />
                     ) : (

@@ -403,6 +403,7 @@ class DeerFlowClient:
             "models": [
                 {
                     "name": model.name,
+                    "model": getattr(model, "model", None),
                     "display_name": getattr(model, "display_name", None),
                     "description": getattr(model, "description", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
@@ -462,6 +463,7 @@ class DeerFlowClient:
             return None
         return {
             "name": model.name,
+            "model": getattr(model, "model", None),
             "display_name": getattr(model, "display_name", None),
             "description": getattr(model, "description", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
