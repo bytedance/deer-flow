@@ -156,6 +156,8 @@ export function useThreadStream({
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const sendInFlightRef = useRef(false);
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 
@@ -175,6 +177,11 @@ export function useThreadStream({
       message: PromptInputMessage,
       extraContext?: Record<string, unknown>,
     ) => {
+      if (sendInFlightRef.current) {
+        return;
+      }
+      sendInFlightRef.current = true;
+
       const text = message.text.trim();
 
       // Capture current count before showing optimistic messages
@@ -217,6 +224,7 @@ export function useThreadStream({
       try {
         // Upload files first if any
         if (message.files && message.files.length > 0) {
+          setIsUploading(true);
           try {
             // Convert FileUIPart to File objects by fetching blob URLs
             const filePromises = message.files.map(async (fileUIPart) => {
@@ -293,6 +301,8 @@ export function useThreadStream({
             toast.error(errorMessage);
             setOptimisticMessages([]);
             throw error;
+          } finally {
+            setIsUploading(false);
           }
         }
 
@@ -342,7 +352,10 @@ export function useThreadStream({
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       } catch (error) {
         setOptimisticMessages([]);
+        setIsUploading(false);
         throw error;
+      } finally {
+        sendInFlightRef.current = false;
       }
     },
     [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
@@ -357,7 +370,7 @@ export function useThreadStream({
         } as typeof thread)
       : thread;
 
-  return [mergedThread, sendMessage] as const;
+  return [mergedThread, sendMessage, isUploading] as const;
 }
 
 export function useThreads(
