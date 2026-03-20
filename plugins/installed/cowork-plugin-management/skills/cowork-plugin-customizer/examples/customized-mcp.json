@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
+    },
+    "asana": {
+      "type": "sse",
+      "url": "https://mcp.asana.com/sse"
+    },
+    "slack": {
+      "type": "http",
+      "url": "https://slack.mcp.claude.com/mcp"
+    },
+    "figma": {
+      "type": "http",
+      "url": "https://mcp.figma.com/mcp"
+    },
+    "datadog": {
+      "type": "http",
+      "url": "https://api.datadoghq.com/mcp",
+      "headers": {
+        "DD-API-KEY": "${DATADOG_API_KEY}",
+        "DD-APPLICATION-KEY": "${DATADOG_APP_KEY}"
+      }
+    }
+  },
+  "recommendedCategories": [
+    "source-control",
+    "project-management",
+    "chat",
+    "documents",
+    "wiki-knowledge-base",
+    "design-graphics",
+    "analytics-bi"
+  ]
+}

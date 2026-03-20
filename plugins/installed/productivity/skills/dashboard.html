@@ -1,0 +1,3098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Productivity</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='2' width='24' height='28' rx='4' fill='%23faf9f5' stroke='%23D97757' stroke-width='2'/%3E%3Crect x='8' y='0' width='16' height='5' rx='2.5' fill='%23D97757'/%3E%3Cpath d='M9 13l3 3 5-5' fill='none' stroke='%23D97757' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='20' y='12' width='5' height='2' rx='1' fill='%23c4c4c2'/%3E%3Crect x='9' y='20' width='10' height='2' rx='1' fill='%23c4c4c2'/%3E%3Crect x='9' y='25' width='7' height='2' rx='1' fill='%23c4c4c2'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-primary: #faf9f5;
+      --bg-secondary: #F5F4EF;
+      --bg-card: #ffffff;
+      --text-primary: #141413;
+      --text-secondary: #5c5c5a;
+      --text-muted: #8c8c8a;
+      --accent: #D97757;
+      --accent-hover: #c4684a;
+      --border: #e5e4df;
+      --border-light: #eeeee9;
+      --shadow: rgba(20, 20, 19, 0.04);
+      --shadow-hover: rgba(20, 20, 19, 0.08);
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      padding: 20px 24px;
+      line-height: 1.5;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: var(--text-secondary); }
+
+    .header-left {
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+    }
+
+    .view-toggle {
+      display: flex;
+      gap: 4px;
+      background: var(--bg-secondary);
+      padding: 4px;
+      border-radius: 8px;
+      margin-left: 16px;
+    }
+
+    .view-toggle button {
+      background: transparent;
+      border: none;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-radius: 6px;
+    }
+
+    .view-toggle button:hover {
+      color: var(--text-primary);
+      background: transparent;
+    }
+
+    .view-toggle button.active {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .buttons { display: flex; gap: 12px; }
+
+    button {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      padding: 10px 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      transition: all 0.15s ease;
+    }
+
+    button:hover {
+      background: var(--bg-secondary);
+      border-color: var(--text-muted);
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    button.primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ===== TASKS STYLES ===== */
+
+    .board {
+      display: flex;
+      gap: 24px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 24px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .column {
+      background: var(--bg-secondary);
+      border-radius: 12px;
+      min-width: 340px;
+      max-width: 340px;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-height: 100%;
+    }
+
+    .column-header {
+      padding: 16px 18px;
+      font-weight: 600;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: grab;
+    }
+
+    .column-header:active {
+      cursor: grabbing;
+    }
+
+    .column.dragging-column {
+      opacity: 0.5;
+    }
+
+    .column-drop-indicator {
+      width: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+      margin: 0 -2px;
+      min-height: 100px;
+    }
+
+    .column-header .count {
+      background: var(--bg-card);
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    .cards {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 12px 12px;
+      min-height: 100px;
+    }
+
+    .cards.drag-over {
+      background: rgba(217, 119, 87, 0.05);
+      border-radius: 8px;
+    }
+
+    .task-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      cursor: grab;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 3px var(--shadow);
+      position: relative;
+    }
+
+    .task-card:hover {
+      box-shadow: 0 4px 12px var(--shadow-hover);
+      border-color: var(--border);
+    }
+
+    .task-card .add-on-hover {
+      display: none;
+    }
+
+    .task-card:hover .add-on-hover {
+      display: block;
+    }
+
+    .task-card .delete-btn {
+      display: none;
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px 6px;
+      font-size: 14px;
+      line-height: 1;
+      border-radius: 4px;
+    }
+
+    .task-card:hover .delete-btn {
+      display: block;
+    }
+
+    .task-card .delete-btn:hover {
+      background: var(--bg-secondary);
+      color: var(--accent);
+    }
+
+    .task-card.dragging {
+      opacity: 0.5;
+      transform: rotate(2deg);
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.5;
+      color: var(--text-primary);
+    }
+
+    .card-note {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 6px;
+      line-height: 1.4;
+      overflow-wrap: break-word;
+      word-break: break-word;
+    }
+
+    .card-subtasks {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-light);
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .subtask {
+      padding: 3px 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .checkbox {
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      min-height: 18px;
+      flex-shrink: 0;
+      border: 2px solid var(--border);
+      border-radius: 5px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      background: var(--bg-card);
+    }
+
+    .checkbox:hover {
+      border-color: var(--accent);
+    }
+
+    .checkbox.checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .checkbox.checked::after {
+      content: '';
+      width: 5px;
+      height: 9px;
+      border: solid white;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+      margin-bottom: 2px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 80px 40px;
+      color: var(--text-muted);
+    }
+
+    .empty-state button {
+      font-size: 16px;
+      padding: 14px 28px;
+      background: var(--accent);
+      border: none;
+      color: white;
+    }
+
+    .empty-state button:hover {
+      background: var(--accent-hover);
+    }
+
+    .status-bar {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--text-primary);
+      color: var(--bg-primary);
+      padding: 12px 24px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      box-shadow: 0 4px 20px rgba(20, 20, 19, 0.15);
+      z-index: 200;
+    }
+
+    .status-bar.visible { opacity: 1; }
+
+    .add-card {
+      padding: 12px;
+    }
+
+    .add-card button {
+      width: 100%;
+      background: transparent;
+      border: 2px dashed var(--border);
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .add-card button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: transparent;
+    }
+
+    .new-task-input {
+      width: 100%;
+      background: var(--bg-card);
+      border: 2px solid var(--accent);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: inherit;
+      resize: none;
+    }
+
+    .new-task-input:focus {
+      outline: none;
+    }
+
+    .new-task-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    /* Scrollbar styling */
+    .cards::-webkit-scrollbar,
+    .list-view::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .cards::-webkit-scrollbar-track,
+    .list-view::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .cards::-webkit-scrollbar-thumb,
+    .list-view::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    .cards::-webkit-scrollbar-thumb:hover,
+    .list-view::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+
+    /* List View Styles */
+    .list-view {
+      max-width: 800px;
+      margin: 0 auto;
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      min-height: 0;
+    }
+
+    .list-section {
+      margin-bottom: 28px;
+    }
+
+    .list-section.drag-over {
+      background: rgba(217, 119, 87, 0.05);
+      border-radius: 8px;
+      margin: 0 -12px 32px;
+      padding: 0 12px;
+    }
+
+    .list-section-header {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      padding: 4px 0;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .list-section-header .section-title {
+      cursor: pointer;
+    }
+
+    .list-section-header .section-title:hover {
+      color: var(--text-primary);
+    }
+
+    .list-section-header .count {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .list-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 14px;
+      margin-bottom: 6px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      cursor: grab;
+      position: relative;
+      border-radius: 10px;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .list-item:active {
+      cursor: grabbing;
+    }
+
+    .list-item:hover {
+      box-shadow: 0 4px 12px var(--shadow-hover);
+      border-color: var(--border);
+    }
+
+    .list-item.dragging {
+      opacity: 0.5;
+      background: var(--bg-secondary);
+    }
+
+    .list-item .checkbox {
+      margin-top: 2px;
+      flex-shrink: 0;
+    }
+
+    .list-item-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .list-item-title {
+      font-size: 15px;
+      color: var(--text-primary);
+      line-height: 1.4;
+    }
+
+    .list-item-title.checked {
+      color: var(--text-muted);
+      text-decoration: line-through;
+    }
+
+    .list-item-note {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+      cursor: pointer;
+    }
+
+    .list-item-note:hover {
+      color: var(--text-secondary);
+    }
+
+    .list-item-note.add-note {
+      font-style: italic;
+      display: none;
+    }
+
+    .list-item:hover .list-item-note.add-note {
+      display: block;
+    }
+
+    .list-item-subtasks {
+      margin-top: 8px;
+      padding-left: 2px;
+    }
+
+    .list-item-subtask {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 3px 0;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .list-item-subtask .checkbox {
+      width: 16px;
+      height: 16px;
+      min-width: 16px;
+      min-height: 16px;
+      margin-top: 1px;
+    }
+
+    .list-item-subtask span {
+      cursor: pointer;
+    }
+
+    .list-item-subtask span:hover {
+      color: var(--text-primary);
+    }
+
+    .list-item-add-subtask {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-style: italic;
+      cursor: pointer;
+      padding: 3px 0;
+      padding-left: 24px;
+      display: none;
+    }
+
+    .list-item:hover .list-item-add-subtask {
+      display: block;
+    }
+
+    .list-item-add-subtask:hover {
+      color: var(--accent);
+    }
+
+    .list-item-section {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-secondary);
+      padding: 2px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+
+    .list-item-actions {
+      display: none;
+      position: absolute;
+      top: 8px;
+      right: 8px;
+    }
+
+    .list-item:hover .list-item-actions {
+      display: flex;
+      gap: 4px;
+    }
+
+    .list-item-actions button {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px 6px;
+      font-size: 14px;
+      line-height: 1;
+      border-radius: 4px;
+    }
+
+    .list-item-actions button:hover {
+      background: var(--bg-card);
+      color: var(--accent);
+    }
+
+    .list-drop-indicator {
+      height: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+      margin: 2px -12px;
+    }
+
+    .list-add-section {
+      margin-top: 16px;
+      padding: 16px;
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      text-align: center;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+
+    .list-add-section:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .quick-add {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 0;
+    }
+
+    .quick-add-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      font-size: 15px;
+      color: var(--text-primary);
+      font-family: inherit;
+      outline: none;
+    }
+
+    .quick-add-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .quick-add-section {
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--bg-secondary);
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+    }
+
+    .quick-add-section:hover {
+      border-color: var(--accent);
+    }
+
+    .section-picker {
+      position: absolute;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 4px 20px var(--shadow-hover);
+      padding: 4px;
+      z-index: 100;
+    }
+
+    .section-picker button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 8px 12px;
+      font-size: 13px;
+      background: transparent;
+      border: none;
+      border-radius: 6px;
+    }
+
+    .section-picker button:hover {
+      background: var(--bg-secondary);
+    }
+
+    /* ===== MEMORY STYLES ===== */
+
+    .memory-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      background: var(--bg-secondary);
+      padding: 4px;
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
+    .memory-tab {
+      background: transparent;
+      color: var(--text-muted);
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+      text-transform: capitalize;
+    }
+
+    .memory-tab:hover { color: var(--text-primary); }
+
+    .memory-tab.active {
+      color: var(--text-primary);
+      background: var(--bg-card);
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .memory-tab .count {
+      background: var(--bg-secondary);
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      margin-left: 6px;
+      color: var(--text-muted);
+    }
+
+    .memory-tab.active .count {
+      background: var(--border-light);
+    }
+
+    .memory-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+
+    .memory-flat-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .memory-flat-table th {
+      text-align: left;
+      padding: 10px 16px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .memory-flat-table td {
+      padding: 9px 16px;
+      border-bottom: 1px solid var(--border-light);
+      color: var(--text-primary);
+      line-height: 1.4;
+    }
+
+    .memory-flat-table td:first-child {
+      color: var(--text-muted);
+      font-weight: 500;
+      white-space: nowrap;
+      width: 120px;
+    }
+
+    .memory-flat-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .memory-flat-table tr:hover td {
+      background: var(--bg-secondary);
+    }
+
+    .memory-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .memory-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 4px 12px var(--shadow-hover);
+    }
+
+    .memory-card-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-primary);
+    }
+
+    .memory-card-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .memory-card-preview {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+    }
+
+    .memory-card-fields {
+      margin-top: 10px;
+      font-size: 12px;
+    }
+
+    .memory-card-field {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .memory-card-field-label {
+      color: var(--text-muted);
+      min-width: 80px;
+    }
+
+    .memory-card-field-value {
+      color: var(--text-secondary);
+    }
+
+    .file-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .file-card-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .file-card-header:hover {
+      background: var(--bg-secondary);
+    }
+
+    .file-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .file-card-content {
+      padding: 16px;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      overflow-y: auto;
+      display: none;
+      color: var(--text-secondary);
+    }
+
+    .file-card-content.expanded {
+      display: block;
+    }
+
+    .stats {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 16px 24px;
+      min-width: 100px;
+      box-shadow: 0 1px 3px var(--shadow);
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: capitalize;
+      margin-top: 4px;
+    }
+
+    .search-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .search-box input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+    }
+
+    .search-box input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .add-btn {
+      background: transparent;
+      border: 2px dashed var(--border);
+      color: var(--text-muted);
+      padding: 40px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .add-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .markdown-content {
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
+    .markdown-content h1 { font-size: 1.4em; margin: 16px 0 8px; color: var(--text-primary); }
+    .markdown-content h2 { font-size: 1.2em; margin: 14px 0 6px; color: var(--text-primary); }
+    .markdown-content h3 { font-size: 1.1em; margin: 12px 0 4px; color: var(--text-secondary); }
+    .markdown-content p { margin: 8px 0; }
+    .markdown-content ul, .markdown-content ol { margin: 8px 0 8px 20px; }
+    .markdown-content li { margin: 4px 0; }
+    .markdown-content code {
+      background: var(--bg-secondary);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: var(--text-primary);
+    }
+    .markdown-content pre {
+      background: var(--bg-secondary);
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 8px 0;
+      border: 1px solid var(--border-light);
+    }
+    .markdown-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .markdown-content th, .markdown-content td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .markdown-content th {
+      background: var(--bg-secondary);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(20, 20, 19, 0.5);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.visible {
+      display: flex;
+    }
+
+    .modal {
+      background: var(--bg-card);
+      border-radius: 12px;
+      width: 90%;
+      max-width: 800px;
+      max-height: 85vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 60px rgba(20, 20, 19, 0.2);
+    }
+
+    .modal-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+    }
+
+    .modal-close:hover { color: var(--text-primary); }
+
+    .modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .modal-footer {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .form-group textarea {
+      width: 100%;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      line-height: 1.5;
+      min-height: 300px;
+      resize: vertical;
+    }
+
+    .form-group textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Tab panel containers */
+    .tab-panel {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    .tab-panel.active {
+      display: flex;
+    }
+
+    /* Memory panel scrollable area */
+    .memory-content-area {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+    }
+
+    .memory-content-area::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .memory-content-area::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .memory-content-area::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    .memory-content-area::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+
+    .file-card-content::-webkit-scrollbar,
+    .modal-body::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .file-card-content::-webkit-scrollbar-track,
+    .modal-body::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .file-card-content::-webkit-scrollbar-thumb,
+    .modal-body::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    .file-card-content::-webkit-scrollbar-thumb:hover,
+    .modal-body::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+
+    /* File path display */
+    .file-path {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <svg width="28" height="28" viewBox="0 0 32 32" style="margin-right: 12px; flex-shrink: 0;">
+        <rect x="4" y="2" width="24" height="28" rx="4" fill="#faf9f5" stroke="#D97757" stroke-width="2"/>
+        <rect x="8" y="0" width="16" height="5" rx="2.5" fill="#D97757"/>
+        <path d="M9 13l3 3 5-5" fill="none" stroke="#D97757" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="20" y="12" width="5" height="2" rx="1" fill="#c4c4c2"/>
+        <rect x="9" y="20" width="10" height="2" rx="1" fill="#c4c4c2"/>
+        <rect x="9" y="25" width="7" height="2" rx="1" fill="#c4c4c2"/>
+      </svg>
+      <div>
+        <h1>Productivity</h1>
+        <div id="filePath" class="file-path"></div>
+      </div>
+      <div class="view-toggle" id="mainTabToggle">
+        <button id="tasksTabBtn" class="active">Tasks</button>
+        <button id="memoryTabBtn">Memory</button>
+      </div>
+      <div class="view-toggle" id="taskViewToggle">
+        <button id="boardViewBtn" class="active">Board</button>
+        <button id="listViewBtn">List</button>
+      </div>
+    </div>
+    <div class="buttons">
+      <button id="openTaskBtn">Select File</button>
+      <button id="openMemoryBtn" style="display: none;">Open Folder</button>
+      <button id="saveBtn" class="primary" disabled style="display: none;">Save</button>
+    </div>
+  </header>
+
+  <!-- TASKS TAB PANEL -->
+  <div class="tab-panel active" id="tasksPanel">
+    <div class="list-view" id="listView" style="display: none;"></div>
+    <div class="board" id="board">
+      <div class="empty-state" id="boardEmptyState" style="width: 100%;">
+        <p style="margin-bottom: 24px; font-size: 18px; font-weight: 600; color: var(--text-primary);">Select your TASKS.md file</p>
+        <button id="openBtnLarge">Select TASKS.md</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MEMORY TAB PANEL -->
+  <div class="tab-panel" id="memoryPanel">
+    <div id="memoryEmptyState" class="empty-state">
+      <p style="margin-bottom: 24px; font-size: 18px; font-weight: 600; color: var(--text-primary);">Select your project folder</p>
+      <button id="openMemoryBtnLarge">Select Folder</button>
+    </div>
+    <div id="memoryMainContent" style="display: none; flex-direction: column; min-height: 0; flex: 1;">
+      <div class="memory-tabs" id="memoryTabsContainer"></div>
+      <div class="memory-content-area">
+        <div id="memoryContentContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL (shared for memory) -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modalTitle">Edit</h3>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-footer">
+        <button id="modalCancel">Cancel</button>
+        <button id="modalSave" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar" id="status"></div>
+
+  <script>
+    // ===== SHARED STATE =====
+    let activeMainTab = 'tasks'; // 'tasks' or 'memory'
+
+    const statusEl = document.getElementById('status');
+    const filePathEl = document.getElementById('filePath');
+
+    function showStatus(msg) {
+      statusEl.textContent = msg;
+      statusEl.classList.add('visible');
+      setTimeout(() => statusEl.classList.remove('visible'), 2000);
+    }
+
+    // ===== MAIN TAB SWITCHING =====
+    const tasksTabBtn = document.getElementById('tasksTabBtn');
+    const memoryTabBtn = document.getElementById('memoryTabBtn');
+    const tasksPanel = document.getElementById('tasksPanel');
+    const memoryPanel = document.getElementById('memoryPanel');
+    const taskViewToggle = document.getElementById('taskViewToggle');
+    const openTaskBtn = document.getElementById('openTaskBtn');
+    const openMemoryBtn = document.getElementById('openMemoryBtn');
+    const saveBtn = document.getElementById('saveBtn');
+
+    function switchMainTab(tab) {
+      activeMainTab = tab;
+
+      tasksTabBtn.classList.toggle('active', tab === 'tasks');
+      memoryTabBtn.classList.toggle('active', tab === 'memory');
+
+      tasksPanel.classList.toggle('active', tab === 'tasks');
+      memoryPanel.classList.toggle('active', tab === 'memory');
+
+      // Show/hide view toggle for tasks
+      taskViewToggle.style.display = tab === 'tasks' ? 'flex' : 'none';
+
+      // Show/hide appropriate buttons
+      openTaskBtn.style.display = tab === 'tasks' ? 'inline-flex' : 'none';
+      openMemoryBtn.style.display = tab === 'memory' ? 'inline-flex' : 'none';
+      saveBtn.style.display = tab === 'tasks' ? 'inline-flex' : 'none';
+
+      // Update file path display
+      if (tab === 'tasks') {
+        filePathEl.textContent = taskFileHandle ? taskFileName : '';
+      } else {
+        filePathEl.textContent = memoryDirHandle ? memoryDirHandle.name : '';
+      }
+    }
+
+    tasksTabBtn.addEventListener('click', () => switchMainTab('tasks'));
+    memoryTabBtn.addEventListener('click', () => switchMainTab('memory'));
+
+    // ============================================================
+    // ===== TASKS FUNCTIONALITY =====
+    // ============================================================
+
+    let taskFileHandle = null;
+    let taskFileName = '';
+    let sections = [];
+    let tasks = {};
+    let hasChanges = false;
+    let currentView = 'board';
+    let quickAddSection = null;
+
+    const board = document.getElementById('board');
+    const listView = document.getElementById('listView');
+    const listViewBtn = document.getElementById('listViewBtn');
+    const boardViewBtn = document.getElementById('boardViewBtn');
+
+    function taskSectionId(name) {
+      return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    }
+
+    function parseTaskMarkdown(content) {
+      const resultSections = [];
+      const resultTasks = {};
+      let currentSection = null;
+      let currentSectionId = null;
+
+      const lines = content.split('\n');
+      let currentTask = null;
+
+      for (const line of lines) {
+        const headerMatch = line.match(/^## \*{0,2}(.+?)\*{0,2}$/);
+        if (headerMatch) {
+          if (currentTask && currentSectionId) {
+            resultTasks[currentSectionId].push(currentTask);
+            currentTask = null;
+          }
+
+          const sectionName = headerMatch[1].trim();
+          currentSectionId = taskSectionId(sectionName);
+          currentSection = sectionName;
+
+          if (!resultTasks[currentSectionId]) {
+            resultSections.push({ id: currentSectionId, name: sectionName });
+            resultTasks[currentSectionId] = [];
+          }
+        } else if (currentSectionId && line.match(/^- \[[ xX]\]/)) {
+          if (currentTask) {
+            resultTasks[currentSectionId].push(currentTask);
+          }
+          const checked = line.match(/\[[xX]\]/) !== null;
+          let text = line.replace(/^- \[[ xX]\]\s*/, '');
+          let title = text;
+          let note = '';
+
+          const boldMatch = text.match(/^\*\*(.+?)\*\*(.*)$/);
+          if (boldMatch) {
+            title = boldMatch[1];
+            note = boldMatch[2].replace(/^\s*-\s*/, '').trim();
+          }
+
+          currentTask = {
+            id: Date.now() + Math.random(),
+            title,
+            note,
+            checked,
+            subtasks: [],
+            section: currentSectionId
+          };
+        } else if (currentTask && line.match(/^\s+- \[[ xX]\]/)) {
+          const checked = line.match(/\[[xX]\]/) !== null;
+          const text = line.replace(/^\s+- \[[ xX]\]\s*/, '');
+          currentTask.subtasks.push({ text, checked });
+        }
+      }
+
+      if (currentTask && currentSectionId) {
+        resultTasks[currentSectionId].push(currentTask);
+      }
+
+      return { sections: resultSections, tasks: resultTasks };
+    }
+
+    function toMarkdown() {
+      let md = '# Tasks\n';
+
+      sections.forEach((section, idx) => {
+        md += `\n## ${section.name}\n`;
+        const sectionTasks = tasks[section.id] || [];
+        sectionTasks.forEach(t => {
+          const checkbox = t.checked ? '[x]' : '[ ]';
+          const note = t.note ? ` - ${t.note}` : '';
+          md += `- ${checkbox} **${t.title}**${note}\n`;
+          t.subtasks.forEach(st => {
+            const stCheckbox = st.checked ? '[x]' : '[ ]';
+            md += `  - ${stCheckbox} ${st.text}\n`;
+          });
+        });
+      });
+
+      return md.trimEnd() + '\n';
+    }
+
+    function createCard(task) {
+      const card = document.createElement('div');
+      card.className = 'task-card';
+      card.draggable = true;
+      card.dataset.id = task.id;
+
+      let html = `
+        <div style="display: flex; align-items: flex-start; gap: 12px;">
+          <button class="delete-btn" data-action="delete" title="Delete task">&times;</button>
+          <span class="checkbox ${task.checked ? 'checked' : ''}" data-action="toggle"></span>
+          <div class="card-title" data-action="edit-title">${task.title}</div>
+        </div>
+      `;
+
+      if (task.note) {
+        html += `<div class="card-note" data-action="edit-note" style="cursor: pointer; margin-left: 30px;">${task.note}</div>`;
+      } else {
+        html += `<div class="card-note add-on-hover" data-action="edit-note" style="cursor: pointer; margin-left: 30px; font-style: italic;">+ Add note</div>`;
+      }
+
+      if (task.subtasks.length > 0) {
+        html += '<div class="card-subtasks" style="margin-left: 30px;">';
+        task.subtasks.forEach((st, idx) => {
+          html += `<div class="subtask">
+            <span class="checkbox ${st.checked ? 'checked' : ''}" data-action="toggle-sub" data-idx="${idx}" style="width: 16px; height: 16px; min-width: 16px; min-height: 16px;"></span>
+            <span data-action="edit-subtask" data-idx="${idx}" style="cursor: pointer;">${st.text}</span>
+          </div>`;
+        });
+        html += `<div class="subtask add-on-hover" data-action="add-subtask" style="color: var(--text-muted); cursor: pointer; font-style: italic; padding-left: 24px;">+ Add subtask</div>`;
+        html += '</div>';
+      } else {
+        html += `<div class="card-subtasks add-on-hover" style="margin-left: 30px;">
+          <div class="subtask" data-action="add-subtask" style="color: var(--text-muted); cursor: pointer; font-style: italic;">+ Add subtask</div>
+        </div>`;
+      }
+
+      card.innerHTML = html;
+
+      card.addEventListener('dragstart', (e) => {
+        card.classList.add('dragging');
+        e.dataTransfer.setData('text/plain', task.id);
+      });
+
+      card.addEventListener('dragend', () => {
+        card.classList.remove('dragging');
+      });
+
+      card.addEventListener('click', (e) => {
+        const action = e.target.dataset.action;
+        if (action === 'toggle') {
+          task.checked = !task.checked;
+          markChanged();
+          renderTasks();
+        } else if (action === 'toggle-sub') {
+          const idx = parseInt(e.target.dataset.idx);
+          task.subtasks[idx].checked = !task.subtasks[idx].checked;
+          markChanged();
+          renderTasks();
+        } else if (action === 'edit-title') {
+          startEditingTitle(e.target, task);
+        } else if (action === 'edit-note') {
+          startEditingNote(e.target, task);
+        } else if (action === 'edit-subtask') {
+          const idx = parseInt(e.target.dataset.idx);
+          startEditingSubtask(e.target, task, idx);
+        } else if (action === 'add-subtask') {
+          startAddingSubtask(e.target, task);
+        } else if (action === 'delete') {
+          deleteTask(task);
+        }
+      });
+
+      return card;
+    }
+
+    function startEditingTitle(titleEl, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.title;
+      input.style.cssText = 'width: 100%; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 6px 10px; color: var(--text-primary); font-size: 14px; font-family: inherit; outline: none;';
+
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newTitle = input.value.trim();
+        if (newTitle && newTitle !== task.title) {
+          task.title = newTitle;
+          markChanged();
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startEditingNote(noteEl, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.note || '';
+      input.placeholder = 'Add a note...';
+      input.style.cssText = 'width: 100%; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 4px 8px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      noteEl.replaceWith(input);
+      input.focus();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        task.note = input.value.trim();
+        markChanged();
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startEditingSubtask(subtaskEl, task, idx) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.subtasks[idx].text;
+      input.style.cssText = 'width: calc(100% - 30px); background: var(--bg-card); border: 2px solid var(--accent); border-radius: 4px; padding: 2px 6px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      subtaskEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newText = input.value.trim();
+        if (newText) { task.subtasks[idx].text = newText; }
+        else { task.subtasks.splice(idx, 1); }
+        markChanged();
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startAddingSubtask(el, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'New subtask...';
+      input.style.cssText = 'width: calc(100% - 10px); background: var(--bg-card); border: 2px solid var(--accent); border-radius: 4px; padding: 2px 6px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      el.replaceWith(input);
+      input.focus();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const text = input.value.trim();
+        if (text) { task.subtasks.push({ text, checked: false }); markChanged(); }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startEditingColumnTitle(titleEl, colId) {
+      const section = sections.find(s => s.id === colId);
+      if (!section) return;
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = section.name;
+      input.style.cssText = 'width: 180px; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 4px 10px; color: var(--text-primary); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-family: inherit; outline: none;';
+
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newName = input.value.trim();
+        if (newName && newName !== section.name) {
+          const oldId = section.id;
+          section.name = newName;
+          const newId = taskSectionId(newName);
+          if (newId !== oldId) {
+            tasks[newId] = tasks[oldId] || [];
+            delete tasks[oldId];
+            tasks[newId].forEach(t => t.section = newId);
+            section.id = newId;
+          }
+          markChanged();
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function createColumn(id, title, items) {
+      const col = document.createElement('div');
+      col.className = 'column';
+      col.innerHTML = `
+        <div class="column-header">
+          <span class="column-title" data-section-id="${id}" style="cursor: pointer;">${title}</span>
+          <span class="count">${items.length}</span>
+        </div>
+        <div class="cards" data-column="${id}"></div>
+        <div class="add-card">
+          <button data-add="${id}">+ Add task</button>
+        </div>
+      `;
+
+      col.querySelector('.column-title').addEventListener('click', (e) => {
+        if (!col.dragging) { startEditingColumnTitle(e.target, id); }
+      });
+
+      const header = col.querySelector('.column-header');
+      header.draggable = true;
+
+      header.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        col.classList.add('dragging-column');
+        e.dataTransfer.setData('text/column', id);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+
+      header.addEventListener('dragend', () => {
+        col.classList.remove('dragging-column');
+        board.querySelectorAll('.column-drop-indicator').forEach(el => el.remove());
+      });
+
+      col.addEventListener('dragover', (e) => {
+        if (e.dataTransfer.types.includes('text/column')) {
+          e.preventDefault();
+          e.stopPropagation();
+          board.querySelectorAll('.column-drop-indicator').forEach(el => el.remove());
+          const indicator = document.createElement('div');
+          indicator.className = 'column-drop-indicator';
+          const rect = col.getBoundingClientRect();
+          if (e.clientX < rect.left + rect.width / 2) { col.before(indicator); }
+          else { col.after(indicator); }
+        }
+      });
+
+      col.addEventListener('drop', (e) => {
+        if (e.dataTransfer.types.includes('text/column')) {
+          e.preventDefault();
+          e.stopPropagation();
+          const fromId = e.dataTransfer.getData('text/column');
+          const toId = id;
+          if (fromId !== toId) {
+            const rect = col.getBoundingClientRect();
+            const insertBefore = e.clientX < rect.left + rect.width / 2;
+            moveSection(fromId, toId, insertBefore);
+          }
+          board.querySelectorAll('.column-drop-indicator').forEach(el => el.remove());
+        }
+      });
+
+      const cardsContainer = col.querySelector('.cards');
+      items.forEach(task => { cardsContainer.appendChild(createCard(task)); });
+
+      const getDropPosition = (e) => {
+        const allCards = [...cardsContainer.querySelectorAll('.task-card')];
+        const visibleCards = allCards.filter(c => !c.classList.contains('dragging'));
+        let insertBeforeCard = null;
+        let dropIndex = visibleCards.length;
+        for (let i = 0; i < visibleCards.length; i++) {
+          const rect = visibleCards[i].getBoundingClientRect();
+          if (e.clientY < rect.top + rect.height / 2) {
+            insertBeforeCard = visibleCards[i];
+            dropIndex = i;
+            break;
+          }
+        }
+        return { insertBeforeCard, dropIndex };
+      };
+
+      const showDropIndicator = (e) => {
+        col.querySelectorAll('.drop-indicator').forEach(el => el.remove());
+        const { insertBeforeCard } = getDropPosition(e);
+        const indicator = document.createElement('div');
+        indicator.className = 'drop-indicator';
+        indicator.style.cssText = 'height: 3px; background: var(--accent); border-radius: 2px; margin: 5px 0;';
+        if (insertBeforeCard) { cardsContainer.insertBefore(indicator, insertBeforeCard); }
+        else { cardsContainer.appendChild(indicator); }
+      };
+
+      col.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        cardsContainer.classList.add('drag-over');
+        showDropIndicator(e);
+      });
+
+      col.addEventListener('dragleave', (e) => {
+        if (!col.contains(e.relatedTarget)) {
+          cardsContainer.classList.remove('drag-over');
+          col.querySelectorAll('.drop-indicator').forEach(el => el.remove());
+        }
+      });
+
+      col.addEventListener('drop', (e) => {
+        e.preventDefault();
+        cardsContainer.classList.remove('drag-over');
+        col.querySelectorAll('.drop-indicator').forEach(el => el.remove());
+        const taskId = parseFloat(e.dataTransfer.getData('text/plain'));
+        const { dropIndex } = getDropPosition(e);
+        moveTask(taskId, id, dropIndex);
+      });
+
+      col.querySelector(`[data-add="${id}"]`).addEventListener('click', () => {
+        addNewTask(id, col.querySelector('.cards'));
+      });
+
+      return col;
+    }
+
+    function addNewTask(sectionId, container) {
+      const existing = container.querySelector('.new-task-input');
+      if (existing) return;
+
+      const input = document.createElement('textarea');
+      input.className = 'new-task-input';
+      input.placeholder = 'What needs to be done?';
+      input.rows = 2;
+      container.appendChild(input);
+      input.focus();
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          const title = input.value.trim();
+          if (title) {
+            if (!tasks[sectionId]) tasks[sectionId] = [];
+            tasks[sectionId].push({
+              id: Date.now() + Math.random(),
+              title,
+              note: '',
+              checked: false,
+              subtasks: [],
+              section: sectionId
+            });
+            markChanged();
+            renderTasks();
+          } else { input.remove(); }
+        } else if (e.key === 'Escape') { input.remove(); }
+      });
+
+      input.addEventListener('blur', () => { setTimeout(() => input.remove(), 100); });
+    }
+
+    function moveSection(fromId, toId, insertBefore) {
+      const fromIdx = sections.findIndex(s => s.id === fromId);
+      const toIdx = sections.findIndex(s => s.id === toId);
+      if (fromIdx === -1 || toIdx === -1) return;
+      const [section] = sections.splice(fromIdx, 1);
+      let newIdx = sections.findIndex(s => s.id === toId);
+      if (!insertBefore) newIdx++;
+      sections.splice(newIdx, 0, section);
+      markChanged();
+      renderTasks();
+    }
+
+    function moveTask(taskId, toSectionId, dropIndex = -1) {
+      let task = null;
+      for (const section of sections) {
+        const sectionTasks = tasks[section.id] || [];
+        const idx = sectionTasks.findIndex(t => t.id === taskId);
+        if (idx !== -1) {
+          task = sectionTasks.splice(idx, 1)[0];
+          break;
+        }
+      }
+      if (!task) return;
+      task.section = toSectionId;
+      if (!tasks[toSectionId]) tasks[toSectionId] = [];
+      if (dropIndex >= 0 && dropIndex <= tasks[toSectionId].length) {
+        tasks[toSectionId].splice(dropIndex, 0, task);
+      } else {
+        tasks[toSectionId].push(task);
+      }
+      markChanged();
+      renderTasks();
+    }
+
+    function deleteTask(task) {
+      if (!confirm(`Delete "${task.title}"?`)) return;
+      for (const section of sections) {
+        const sectionTasks = tasks[section.id] || [];
+        const idx = sectionTasks.findIndex(t => t.id === task.id);
+        if (idx !== -1) { sectionTasks.splice(idx, 1); break; }
+      }
+      markChanged();
+      renderTasks();
+    }
+
+    let saveTimeout = null;
+    let lastModified = 0;
+    let watchInterval = null;
+    let isSaving = false;
+
+    function markChanged() {
+      hasChanges = true;
+      saveBtn.disabled = false;
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(autoSave, 500);
+    }
+
+    async function autoSave() {
+      if (!taskFileHandle || !hasChanges || isSaving) return;
+      isSaving = true;
+      try {
+        const writable = await taskFileHandle.createWritable();
+        const content = toMarkdown();
+        await writable.write(content);
+        await writable.close();
+        const file = await taskFileHandle.getFile();
+        lastModified = file.lastModified;
+        hasChanges = false;
+        saveBtn.disabled = true;
+        showStatus('Saved');
+      } catch (e) {
+        showStatus('Save failed: ' + e.message);
+      }
+      isSaving = false;
+    }
+
+    async function checkForExternalChanges() {
+      if (!taskFileHandle || hasChanges || isSaving) return;
+      try {
+        const file = await taskFileHandle.getFile();
+        if (file.lastModified > lastModified) {
+          lastModified = file.lastModified;
+          const content = await file.text();
+          const result = parseTaskMarkdown(content);
+          sections = result.sections;
+          tasks = result.tasks;
+          renderTasks();
+          showStatus('Reloaded');
+        }
+      } catch (e) { console.log('Watch error:', e); }
+    }
+
+    function startWatching() {
+      if (watchInterval) clearInterval(watchInterval);
+      watchInterval = setInterval(checkForExternalChanges, 1000);
+    }
+
+    function stopWatching() {
+      if (watchInterval) { clearInterval(watchInterval); watchInterval = null; }
+    }
+
+    function renderTasks() {
+      if (currentView === 'board') { renderBoard(); }
+      else { renderList(); }
+    }
+
+    function renderBoard() {
+      board.innerHTML = '';
+      sections.forEach(section => {
+        const sectionTasks = tasks[section.id] || [];
+        board.appendChild(createColumn(section.id, section.name, sectionTasks));
+      });
+
+      const addSectionBtn = document.createElement('div');
+      addSectionBtn.className = 'column';
+      addSectionBtn.style.cssText = 'background: transparent; border: 2px dashed var(--border); display: flex; align-items: center; justify-content: center; cursor: pointer; min-height: 120px;';
+      addSectionBtn.innerHTML = '<span style="color: var(--text-muted); font-size: 14px; font-weight: 500;">+ Add Section</span>';
+      addSectionBtn.addEventListener('click', () => startAddingSection(addSectionBtn));
+      board.appendChild(addSectionBtn);
+    }
+
+    function renderList() {
+      listView.innerHTML = '';
+
+      if (!quickAddSection && sections.length > 0) {
+        quickAddSection = sections[0].id;
+      }
+
+      // Quick add at top
+      const quickAdd = document.createElement('div');
+      quickAdd.className = 'quick-add';
+      quickAdd.style.cssText = 'border-bottom: 2px solid var(--border); margin-bottom: 24px; padding-bottom: 16px;';
+
+      const sectionName = sections.find(s => s.id === quickAddSection)?.name || 'Select section';
+      quickAdd.innerHTML = `
+        <span class="checkbox" style="opacity: 0.3;"></span>
+        <input type="text" class="quick-add-input" placeholder="Add a task..." id="quickAddInput">
+        <span class="quick-add-section" id="quickAddSectionBtn">${sectionName}</span>
+      `;
+      listView.appendChild(quickAdd);
+
+      const quickInput = document.getElementById('quickAddInput');
+      const sectionBtn = document.getElementById('quickAddSectionBtn');
+
+      quickInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && quickInput.value.trim()) {
+          const title = quickInput.value.trim();
+          if (!tasks[quickAddSection]) tasks[quickAddSection] = [];
+          tasks[quickAddSection].unshift({
+            id: Date.now() + Math.random(),
+            title,
+            note: '',
+            checked: false,
+            subtasks: [],
+            section: quickAddSection
+          });
+          quickInput.value = '';
+          markChanged();
+          renderTasks();
+          setTimeout(() => document.getElementById('quickAddInput')?.focus(), 10);
+        }
+      });
+
+      sectionBtn.addEventListener('click', (e) => { showSectionPicker(e.target); });
+
+      // Render each section
+      sections.forEach(section => {
+        const sectionTasks = tasks[section.id] || [];
+        const sectionEl = document.createElement('div');
+        sectionEl.className = 'list-section';
+        sectionEl.dataset.sectionId = section.id;
+
+        const header = document.createElement('div');
+        header.className = 'list-section-header';
+        header.innerHTML = `
+          <span class="section-title" data-section-id="${section.id}">${section.name}</span>
+          <span class="count">${sectionTasks.length}</span>
+        `;
+
+        header.querySelector('.section-title').addEventListener('click', (e) => {
+          startEditingListSectionTitle(e.target, section);
+        });
+
+        sectionEl.appendChild(header);
+
+        const tasksContainer = document.createElement('div');
+        tasksContainer.className = 'list-tasks-container';
+        tasksContainer.dataset.sectionId = section.id;
+
+        sectionTasks.forEach(task => {
+          tasksContainer.appendChild(createListItem(task, section));
+        });
+
+        sectionEl.appendChild(tasksContainer);
+
+        // Drag-and-drop handlers for section
+        const getDropPosition = (e, container) => {
+          const items = [...container.querySelectorAll('.list-item:not(.dragging)')];
+          let insertBeforeEl = null;
+          let dropIndex = items.length;
+          for (let i = 0; i < items.length; i++) {
+            const rect = items[i].getBoundingClientRect();
+            if (e.clientY < rect.top + rect.height / 2) {
+              insertBeforeEl = items[i];
+              dropIndex = i;
+              break;
+            }
+          }
+          return { insertBeforeEl, dropIndex };
+        };
+
+        const showDropIndicator = (e) => {
+          tasksContainer.querySelectorAll('.list-drop-indicator').forEach(el => el.remove());
+          const { insertBeforeEl } = getDropPosition(e, tasksContainer);
+          const indicator = document.createElement('div');
+          indicator.className = 'list-drop-indicator';
+          if (insertBeforeEl) { tasksContainer.insertBefore(indicator, insertBeforeEl); }
+          else { tasksContainer.appendChild(indicator); }
+        };
+
+        sectionEl.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          sectionEl.classList.add('drag-over');
+          showDropIndicator(e);
+        });
+
+        sectionEl.addEventListener('dragleave', (e) => {
+          if (!sectionEl.contains(e.relatedTarget)) {
+            sectionEl.classList.remove('drag-over');
+            tasksContainer.querySelectorAll('.list-drop-indicator').forEach(el => el.remove());
+          }
+        });
+
+        sectionEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          sectionEl.classList.remove('drag-over');
+          tasksContainer.querySelectorAll('.list-drop-indicator').forEach(el => el.remove());
+          const taskId = parseFloat(e.dataTransfer.getData('text/plain'));
+          if (!taskId) return;
+          const { dropIndex } = getDropPosition(e, tasksContainer);
+          moveTask(taskId, section.id, dropIndex);
+        });
+
+        listView.appendChild(sectionEl);
+      });
+
+      // Add Section button
+      const addSectionBtn = document.createElement('div');
+      addSectionBtn.className = 'list-add-section';
+      addSectionBtn.textContent = '+ Add Section';
+      addSectionBtn.addEventListener('click', () => { startAddingListSection(addSectionBtn); });
+      listView.appendChild(addSectionBtn);
+    }
+
+    function startEditingListSectionTitle(titleEl, section) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = section.name;
+      input.style.cssText = 'width: 200px; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 4px 10px; color: var(--text-primary); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-family: inherit; outline: none;';
+
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newName = input.value.trim();
+        if (newName && newName !== section.name) {
+          const oldId = section.id;
+          section.name = newName;
+          const newId = taskSectionId(newName);
+          if (newId !== oldId) {
+            tasks[newId] = tasks[oldId] || [];
+            delete tasks[oldId];
+            tasks[newId].forEach(t => t.section = newId);
+            section.id = newId;
+          }
+          markChanged();
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startAddingListSection(btn) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Section name...';
+      input.style.cssText = 'width: 100%; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 8px; padding: 12px 16px; color: var(--text-primary); font-size: 14px; font-family: inherit; outline: none; text-align: left;';
+
+      btn.innerHTML = '';
+      btn.style.border = '2px solid var(--accent)';
+      btn.style.cursor = 'default';
+      btn.appendChild(input);
+      input.focus();
+
+      let saved = false;
+      const saveSection = () => {
+        if (saved) return;
+        saved = true;
+        const name = input.value.trim();
+        if (name) {
+          const id = taskSectionId(name);
+          if (!tasks[id]) {
+            sections.push({ id, name });
+            tasks[id] = [];
+            markChanged();
+          }
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveSection(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveSection);
+    }
+
+    function createListItem(task, section) {
+      const item = document.createElement('div');
+      item.className = 'list-item';
+      item.draggable = true;
+      item.dataset.taskId = task.id;
+
+      item.addEventListener('dragstart', (e) => {
+        item.classList.add('dragging');
+        e.dataTransfer.setData('text/plain', task.id);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        document.querySelectorAll('.list-drop-indicator').forEach(el => el.remove());
+        document.querySelectorAll('.list-section.drag-over').forEach(el => el.classList.remove('drag-over'));
+      });
+
+      const checkbox = document.createElement('span');
+      checkbox.className = `checkbox ${task.checked ? 'checked' : ''}`;
+      checkbox.addEventListener('click', (e) => {
+        e.stopPropagation();
+        task.checked = !task.checked;
+        markChanged();
+        renderTasks();
+      });
+
+      const content = document.createElement('div');
+      content.className = 'list-item-content';
+
+      const title = document.createElement('div');
+      title.className = `list-item-title ${task.checked ? 'checked' : ''}`;
+      title.textContent = task.title;
+      title.addEventListener('click', (e) => {
+        e.stopPropagation();
+        startEditingListItem(title, task);
+      });
+      content.appendChild(title);
+
+      if (task.note) {
+        const note = document.createElement('div');
+        note.className = 'list-item-note';
+        note.textContent = task.note;
+        note.addEventListener('click', (e) => {
+          e.stopPropagation();
+          startEditingListNote(note, task);
+        });
+        content.appendChild(note);
+      } else {
+        const addNote = document.createElement('div');
+        addNote.className = 'list-item-note add-note';
+        addNote.textContent = '+ Add note';
+        addNote.addEventListener('click', (e) => {
+          e.stopPropagation();
+          startEditingListNote(addNote, task);
+        });
+        content.appendChild(addNote);
+      }
+
+      if (task.subtasks && task.subtasks.length > 0) {
+        const subtasksContainer = document.createElement('div');
+        subtasksContainer.className = 'list-item-subtasks';
+
+        task.subtasks.forEach((st, idx) => {
+          const subtaskEl = document.createElement('div');
+          subtaskEl.className = 'list-item-subtask';
+
+          const stCheckbox = document.createElement('span');
+          stCheckbox.className = `checkbox ${st.checked ? 'checked' : ''}`;
+          stCheckbox.addEventListener('click', (e) => {
+            e.stopPropagation();
+            st.checked = !st.checked;
+            markChanged();
+            renderTasks();
+          });
+
+          const stText = document.createElement('span');
+          stText.textContent = st.text;
+          if (st.checked) {
+            stText.style.textDecoration = 'line-through';
+            stText.style.color = 'var(--text-muted)';
+          }
+          stText.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startEditingListSubtask(stText, task, idx);
+          });
+
+          subtaskEl.appendChild(stCheckbox);
+          subtaskEl.appendChild(stText);
+          subtasksContainer.appendChild(subtaskEl);
+        });
+
+        content.appendChild(subtasksContainer);
+      }
+
+      const addSubtask = document.createElement('div');
+      addSubtask.className = 'list-item-add-subtask';
+      addSubtask.textContent = '+ Add subtask';
+      addSubtask.addEventListener('click', (e) => {
+        e.stopPropagation();
+        startAddingListSubtask(addSubtask, task);
+      });
+      content.appendChild(addSubtask);
+
+      const actions = document.createElement('div');
+      actions.className = 'list-item-actions';
+      actions.innerHTML = '<button title="Delete task">&times;</button>';
+      actions.querySelector('button').addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteTask(task);
+      });
+
+      item.appendChild(checkbox);
+      item.appendChild(content);
+      item.appendChild(actions);
+
+      return item;
+    }
+
+    function startEditingListNote(noteEl, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.note || '';
+      input.placeholder = 'Add a note...';
+      input.style.cssText = 'width: 100%; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 4px 8px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      noteEl.replaceWith(input);
+      input.focus();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        task.note = input.value.trim();
+        markChanged();
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startEditingListSubtask(subtaskEl, task, idx) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.subtasks[idx].text;
+      input.style.cssText = 'width: calc(100% - 30px); background: var(--bg-card); border: 2px solid var(--accent); border-radius: 4px; padding: 2px 6px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      subtaskEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newText = input.value.trim();
+        if (newText) { task.subtasks[idx].text = newText; }
+        else { task.subtasks.splice(idx, 1); }
+        markChanged();
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startAddingListSubtask(el, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'New subtask...';
+      input.style.cssText = 'width: calc(100% - 10px); background: var(--bg-card); border: 2px solid var(--accent); border-radius: 4px; padding: 2px 6px; color: var(--text-primary); font-size: 13px; font-family: inherit; outline: none;';
+
+      el.replaceWith(input);
+      input.focus();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const text = input.value.trim();
+        if (text) {
+          if (!task.subtasks) task.subtasks = [];
+          task.subtasks.push({ text, checked: false });
+          markChanged();
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function startEditingListItem(titleEl, task) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = task.title;
+      input.style.cssText = 'width: 100%; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 6px; padding: 8px 12px; color: var(--text-primary); font-size: 15px; font-family: inherit; outline: none;';
+
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let saved = false;
+      const saveEdit = () => {
+        if (saved) return;
+        saved = true;
+        const newTitle = input.value.trim();
+        if (newTitle && newTitle !== task.title) {
+          task.title = newTitle;
+          markChanged();
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveEdit);
+    }
+
+    function showSectionPicker(anchorEl) {
+      document.querySelectorAll('.section-picker').forEach(el => el.remove());
+      const picker = document.createElement('div');
+      picker.className = 'section-picker';
+      const rect = anchorEl.getBoundingClientRect();
+      picker.style.top = (rect.bottom + 4) + 'px';
+      picker.style.right = (window.innerWidth - rect.right) + 'px';
+
+      sections.forEach(section => {
+        const btn = document.createElement('button');
+        btn.textContent = section.name;
+        btn.addEventListener('click', () => {
+          quickAddSection = section.id;
+          picker.remove();
+          renderTasks();
+          setTimeout(() => document.getElementById('quickAddInput')?.focus(), 10);
+        });
+        picker.appendChild(btn);
+      });
+
+      document.body.appendChild(picker);
+      setTimeout(() => {
+        document.addEventListener('click', function closeHandler(e) {
+          if (!picker.contains(e.target)) {
+            picker.remove();
+            document.removeEventListener('click', closeHandler);
+          }
+        });
+      }, 10);
+    }
+
+    function switchTaskView(view) {
+      currentView = view;
+      if (view === 'list') {
+        listView.style.display = 'block';
+        board.style.display = 'none';
+        listViewBtn.classList.add('active');
+        boardViewBtn.classList.remove('active');
+      } else {
+        listView.style.display = 'none';
+        board.style.display = 'flex';
+        listViewBtn.classList.remove('active');
+        boardViewBtn.classList.add('active');
+      }
+      renderTasks();
+    }
+
+    listViewBtn.addEventListener('click', () => switchTaskView('list'));
+    boardViewBtn.addEventListener('click', () => switchTaskView('board'));
+
+    function startAddingSection(btn) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Section name...';
+      input.style.cssText = 'width: 220px; background: var(--bg-card); border: 2px solid var(--accent); border-radius: 8px; padding: 10px 14px; color: var(--text-primary); font-size: 14px; font-family: inherit; outline: none;';
+
+      btn.innerHTML = '';
+      btn.style.cssText = 'background: var(--bg-secondary); border: 2px dashed var(--accent); display: flex; align-items: center; justify-content: center; cursor: default; min-height: 120px; min-width: 340px; border-radius: 12px;';
+      btn.appendChild(input);
+      input.focus();
+
+      let saved = false;
+      const saveSection = () => {
+        if (saved) return;
+        saved = true;
+        const name = input.value.trim();
+        if (name) {
+          const id = taskSectionId(name);
+          if (!tasks[id]) {
+            sections.push({ id, name });
+            tasks[id] = [];
+            markChanged();
+          }
+        }
+        renderTasks();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveSection(); }
+        else if (e.key === 'Escape') { saved = true; renderTasks(); }
+      });
+      input.addEventListener('blur', saveSection);
+    }
+
+    async function openTaskFile() {
+      try {
+        [taskFileHandle] = await window.showOpenFilePicker({
+          types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }]
+        });
+        const file = await taskFileHandle.getFile();
+        const content = await file.text();
+        lastModified = file.lastModified;
+        const result = parseTaskMarkdown(content);
+        sections = result.sections;
+        tasks = result.tasks;
+        switchTaskView('board');
+        startWatching();
+        taskFileName = file.name;
+        filePathEl.textContent = file.name;
+        showStatus('Loaded ' + file.name);
+      } catch (e) {
+        if (e.name !== 'AbortError') { showStatus('Error: ' + e.message); }
+      }
+    }
+
+    openTaskBtn.addEventListener('click', openTaskFile);
+    document.getElementById('openBtnLarge')?.addEventListener('click', openTaskFile);
+
+    saveBtn.addEventListener('click', async () => {
+      if (!taskFileHandle) return;
+      try {
+        const writable = await taskFileHandle.createWritable();
+        await writable.write(toMarkdown());
+        await writable.close();
+        hasChanges = false;
+        saveBtn.disabled = true;
+        showStatus('Saved');
+      } catch (e) { showStatus('Error: ' + e.message); }
+    });
+
+    window.addEventListener('beforeunload', (e) => {
+      if (hasChanges) { e.preventDefault(); e.returnValue = ''; }
+    });
+
+    // ============================================================
+    // ===== MEMORY FUNCTIONALITY =====
+    // ============================================================
+
+    let memoryDirHandle = null;
+    let memoryData = {
+      claudeMd: null,
+      memoryFiles: [],
+      memoryDirs: {}
+    };
+
+    const memoryEmptyState = document.getElementById('memoryEmptyState');
+    const memoryMainContent = document.getElementById('memoryMainContent');
+    const memoryTabsContainer = document.getElementById('memoryTabsContainer');
+    const memoryContentContainer = document.getElementById('memoryContentContainer');
+    const modalOverlay = document.getElementById('modalOverlay');
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text || '';
+      return div.innerHTML;
+    }
+
+    function parseMemoryMarkdown(content) {
+      const parsed = {
+        title: '',
+        fields: {},
+        sections: {},
+        tables: [],
+        rawContent: content
+      };
+
+      const lines = content.split('\n');
+      let currentSection = '_intro';
+      parsed.sections[currentSection] = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (line.match(/^# /)) {
+          parsed.title = line.replace(/^# /, '').trim();
+          continue;
+        }
+
+        if (line.match(/^## /)) {
+          currentSection = line.replace(/^## /, '').trim();
+          parsed.sections[currentSection] = [];
+          continue;
+        }
+
+        const kvMatch = line.match(/^\*\*(.+?):\*\*\s*(.*)$/);
+        if (kvMatch) {
+          parsed.fields[kvMatch[1]] = kvMatch[2];
+          continue;
+        }
+
+        parsed.sections[currentSection].push(line);
+      }
+
+      for (const key in parsed.sections) {
+        parsed.sections[key] = parsed.sections[key].join('\n').trim();
+      }
+
+      const tableRegex = /\|(.+)\|\n\|[-| ]+\|\n((?:\|.+\|\n?)+)/g;
+      let match;
+      while ((match = tableRegex.exec(content)) !== null) {
+        const headers = match[1].split('|').map(h => h.trim()).filter(h => h);
+        const rowLines = match[2].trim().split('\n');
+        const rows = rowLines.map(row => row.split('|').map(c => c.trim()).filter(c => c));
+        parsed.tables.push({ headers, rows });
+      }
+
+      return parsed;
+    }
+
+    function getPreview(content, maxLength = 150) {
+      let preview = content
+        .replace(/^#+ .+$/gm, '')
+        .replace(/\*\*(.+?):\*\*.*/g, '')
+        .replace(/\|.+\|/g, '')
+        .replace(/[-=]{3,}/g, '')
+        .trim()
+        .substring(0, maxLength);
+      if (content.length > maxLength) preview += '...';
+      return preview;
+    }
+
+    function getDisplayName(filename) {
+      return filename
+        .replace('.md', '')
+        .split(/[-_]/)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+    }
+
+    async function loadMemoryDirectory() {
+      try {
+        memoryDirHandle = await window.showDirectoryPicker();
+
+        memoryData = { claudeMd: null, memoryFiles: [], memoryDirs: {} };
+
+        try {
+          const claudeFileHandle = await memoryDirHandle.getFileHandle('CLAUDE.md');
+          const file = await claudeFileHandle.getFile();
+          memoryData.claudeMd = { content: await file.text(), fileHandle: claudeFileHandle };
+        } catch (e) { console.log('No CLAUDE.md found'); }
+
+        try {
+          const memoryDir = await memoryDirHandle.getDirectoryHandle('memory');
+          for await (const entry of memoryDir.values()) {
+            if (entry.kind === 'file' && entry.name.endsWith('.md')) {
+              const file = await entry.getFile();
+              memoryData.memoryFiles.push({
+                name: entry.name,
+                content: await file.text(),
+                fileHandle: entry
+              });
+            } else if (entry.kind === 'directory') {
+              memoryData.memoryDirs[entry.name] = [];
+              const subDirHandle = entry;
+              for await (const subEntry of subDirHandle.values()) {
+                if (subEntry.kind === 'file' && subEntry.name.endsWith('.md')) {
+                  const file = await subEntry.getFile();
+                  const content = await file.text();
+                  memoryData.memoryDirs[entry.name].push({
+                    name: subEntry.name,
+                    content: content,
+                    fileHandle: subEntry,
+                    dirHandle: subDirHandle,
+                    parsed: parseMemoryMarkdown(content)
+                  });
+                }
+              }
+            }
+          }
+        } catch (e) { console.log('No memory/ directory found'); }
+
+        renderMemory();
+        memoryEmptyState.style.display = 'none';
+        memoryMainContent.style.display = 'flex';
+        filePathEl.textContent = memoryDirHandle.name;
+        showStatus('Loaded memory from ' + memoryDirHandle.name);
+
+      } catch (e) {
+        if (e.name !== 'AbortError') { showStatus('Error: ' + e.message); }
+      }
+    }
+
+    function renderMemory() {
+      renderMemoryTabs();
+      renderMemoryContent();
+    }
+
+    function renderMemoryTabs() {
+      let html = '';
+
+      if (memoryData.claudeMd) {
+        html += `<button class="memory-tab active" data-tab="overview">Overview</button>`;
+      }
+
+      for (const file of memoryData.memoryFiles) {
+        const name = file.name.replace('.md', '');
+        html += `<button class="memory-tab${!memoryData.claudeMd && memoryData.memoryFiles[0] === file ? ' active' : ''}" data-tab="file-${name}">${name}</button>`;
+      }
+
+      for (const dirName of Object.keys(memoryData.memoryDirs).sort()) {
+        const files = memoryData.memoryDirs[dirName];
+        let count;
+        if (dirName === 'context') {
+          count = 0;
+          for (const file of files) {
+            const p = file.parsed;
+            count += Object.keys(p.fields).length;
+            for (const table of p.tables) {
+              count += table.rows.length;
+            }
+            for (const [sName, sContent] of Object.entries(p.sections)) {
+              if (sContent && sName !== '_intro') {
+                count += sContent.split('\n').filter(l => l.trim() && !l.trim().startsWith('|')).length;
+              }
+            }
+          }
+        } else {
+          count = files.length;
+        }
+        html += `<button class="memory-tab" data-tab="dir-${dirName}">${dirName} <span class="count">${count}</span></button>`;
+      }
+
+      memoryTabsContainer.innerHTML = html;
+
+      memoryTabsContainer.querySelectorAll('.memory-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          memoryTabsContainer.querySelectorAll('.memory-tab').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          renderMemoryContent();
+        });
+      });
+    }
+
+    function renderMemoryContent() {
+      const activeTab = memoryTabsContainer.querySelector('.memory-tab.active');
+      if (!activeTab) return;
+
+      const tabId = activeTab.dataset.tab;
+
+      if (tabId === 'overview') { renderMemoryOverview(); }
+      else if (tabId.startsWith('file-')) {
+        const fileName = tabId.replace('file-', '') + '.md';
+        renderMemoryFile(fileName);
+      } else if (tabId.startsWith('dir-')) {
+        const dirName = tabId.replace('dir-', '');
+        renderMemoryDirectory(dirName);
+      }
+    }
+
+    function renderMemoryOverview() {
+      if (!memoryData.claudeMd) return;
+
+      let statsHtml = '<div class="stats">';
+      for (const [dirName, files] of Object.entries(memoryData.memoryDirs)) {
+        let count;
+        if (dirName === 'context') {
+          count = 0;
+          for (const file of files) {
+            const p = file.parsed;
+            count += Object.keys(p.fields).length;
+            for (const table of p.tables) { count += table.rows.length; }
+            for (const [sName, sContent] of Object.entries(p.sections)) {
+              if (sContent && sName !== '_intro') {
+                count += sContent.split('\n').filter(l => l.trim() && !l.trim().startsWith('|')).length;
+              }
+            }
+          }
+        } else {
+          count = files.length;
+        }
+        statsHtml += `
+          <div class="stat">
+            <div class="stat-value">${count}</div>
+            <div class="stat-label">${dirName}</div>
+          </div>
+        `;
+      }
+      statsHtml += '</div>';
+
+      const claudeContent = renderMarkdownToHtml(memoryData.claudeMd.content);
+
+      memoryContentContainer.innerHTML = `
+        ${statsHtml}
+        <div class="file-card">
+          <div class="file-card-header" onclick="this.nextElementSibling.classList.toggle('expanded'); this.querySelector('.toggle').textContent = this.nextElementSibling.classList.contains('expanded') ? '\u2212' : '+'">
+            <span class="file-card-title">CLAUDE.md</span>
+            <span class="toggle" style="color: var(--text-muted);">&minus;</span>
+          </div>
+          <div class="file-card-content expanded markdown-content">${claudeContent}</div>
+        </div>
+        <button onclick="openEditModal('CLAUDE.md', 'claudeMd')" style="margin-top: 10px;">Edit CLAUDE.md</button>
+      `;
+    }
+
+    function renderMemoryFile(fileName) {
+      const file = memoryData.memoryFiles.find(f => f.name === fileName);
+      if (!file) return;
+
+      const content = renderMarkdownToHtml(file.content);
+
+      memoryContentContainer.innerHTML = `
+        <div class="file-card">
+          <div class="file-card-header">
+            <span class="file-card-title">${fileName}</span>
+          </div>
+          <div class="file-card-content expanded markdown-content">${content}</div>
+        </div>
+        <button onclick="openEditModal('${fileName}', 'memoryFile')" style="margin-top: 10px;">Edit ${fileName}</button>
+      `;
+    }
+
+    function renderMemoryDirectory(dirName) {
+      const files = memoryData.memoryDirs[dirName] || [];
+
+      // Context directory uses flat list view
+      if (dirName === 'context') {
+        renderMemoryDirectoryFlat(dirName, files);
+        return;
+      }
+
+      // All other directories use card grid view
+      let html = `
+        <div class="search-box">
+          <span style="color: var(--text-muted);">&#128269;</span>
+          <input type="text" placeholder="Search ${dirName}..." id="dirSearch" oninput="filterMemoryDirectory('${dirName}', this.value)">
+        </div>
+        <div class="memory-grid" id="dirGrid">
+      `;
+
+      for (const file of files) {
+        const p = file.parsed;
+        const title = p.title || getDisplayName(file.name);
+
+        let fieldsHtml = '';
+        const fieldEntries = Object.entries(p.fields).slice(0, 3);
+        if (fieldEntries.length > 0) {
+          fieldsHtml = '<div class="memory-card-fields">';
+          for (const [key, value] of fieldEntries) {
+            fieldsHtml += `
+              <div class="memory-card-field">
+                <span class="memory-card-field-label">${escapeHtml(key)}</span>
+                <span class="memory-card-field-value">${escapeHtml(value)}</span>
+              </div>
+            `;
+          }
+          fieldsHtml += '</div>';
+        }
+
+        let preview = '';
+        for (const [sectionName, sectionContent] of Object.entries(p.sections)) {
+          if (sectionContent && sectionName !== '_intro') {
+            preview = getPreview(sectionContent, 100);
+            break;
+          }
+        }
+        if (!preview) preview = getPreview(p.rawContent, 100);
+
+        html += `
+          <div class="memory-card" onclick="openFileModal('${dirName}', '${file.name}')" data-search="${escapeHtml((title + ' ' + JSON.stringify(p.fields) + ' ' + p.rawContent).toLowerCase())}">
+            <div class="memory-card-title">${escapeHtml(title)}</div>
+            ${fieldsHtml}
+            <div class="memory-card-preview">${escapeHtml(preview)}</div>
+          </div>
+        `;
+      }
+
+      html += `
+        <div class="add-btn" onclick="openNewFileModal('${dirName}')">
+          + Add to ${dirName}
+        </div>
+      </div>`;
+
+      memoryContentContainer.innerHTML = html;
+    }
+
+    function renderMemoryDirectoryFlat(dirName, files) {
+      let html = `
+        <div class="search-box">
+          <span style="color: var(--text-muted);">&#128269;</span>
+          <input type="text" placeholder="Search ${dirName}..." id="dirSearch" oninput="filterMemoryDirectory('${dirName}', this.value)">
+        </div>
+        <div id="dirGrid">
+      `;
+
+      for (const file of files) {
+        const p = file.parsed;
+
+        // Render fields as a key-value table
+        const fieldEntries = Object.entries(p.fields);
+        if (fieldEntries.length > 0) {
+          html += `<div class="file-card" style="margin-bottom: 16px;"><table class="memory-flat-table"><tbody>`;
+          for (const [key, value] of fieldEntries) {
+            html += `<tr data-search="${escapeHtml((key + ' ' + value).toLowerCase())}"><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`;
+          }
+          html += `</tbody></table></div>`;
+        }
+
+        // Render parsed tables (teams, tools, etc.) as proper HTML tables
+        for (const table of p.tables) {
+          html += `<div class="file-card" style="margin-bottom: 16px;"><table class="memory-flat-table"><thead><tr>`;
+          for (const h of table.headers) {
+            html += `<th>${escapeHtml(h)}</th>`;
+          }
+          html += `</tr></thead><tbody>`;
+          for (const row of table.rows) {
+            const searchData = row.join(' ').toLowerCase();
+            html += `<tr data-search="${escapeHtml(searchData)}">`;
+            for (const cell of row) {
+              html += `<td>${escapeHtml(cell)}</td>`;
+            }
+            html += `</tr>`;
+          }
+          html += `</tbody></table></div>`;
+        }
+
+        // Render non-table section content as list items
+        for (const [sectionName, sectionContent] of Object.entries(p.sections)) {
+          if (!sectionContent || sectionName === '_intro') continue;
+          const lines = sectionContent.split('\n').filter(l => l.trim() && !l.trim().startsWith('|'));
+          if (lines.length === 0) continue;
+          html += `<div class="file-card" style="margin-bottom: 16px;"><table class="memory-flat-table"><thead><tr><th colspan="2">${escapeHtml(sectionName)}</th></tr></thead><tbody>`;
+          for (const line of lines) {
+            const cleanLine = line.replace(/^[-*]\s*/, '').replace(/\*\*(.+?)\*\*/g, '$1').trim();
+            if (!cleanLine) continue;
+            html += `<tr data-search="${escapeHtml((sectionName + ' ' + cleanLine).toLowerCase())}"><td colspan="2">${escapeHtml(cleanLine)}</td></tr>`;
+          }
+          html += `</tbody></table></div>`;
+        }
+      }
+
+      html += `</div>`;
+      memoryContentContainer.innerHTML = html;
+    }
+
+    function filterMemoryDirectory(dirName, searchTerm) {
+      const grid = document.getElementById('dirGrid');
+      const items = grid.querySelectorAll('.memory-card, tr[data-search]');
+      const search = searchTerm.toLowerCase();
+      items.forEach(item => {
+        const searchData = item.dataset.search || '';
+        item.style.display = (!search || searchData.includes(search)) ? '' : 'none';
+      });
+    }
+
+    function renderMarkdownToHtml(md) {
+      let html = escapeHtml(md);
+
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      html = html.replace(/```[\s\S]*?```/g, match => {
+        const code = match.replace(/```\w*\n?/g, '');
+        return '<pre><code>' + code + '</code></pre>';
+      });
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      html = html.replace(/(\|.+\|\n\|[-| ]+\|\n(?:\|.+\|\n?)+)/g, match => {
+        const lines = match.trim().split('\n');
+        const headers = lines[0].split('|').filter(c => c.trim());
+        const rows = lines.slice(2).map(row => row.split('|').filter(c => c.trim()));
+        let table = '<table><thead><tr>';
+        headers.forEach(h => table += `<th>${h.trim()}</th>`);
+        table += '</tr></thead><tbody>';
+        rows.forEach(row => {
+          table += '<tr>';
+          row.forEach(cell => table += `<td>${cell.trim()}</td>`);
+          table += '</tr>';
+        });
+        table += '</tbody></table>';
+        return table;
+      });
+      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+      html = html.replace(/^(?!<[hupol]|<li|<table|<pre)(.+)$/gm, '<p>$1</p>');
+      html = html.replace(/<p><\/p>/g, '');
+      html = html.replace(/<p>\s*<\/p>/g, '');
+
+      return html;
+    }
+
+    // Modal functions
+    function openFileModal(dirName, fileName) {
+      const files = memoryData.memoryDirs[dirName];
+      const file = files.find(f => f.name === fileName);
+      if (!file) return;
+
+      document.getElementById('modalTitle').textContent = getDisplayName(fileName);
+      document.getElementById('modalBody').innerHTML = `
+        <div class="markdown-content" style="margin-bottom: 20px;">
+          ${renderMarkdownToHtml(file.content)}
+        </div>
+        <div class="form-group">
+          <label>Edit Raw Markdown</label>
+          <textarea id="editContent">${escapeHtml(file.content)}</textarea>
+        </div>
+      `;
+
+      modalOverlay.classList.add('visible');
+      modalOverlay.dataset.type = 'dirFile';
+      modalOverlay.dataset.dirName = dirName;
+      modalOverlay.dataset.fileName = fileName;
+    }
+
+    function openNewFileModal(dirName) {
+      document.getElementById('modalTitle').textContent = `Add to ${dirName}`;
+
+      let template = '# New Entry\n\n';
+      const existingFiles = memoryData.memoryDirs[dirName];
+      if (existingFiles && existingFiles.length > 0) {
+        const sample = existingFiles[0].parsed;
+        for (const key of Object.keys(sample.fields)) {
+          template += `**${key}:** \n`;
+        }
+        template += '\n';
+        for (const section of Object.keys(sample.sections)) {
+          if (section !== '_intro') {
+            template += `## ${section}\n\n`;
+          }
+        }
+      }
+
+      document.getElementById('modalBody').innerHTML = `
+        <div class="form-group">
+          <label>Filename (without .md)</label>
+          <input type="text" id="newFileName" placeholder="my-new-entry" style="width: 100%; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text-primary); font-size: 14px; font-family: inherit; margin-bottom: 16px;">
+        </div>
+        <div class="form-group">
+          <label>Content</label>
+          <textarea id="editContent">${escapeHtml(template)}</textarea>
+        </div>
+      `;
+
+      modalOverlay.classList.add('visible');
+      modalOverlay.dataset.type = 'newDirFile';
+      modalOverlay.dataset.dirName = dirName;
+    }
+
+    function openEditModal(fileName, type) {
+      let content = '';
+      if (type === 'claudeMd') {
+        content = memoryData.claudeMd.content;
+      } else if (type === 'memoryFile') {
+        const file = memoryData.memoryFiles.find(f => f.name === fileName);
+        if (file) content = file.content;
+      }
+
+      document.getElementById('modalTitle').textContent = `Edit ${fileName}`;
+      document.getElementById('modalBody').innerHTML = `
+        <div class="form-group">
+          <label>Content</label>
+          <textarea id="editContent" style="min-height: 400px;">${escapeHtml(content)}</textarea>
+        </div>
+      `;
+
+      modalOverlay.classList.add('visible');
+      modalOverlay.dataset.type = type;
+      modalOverlay.dataset.fileName = fileName;
+    }
+
+    function closeModal() {
+      modalOverlay.classList.remove('visible');
+    }
+
+    async function saveModal() {
+      const type = modalOverlay.dataset.type;
+      const content = document.getElementById('editContent').value;
+
+      try {
+        if (type === 'claudeMd') {
+          memoryData.claudeMd.content = content;
+          const writable = await memoryData.claudeMd.fileHandle.createWritable();
+          await writable.write(content);
+          await writable.close();
+          showStatus('Saved CLAUDE.md');
+
+        } else if (type === 'memoryFile') {
+          const fileName = modalOverlay.dataset.fileName;
+          const file = memoryData.memoryFiles.find(f => f.name === fileName);
+          if (file) {
+            file.content = content;
+            const writable = await file.fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            showStatus('Saved ' + fileName);
+          }
+
+        } else if (type === 'dirFile') {
+          const dirName = modalOverlay.dataset.dirName;
+          const fileName = modalOverlay.dataset.fileName;
+          const files = memoryData.memoryDirs[dirName];
+          const file = files.find(f => f.name === fileName);
+          if (file) {
+            file.content = content;
+            file.parsed = parseMemoryMarkdown(content);
+            const writable = await file.fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            showStatus('Saved ' + fileName);
+          }
+
+        } else if (type === 'newDirFile') {
+          const dirName = modalOverlay.dataset.dirName;
+          let fileName = document.getElementById('newFileName').value.trim();
+          if (!fileName) { showStatus('Please enter a filename'); return; }
+          if (!fileName.endsWith('.md')) fileName += '.md';
+
+          const memoryDir = await memoryDirHandle.getDirectoryHandle('memory');
+          const subDir = await memoryDir.getDirectoryHandle(dirName, { create: true });
+          const fileHandle = await subDir.getFileHandle(fileName, { create: true });
+
+          const writable = await fileHandle.createWritable();
+          await writable.write(content);
+          await writable.close();
+
+          memoryData.memoryDirs[dirName].push({
+            name: fileName,
+            content: content,
+            fileHandle: fileHandle,
+            dirHandle: subDir,
+            parsed: parseMemoryMarkdown(content)
+          });
+
+          showStatus('Created ' + fileName);
+        }
+
+        closeModal();
+        renderMemory();
+
+      } catch (e) {
+        showStatus('Error saving: ' + e.message);
+      }
+    }
+
+    // Memory event listeners
+    openMemoryBtn.addEventListener('click', loadMemoryDirectory);
+    document.getElementById('openMemoryBtnLarge').addEventListener('click', loadMemoryDirectory);
+    document.getElementById('modalClose').addEventListener('click', closeModal);
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+    document.getElementById('modalSave').addEventListener('click', saveModal);
+
+    modalOverlay.addEventListener('click', (e) => {
+      if (e.target === modalOverlay) closeModal();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+
+    // Expose functions to onclick handlers
+    window.openFileModal = openFileModal;
+    window.openNewFileModal = openNewFileModal;
+    window.openEditModal = openEditModal;
+    window.filterMemoryDirectory = filterMemoryDirectory;
+  </script>
+</body>
+</html>

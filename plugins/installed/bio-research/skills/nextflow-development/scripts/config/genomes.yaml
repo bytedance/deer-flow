@@ -1,0 +1,148 @@
+# Organism to Genome Mapping for nf-core Pipelines
+# Maps organism names (as they appear in GEO/SRA) to iGenomes keys
+
+organisms:
+  # Human
+  "Homo sapiens":
+    genome: "GRCh38"
+    taxid: 9606
+    aliases: ["human", "hg38", "GRCh38"]
+    notes: "Primary human reference genome"
+
+  "Homo sapiens (legacy)":
+    genome: "GRCh37"
+    taxid: 9606
+    aliases: ["hg19", "GRCh37"]
+    notes: "Legacy human reference, still used for some clinical data"
+
+  # Mouse
+  "Mus musculus":
+    genome: "GRCm39"
+    taxid: 10090
+    aliases: ["mouse", "mm39", "GRCm39"]
+    notes: "Current mouse reference genome"
+
+  "Mus musculus (legacy)":
+    genome: "GRCm38"
+    taxid: 10090
+    aliases: ["mm10", "GRCm38"]
+    notes: "Legacy mouse reference"
+
+  # Yeast
+  "Saccharomyces cerevisiae":
+    genome: "R64-1-1"
+    taxid: 4932
+    aliases: ["yeast", "sacCer3", "S288C", "budding yeast"]
+    notes: "S288C reference strain"
+
+  # Fruit fly
+  "Drosophila melanogaster":
+    genome: "BDGP6"
+    taxid: 7227
+    aliases: ["fly", "dm6", "fruit fly", "Dmel"]
+    notes: "Berkeley Drosophila Genome Project release 6"
+
+  # Worm
+  "Caenorhabditis elegans":
+    genome: "WBcel235"
+    taxid: 6239
+    aliases: ["worm", "ce11", "C. elegans", "Cele"]
+    notes: "WormBase reference"
+
+  # Zebrafish
+  "Danio rerio":
+    genome: "GRCz11"
+    taxid: 7955
+    aliases: ["zebrafish", "danRer11", "Drer"]
+    notes: "Genome Reference Consortium Zebrafish Build 11"
+
+  # Arabidopsis
+  "Arabidopsis thaliana":
+    genome: "TAIR10"
+    taxid: 3702
+    aliases: ["arabidopsis", "thale cress", "Atha"]
+    notes: "The Arabidopsis Information Resource v10"
+
+  # Rat
+  "Rattus norvegicus":
+    genome: "Rnor_6.0"
+    taxid: 10116
+    aliases: ["rat", "rn6", "Rnor"]
+    notes: "Rnor 6.0 reference"
+
+  # Chicken
+  "Gallus gallus":
+    genome: "GRCg6a"
+    taxid: 9031
+    aliases: ["chicken", "galGal6", "Ggal"]
+    notes: "Genome Reference Consortium Chicken Build 6a"
+
+  # Pig
+  "Sus scrofa":
+    genome: "Sscrofa11.1"
+    taxid: 9823
+    aliases: ["pig", "susScr11", "Sscr"]
+    notes: "Swine genome assembly 11.1"
+
+  # Cow
+  "Bos taurus":
+    genome: "ARS-UCD1.2"
+    taxid: 9913
+    aliases: ["cow", "bosTau9", "cattle", "Btau"]
+    notes: "USDA ARS assembly"
+
+  # Dog
+  "Canis lupus familiaris":
+    genome: "CanFam3.1"
+    taxid: 9615
+    aliases: ["dog", "canFam3", "Clup"]
+    notes: "Broad Institute CanFam3.1"
+
+  # Frog
+  "Xenopus tropicalis":
+    genome: "JGI_4.2"
+    taxid: 8364
+    aliases: ["frog", "xenTro9", "Xtro"]
+    notes: "JGI assembly version 4.2"
+
+  # Maize/Corn
+  "Zea mays":
+    genome: "Zm-B73-REFERENCE-NAM-5.0"
+    taxid: 4577
+    aliases: ["maize", "corn", "Zmay"]
+    notes: "B73 reference genome v5"
+
+  # Rice
+  "Oryza sativa":
+    genome: "IRGSP-1.0"
+    taxid: 39947
+    aliases: ["rice", "Osat"]
+    notes: "International Rice Genome Sequencing Project"
+
+  # E. coli (common bacterial model)
+  "Escherichia coli":
+    genome: null
+    taxid: 562
+    aliases: ["E. coli", "Ecol"]
+    notes: "Use specific strain reference; K-12 MG1655 common"
+
+  # Fission yeast
+  "Schizosaccharomyces pombe":
+    genome: "ASM294v2"
+    taxid: 4896
+    aliases: ["fission yeast", "S. pombe", "Spom"]
+    notes: "PomBase reference"
+
+# Pipeline mapping based on library strategy
+pipeline_suggestions:
+  "RNA-SEQ": "rnaseq"
+  "ATAC-SEQ": "atacseq"
+  "CHIP-SEQ": "chipseq"
+  "WGS": "sarek"
+  "WXS": "sarek"
+  "EXOME": "sarek"
+  "AMPLICON": "ampliseq"
+  "BISULFITE-SEQ": "methylseq"
+  "HI-C": "hic"
+  "MIRNA-SEQ": "smrnaseq"
+  "RRBS": "methylseq"

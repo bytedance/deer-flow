@@ -1,0 +1,187 @@
+name: atacseq
+version: "2.1.2"
+description: "Chromatin accessibility analysis and peak calling"
+
+# Documentation and source - NOTE: Update version in URLs when upgrading pipeline
+urls:
+  documentation: "https://nf-co.re/atacseq/{version}/"
+  parameters: "https://nf-co.re/atacseq/{version}/parameters/"
+  output_docs: "https://nf-co.re/atacseq/{version}/docs/output/"
+  github: "https://github.com/nf-core/atacseq"
+  releases: "https://github.com/nf-core/atacseq/releases"
+
+data_types:
+  - ATAC-seq
+  - chromatin accessibility
+  - open chromatin
+
+detection_hints:
+  filename:
+    - atac
+    - atacseq
+    - chromatin
+    - accessibility
+  directory:
+    - atac
+    - atacseq
+    - chromatin
+    - epigenome
+    - epigenetics
+
+samplesheet:
+  input_types:
+    - fastq
+
+  columns:
+    - name: sample
+      required: true
+      type: string
+      inference: filename
+      description: "Condition/group identifier (replicates share same name)"
+
+    - name: fastq_1
+      required: true
+      type: path
+      inference: auto
+      description: "Absolute path to R1 FASTQ"
+
+    - name: fastq_2
+      required: true
+      type: path
+      inference: auto
+      description: "Absolute path to R2 FASTQ (paired-end required)"
+
+    - name: replicate
+      required: true
+      type: integer
+      default: 1
+      inference: filename
+      description: "Replicate number (integer)"
+
+decision_points:
+  - parameter: genome
+    prompt: "Which reference genome matches your organism?"
+    options:
+      - value: GRCh38
+        label: "Human GRCh38/hg38 (recommended)"
+        description: "Latest human reference"
+      - value: GRCh37
+        label: "Human GRCh37/hg19 (legacy)"
+        description: "Older human reference"
+      - value: mm10
+        label: "Mouse mm10"
+        description: "Mouse reference genome"
+    default: GRCh38
+    recommendation: "Default to GRCh38 for human samples"
+
+  - parameter: read_length
+    prompt: "What is the read length of your sequencing data?"
+    options:
+      - value: 50
+        label: "50 bp"
+        description: "Short reads"
+      - value: 75
+        label: "75 bp"
+        description: "Standard length"
+      - value: 100
+        label: "100 bp"
+        description: "Common for modern sequencers"
+      - value: 150
+        label: "150 bp"
+        description: "Long reads"
+    default: 50
+    recommendation: "Check FASTQ files or sequencing report for exact length"
+
+  - parameter: narrow_peak
+    prompt: "What type of peaks are you expecting?"
+    options:
+      - value: "true"
+        label: "Narrow peaks (default for ATAC-seq)"
+        description: "Standard ATAC-seq open chromatin regions"
+      - value: "false"
+        label: "Broad peaks"
+        description: "For histone marks or broader accessibility regions"
+    default: "true"
+    recommendation: "Use narrow peaks for standard ATAC-seq"
+
+test_profile:
+  command: "nextflow run nf-core/atacseq -r 2.1.2 -profile test,docker --outdir test_atacseq"
+  duration: "15 minutes"
+  success_indicators:
+    - "test_atacseq/multiqc/multiqc_report.html"
+  log_pattern: "Pipeline completed successfully"
+
+run_command:
+  template: |
+    nextflow run nf-core/atacseq \
+        -r 2.1.2 \
+        -profile docker \
+        --input {samplesheet} \
+        --outdir {outdir} \
+        --genome {genome} \
+        --read_length {read_length} \
+        -resume
+
+outputs:
+  primary:
+    - path: "bwa/mergedLibrary/*.mLb.mkD.sorted.bam"
+      description: "Filtered, deduplicated alignments"
+    - path: "bwa/mergedLibrary/bigwig/*.bigWig"
+      description: "Coverage tracks for genome browsers"
+    - path: "macs2/narrowPeak/*.narrowPeak"
+      description: "Peak calls (BED format)"
+    - path: "macs2/narrowPeak/consensus/consensus_peaks.bed"
+      description: "Consensus peaks across replicates"
+
+  validation:
+    - file: "multiqc/multiqc_report.html"
+      check: exists
+      description: "QC report must exist"
+    - file: "macs2/narrowPeak"
+      check: exists
+      description: "Peak calls directory"
+
+quality_metrics:
+  - name: mapped_reads
+    good: ">80%"
+    acceptable: "60-80%"
+    poor: "<60%"
+  - name: mitochondrial
+    good: "<20%"
+    acceptable: "20-40%"
+    poor: ">40%"
+  - name: duplicates
+    good: "<30%"
+    acceptable: "30-50%"
+    poor: ">50%"
+  - name: frip
+    good: ">30%"
+    acceptable: "15-30%"
+    poor: "<15%"
+  - name: tss_enrichment
+    good: ">6"
+    acceptable: "4-6"
+    poor: "<4"
+
+resources:
+  min_memory: "8.GB"
+  recommended_memory: "32.GB"
+  min_cpus: 4
+  recommended_cpus: 8
+  disk_space: "100.GB"
+
+troubleshooting:
+  - error: "Low FRiP score"
+    fix: "Check library complexity in plotFingerprint. May indicate over-transposition or low quality"
+  - error: "Few peaks called"
+    fix: "Lower threshold with --macs_qvalue 0.1 or use --narrow_peak false for broader peaks"
+  - error: "High duplicates"
+    fix: "Normal for low-input samples. Pipeline removes by default. Consider deeper sequencing"
+  - error: "High mitochondrial reads"
+    fix: "Sample quality issue. Pipeline filters mito by default (--keep_mito false)"
+
+replicate_patterns:
+  - "_rep(\\d+)"
+  - "_R(\\d+)_"
+  - "_(\\d+)$"
+  - "_replicate(\\d+)"

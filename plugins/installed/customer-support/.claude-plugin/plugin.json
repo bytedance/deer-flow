@@ -1,0 +1,8 @@
+{
+  "name": "customer-support",
+  "version": "1.0.0",
+  "description": "Triage tickets, draft responses, escalate issues, and build your knowledge base. Research customer context and turn resolved issues into self-service content.",
+  "author": {
+    "name": "Anthropic"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "slack": {
+      "type": "http",
+      "url": "https://mcp.slack.com/mcp"
+    },
+    "box": {
+      "type": "http",
+      "url": "https://mcp.box.com"
+    },
+    "egnyte": {
+      "type": "http",
+      "url": "https://mcp-server.egnyte.com/mcp"
+    },
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    "ms365": {
+      "type": "http",
+      "url": "https://microsoft365.mcp.claude.com/mcp"
+    }
+  }
+}

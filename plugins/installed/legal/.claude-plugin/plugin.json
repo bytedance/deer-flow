@@ -1,0 +1,8 @@
+{
+  "name": "legal",
+  "version": "1.0.0",
+  "description": "Speed up contract review, NDA triage, and compliance workflows for in-house legal teams. Draft legal briefs, organize precedent research, and manage institutional knowledge.",
+  "author": {
+    "name": "Anthropic"
+  }
+}

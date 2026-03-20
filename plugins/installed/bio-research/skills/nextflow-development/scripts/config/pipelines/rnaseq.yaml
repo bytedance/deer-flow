@@ -1,0 +1,147 @@
+name: rnaseq
+version: "3.22.2"
+description: "Gene expression quantification and differential expression analysis"
+
+# Documentation and source - NOTE: Update version in URLs when upgrading pipeline
+urls:
+  documentation: "https://nf-co.re/rnaseq/{version}/"
+  parameters: "https://nf-co.re/rnaseq/{version}/parameters/"
+  output_docs: "https://nf-co.re/rnaseq/{version}/docs/output/"
+  github: "https://github.com/nf-core/rnaseq"
+  releases: "https://github.com/nf-core/rnaseq/releases"
+
+data_types:
+  - RNA-seq
+  - mRNA-seq
+  - bulk RNA-seq
+
+detection_hints:
+  filename:
+    - rna
+    - rnaseq
+    - mrna
+    - expression
+  directory:
+    - rnaseq
+    - rna
+    - expression
+    - transcriptome
+
+samplesheet:
+  input_types:
+    - fastq
+
+  columns:
+    - name: sample
+      required: true
+      type: string
+      inference: filename
+      description: "Sample identifier"
+
+    - name: fastq_1
+      required: true
+      type: path
+      inference: auto
+      description: "Absolute path to R1 FASTQ"
+
+    - name: fastq_2
+      required: false
+      type: path
+      inference: auto
+      description: "Absolute path to R2 FASTQ (empty for single-end)"
+
+    - name: strandedness
+      required: true
+      type: enum
+      allowed:
+        - auto
+        - forward
+        - reverse
+        - unstranded
+      default: "auto"
+      inference: default
+      description: "Library strandedness (auto recommended)"
+
+decision_points:
+  - parameter: genome
+    prompt: "Which reference genome matches your organism?"
+    options:
+      - value: GRCh38
+        label: "Human GRCh38/hg38 (recommended for human)"
+        description: "Latest human reference assembly"
+      - value: GRCh37
+        label: "Human GRCh37/hg19 (legacy)"
+        description: "Older human reference for compatibility"
+      - value: mm10
+        label: "Mouse mm10/GRCm38"
+        description: "Mouse reference genome"
+      - value: BDGP6
+        label: "Drosophila BDGP6"
+        description: "Fruit fly reference"
+    default: GRCh38
+    recommendation: "Default to GRCh38 for human samples"
+
+  - parameter: aligner
+    prompt: "Which alignment strategy would you prefer?"
+    options:
+      - value: star_salmon
+        label: "STAR + Salmon (recommended)"
+        description: "Most accurate, standard for differential expression"
+      - value: star_rsem
+        label: "STAR + RSEM"
+        description: "Better for isoform-level quantification"
+      - value: hisat2
+        label: "HISAT2"
+        description: "Lower memory requirements, faster"
+    default: star_salmon
+    recommendation: "Use star_salmon unless memory-constrained or need isoforms"
+
+test_profile:
+  command: "nextflow run nf-core/rnaseq -r 3.22.2 -profile test,docker --outdir test_rnaseq"
+  duration: "15 minutes"
+  success_indicators:
+    - "test_rnaseq/multiqc/multiqc_report.html"
+  log_pattern: "Pipeline completed successfully"
+
+run_command:
+  template: |
+    nextflow run nf-core/rnaseq \
+        -r 3.22.2 \
+        -profile docker \
+        --input {samplesheet} \
+        --outdir {outdir} \
+        --genome {genome} \
+        --aligner {aligner} \
+        -resume
+
+outputs:
+  primary:
+    - path: "star_salmon/salmon.merged.gene_counts.tsv"
+      description: "Raw gene counts for DESeq2/edgeR"
+    - path: "star_salmon/salmon.merged.gene_tpm.tsv"
+      description: "TPM normalized expression values"
+    - path: "star_salmon/*.bam"
+      description: "Aligned reads"
+
+  validation:
+    - file: "multiqc/multiqc_report.html"
+      check: exists
+      description: "QC report must exist"
+    - file: "star_salmon/salmon.merged.gene_counts.tsv"
+      check: non_empty
+      description: "Count matrix must have data"
+
+resources:
+  min_memory: "8.GB"
+  recommended_memory: "32.GB"
+  min_cpus: 4
+  recommended_cpus: 8
+  disk_space: "100.GB"
+
+troubleshooting:
+  - error: "STAR index fails"
+    fix: "Increase memory with --max_memory '64.GB' or provide pre-built --star_index"
+  - error: "Low alignment rate"
+    fix: "Verify genome matches species; check FastQC for adapter contamination"
+  - error: "Strandedness detection fails"
+    fix: "Specify explicitly with --strandedness reverse (or forward/unstranded)"

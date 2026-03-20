@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "snowflake": {
+      "type": "http",
+      "url": ""
+    },
+    "databricks": {
+      "type": "http",
+      "url": ""
+    },
+    "bigquery": {
+      "type": "http",
+      "url": "https://bigquery.googleapis.com/mcp"
+    },
+    "hex": {
+      "type": "http",
+      "url": "https://app.hex.tech/mcp"
+    },
+    "amplitude": {
+      "type": "http",
+      "url": "https://mcp.amplitude.com/mcp"
+    },
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    }
+  }
+}

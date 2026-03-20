@@ -1,0 +1,233 @@
+name: sarek
+version: "3.7.1"
+description: "Variant calling for WGS/WES data (germline and somatic)"
+
+# Documentation and source - NOTE: Update version in URLs when upgrading pipeline
+urls:
+  documentation: "https://nf-co.re/sarek/{version}/"
+  parameters: "https://nf-co.re/sarek/{version}/parameters/"
+  output_docs: "https://nf-co.re/sarek/{version}/docs/output/"
+  github: "https://github.com/nf-core/sarek"
+  releases: "https://github.com/nf-core/sarek/releases"
+
+data_types:
+  - WGS
+  - WES
+  - whole genome sequencing
+  - whole exome sequencing
+  - tumor-normal
+  - germline
+  - somatic
+
+detection_hints:
+  filename:
+    - tumor
+    - normal
+    - germline
+    - wgs
+    - wes
+    - exome
+    - dna
+    - variant
+  directory:
+    - variant
+    - wgs
+    - wes
+    - exome
+    - germline
+    - somatic
+
+samplesheet:
+  input_types:
+    - fastq
+    - bam
+    - cram
+
+  columns:
+    - name: patient
+      required: true
+      type: string
+      inference: filename
+      description: "Patient/subject identifier for grouping samples"
+
+    - name: sample
+      required: true
+      type: string
+      inference: filename
+      description: "Sample identifier (e.g., tumor, normal)"
+
+    - name: lane
+      required: false
+      type: string
+      default: "L001"
+      inference: filename
+      description: "Sequencing lane"
+
+    - name: fastq_1
+      required: true
+      type: path
+      inference: auto
+      condition: "input_type == 'fastq'"
+      description: "Absolute path to R1 FASTQ"
+
+    - name: fastq_2
+      required: false
+      type: path
+      inference: auto
+      condition: "input_type == 'fastq'"
+      description: "Absolute path to R2 FASTQ"
+
+    - name: bam
+      required: true
+      type: path
+      inference: auto
+      condition: "input_type in ['bam', 'cram']"
+      description: "Absolute path to BAM/CRAM file"
+
+    - name: bai
+      required: true
+      type: path
+      inference: auto
+      condition: "input_type in ['bam', 'cram']"
+      description: "Absolute path to BAM/CRAM index"
+
+    - name: status
+      required: false
+      type: integer
+      allowed:
+        - 0
+        - 1
+      default: 0
+      inference: filename
+      description: "0=normal, 1=tumor (critical for somatic calling)"
+
+decision_points:
+  - parameter: genome
+    prompt: "Which reference genome should be used?"
+    options:
+      - value: GRCh38
+        label: "Human GRCh38/hg38 (recommended)"
+        description: "Latest human reference with most annotation support"
+      - value: GRCh37
+        label: "Human GRCh37/hg19 (legacy)"
+        description: "For compatibility with older datasets"
+      - value: mm10
+        label: "Mouse mm10"
+        description: "Mouse reference genome"
+    default: GRCh38
+    recommendation: "Default to GRCh38 for human data"
+
+  - parameter: tools
+    prompt: "What type of variant calling do you need?"
+    options:
+      - value: "haplotypecaller,snpeff"
+        label: "Germline variants (single samples)"
+        description: "For finding inherited variants in normal samples"
+        condition: "no tumor samples detected"
+      - value: "mutect2,strelka,snpeff"
+        label: "Somatic variants (tumor-normal pairs)"
+        description: "For finding cancer mutations with matched normal"
+        condition: "tumor-normal pairs detected"
+      - value: "haplotypecaller,deepvariant,snpeff"
+        label: "Germline with DeepVariant"
+        description: "Higher accuracy germline calling (requires GPU)"
+      - value: "mutect2,manta,snpeff"
+        label: "Somatic with structural variants"
+        description: "Comprehensive tumor analysis including SVs"
+    default: "haplotypecaller,snpeff"
+    recommendation: "Use somatic tools if tumor/normal pairs detected, otherwise germline"
+
+  - parameter: wes
+    prompt: "Is this whole exome sequencing (WES) data?"
+    options:
+      - value: "false"
+        label: "No - Whole Genome Sequencing (WGS)"
+        description: "Full genome coverage"
+      - value: "true"
+        label: "Yes - Whole Exome Sequencing (WES)"
+        description: "Requires --intervals BED file"
+    default: "false"
+    recommendation: "If WES, user must provide intervals BED file"
+
+test_profile:
+  command: "nextflow run nf-core/sarek -r 3.7.1 -profile test,docker --outdir test_sarek"
+  duration: "20 minutes"
+  success_indicators:
+    - "test_sarek/multiqc/multiqc_report.html"
+  log_pattern: "Pipeline completed successfully"
+
+run_command:
+  template: |
+    nextflow run nf-core/sarek \
+        -r 3.7.1 \
+        -profile docker \
+        --input {samplesheet} \
+        --outdir {outdir} \
+        --genome {genome} \
+        --tools {tools} \
+        -resume
+
+  wes_template: |
+    nextflow run nf-core/sarek \
+        -r 3.7.1 \
+        -profile docker \
+        --input {samplesheet} \
+        --outdir {outdir} \
+        --genome {genome} \
+        --tools {tools} \
+        --wes \
+        --intervals {intervals} \
+        -resume
+
+outputs:
+  primary:
+    - path: "preprocessing/recalibrated/*.recal.bam"
+      description: "Analysis-ready BAM files"
+    - path: "variant_calling/*/*.vcf.gz"
+      description: "Variant call files"
+    - path: "annotation/snpeff/*.ann.vcf.gz"
+      description: "Annotated variants"
+
+  validation:
+    - file: "multiqc/multiqc_report.html"
+      check: exists
+      description: "QC report must exist"
+    - file: "preprocessing/recalibrated"
+      check: exists
+      description: "Recalibrated BAMs directory"
+
+resources:
+  min_memory: "16.GB"
+  recommended_memory: "64.GB"
+  wgs_memory: "128.GB"
+  min_cpus: 4
+  recommended_cpus: 16
+  disk_space: "500.GB"
+
+troubleshooting:
+  - error: "BQSR fails"
+    fix: "Check known sites available for genome. Skip with --skip_bqsr for non-standard references"
+  - error: "Mutect2 no variants"
+    fix: "Verify tumor/normal pairing in samplesheet (check status column: 0=normal, 1=tumor)"
+  - error: "Out of memory"
+    fix: "--max_memory '128.GB' for WGS data"
+  - error: "DeepVariant GPU issues"
+    fix: "Ensure NVIDIA Docker runtime configured, or use CPU mode"
+
+tumor_normal_keywords:
+  tumor:
+    - tumor
+    - tumour
+    - met
+    - metastasis
+    - primary
+    - cancer
+    - malignant
+  normal:
+    - normal
+    - germline
+    - blood
+    - pbmc
+    - control
+    - healthy
+    - matched
