@@ -14,6 +14,7 @@ from app.gateway.routers import (
     models,
     skills,
     suggestions,
+    threads,
     uploads,
 )
 from deerflow.config.app_config import get_app_config
@@ -140,6 +141,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "threads",
+                "description": "Browse, view, and manage conversation history",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -169,6 +174,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Threads API is mounted at /api/threads
+    app.include_router(threads.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
