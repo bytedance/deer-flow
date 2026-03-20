@@ -1145,7 +1145,11 @@ class TestChannelManager:
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            async def capture(msg):
+                 outbound_received.append(msg)
+                 
+            bus.subscribe_outbound(capture)
             await manager.start()
 
             inbound = InboundMessage(
