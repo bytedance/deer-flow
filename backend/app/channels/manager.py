@@ -26,6 +26,12 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
 
+CHANNEL_CAPABILITIES = {
+    "feishu": {"supports_streaming": True},
+    "slack": {"supports_streaming": False},
+    "telegram": {"supports_streaming": False},
+}
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
@@ -341,6 +347,10 @@ class ChannelManager:
         self._running = False
         self._task: asyncio.Task | None = None
 
+    @staticmethod
+    def _channel_supports_streaming(channel_name: str) -> bool:
+        return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
+
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
         users_layer = _as_dict(channel_layer.get("users"))
@@ -466,7 +476,7 @@ class ChannelManager:
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
-    async def _handle_chat(self, msg: InboundMessage) -> None:
+    async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
         client = self._get_client()
 
         # Look up existing DeerFlow thread.
@@ -481,7 +491,9 @@ class ChannelManager:
             thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
-        if msg.channel_name == "feishu":
+        if extra_context:
+            run_context.update(extra_context)
+        if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
                 client,
                 msg,
@@ -635,6 +647,14 @@ class ChannelManager:
         parts = text.split(maxsplit=1)
         command = parts[0].lower().lstrip("/")
 
+        if command == "bootstrap":
+            from dataclasses import replace as _dc_replace
+
+            chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
+            chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
+            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
+            return
+
         if command == "new":
             # Create a new thread on the LangGraph Server
             client = self._get_client()
@@ -656,7 +676,15 @@ class ChannelManager:
         elif command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory")
         elif command == "help":
-            reply = "Available commands:\n/new — Start a new conversation\n/status — Show current thread info\n/models — List available models\n/memory — Show memory status\n/help — Show this help"
+            reply = (
+                "Available commands:\n"
+                "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/new — Start a new conversation\n"
+                "/status — Show current thread info\n"
+                "/models — List available models\n"
+                "/memory — Show memory status\n"
+                "/help — Show this help"
+            )
         else:
             reply = f"Unknown command: /{command}. Type /help for available commands."
 
