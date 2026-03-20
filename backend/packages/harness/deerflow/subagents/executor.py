@@ -79,7 +79,7 @@ def get_scheduler_pool() -> ThreadPoolExecutor:
     if _scheduler_pool is None:
         with _pool_lock:
             if _scheduler_pool is None:
-                from src.config.subagents_config import get_subagents_app_config
+                from deerflow.config.subagents_config import get_subagents_app_config
 
                 size = get_subagents_app_config().scheduler_pool_size
                 _scheduler_pool = ThreadPoolExecutor(max_workers=size, thread_name_prefix="subagent-scheduler-")
@@ -93,7 +93,7 @@ def get_execution_pool() -> ThreadPoolExecutor:
     if _execution_pool is None:
         with _pool_lock:
             if _execution_pool is None:
-                from src.config.subagents_config import get_subagents_app_config
+                from deerflow.config.subagents_config import get_subagents_app_config
 
                 size = get_subagents_app_config().execution_pool_size
                 _execution_pool = ThreadPoolExecutor(max_workers=size, thread_name_prefix="subagent-exec-")

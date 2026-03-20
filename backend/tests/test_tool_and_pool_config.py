@@ -9,8 +9,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config.subagents_config import SubagentsAppConfig, get_subagents_app_config, load_subagents_config_from_dict
-from src.config.tool_config import _DEFAULT_MAX_CONTENT_CHARS, ToolConfig, get_max_content_chars
+from deerflow.config.subagents_config import (
+    SubagentsAppConfig,
+    get_subagents_app_config,
+    load_subagents_config_from_dict,
+)
+from deerflow.config.tool_config import (
+    _DEFAULT_MAX_CONTENT_CHARS,
+    ToolConfig,
+    get_max_content_chars,
+)
 
 # ---------------------------------------------------------------------------
 # get_max_content_chars()
