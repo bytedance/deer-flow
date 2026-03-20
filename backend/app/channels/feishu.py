@@ -471,7 +471,7 @@ class FeishuChannel(Channel):
                 # Handle plain text messages
                 text = content["text"]
             elif "content" in content and isinstance(content["content"], list):
-                # Handle topic group messages
+                # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
                 text_parts = []
                 for paragraph in content["content"]:
                     if isinstance(paragraph, list):
