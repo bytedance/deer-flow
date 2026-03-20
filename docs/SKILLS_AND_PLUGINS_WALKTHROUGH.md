@@ -27,7 +27,7 @@ A comprehensive walkthrough of how skills are selected, loaded, and applied in t
 │                        Thinktank.ai Skills Architecture                       │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │                                                                               │
-│   think-tank/                                                                  │
+│   think-tank/                                                                 │
 │   ├── skills/                          ← On-disk skill storage                │
 │   │   ├── public/                      ← Built-in / committed skills          │
 │   │   │   ├── pdf-processing/          ← Each skill = directory + SKILL.md    │
@@ -651,7 +651,7 @@ Key validations during install:
 │  │ Agent (thinking): "This matches pdf-processing skill"               │        │
 │  │                                                                     │        │
 │  │ Agent: read_file("/mnt/skills/public/pdf-processing/SKILL.md")      │        │
-│  │   └── Sandbox translates → think-tank/skills/public/.../SKILL.md     │        │
+│  │   └── Sandbox translates → think-tank/skills/public/.../SKILL.md    │        │
 │  │                                                                     │        │
 │  │ Agent: [reads instructions, follows workflow]                       │        │
 │  │ Agent: read_file("/mnt/skills/.../scripts/extract.py")  ← if ref'd  │        │

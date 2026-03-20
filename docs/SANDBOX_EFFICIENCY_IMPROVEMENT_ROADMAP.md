@@ -158,16 +158,16 @@ Pure code fixes in existing files that yield immediate performance gains.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Warm Pool Manager                   │
+│                  Warm Pool Manager                  │
 │                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
-│  │ Ready #1 │  │ Ready #2 │  │ Ready #3 │  ...     │
-│  │ (idle)   │  │ (idle)   │  │ (idle)   │          │
-│  └──────────┘  └──────────┘  └──────────┘          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │ Ready #1 │  │ Ready #2 │  │ Ready #3 │  ...      │
+│  │ (idle)   │  │ (idle)   │  │ (idle)   │           │
+│  └──────────┘  └──────────┘  └──────────┘           │
 │       │                                             │
 │       ▼  acquire(thread_id) → instant assignment    │
 │  ┌──────────┐                                       │
-│  │ Active   │ ──→ idle timeout ──→ back to pool    │
+│  │ Active   │ ──→ idle timeout ──→ back to pool     │
 │  │ sandbox  │                     (not destroyed)   │
 │  └──────────┘                                       │
 │                                                     │
