@@ -122,7 +122,13 @@ export default function ChatPage() {
                   isNewThread={isNewThread}
                   threadId={threadId}
                   autoFocus={isNewThread}
-                  status={thread.isLoading ? "streaming" : "ready"}
+                  status={
+                    thread.error
+                      ? "error"
+                      : thread.isLoading
+                        ? "streaming"
+                        : "ready"
+                  }
                   context={settings.context}
                   extraHeader={
                     isNewThread && <Welcome mode={settings.context.mode} />
