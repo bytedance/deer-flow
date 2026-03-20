@@ -316,7 +316,12 @@ def format_conversation_for_update(messages: list[Any]) -> str:
 
         # Handle content that might be a list (multimodal)
         if isinstance(content, list):
-            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+            text_parts = []
+            for p in content:
+                if isinstance(p, str):
+                    text_parts.append(p)
+                elif isinstance(p, dict) and "text" in p:
+                    text_parts.append(p["text"])
             content = " ".join(text_parts) if text_parts else str(content)
 
         # Strip uploaded_files tags from human messages to avoid persisting

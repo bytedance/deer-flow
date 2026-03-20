@@ -302,7 +302,19 @@ class SubagentExecutor:
                     # Fallback: use the last message if no AIMessage found
                     last_message = messages[-1]
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no AIMessage found, using last message: {type(last_message)}")
-                    result.result = str(last_message.content) if hasattr(last_message, "content") else str(last_message)
+                    raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
+                    if isinstance(raw_content, str):
+                        result.result = raw_content
+                    elif isinstance(raw_content, list):
+                        parts = []
+                        for block in raw_content:
+                            if isinstance(block, str):
+                                parts.append(block)
+                            elif isinstance(block, dict) and "text" in block:
+                                parts.append(block["text"])
+                        result.result = "\n".join(parts) if parts else str(raw_content)
+                    else:
+                        result.result = str(raw_content)
                 else:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
                     result.result = "No response generated"

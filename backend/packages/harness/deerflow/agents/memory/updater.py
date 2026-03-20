@@ -1,6 +1,7 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -14,6 +15,8 @@ from deerflow.agents.memory.prompt import (
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -113,6 +116,29 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     return memory_data
 
 
+def _extract_text(content: Any) -> str:
+    """Extract plain text from LLM response content (str or list of content blocks).
+
+    Modern LLMs may return structured content as a list of blocks instead of a
+    plain string, e.g. [{"type": "text", "text": "..."}]. Using str() on such
+    content produces Python repr instead of the actual text, breaking JSON
+    parsing downstream.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text_val = block.get("text")
+                if isinstance(text_val, str):
+                    parts.append(text_val)
+        return "\n".join(parts)
+    return str(content)
+
+
 def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
     """Load memory data from file.
 
@@ -132,7 +158,7 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
             data = json.load(f)
         return data
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to load memory file: {e}")
+        logger.warning("Failed to load memory file: %s", e)
         return _create_empty_memory()
 
 
@@ -217,10 +243,10 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
 
         _memory_cache[agent_name] = (memory_data, mtime)
 
-        print(f"Memory saved to {file_path}")
+        logger.info("Memory saved to %s", file_path)
         return True
     except OSError as e:
-        print(f"Failed to save memory file: {e}")
+        logger.error("Failed to save memory file: %s", e)
         return False
 
 
@@ -278,7 +304,7 @@ class MemoryUpdater:
             # Call LLM
             model = self._get_model()
             response = model.invoke(prompt)
-            response_text = str(response.content).strip()
+            response_text = _extract_text(response.content).strip()
 
             # Parse response
             # Remove markdown code blocks if present
@@ -301,10 +327,10 @@ class MemoryUpdater:
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.error("Memory update failed: %s", e)
             return False
 
     def _apply_updates(
