@@ -98,9 +98,9 @@ def e2e_env(tmp_path, monkeypatch):
     set_app_config(config)
 
     # 3. Disable title generation (extra LLM call, non-deterministic)
-    from deerflow.config.title_config import TitleConfig, set_title_config
+    from deerflow.config.title_config import TitleConfig
 
-    set_title_config(TitleConfig(enabled=False))
+    monkeypatch.setattr("deerflow.config.title_config._title_config", TitleConfig(enabled=False))
 
     # 4. Disable memory queueing (avoids background threads & file writes)
     from deerflow.config.memory_config import MemoryConfig
@@ -111,9 +111,9 @@ def e2e_env(tmp_path, monkeypatch):
     )
 
     # 5. Ensure summarization is off (default, but be explicit)
-    from deerflow.config.summarization_config import SummarizationConfig, set_summarization_config
+    from deerflow.config.summarization_config import SummarizationConfig
 
-    set_summarization_config(SummarizationConfig(enabled=False))
+    monkeypatch.setattr("deerflow.config.summarization_config._summarization_config", SummarizationConfig(enabled=False))
 
     # 6. Exclude TitleMiddleware from the chain.
     #    It triggers an extra LLM call to generate a thread title, which adds
