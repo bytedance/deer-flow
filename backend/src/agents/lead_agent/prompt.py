@@ -1,6 +1,8 @@
 from datetime import datetime
 
 from src.agents.lead_agent.prompts.composer import PromptComposer
+from src.plugins.prompt import build_commands_prompt_section
+from src.plugins.registry import get_plugin_registry
 from src.skills import load_skills
 
 # Singleton composer instance (fragments are cached on first load)
@@ -225,6 +227,22 @@ You have access to skills that provide optimized workflows for specific tasks. E
 </skill_system>"""
 
 
+def _get_commands_prompt_section() -> str:
+    """Generate the commands prompt section from installed plugins.
+
+    Returns the <command_system>...</command_system> block listing all
+    available slash commands from enabled plugins.
+    """
+    try:
+        registry = get_plugin_registry()
+        commands = registry.get_all_commands()
+        if not commands:
+            return ""
+        return build_commands_prompt_section(commands)
+    except Exception:
+        return ""
+
+
 def _build_ptc_section() -> str:
     """Build the PTC (Programmatic Tool Calling) system prompt section.
 
@@ -346,6 +364,9 @@ def apply_prompt_template(
     # Get skills section
     skills_section = get_skills_prompt_section()
 
+    # Get commands section from plugins
+    commands_section = _get_commands_prompt_section()
+
     # Assemble via PromptComposer
     return _composer.compose(
         memory_context=memory_context,
@@ -356,5 +377,6 @@ def apply_prompt_template(
         tool_search_section=tool_search_section,
         ptc_section=ptc_section,
         skills_section=skills_section,
+        commands_section=commands_section,
         current_date=datetime.now().strftime("%Y-%m-%d, %A"),
     )

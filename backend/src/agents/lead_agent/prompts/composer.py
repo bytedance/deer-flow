@@ -171,6 +171,7 @@ class PromptComposer:
         tool_search_section: str = "",
         ptc_section: str = "",
         skills_section: str = "",
+        commands_section: str = "",
         current_date: str = "",
         extra_variables: dict[str, Any] | None = None,
     ) -> str:
@@ -178,7 +179,7 @@ class PromptComposer:
 
         Section ordering:
         identity -> memory -> thinking_style -> clarification ->
-        tool_policies -> tool_search -> ptc -> skills -> subagent ->
+        tool_policies -> tool_search -> ptc -> skills -> commands -> subagent ->
         working_directory -> response_style -> citations ->
         research_planning -> critical_reminders -> current_date
 
@@ -191,6 +192,7 @@ class PromptComposer:
             tool_search_section: Pre-formatted ``<tool_search_system>`` block or empty.
             ptc_section: Pre-formatted ``<ptc_system>`` block or empty.
             skills_section: Pre-formatted ``<skill_system>`` block or empty.
+            commands_section: Pre-formatted ``<command_system>`` block or empty.
             current_date: Formatted date string for ``<current_date>`` tag.
             extra_variables: Additional template variables merged with defaults.
 
@@ -236,6 +238,10 @@ class PromptComposer:
         # 6. Skills (pass-through)
         if skills_section.strip():
             sections.append(skills_section)
+
+        # 6.5. Commands from plugins (pass-through)
+        if commands_section.strip():
+            sections.append(commands_section)
 
         # 7. Subagent (pass-through)
         if subagent_section.strip():
