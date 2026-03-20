@@ -67,9 +67,10 @@ models:
   #   supports_vision: true
 
   # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
-  # Use PatchedChatOpenAI so that thought_signature is preserved across multi-turn
-  # tool-call conversations — required by the Gemini API when thinking is enabled.
-  # See: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+  # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
+  # are preserved across multi-turn tool-call conversations — required by the
+  # Gemini API when thinking is enabled. See:
+  # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
   # - name: gemini-2.5-pro-thinking
   #   display_name: Gemini 2.5 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI

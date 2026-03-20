@@ -172,5 +172,5 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
 
-# Integration behavior is validated via _restore_thinking_blocks and
+# Integration behavior for PatchedChatOpenAI is validated indirectly via
 # _restore_tool_call_signatures unit coverage above.
