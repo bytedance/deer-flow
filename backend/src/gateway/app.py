@@ -15,6 +15,7 @@ from src.gateway.routers import (
     mcp,
     memory,
     models,
+    plugins,
     projects,
     providers,
     ptc,
@@ -194,6 +195,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+
+    # Plugins API is mounted at /api/plugins
+    app.include_router(plugins.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
