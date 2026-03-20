@@ -114,7 +114,9 @@ export function groupMessages<T>(
 
       // Not an else-if: a message with reasoning + content (but no tool calls) goes
       // into the processing group above AND gets its own assistant bubble here.
-      if (hasContent(message) && !hasToolCalls(message)) {
+      // Also surface text content from messages that carry both tool_calls and text —
+      // the text would otherwise be silently dropped.
+      if (hasContent(message) && (!hasToolCalls(message) || extractTextFromMessage(message).length > 0)) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }
@@ -237,7 +239,11 @@ export function hasContent(message: Message) {
     ).length > 0;
   }
   if (Array.isArray(message.content)) {
-    return message.content.length > 0;
+    // Array content may include non-text blocks (e.g. thinking).
+    // Only consider blocks with type === "text" and non-empty text.
+    return message.content.some(
+      (block) => "type" in block && block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0,
+    );
   }
   return false;
 }
