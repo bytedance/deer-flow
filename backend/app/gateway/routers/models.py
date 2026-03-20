@@ -10,6 +10,7 @@ class ModelResponse(BaseModel):
     """Response model for model information."""
 
     name: str = Field(..., description="Unique identifier for the model")
+    model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
@@ -61,6 +62,7 @@ async def list_models() -> ModelsListResponse:
     models = [
         ModelResponse(
             name=model.name,
+            model=model.model,
             display_name=model.display_name,
             description=model.description,
             supports_thinking=model.supports_thinking,
@@ -106,6 +108,7 @@ async def get_model(model_name: str) -> ModelResponse:
 
     return ModelResponse(
         name=model.name,
+        model=model.model,
         display_name=model.display_name,
         description=model.description,
         supports_thinking=model.supports_thinking,
