@@ -55,6 +55,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@shikijs/transformers": "^4.0.1",
+    "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
     "@tanstack/react-query": "^5.90.17",
     "@tanstack/react-table": "^8.21.3",

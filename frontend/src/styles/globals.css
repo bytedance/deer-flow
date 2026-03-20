@@ -465,6 +465,138 @@
     white-space: pre;
   }
 
+  .artifact-markdown {
+    padding: 1.5rem;
+    color: var(--foreground);
+  }
+
+  .artifact-markdown h1,
+  .artifact-markdown h2,
+  .artifact-markdown h3,
+  .artifact-markdown h4,
+  .artifact-markdown h5,
+  .artifact-markdown h6 {
+    font-family: var(--font-user);
+    color: var(--foreground);
+    letter-spacing: -0.02em;
+  }
+
+  .artifact-markdown h1 {
+    margin-top: 0;
+    font-size: clamp(2rem, 4vw, 2.6rem);
+    line-height: 1.05;
+  }
+
+  .artifact-markdown h2 {
+    margin-top: 2.25rem;
+    font-size: clamp(1.5rem, 3vw, 1.9rem);
+    line-height: 1.1;
+  }
+
+  .artifact-markdown h3 {
+    margin-top: 1.75rem;
+    font-size: 1.25rem;
+    line-height: 1.2;
+  }
+
+  .artifact-markdown p,
+  .artifact-markdown ul,
+  .artifact-markdown ol,
+  .artifact-markdown blockquote,
+  .artifact-markdown dl {
+    max-width: 72ch;
+    font-size: 0.98rem;
+    line-height: 1.8;
+  }
+
+  .artifact-markdown ul,
+  .artifact-markdown ol {
+    padding-left: 1.4rem;
+  }
+
+  .artifact-markdown li + li {
+    margin-top: 0.35rem;
+  }
+
+  .artifact-markdown hr {
+    margin-block: 2rem;
+    border-color: color-mix(in srgb, var(--border) 75%, transparent);
+  }
+
+  .artifact-markdown blockquote {
+    border-left: 3px solid color-mix(in srgb, var(--primary) 65%, white 35%);
+    padding-left: 1rem;
+    color: color-mix(in srgb, var(--foreground) 72%, transparent);
+  }
+
+  .artifact-markdown img {
+    margin-block: 1.5rem;
+    border-radius: 1rem;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+  }
+
+  .artifact-markdown [data-streamdown="code-block"] {
+    margin-block: 1.5rem;
+    width: 100%;
+    border-color: color-mix(in srgb, var(--primary) 18%, var(--border));
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+  }
+
+  .artifact-markdown [data-streamdown="code-block-body"] pre {
+    background: var(--sdm-bg, var(--code-bg));
+    color: var(--sdm-fg, inherit);
+  }
+
+  .dark .artifact-markdown [data-streamdown="code-block-body"] pre {
+    background: var(--shiki-dark-bg, var(--sdm-bg, var(--code-bg)));
+    color: var(--shiki-dark, var(--sdm-fg, inherit));
+  }
+
+  .artifact-markdown
+    [data-streamdown="code-block-body"]
+    code
+    span[style*="--sdm-c"] {
+    color: var(--sdm-c) !important;
+  }
+
+  .dark
+    .artifact-markdown
+    [data-streamdown="code-block-body"]
+    code
+    span[style*="--shiki-dark"] {
+    color: var(--shiki-dark) !important;
+  }
+
+  .artifact-markdown
+    [data-streamdown="code-block-body"]
+    code
+    span[style*="--sdm-tbg"] {
+    background-color: var(--sdm-tbg);
+  }
+
+  .dark
+    .artifact-markdown
+    [data-streamdown="code-block-body"]
+    code
+    span[style*="--shiki-dark-bg"] {
+    background-color: var(--shiki-dark-bg);
+  }
+
+  .artifact-markdown [data-streamdown="code-block-header"] {
+    padding-inline: 0.5rem;
+    color: color-mix(in srgb, var(--foreground) 62%, transparent);
+  }
+
+  .artifact-markdown [data-streamdown="code-block-actions"] {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .artifact-markdown .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-block: 0.4rem;
+  }
+
   .container-md {
     width: 100%;
     @media (width >= 40rem) {

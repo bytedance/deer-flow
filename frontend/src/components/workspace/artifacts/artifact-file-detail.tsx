@@ -1,3 +1,5 @@
+import { createCodePlugin } from "@streamdown/code";
+import { math } from "@streamdown/math";
 import {
   Code2Icon,
   CopyIcon,
@@ -8,10 +10,21 @@ import {
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { type BundledLanguage } from "shiki";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentProps,
+  type HTMLAttributes,
+} from "react";
+import { type BundledLanguage, type BundledTheme } from "shiki";
 import { toast } from "sonner";
-import { Streamdown } from "streamdown";
+import {
+  Streamdown,
+  type CodeHighlighterPlugin,
+  type StreamdownProps,
+} from "streamdown";
 
 import {
   Artifact,
@@ -35,16 +48,69 @@ import { downloadArtifact, urlOfArtifact } from "@/core/artifacts/utils";
 import { authFetch } from "@/core/auth/fetch";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill } from "@/core/skills/api";
-import { streamdownPlugins } from "@/core/streamdown";
 import { checkCodeFile, getFileName, isImageFile } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import { ScrollableTable } from "../messages/scrollable-table";
 import { Tooltip } from "../tooltip";
 
 import { useArtifacts } from "./context";
 import { DataTableViewer } from "./data-table-viewer";
+
+const artifactMarkdownThemes: [BundledTheme, BundledTheme] = [
+  "vitesse-light",
+  "tokyo-night",
+];
+
+const artifactMarkdownCodePlugin = createCodePlugin({
+  themes: artifactMarkdownThemes,
+}) as unknown as CodeHighlighterPlugin;
+
+const artifactMarkdownPlugins: NonNullable<StreamdownProps["plugins"]> = {
+  code: artifactMarkdownCodePlugin,
+  math,
+};
+
+function ArtifactMarkdownLink({
+  className,
+  href,
+  children,
+  ...props
+}: ComponentProps<"a">) {
+  if (typeof children === "string") {
+    const match = /^citation:(.+)$/.exec(children);
+    if (match) {
+      const [, text] = match;
+      return (
+        <CitationLink href={href} {...props}>
+          {text}
+        </CitationLink>
+      );
+    }
+  }
+
+  return (
+    <a
+      {...props}
+      href={href}
+      rel="noopener noreferrer"
+      target="_blank"
+      className={cn(
+        "decoration-primary/60 text-primary underline underline-offset-4 transition-colors hover:text-primary/80 hover:decoration-primary",
+        className,
+      )}
+    />
+  );
+}
+
+const artifactMarkdownComponents = {
+  a: ArtifactMarkdownLink,
+  table: (props: HTMLAttributes<HTMLTableElement>) => (
+    <ScrollableTable {...props} />
+  ),
+};
 
 export function ArtifactFileDetail({
   className,
@@ -323,11 +389,14 @@ export function ArtifactFilePreview({
 }) {
   if (language === "markdown") {
     return (
-      <div className="size-full px-4">
+      <div className="size-full overflow-auto">
         <Streamdown
-          className="size-full"
-          {...streamdownPlugins}
-          components={{ a: CitationLink }}
+          className="artifact-markdown size-full"
+          components={artifactMarkdownComponents}
+          controls={{ code: true }}
+          mode="static"
+          normalizeHtmlIndentation
+          plugins={artifactMarkdownPlugins}
         >
           {content ?? ""}
         </Streamdown>
@@ -360,19 +429,22 @@ function AuthImage({
 
   useEffect(() => {
     let revoked = false;
+    let nextObjectUrl: string | null = null;
     authFetch(src)
       .then((res) => res.blob())
       .then((blob) => {
+        nextObjectUrl = URL.createObjectURL(blob);
         if (!revoked) {
-          setObjectUrl(URL.createObjectURL(blob));
+          setObjectUrl(nextObjectUrl);
+        } else {
+          URL.revokeObjectURL(nextObjectUrl);
         }
       })
       .catch(console.error);
     return () => {
       revoked = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (nextObjectUrl) URL.revokeObjectURL(nextObjectUrl);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
 
   if (!objectUrl) return null;
