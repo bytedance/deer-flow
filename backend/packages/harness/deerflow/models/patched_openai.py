@@ -2,20 +2,21 @@
 
 When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
 Vertex AI, Google AI Studio, or any proxy), the API requires that the
-``thought_signature`` field present on thinking content blocks in the model's
-response is echoed back verbatim in every subsequent request that includes those
-assistant messages.
+``thought_signature`` field on tool-call objects is echoed back verbatim in
+every subsequent request.
 
-Standard ``langchain_openai.ChatOpenAI`` does not know about this Gemini-specific
-field and silently drops it when serialising messages for the next API call.
-That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
+The OpenAI-compatible gateway stores the raw tool-call dicts (including
+``thought_signature``) in ``additional_kwargs["tool_calls"]``, but standard
+``langchain_openai.ChatOpenAI`` only serialises the standard fields (``id``,
+``type``, ``function``) into the outgoing payload, silently dropping the
+signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
 
     Unable to submit request because function call `<tool>` in the N. content
     block is missing a `thought_signature`.
 
 This module fixes the problem by overriding ``_get_request_payload`` to
-re-inject thinking blocks (with their ``thought_signature``) back into the
-outgoing payload for any assistant message that originally carried them.
+re-inject tool-call signatures back into the outgoing payload for any assistant
+message that originally carried them.
 """
 
 from __future__ import annotations
@@ -31,10 +32,10 @@ class PatchedChatOpenAI(ChatOpenAI):
     """ChatOpenAI with ``thought_signature`` preservation for Gemini thinking via OpenAI gateway.
 
     When using Gemini with thinking enabled via an OpenAI-compatible gateway,
-    the API expects ``thought_signature`` to be present on thinking content
-    blocks in multi-turn conversations.  This patched version ensures those
-    blocks are restored in the request payload from wherever LangChain stored
-    them on the ``AIMessage``.
+    the API expects ``thought_signature`` to be present on tool-call objects in
+    multi-turn conversations.  This patched version restores those signatures
+    from ``AIMessage.additional_kwargs["tool_calls"]`` into the serialised
+    request payload before it is sent to the API.
 
     Usage in ``config.yaml``::
 
@@ -60,11 +61,12 @@ class PatchedChatOpenAI(ChatOpenAI):
         stop: list[str] | None = None,
         **kwargs: Any,
     ) -> dict:
-        """Get request payload with ``thought_signature`` preserved in thinking blocks.
+        """Get request payload with ``thought_signature`` preserved on tool-call objects.
 
-        Overrides the parent method to re-inject thinking content blocks (and
-        their ``thought_signature``) from the original ``AIMessage`` objects
-        into the serialised payload that will be sent to the API.
+        Overrides the parent method to re-inject ``thought_signature`` fields
+        on tool-call objects that were stored in
+        ``additional_kwargs["tool_calls"]`` by LangChain but dropped during
+        serialisation.
         """
         # Capture the original LangChain messages *before* conversion so we can
         # access fields that the serialiser might drop.
@@ -78,7 +80,7 @@ class PatchedChatOpenAI(ChatOpenAI):
         if len(payload_messages) == len(original_messages):
             for payload_msg, orig_msg in zip(payload_messages, original_messages):
                 if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
-                    _restore_thinking_blocks(payload_msg, orig_msg)
+                    _restore_tool_call_signatures(payload_msg, orig_msg)
         else:
             # Fallback: match assistant-role entries positionally against AIMessages.
             ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
@@ -86,63 +88,47 @@ class PatchedChatOpenAI(ChatOpenAI):
                 (i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"
             ]
             for (_, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
-                _restore_thinking_blocks(payload_msg, ai_msg)
+                _restore_tool_call_signatures(payload_msg, ai_msg)
 
         return payload
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> None:
+    """Re-inject ``thought_signature`` onto tool-call objects in *payload_msg*.
 
+    When the Gemini OpenAI-compatible gateway returns a response with function
+    calls, each tool-call object may carry a ``thought_signature``.  LangChain
+    stores the raw tool-call dicts in ``additional_kwargs["tool_calls"]`` but
+    only serialises the standard fields (``id``, ``type``, ``function``) into
+    the outgoing payload, silently dropping the signature.
 
-def _restore_thinking_blocks(payload_msg: dict, orig_msg: AIMessage) -> None:
-    """Re-inject thinking content blocks with ``thought_signature`` into *payload_msg*.
-
-    LangChain may store the raw thinking blocks in two places depending on the
-    provider library version:
-
-    1. ``additional_kwargs["thinking_blocks"]`` – some gateway/version combos
-       store the raw content-block list here.
-    2. ``content`` as a ``list`` – newer LangChain versions preserve the full
-       content-block list directly on the message.
-
-    We check both locations, collect only blocks that carry a
-    ``thought_signature`` (to avoid injecting spurious empty blocks), and
-    prepend them to the serialised content so Gemini can validate the
-    signature chain.
+    This function matches raw tool-call entries (by ``id``, falling back to
+    positional order) and copies the signature back onto the serialised
+    payload entries.
     """
-    # --- 1. Try additional_kwargs["thinking_blocks"] first -----------------
-    thinking_blocks: list[dict] = list(orig_msg.additional_kwargs.get("thinking_blocks") or [])
+    raw_tool_calls: list[dict] = orig_msg.additional_kwargs.get("tool_calls") or []
+    payload_tool_calls: list[dict] = payload_msg.get("tool_calls") or []
 
-    # --- 2. Fall back to content list if no blocks found above --------------
-    if not thinking_blocks and isinstance(orig_msg.content, list):
-        thinking_blocks = [
-            block
-            for block in orig_msg.content
-            if isinstance(block, dict) and block.get("type") == "thinking"
-        ]
-
-    if not thinking_blocks:
+    if not raw_tool_calls or not payload_tool_calls:
         return
 
-    # Only keep blocks that actually carry a thought_signature; blocks without
-    # one do not need special handling and injecting them could cause issues.
-    signed_blocks = [b for b in thinking_blocks if b.get("thought_signature")]
-    if not signed_blocks:
-        return
+    # Build an id → raw_tc lookup for efficient matching.
+    raw_by_id: dict[str, dict] = {}
+    for raw_tc in raw_tool_calls:
+        tc_id = raw_tc.get("id")
+        if tc_id:
+            raw_by_id[tc_id] = raw_tc
 
-    # --- Merge signed blocks into the payload content ----------------------
-    existing_content = payload_msg.get("content")
+    for idx, payload_tc in enumerate(payload_tool_calls):
+        # Try matching by id first, then fall back to positional.
+        raw_tc = raw_by_id.get(payload_tc.get("id", ""))
+        if raw_tc is None and idx < len(raw_tool_calls):
+            raw_tc = raw_tool_calls[idx]
 
-    if isinstance(existing_content, list):
-        # Remove any stale (unsigned) thinking blocks already in the list,
-        # then prepend the correctly-signed ones.
-        non_thinking = [b for b in existing_content if b.get("type") != "thinking"]
-        payload_msg["content"] = signed_blocks + non_thinking
-    elif isinstance(existing_content, str) and existing_content:
-        # Content is a plain string; wrap it so we can prepend blocks.
-        payload_msg["content"] = signed_blocks + [{"type": "text", "text": existing_content}]
-    else:
-        # Content is None / empty — just set the thinking blocks directly.
-        payload_msg["content"] = signed_blocks
+        if raw_tc is None:
+            continue
+
+        # The gateway may use either snake_case or camelCase.
+        sig = raw_tc.get("thought_signature") or raw_tc.get("thoughtSignature")
+        if sig:
+            payload_tc["thought_signature"] = sig

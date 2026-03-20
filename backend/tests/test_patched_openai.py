@@ -1,199 +1,176 @@
 """Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
 
-These tests verify that _restore_thinking_blocks correctly re-injects
-thought_signature-carrying thinking blocks into the outgoing payload for
-assistant messages, covering the two storage patterns that LangChain may use
-and several edge-cases.
+These tests verify that _restore_tool_call_signatures correctly re-injects
+``thought_signature`` onto tool-call objects stored in
+``additional_kwargs["tool_calls"]``, covering id-based matching, positional
+fallback, camelCase keys, and several edge-cases.
 """
 
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from deerflow.models.patched_openai import _restore_thinking_blocks
+from deerflow.models.patched_openai import _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-SIGNED_BLOCK = {
-    "type": "thinking",
-    "thinking": "Let me reason about this...",
-    "thought_signature": "abc123==",
+RAW_TC_SIGNED = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "web_fetch", "arguments": '{"url":"http://example.com"}'},
+    "thought_signature": "SIG_A==",
 }
 
-UNSIGNED_BLOCK = {
-    "type": "thinking",
-    "thinking": "Some thought without a signature",
+RAW_TC_UNSIGNED = {
+    "id": "call_2",
+    "type": "function",
+    "function": {"name": "bash", "arguments": '{"cmd":"ls"}'},
 }
 
-TEXT_BLOCK = {"type": "text", "text": "I will fetch the page for you."}
+PAYLOAD_TC_1 = {
+    "type": "function",
+    "id": "call_1",
+    "function": {"name": "web_fetch", "arguments": '{"url":"http://example.com"}'},
+}
+
+PAYLOAD_TC_2 = {
+    "type": "function",
+    "id": "call_2",
+    "function": {"name": "bash", "arguments": '{"cmd":"ls"}'},
+}
 
 
-def _ai_msg_with_additional_kwargs(thinking_blocks: list[dict]) -> AIMessage:
-    return AIMessage(content="", additional_kwargs={"thinking_blocks": thinking_blocks})
-
-
-def _ai_msg_with_list_content(content: list[dict]) -> AIMessage:
-    return AIMessage(content=content)
-
-
-def _ai_msg_with_str_content(text: str) -> AIMessage:
-    return AIMessage(content=text)
-
-
-# ---------------------------------------------------------------------------
-# Core: signed block in additional_kwargs
-# ---------------------------------------------------------------------------
-
-
-def test_signed_block_from_additional_kwargs_prepended_to_none_content():
-    """Signed block from additional_kwargs is injected when payload content is None."""
-    payload_msg = {"role": "assistant", "content": None}
-    orig = _ai_msg_with_additional_kwargs([SIGNED_BLOCK])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] == [SIGNED_BLOCK]
-
-
-def test_signed_block_from_additional_kwargs_prepended_to_string_content():
-    """Signed block is prepended; plain string content is wrapped as text block."""
-    payload_msg = {"role": "assistant", "content": "Calling tool now."}
-    orig = _ai_msg_with_additional_kwargs([SIGNED_BLOCK])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] == [
-        SIGNED_BLOCK,
-        {"type": "text", "text": "Calling tool now."},
-    ]
-
-
-def test_signed_block_from_additional_kwargs_prepended_to_list_content():
-    """Signed block is prepended to an existing content list."""
-    payload_msg = {"role": "assistant", "content": [TEXT_BLOCK]}
-    orig = _ai_msg_with_additional_kwargs([SIGNED_BLOCK])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] == [SIGNED_BLOCK, TEXT_BLOCK]
+def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
+    return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
 
 
 # ---------------------------------------------------------------------------
-# Core: signed block in AIMessage.content (list)
+# Core: signed tool-call restoration
 # ---------------------------------------------------------------------------
 
 
-def test_signed_block_from_list_content():
-    """Signed block found in content list is injected into the payload."""
-    payload_msg = {"role": "assistant", "content": None}
-    orig = _ai_msg_with_list_content([SIGNED_BLOCK, TEXT_BLOCK])
+def test_tool_call_signature_restored_by_id():
+    """thought_signature is copied to the payload tool-call matched by id."""
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
+    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
 
-    _restore_thinking_blocks(payload_msg, orig)
+    _restore_tool_call_signatures(payload_msg, orig)
 
-    assert SIGNED_BLOCK in payload_msg["content"]
-
-
-def test_signed_block_from_list_content_deduplicates_existing_stale_blocks():
-    """Stale (unsigned) thinking blocks already in the payload list are replaced."""
-    stale = {"type": "thinking", "thinking": "old thought"}  # no thought_signature
-    payload_msg = {"role": "assistant", "content": [stale, TEXT_BLOCK]}
-    orig = _ai_msg_with_list_content([SIGNED_BLOCK, TEXT_BLOCK])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert stale not in payload_msg["content"]
-    assert SIGNED_BLOCK in payload_msg["content"]
-    assert TEXT_BLOCK in payload_msg["content"]
+    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_A=="
 
 
-# ---------------------------------------------------------------------------
-# Edge cases: no-op scenarios
-# ---------------------------------------------------------------------------
-
-
-def test_no_thinking_blocks_anywhere_is_noop():
-    """No change when the AIMessage has no thinking blocks at all."""
-    payload_msg = {"role": "assistant", "content": None}
-    orig = AIMessage(content="plain response")
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] is None
-
-
-def test_unsigned_block_only_is_noop():
-    """Thinking blocks without thought_signature must not be injected."""
-    payload_msg = {"role": "assistant", "content": None}
-    orig = _ai_msg_with_additional_kwargs([UNSIGNED_BLOCK])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] is None
-
-
-def test_empty_additional_kwargs_thinking_blocks_list_is_noop():
-    """Empty thinking_blocks list in additional_kwargs triggers no injection."""
-    payload_msg = {"role": "assistant", "content": "response"}
-    orig = _ai_msg_with_additional_kwargs([])
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] == "response"
-
-
-def test_additional_kwargs_missing_thinking_blocks_key_is_noop():
-    """No thinking_blocks key in additional_kwargs → no injection."""
-    payload_msg = {"role": "assistant", "content": "response"}
-    orig = AIMessage(content="response", additional_kwargs={"some_other_key": "value"})
-
-    _restore_thinking_blocks(payload_msg, orig)
-
-    assert payload_msg["content"] == "response"
-
-
-# ---------------------------------------------------------------------------
-# Priority: additional_kwargs takes precedence over content list
-# ---------------------------------------------------------------------------
-
-
-def test_additional_kwargs_takes_precedence_over_content_list():
-    """When both storage locations have thinking blocks, additional_kwargs wins."""
-    alt_block = {
-        "type": "thinking",
-        "thinking": "Another thought",
-        "thought_signature": "xyz789==",
+def test_tool_call_signature_for_parallel_calls():
+    """For parallel function calls, only the first has a signature (per Gemini spec)."""
+    payload_msg = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [PAYLOAD_TC_1.copy(), PAYLOAD_TC_2.copy()],
     }
-    payload_msg = {"role": "assistant", "content": None}
-    # additional_kwargs has SIGNED_BLOCK, content list has alt_block
-    orig = AIMessage(
-        content=[alt_block],
-        additional_kwargs={"thinking_blocks": [SIGNED_BLOCK]},
-    )
+    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED, RAW_TC_UNSIGNED])
 
-    _restore_thinking_blocks(payload_msg, orig)
+    _restore_tool_call_signatures(payload_msg, orig)
 
-    # SIGNED_BLOCK from additional_kwargs should win
-    assert SIGNED_BLOCK in payload_msg["content"]
-    assert alt_block not in payload_msg["content"]
+    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_A=="
+    assert "thought_signature" not in payload_msg["tool_calls"][1]
+
+
+def test_tool_call_signature_camel_case():
+    """thoughtSignature (camelCase) from some gateways is also handled."""
+    raw_camel = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "web_fetch", "arguments": "{}"},
+        "thoughtSignature": "SIG_CAMEL==",
+    }
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
+    orig = _ai_msg_with_raw_tool_calls([raw_camel])
+
+    _restore_tool_call_signatures(payload_msg, orig)
+
+    assert payload_msg["tool_calls"][0]["thought_signature"] == "SIG_CAMEL=="
+
+
+def test_tool_call_signature_positional_fallback():
+    """When ids don't match, falls back to positional matching."""
+    raw_no_id = {
+        "type": "function",
+        "function": {"name": "web_fetch", "arguments": "{}"},
+        "thought_signature": "SIG_POS==",
+    }
+    payload_tc = {
+        "type": "function",
+        "id": "call_99",
+        "function": {"name": "web_fetch", "arguments": "{}"},
+    }
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [payload_tc]}
+    orig = _ai_msg_with_raw_tool_calls([raw_no_id])
+
+    _restore_tool_call_signatures(payload_msg, orig)
+
+    assert payload_tc["thought_signature"] == "SIG_POS=="
 
 
 # ---------------------------------------------------------------------------
-# Multiple signed blocks
+# Edge cases: no-op scenarios for tool-call signatures
 # ---------------------------------------------------------------------------
 
 
-def test_multiple_signed_blocks_all_injected():
-    """All signed thinking blocks are injected, preserving order."""
-    block1 = {"type": "thinking", "thinking": "first", "thought_signature": "sig1=="}
-    block2 = {"type": "thinking", "thinking": "second", "thought_signature": "sig2=="}
-    payload_msg = {"role": "assistant", "content": [TEXT_BLOCK]}
-    orig = _ai_msg_with_additional_kwargs([block1, block2])
+def test_tool_call_no_raw_tool_calls_is_noop():
+    """No change when additional_kwargs has no tool_calls."""
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_1.copy()]}
+    orig = AIMessage(content="", additional_kwargs={})
 
-    _restore_thinking_blocks(payload_msg, orig)
+    _restore_tool_call_signatures(payload_msg, orig)
 
-    assert payload_msg["content"] == [block1, block2, TEXT_BLOCK]
+    assert "thought_signature" not in payload_msg["tool_calls"][0]
 
 
-# Integration behavior is validated via _restore_thinking_blocks unit coverage above.
+def test_tool_call_no_payload_tool_calls_is_noop():
+    """No change when payload has no tool_calls."""
+    payload_msg = {"role": "assistant", "content": "just text"}
+    orig = _ai_msg_with_raw_tool_calls([RAW_TC_SIGNED])
+
+    _restore_tool_call_signatures(payload_msg, orig)
+
+    assert "tool_calls" not in payload_msg
+
+
+def test_tool_call_unsigned_raw_entries_is_noop():
+    """No signature added when raw tool-calls have no thought_signature."""
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [PAYLOAD_TC_2.copy()]}
+    orig = _ai_msg_with_raw_tool_calls([RAW_TC_UNSIGNED])
+
+    _restore_tool_call_signatures(payload_msg, orig)
+
+    assert "thought_signature" not in payload_msg["tool_calls"][0]
+
+
+def test_tool_call_multiple_sequential_signatures():
+    """Sequential tool calls each carry their own signature."""
+    raw_tc_a = {
+        "id": "call_a",
+        "type": "function",
+        "function": {"name": "check_flight", "arguments": "{}"},
+        "thought_signature": "SIG_STEP1==",
+    }
+    raw_tc_b = {
+        "id": "call_b",
+        "type": "function",
+        "function": {"name": "book_taxi", "arguments": "{}"},
+        "thought_signature": "SIG_STEP2==",
+    }
+    payload_tc_a = {"type": "function", "id": "call_a", "function": {"name": "check_flight", "arguments": "{}"}}
+    payload_tc_b = {"type": "function", "id": "call_b", "function": {"name": "book_taxi", "arguments": "{}"}}
+    payload_msg = {"role": "assistant", "content": None, "tool_calls": [payload_tc_a, payload_tc_b]}
+    orig = _ai_msg_with_raw_tool_calls([raw_tc_a, raw_tc_b])
+
+    _restore_tool_call_signatures(payload_msg, orig)
+
+    assert payload_tc_a["thought_signature"] == "SIG_STEP1=="
+    assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
+
+
+# Integration behavior is validated via _restore_thinking_blocks and
+# _restore_tool_call_signatures unit coverage above.
