@@ -55,8 +55,14 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+class PluginStateConfig(BaseModel):
+    """Configuration for a single plugin's state."""
+
+    enabled: bool = Field(default=True, description="Whether this plugin is enabled")
+
+
 class ExtensionsConfig(BaseModel):
-    """Unified configuration for MCP servers and skills."""
+    """Unified configuration for MCP servers, skills, and plugins."""
 
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
@@ -66,6 +72,10 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    plugins: dict[str, PluginStateConfig] = Field(
+        default_factory=dict,
+        description="Map of plugin name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -210,6 +220,20 @@ class ExtensionsConfig(BaseModel):
             # Default to enable for public & custom skill
             return skill_category in ("public", "custom")
         return skill_config.enabled
+
+    def is_plugin_enabled(self, plugin_name: str) -> bool:
+        """Check if a plugin is enabled.
+
+        Args:
+            plugin_name: Name of the plugin
+
+        Returns:
+            True if enabled, False otherwise. Defaults to True if not configured.
+        """
+        plugin_config = self.plugins.get(plugin_name)
+        if plugin_config is None:
+            return True  # Plugins are enabled by default
+        return plugin_config.enabled
 
 
 _extensions_config: ExtensionsConfig | None = None
