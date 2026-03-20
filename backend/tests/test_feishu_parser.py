@@ -5,7 +5,6 @@ import pytest
 
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus
-from app.channels.store import ChannelStore
 
 def test_feishu_on_message_plain_text():
     bus = MessageBus()
