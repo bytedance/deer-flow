@@ -1107,7 +1107,11 @@ class TestChannelManager:
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
 
             mock_client = _make_mock_langgraph_client(thread_id="bootstrap-thread")
             manager._client = mock_client
