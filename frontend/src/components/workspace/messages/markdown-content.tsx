@@ -54,6 +54,24 @@ export function MarkdownContent({
           />
         );
       },
+      pre: ({ className, ...props }: any) => (
+        <pre
+          className={cn(
+            "glass shadow-md my-4 overflow-x-auto rounded-xl border-white/10 bg-black/20 p-4 font-mono text-sm leading-relaxed transition-all duration-300 hover:shadow-lg",
+            className,
+          )}
+          {...props}
+        />
+      ),
+      code: ({ className, ...props }: any) => (
+        <code
+          className={cn(
+            "rounded bg-white/5 px-1.5 py-0.5 font-mono text-[0.9em] text-primary-foreground",
+            className,
+          )}
+          {...props}
+        />
+      ),
       ...componentsFromProps,
     };
   }, [componentsFromProps]);

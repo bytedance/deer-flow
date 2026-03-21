@@ -32,41 +32,47 @@ export function Welcome({
   return (
     <div
       className={cn(
-        "mx-auto flex w-full flex-col items-center justify-center gap-2 px-8 py-4 text-center",
+        "mx-auto flex w-full flex-col items-center justify-center gap-6 px-10 py-12 text-center animate-fade-in",
         className,
       )}
     >
-      <div className="text-2xl font-bold">
-        {searchParams.get("mode") === "skill" ? (
-          `✨ ${t.welcome.createYourOwnSkill} ✨`
-        ) : (
-          <div className="flex items-center gap-2">
-            <div className={cn("inline-block", !waved ? "animate-wave" : "")}>
-              {isUltra ? "🚀" : "👋"}
+      <div className="flex flex-col items-center gap-4">
+        <div className="bg-primary/10 text-primary flex size-16 items-center justify-center rounded-3xl shadow-xl glass-card border-white/10 transition-transform hover:rotate-12 duration-500">
+          <span className="text-4xl">🦌</span>
+        </div>
+        
+        <div className="text-4xl font-extrabold tracking-tight text-foreground sm:text-5xl">
+          {searchParams.get("mode") === "skill" ? (
+            <AuroraText colors={colors}>{t.welcome.createYourOwnSkill}</AuroraText>
+          ) : (
+            <div className="flex items-center justify-center gap-3">
+              <AuroraText colors={colors}>{t.welcome.greeting}</AuroraText>
             </div>
-            <AuroraText colors={colors}>{t.welcome.greeting}</AuroraText>
+          )}
+        </div>
+      </div>
+
+      <div className="max-w-2xl">
+        {searchParams.get("mode") === "skill" ? (
+          <div className="text-muted-foreground/80 text-lg leading-relaxed">
+            {t.welcome.createYourOwnSkillDescription.includes("\n") ? (
+              <pre className="font-sans whitespace-pre-wrap">
+                {t.welcome.createYourOwnSkillDescription}
+              </pre>
+            ) : (
+              <p>{t.welcome.createYourOwnSkillDescription}</p>
+            )}
+          </div>
+        ) : (
+          <div className="text-muted-foreground/80 text-lg leading-relaxed">
+            {t.welcome.description.includes("\n") ? (
+              <pre className="font-sans whitespace-pre-wrap">{t.welcome.description}</pre>
+            ) : (
+              <p>{t.welcome.description}</p>
+            )}
           </div>
         )}
       </div>
-      {searchParams.get("mode") === "skill" ? (
-        <div className="text-muted-foreground text-sm">
-          {t.welcome.createYourOwnSkillDescription.includes("\n") ? (
-            <pre className="font-sans whitespace-pre">
-              {t.welcome.createYourOwnSkillDescription}
-            </pre>
-          ) : (
-            <p>{t.welcome.createYourOwnSkillDescription}</p>
-          )}
-        </div>
-      ) : (
-        <div className="text-muted-foreground text-sm">
-          {t.welcome.description.includes("\n") ? (
-            <pre className="whitespace-pre">{t.welcome.description}</pre>
-          ) : (
-            <p>{t.welcome.description}</p>
-          )}
-        </div>
-      )}
     </div>
   );
 }

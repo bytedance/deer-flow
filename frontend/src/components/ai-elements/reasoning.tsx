@@ -116,34 +116,39 @@ export type ReasoningTriggerProps = ComponentProps<typeof CollapsibleTrigger> & 
 };
 
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
-  if (isStreaming || duration === 0) {
-    return <Shimmer duration={1}>Thinking...</Shimmer>;
+  if (isStreaming || (duration !== undefined && duration === 0)) {
+    return <Shimmer duration={1}>يفكر...</Shimmer>;
   }
   if (duration === undefined) {
-    return <p>Thought for a few seconds</p>;
+    return <p>فكر لعدة ثوانٍ</p>;
   }
-  return <p>Thought for {duration} seconds</p>;
+  return <p>فكر لمدة {duration} ثوانٍ</p>;
 };
 
 export const ReasoningTrigger = memo(
-  ({ className, children, getThinkingMessage = defaultGetThinkingMessage, ...props }: ReasoningTriggerProps) => {
+  ({
+    className,
+    children,
+    getThinkingMessage = defaultGetThinkingMessage,
+    ...props
+  }: ReasoningTriggerProps) => {
     const { isStreaming, isOpen, duration } = useReasoning();
 
     return (
       <CollapsibleTrigger
         className={cn(
-          "flex w-full items-center gap-2 text-muted-foreground text-sm transition-colors hover:text-foreground",
+          "flex items-center gap-2.5 text-muted-foreground/80 text-sm transition-all duration-300 hover:text-foreground glass-button px-4 py-2 rounded-xl border border-white/5",
           className
         )}
         {...props}
       >
         {children ?? (
           <>
-            <BrainIcon className="size-4" />
+            <BrainIcon className={cn("size-4 transition-transform duration-500", isStreaming && "animate-pulse scale-110 text-primary")} />
             {getThinkingMessage(isStreaming, duration)}
             <ChevronDownIcon
               className={cn(
-                "size-4 transition-transform",
+                "size-4 transition-transform duration-300 ml-auto rtl:mr-auto rtl:ml-0",
                 isOpen ? "rotate-180" : "rotate-0"
               )}
             />
@@ -164,8 +169,8 @@ export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (
     <CollapsibleContent
       className={cn(
-        "mt-4 text-sm",
-        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+        "mt-3 text-sm rounded-2xl glass p-5 border-l-4 border-l-primary/30 rtl:border-l-0 rtl:border-r-4 rtl:border-r-primary/30",
+        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground/90 outline-none data-[state=closed]:animate-out data-[state=open]:animate-in shadow-inner",
         className
       )}
       {...props}

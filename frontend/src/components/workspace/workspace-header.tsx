@@ -30,38 +30,37 @@ export function WorkspaceHeader({ className }: { className?: string }) {
         {state === "collapsed" ? (
           <div className="group-has-data-[collapsible=icon]/sidebar-wrapper:-translate-y flex w-full cursor-pointer items-center justify-center">
             <div 
-              className="text-primary block pt-1 font-serif group-hover/workspace-header:hidden"
+              className="text-primary block font-bold text-lg group-hover/workspace-header:hidden"
               suppressHydrationWarning
               translate="no"
             >
               DF
             </div>
-            <SidebarTrigger className="hidden pl-2 group-hover/workspace-header:block" />
+            <SidebarTrigger className="hidden group-hover/workspace-header:block" />
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-2">
-            {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ? (
-              <Link href="/" className="text-primary ml-2 font-serif">
-                DeerFlow
-              </Link>
-            ) : (
-              <div className="text-primary ml-2 cursor-default font-serif">
-                DeerFlow
-              </div>
-            )}
+          <div className="flex items-center justify-between gap-2 px-1">
+            <div className="text-primary flex items-center gap-2 font-bold text-xl tracking-tight" translate="no">
+              <span className="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg shadow-lg">🦌</span>
+              DeerFlow
+            </div>
             <SidebarTrigger />
           </div>
         )}
       </div>
-      <SidebarMenu>
+      <SidebarMenu className="px-2 mt-2">
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname === "/workspace/chats/new"}
             asChild
+            className={cn(
+              "glass-button rounded-xl py-6 hover:bg-primary/10 transition-all duration-300 border-white/5 shadow-sm",
+              pathname === "/workspace/chats/new" ? "bg-primary/15 text-primary border-primary/20 shadow-primary/10" : "text-muted-foreground"
+            )}
           >
-            <Link className="text-muted-foreground" href="/workspace/chats/new">
-              <MessageSquarePlus size={16} />
-              <span>{t.sidebar.newChat}</span>
+            <Link href="/workspace/chats/new">
+              <MessageSquarePlus className="size-5" />
+              <span className="font-semibold">{t.sidebar.newChat}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

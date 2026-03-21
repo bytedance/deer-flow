@@ -31,13 +31,20 @@ export default function WorkspaceLayout({
   );
   return (
     <QueryClientProvider client={queryClient}>
+      
+      {/* Ambient Premium Glow Orbs */}
+      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+        <div className="absolute top-[-20%] rtl:left-[-10%] ltr:right-[-10%] h-[500px] w-[500px] rounded-full bg-primary/20 blur-[120px] transition-all duration-1000 animate-pulse" />
+        <div className="absolute bottom-[-20%] rtl:right-[-10%] ltr:left-[-10%] h-[600px] w-[600px] rounded-full bg-blue-600/10 blur-[150px]" />
+      </div>
+
       <SidebarProvider
-        className="h-screen"
+        className="relative z-10 h-screen bg-transparent"
         open={open}
         onOpenChange={handleOpenChange}
       >
         <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">{children}</SidebarInset>
+        <SidebarInset className="min-w-0 bg-transparent/5!">{children}</SidebarInset>
       </SidebarProvider>
       <Toaster position="top-center" />
     </QueryClientProvider>

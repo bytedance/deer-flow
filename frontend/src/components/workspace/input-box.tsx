@@ -375,7 +375,7 @@ export function InputBox({
     <div ref={promptRootRef} className="relative">
       <PromptInput
         className={cn(
-          "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          "glass shadow-xl rounded-3xl transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-3xl",
           className,
         )}
         disabled={disabled}
@@ -740,7 +740,7 @@ export function InputBox({
             </ModelSelectorContent>
           </ModelSelector>
           <PromptInputSubmit
-            className="rounded-full"
+            className="rounded-full glass-button hover:bg-white/20 transition-all text-muted-foreground hover:text-foreground border-transparent border"
             disabled={disabled}
             variant="outline"
             status={status}

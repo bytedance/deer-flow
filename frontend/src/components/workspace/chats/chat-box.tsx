@@ -118,8 +118,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       >
         <div
           className={cn(
-            "h-full p-4 transition-transform duration-300 ease-in-out",
-            artifactPanelOpen ? "translate-x-0" : "translate-x-full",
+            "h-full p-4 transition-transform duration-500 ease-in-out glass-card border-l border-white/5",
+            artifactPanelOpen ? "translate-x-0" : "ltr:translate-x-full rtl:-translate-x-full",
           )}
         >
           {selectedArtifact ? (
@@ -130,31 +130,32 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             />
           ) : (
             <div className="relative flex size-full justify-center">
-              <div className="absolute top-1 right-1 z-30">
+              <div className="absolute top-2 right-2 z-30">
                 <Button
                   size="icon-sm"
                   variant="ghost"
+                  className="rounded-full hover:bg-white/10"
                   onClick={() => {
                     setArtifactsOpen(false);
                   }}
                 >
-                  <XIcon />
+                  <XIcon className="size-4" />
                 </Button>
               </div>
               {thread.values.artifacts?.length === 0 ? (
                 <ConversationEmptyState
-                  icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
+                  icon={<FilesIcon className="size-10 text-muted-foreground/50" />}
+                  title="لم يتم العثور على مخرجات"
+                  description="سيظهر أي محتوى يتم توليده هنا تلقائياً."
                 />
               ) : (
                 <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                  <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
+                  <header className="shrink-0 mb-4 px-2">
+                    <h2 className="text-xl font-bold text-foreground">المخرجات</h2>
                   </header>
-                  <main className="min-h-0 grow">
+                  <main className="min-h-0 grow overflow-auto">
                     <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
+                      className="max-w-(--container-width-sm) p-2"
                       files={thread.values.artifacts ?? []}
                       threadId={threadId}
                     />
