@@ -36,17 +36,20 @@ export function groupMessages<T>(
 
   const groups: MessageGroup[] = [];
 
-  // Returns the last group if it can still accept tool messages
-  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  // Returns the most recent open group that can still accept tool messages,
+  // skipping terminal groups (human, assistant, clarification).
+  // Searches backward because a terminal assistant group may be inserted
+  // between a processing group and its subsequent tool messages.
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
-      return last;
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const g = groups[i];
+      if (
+        g.type !== "human" &&
+        g.type !== "assistant" &&
+        g.type !== "assistant:clarification"
+      ) {
+        return g;
+      }
     }
     return null;
   }
@@ -114,9 +117,9 @@ export function groupMessages<T>(
 
       // Not an else-if: a message with reasoning + content (but no tool calls) goes
       // into the processing group above AND gets its own assistant bubble here.
-      // Also surface text content from messages that carry both tool_calls and text —
-      // the text would otherwise be silently dropped.
-      if (hasContent(message) && (!hasToolCalls(message) || extractTextFromMessage(message).length > 0)) {
+      // Messages with both tool_calls and text content also get a bubble so the
+      // text isn't silently dropped.
+      if (hasContent(message)) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }
@@ -239,11 +242,31 @@ export function hasContent(message: Message) {
     ).length > 0;
   }
   if (Array.isArray(message.content)) {
-    // Array content may include non-text blocks (e.g. thinking).
-    // Only consider blocks with type === "text" and non-empty text.
-    return message.content.some(
-      (block) => "type" in block && block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0,
-    );
+    // Array content may include non-text blocks (e.g. thinking, images).
+    // Consider blocks with type === "text" (non-empty) or type === "image_url" (has URL).
+    return message.content.some((block) => {
+      if (!("type" in block)) {
+        return false;
+      }
+      if (
+        block.type === "text" &&
+        typeof (block as { text?: unknown }).text === "string" &&
+        (block as { text: string }).text.trim().length > 0
+      ) {
+        return true;
+      }
+      if (block.type === "image_url") {
+        const imageBlock = block as {
+          image_url?: string | { url: string };
+        };
+        if (!imageBlock.image_url) {
+          return false;
+        }
+        const url = extractURLFromImageURLContent(imageBlock.image_url);
+        return typeof url === "string" && url.trim().length > 0;
+      }
+      return false;
+    });
   }
   return false;
 }
