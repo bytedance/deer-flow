@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | 中文
+[English](./README.md) | 中文 | [日本語](./README_ja.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
