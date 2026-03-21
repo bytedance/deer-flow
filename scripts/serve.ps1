@@ -33,7 +33,7 @@ New-Item -Path "$REPO_ROOT\backend\.venv\Scripts\uvicorn.bat" -ItemType File -Va
 
 if ($Dev) {
     # Using python -m langgraph_cli bypasses initial AppLocker blocks
-    $LangGraphArgs = "run python -m langgraph_cli dev --no-browser --allow-blocking --no-reload"
+    $LangGraphArgs = "run python -m langgraph_cli dev --host 0.0.0.0 --port 2024 --no-browser --allow-blocking --no-reload"
     $GatewayArgs = "run python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include=*.yaml --reload-include=.env"
     $FrontendCmd = "run dev"
 } else {
