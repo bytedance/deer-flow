@@ -1,0 +1,1140 @@
+INFO:langgraph_api.cli:
+
+        Welcome to
+
+\u2566  \u250c\u2500\u2510\u250c\u2510\u250c\u250c\u2500\u2510\u2554\u2550\u2557\u252c\u2500\u2510\u250c\u2500\u2510\u250c\u2500\u2510\u252c \u252c
+\u2551  \u251c\u2500\u2524\u2502\u2502\u2502\u2502 \u252c\u2551 \u2566\u251c\u252c\u2518\u251c\u2500\u2524\u251c\u2500\u2518\u251c\u2500\u2524
+\u2569\u2550\u255d\u2534 \u2534\u2518\u2514\u2518\u2514\u2500\u2518\u255a\u2550\u255d\u2534\u2514\u2500\u2534 \u2534\u2534  \u2534 \u2534
+
+- \U0001f680 API: http://127.0.0.1:2024
+- \U0001f3a8 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- \U0001f4da API Docs: http://127.0.0.1:2024/docs
+
+This in-memory server is designed for development and testing.
+For production use, please use LangSmith Deployment.
+
+
+[version] A newer version of langgraph-api is available: 0.7.65 \u2192 0.7.83  (pip install -U langgraph-api)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\colorama\ansitowin32.py", line 47, in write
+    self.__convertor.write(text)
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\colorama\ansitowin32.py", line 177, in write
+    self.write_and_convert(text)
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\colorama\ansitowin32.py", line 202, in write_and_convert
+    self.write_plain_text(text, cursor, start)
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\colorama\ansitowin32.py", line 210, in write_plain_text
+    self.wrapped.write(text[start:end])
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\encodings\cp1256.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in position 64: character maps to <undefined>
+Call stack:
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\threading.py", line 1032, in _bootstrap
+    self._bootstrap_inner()
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\cli.py", line 501, in _check_newer_version
+    log.info(
+Message: '[version] A newer version of %s is available: %s \u2192 %s  (pip install -U %s)'
+Arguments: ('langgraph-api', <Version('0.7.65')>, <Version('0.7.83')>, 'langgraph-api')
+2026-03-21T21:58:14.847605Z [info     ] 2026-03-21T21:58:15.465591Z [info     ] Starting dev persistence flush loop [langgraph_runtime_inmem._persistence] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T21:58:15.482599Z [info     ] Using langgraph_runtime_inmem  [langgraph_runtime] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T21:58:15.497621Z [info     ] Using auth of type=noop        [langgraph_api.auth.middleware] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T21:58:15.500341Z [info     ] Starting In-Memory runtime with langgraph-api=0.7.65 and in-memory runtime=0.26.0 [langgraph_runtime_inmem.lifespan] api_variant=local_dev langgraph_api_version=0.7.65 langgraph_runtime_inmem_version=0.26.0 thread_name=asyncio_0 version=0.7.65
+2026-03-21T21:58:15.567599Z [info     ] Configuring custom checkpointer at ./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer
+
+This replaces the default persistence backend.
+Required methods: aget, aget_tuple, aput, aput_writes, alist.
+Recommended methods: adelete_thread, adelete_for_runs, acopy_thread, aprune.
+Missing methods will degrade functionality ù see startup logs for details. [langgraph_api._checkpointer._adapter] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=asyncio_0
+2026-03-21T21:58:15.723883Z [info     ] Loading checkpointer ./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer [langgraph_api.timing.timer] api_variant=local_dev checkpointer_path=./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer elapsed_seconds=0.15529299998888746 langgraph_api_version=0.7.65 name=_load_checkpointer thread_name=asyncio_0
+2026-03-21T21:58:15.749401Z [error    ] Traceback (most recent call last):
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\starlette\routing.py", line 694, in lifespan
+    async with self.lifespan_context(app) as maybe_state:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\timing\timer.py", line 227, in combined_lifespan
+    await stack.enter_async_context(ls(app))
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 659, in enter_async_context
+    result = await _enter(cm)
+             ^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_runtime_inmem\lifespan.py", line 62, in lifespan
+    await api_checkpointer.start_checkpointer()
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\_checkpointer\__init__.py", line 34, in start_checkpointer
+    checkpointer = await get_checkpointer()
+                   ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\_checkpointer\__init__.py", line 22, in get_checkpointer
+    return await _adapter.get_checkpointer(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\_checkpointer\_adapter.py", line 268, in get_checkpointer
+    inner = await stack.enter_async_context(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 659, in enter_async_context
+    result = await _enter(cm)
+             ^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\_checkpointer\_adapter.py", line 396, in _yield_checkpointer
+    async with _yield_checkpointer(value()) as ctx_value:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\langgraph_api\_checkpointer\_adapter.py", line 380, in _yield_checkpointer
+    async with value as ctx_value:
+               ^^^^^
+  File "C:\Users\amara\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\Lib\contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\packages/harness/deerflow/agents/checkpointer/async_provider.py", line 100, in make_checkpointer
+    config = get_app_config()
+             ^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\packages\harness\deerflow\config\app_config.py", line 237, in get_app_config
+    _app_config = AppConfig.from_file()
+                  ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\packages\harness\deerflow\config\app_config.py", line 118, in from_file
+    result = cls.model_validate(config_data)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\amara\deer-flow\backend\.venv\Lib\site-packages\pydantic\main.py", line 716, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for AppConfig
+models
+  Input should be a valid list [type=list_type, input_value=None, input_type=NoneType]
+    For further information visit https://errors.pydantic.dev/2.12/v/list_type
+ [uvicorn.error] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T21:58:15.750354Z [error    ] Application startup failed. Exiting. [uvicorn.error] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:20.959892Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:21.317466Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:21.669896Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:22.023759Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:22.383063Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:22.742673Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:23.099826Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:23.508167Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:23.967654Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:24.384924Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:24.741452Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:25.145178Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:25.548851Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:25.961752Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:26.381199Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:26.793019Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:27.205902Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:27.618432Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:28.029292Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:28.381406Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:28.786686Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:29.193516Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:29.600664Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:29.964608Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:30.369463Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:30.836121Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:31.192089Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:31.552574Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:31.960502Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:32.368710Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:32.781090Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:33.183979Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:33.599518Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:34.015678Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:34.425404Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:34.834051Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:35.194572Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:35.599227Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:36.007303Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:36.475599Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:36.833569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:37.289193Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:37.695302Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:38.098037Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:38.516389Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:38.931810Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:39.391347Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:39.798320Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:40.211128Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:40.615537Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:41.070638Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:41.475097Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:41.887255Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:42.246930Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:42.648662Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:43.113421Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:43.980160Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:44.337278Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:44.753506Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:45.209386Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:45.612106Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:46.028041Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:46.431555Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:46.835438Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:47.243583Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:47.647462Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:48.063570Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:48.532925Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:48.897928Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:49.355289Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:49.764350Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:50.318773Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:50.825219Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:51.230798Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:51.635929Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:52.042200Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:52.445768Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:52.854348Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:53.258812Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:53.666673Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:54.075211Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:54.486652Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:54.945733Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:55.305758Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:55.767741Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:56.170904Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:56.580623Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:56.987883Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:57.347228Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:57.753578Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:58.160188Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:58.620470Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:58.973574Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:59.376413Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:07:59.788870Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:00.250398Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:00.661721Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:01.064496Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:01.480697Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:01.887324Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:02.254775Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:02.711347Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:03.177496Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:03.593137Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:04.001927Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:04.410600Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:04.813717Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:05.216801Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:05.574772Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:06.041719Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:06.447823Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:06.904526Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:07.362103Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:07.723576Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:08.133600Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:08.537167Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:08.944493Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:09.351542Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:09.718915Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:10.272282Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:10.681907Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:11.147855Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:11.552604Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:11.958762Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:12.316082Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:12.775289Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:13.143644Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:13.556526Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:13.959889Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:14.368384Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:14.786812Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:15.198596Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:15.604215Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:16.019276Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:16.431030Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:16.846296Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:17.214328Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:17.727695Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:18.082068Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:18.495293Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:18.906301Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:19.311463Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:19.672340Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:20.140277Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:20.557430Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:21.014918Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:21.419143Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:21.830917Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:22.287195Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:22.744418Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:23.153109Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:23.560383Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:23.967582Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:24.379725Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:24.790416Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:25.204674Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:25.607829Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:26.013699Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:26.376413Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:26.837695Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:27.201054Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:27.656569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:28.160125Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:28.577488Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:28.982888Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:29.392659Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:29.805252Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:30.160154Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:30.577827Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:30.991927Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:31.397067Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:31.764480Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:32.233898Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:32.640735Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:33.098214Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:33.557666Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:33.968662Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:34.381186Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:34.741118Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:35.160157Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:35.563909Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:35.932157Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:36.386654Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:36.843884Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:37.208667Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:37.622585Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:38.077861Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:38.532471Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:38.897771Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:39.304503Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:39.723480Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:40.132906Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:40.541836Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:40.950144Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:41.305470Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:41.708925Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:42.168033Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:42.583233Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:43.001019Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:43.425900Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:43.779013Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:44.186092Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:44.648266Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:45.055913Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:45.469331Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:45.830948Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:46.345144Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:46.751712Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:47.167490Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:47.572026Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:47.977727Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:48.389171Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:48.805909Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:49.208236Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:49.570671Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:50.038895Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:50.442504Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:50.846093Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:51.251575Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:51.661852Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:52.064607Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:52.571928Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:53.035931Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:53.443679Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:53.852480Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:54.308937Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:54.714767Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:55.118880Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:55.576780Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:55.985657Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:56.343795Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:56.748612Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:57.153971Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:57.564350Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:58.033818Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:58.453825Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:58.863759Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:59.275646Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:08:59.683392Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:00.048366Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:00.510957Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:00.923721Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:01.331575Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:01.738739Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:02.204807Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:02.619020Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:03.023412Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:03.428721Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:03.837424Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:04.248741Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:04.653114Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:05.062140Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:05.519518Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:05.930824Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:06.340699Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:06.707661Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:07.172429Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:07.581086Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:07.936739Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:08.404924Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:08.819436Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:09.185996Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:09.592519Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:09.998498Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:10.402803Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:10.818238Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:11.231460Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:11.639560Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:12.108658Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:12.513951Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:12.921819Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:13.327200Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:13.740349Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:14.094624Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:14.551781Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:14.907325Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:15.313695Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:15.721793Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:16.131533Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:16.546338Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:17.016116Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:17.372464Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:17.780609Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:18.186057Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:18.589746Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:19.056339Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:19.515149Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:19.922310Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:20.376811Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:20.779675Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:21.193793Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:21.597857Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:22.109104Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:22.469405Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:22.874224Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:23.280778Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:23.689967Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:24.105121Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:24.511233Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:24.915021Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:25.323394Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:25.727787Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:26.141444Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:26.545800Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:26.955870Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:27.360471Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:27.772445Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:28.184622Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:28.587201Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:29.055801Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:29.463552Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:29.875319Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:30.280491Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:30.689495Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:31.055174Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:31.522149Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:31.927158Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:32.334118Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:32.740553Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:33.144569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:33.561899Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:33.985573Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:34.340213Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:34.805717Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:35.211802Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:35.614525Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:36.017998Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:36.421985Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:36.835899Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:37.240662Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:37.599126Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:38.005461Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:38.423395Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:38.832638Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:39.191269Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:39.645452Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:40.053931Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:40.456985Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:40.873008Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:41.282914Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:41.692401Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:42.094706Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:42.508134Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:42.923007Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:43.279849Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:43.684521Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:44.087372Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:44.496902Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:44.905608Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:45.266393Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:45.684742Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:46.139730Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:46.496529Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:46.913780Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:47.328366Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:47.691270Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:48.158490Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:48.562370Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:48.973974Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:49.385312Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:49.788506Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:50.193360Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:50.564165Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:50.970903Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:51.435651Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:51.845264Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:52.248605Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:52.607230Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:53.069422Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:53.475759Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:53.880420Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:54.237805Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:54.642569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:55.046447Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:55.451874Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:55.859788Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:56.269160Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:56.681850Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:57.137124Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:57.555291Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:57.919127Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:58.381425Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:58.846961Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:59.300483Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:09:59.660402Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:00.127158Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:00.582873Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:00.988592Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:01.401120Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:01.814287Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:02.217356Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:02.619670Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:03.090202Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:03.452616Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:03.865710Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:04.283895Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:04.688481Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:05.096290Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:05.464522Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:05.917139Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:06.278864Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:06.734514Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:07.139599Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:07.553837Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:07.968466Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:08.374875Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:08.730348Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:09.141959Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:09.553807Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:10.013298Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:10.417386Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:10.825998Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:11.230055Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:11.582078Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:12.043105Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:12.456906Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:12.869764Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:13.274120Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:13.678923Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:14.131725Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:14.534389Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:14.900246Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:15.304009Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:15.710814Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:16.117738Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:16.522806Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:16.929459Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:17.293677Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:17.711473Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:18.118545Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:18.478922Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:18.938549Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:19.343827Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:19.712219Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:20.120926Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:20.524173Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:20.928245Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:21.344463Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:21.754943Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:22.171328Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:22.588793Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:23.000980Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:23.404968Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:23.807269Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:24.217973Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:24.627742Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:24.986115Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:25.391775Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:25.797120Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:26.161916Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:26.566239Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:27.019692Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:27.421561Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:27.835756Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:28.192520Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:28.599715Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:29.010763Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:29.422359Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:29.835503Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:30.242206Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:30.644923Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:31.049642Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:31.456346Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:31.815923Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:32.277307Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:32.629957Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:33.038487Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:33.453743Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:33.808075Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:34.176163Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:34.538485Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:34.890395Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:35.259909Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:35.628260Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:35.993439Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:36.348833Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:36.704831Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:37.117112Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:37.527377Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:37.934569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:38.338060Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:38.749436Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:39.203167Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:39.571730Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:39.983297Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:40.387085Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:40.796788Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:41.153508Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:41.609201Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:41.981404Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:42.439069Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:42.796541Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:43.254971Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:43.662625Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:44.019242Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:44.422888Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:44.834855Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:45.239342Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:45.650195Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:46.160918Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:46.562730Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:46.970611Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:47.372175Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:47.828927Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:48.239099Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:48.643514Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:48.997483Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:49.349072Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:49.765635Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:50.126077Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:50.484172Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:50.836166Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:51.188670Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:51.542155Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:51.896255Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:52.254766Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:52.611682Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:53.016237Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:53.424129Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:53.829117Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:54.240895Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:54.598747Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:55.056754Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:55.471323Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:55.823959Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:56.327571Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:56.732749Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:57.188498Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:57.643181Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:58.059248Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:58.515943Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:58.924065Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:59.285947Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:10:59.703345Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:00.122099Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:00.487812Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:00.900102Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:01.314907Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:01.723600Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:02.083859Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:02.494614Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:02.899124Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:03.314789Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:03.720541Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:04.134914Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:04.545512Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:05.005656Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:05.411493Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:05.777567Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:06.183739Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:06.588926Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:07.003479Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:07.405410Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:07.813762Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:08.234577Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:08.639853Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:09.052564Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:09.411954Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:09.816868Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:10.220197Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:10.626282Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:11.137390Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:11.694268Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:12.102467Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:12.459504Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:12.818885Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:13.225312Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:13.633647Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:14.088745Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:14.492505Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:14.899162Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:15.353534Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:15.761294Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:16.172001Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:16.629534Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:17.034187Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:17.438354Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:17.791516Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:18.245691Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:18.649661Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:19.061792Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:19.471688Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:19.875371Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:20.235748Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:20.640147Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:21.052240Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:21.414600Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:21.872761Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:22.278278Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:22.690242Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:23.098749Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:23.504571Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:23.908735Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:24.313539Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:24.718858Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:25.134151Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:25.493331Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:25.901353Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:26.309875Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:26.725437Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:27.134824Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:27.552848Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:27.969007Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:28.329964Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:28.802412Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:29.320558Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:29.728774Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:30.135530Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:30.544370Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:30.947703Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:31.301461Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:31.660888Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:32.029102Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:32.385499Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:32.744319Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:33.152417Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:33.515919Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:33.929602Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:34.337144Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:34.806022Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:35.213532Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:35.622122Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:36.032825Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:36.439627Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:36.855209Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:37.218244Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:37.631551Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:38.037991Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:38.447416Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:38.857204Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:39.309824Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:39.713880Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:40.086055Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:40.539960Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:40.955098Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:41.369106Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:41.773434Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:42.176328Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:42.784469Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:43.197402Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:43.611431Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:44.018054Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:44.420252Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:44.778029Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:45.238384Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:45.649498Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:46.055871Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:46.418037Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:46.821846Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:47.229458Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:47.594510Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:47.999769Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:48.454227Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:48.816588Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:49.220110Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:49.726428Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:50.082993Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:50.494301Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:50.947488Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:51.399970Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:51.859022Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:52.264753Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:52.674718Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:53.086405Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:53.497640Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:53.907641Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:54.314746Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:54.725997Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:55.128788Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:55.535862Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:55.938060Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:56.346292Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:56.808862Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:57.215431Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:57.624391Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:58.033555Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:58.441117Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:58.851238Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:59.206947Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:11:59.673752Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:00.034940Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:00.446021Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:00.899518Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:01.306661Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:01.661095Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:02.116450Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:02.478132Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:02.881218Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:03.289076Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:03.745958Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:04.151135Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:04.605145Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:04.957208Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:05.424141Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:05.835330Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:06.477151Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:06.833551Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:07.241417Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:07.823524Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:08.232551Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:08.657349Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:09.214521Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:09.634772Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:10.048652Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:10.568445Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:11.125946Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:11.540102Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:12.004999Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:12.417520Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:12.824048Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:13.340633Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:14.060253Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:14.479200Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:14.886409Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:15.295126Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:15.699180Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:16.117236Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:16.535149Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:16.940089Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:17.420396Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:17.773840Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:18.232669Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:18.692903Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:19.106340Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:19.518352Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:20.033698Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:20.401968Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:20.858736Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:21.415819Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:21.826089Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:22.258313Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:22.748801Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:23.205197Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:23.571448Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:24.139350Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:24.507191Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:24.929509Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:25.456984Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:25.887654Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:26.350404Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:26.868048Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:27.286844Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:27.662499Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:28.185676Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:28.594077Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:28.951384Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:29.354533Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:29.821668Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:30.228955Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:30.595557Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:31.002452Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:31.408912Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:31.820220Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:32.230520Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:32.645852Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:33.100556Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:33.502990Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:33.861569Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:34.265655Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:34.682692Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:35.046269Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:35.451583Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:35.862708Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:36.272047Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:36.680239Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:37.093859Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:37.508438Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:37.914799Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:38.330646Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:38.692611Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:39.096316Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:39.506826Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:39.912268Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:40.317880Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:40.722165Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:41.124251Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:41.527608Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:41.936563Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:42.288738Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:42.703383Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:43.106919Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:43.513098Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:43.918751Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:44.321073Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:44.725160Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:45.134889Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:45.540634Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:45.903421Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:46.315709Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:46.722043Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:47.130365Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:47.543855Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:47.953608Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:48.423350Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:48.837255Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:49.246793Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:49.613418Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:50.069429Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:50.473873Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:50.888281Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:51.300536Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:51.719263Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:52.077607Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:52.537575Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:52.902588Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:53.361784Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:53.768021Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:54.182554Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:54.650471Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:55.054266Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:55.469591Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:55.927581Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:56.331013Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:56.744426Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:57.161118Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:57.564057Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:57.968036Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:58.381794Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:58.796712Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:59.162168Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:59.567540Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:12:59.971453Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:00.380202Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:00.787607Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:01.145063Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:01.554567Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:01.964198Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:02.369398Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:02.781003Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:03.195924Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:03.604860Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:03.965098Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:04.371783Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:04.779272Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:05.185856Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:05.599956Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:06.016255Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:06.427587Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:06.790654Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:07.200716Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:07.663567Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:08.020609Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:08.439202Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:08.850442Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:09.257342Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:09.667633Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:10.026889Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:10.445190Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:10.855940Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:11.221090Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:11.639856Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:12.050492Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:12.453640Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:12.863843Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:13.277988Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:13.689432Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:14.143654Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:14.549214Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:14.964146Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:15.373925Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:15.786115Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:16.143830Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:16.546607Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:16.956954Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:17.361956Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:17.765550Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:18.174134Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:18.578534Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:18.988206Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:19.394904Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:19.808976Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:20.215897Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:20.625195Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:21.028789Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:21.431567Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:21.795229Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:22.248521Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:22.657331Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:23.063816Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:23.417769Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:23.880863Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:24.292777Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:24.695392Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:25.108225Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:25.512377Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:25.923969Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:26.340684Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:26.756821Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:27.167142Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:27.572613Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:27.929046Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:28.338517Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:28.744309Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:29.097174Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:29.554073Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:29.914096Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:30.328747Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:30.785798Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:31.195802Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:31.560596Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:31.978228Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:32.392562Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:32.805695Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:33.209558Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:33.567139Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:34.023501Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:34.431199Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:34.842898Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:35.250150Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:35.609738Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:36.012676Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:36.422141Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:36.790609Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:37.195810Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:37.604925Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:38.016747Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:38.472871Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:38.837704Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:39.241858Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:39.648815Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:40.004320Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:40.416651Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:40.877414Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:41.234925Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:41.641283Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:42.054651Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:42.458490Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:42.860120Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:43.312572Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:43.721159Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:44.124868Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:44.490534Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:44.906169Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:45.312886Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:45.725808Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:46.141325Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:46.545244Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:46.901812Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:47.361760Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:47.720245Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:48.180871Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:48.539320Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:48.947501Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:49.403621Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:49.760696Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:50.215446Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:50.720698Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:51.130390Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:51.583627Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:52.038914Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:52.444287Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:52.796160Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:53.149580Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:53.505663Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:53.860113Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:54.211853Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:54.567021Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:54.970179Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:55.437163Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:55.794808Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:56.209064Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:56.616944Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:57.026013Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:57.384593Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:57.844287Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:58.199178Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:58.615972Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:59.073659Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:59.475973Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:13:59.884273Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:00.295204Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:00.699340Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:01.165709Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:01.533355Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:01.943900Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:02.448782Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:02.860353Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:03.265810Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:03.681232Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:04.085797Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:04.496446Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:04.916031Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:05.331679Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:05.742450Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:06.146422Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:06.510765Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:06.915077Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:07.324437Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:07.739179Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:08.144139Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:08.548275Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:09.008962Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:09.373533Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:09.782697Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:10.186694Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:10.602864Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:11.020294Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:11.386479Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:11.797362Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:12.214081Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:12.819484Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:13.228152Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:13.638455Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:14.048271Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:14.457246Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:14.820216Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:15.228589Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:15.641683Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:16.048771Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:16.452166Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:16.869052Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:17.226781Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:17.630589Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:18.086822Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:18.493305Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:18.902195Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:19.311337Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:19.720226Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:20.123819Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:20.491175Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:20.860893Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:21.314041Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
+2026-03-21T22:14:21.718519Z [info     ] 1 change detected              [watchfiles.main] api_variant=local_dev langgraph_api_version=0.7.65 thread_name=MainThread
