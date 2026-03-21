@@ -330,7 +330,7 @@ class MemoryUpdater:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            logger.error("Memory update failed: %s", e)
+            logger.exception("Memory update failed: %s", e)
             return False
 
     def _apply_updates(

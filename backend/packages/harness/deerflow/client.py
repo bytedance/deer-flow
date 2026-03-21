@@ -260,8 +260,10 @@ class DeerFlowClient:
             for block in content:
                 if isinstance(block, str):
                     parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block["text"])
+                elif isinstance(block, dict):
+                    text_val = block.get("text")
+                    if isinstance(text_val, str):
+                        parts.append(text_val)
             return "\n".join(parts) if parts else ""
         return str(content)
 

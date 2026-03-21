@@ -293,8 +293,10 @@ class SubagentExecutor:
                         for block in content:
                             if isinstance(block, str):
                                 text_parts.append(block)
-                            elif isinstance(block, dict) and "text" in block:
-                                text_parts.append(block["text"])
+                            elif isinstance(block, dict):
+                                text_val = block.get("text")
+                                if isinstance(text_val, str):
+                                    text_parts.append(text_val)
                         result.result = "\n".join(text_parts) if text_parts else "No text content in response"
                     else:
                         result.result = str(content)
@@ -310,9 +312,11 @@ class SubagentExecutor:
                         for block in raw_content:
                             if isinstance(block, str):
                                 parts.append(block)
-                            elif isinstance(block, dict) and "text" in block:
-                                parts.append(block["text"])
-                        result.result = "\n".join(parts) if parts else str(raw_content)
+                            elif isinstance(block, dict):
+                                text_val = block.get("text")
+                                if isinstance(text_val, str):
+                                    parts.append(text_val)
+                        result.result = "\n".join(parts) if parts else "No text content in response"
                     else:
                         result.result = str(raw_content)
                 else:
