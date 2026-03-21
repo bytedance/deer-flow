@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,10 @@ class TelegramChannel(Channel):
             return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
+    async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
+        await self._send_running_reply(chat_id, msg_id)
+        await self.bus.publish_inbound(inbound)
+
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
         if not self._check_user(update.effective_user.id):
@@ -255,8 +259,7 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
 
     async def _on_text(self, update, context) -> None:
         """Handle regular text messages."""
@@ -295,5 +298,4 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
