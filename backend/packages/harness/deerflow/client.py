@@ -329,9 +329,9 @@ class DeerFlowClient:
                     # Track token usage from AI messages
                     usage = getattr(msg, "usage_metadata", None)
                     if usage:
-                        cumulative_usage["input_tokens"] += getattr(usage, "input_tokens", 0) or 0
-                        cumulative_usage["output_tokens"] += getattr(usage, "output_tokens", 0) or 0
-                        cumulative_usage["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
+                        cumulative_usage["input_tokens"] += usage.get("input_tokens", 0) or 0
+                        cumulative_usage["output_tokens"] += usage.get("output_tokens", 0) or 0
+                        cumulative_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
 
                     if msg.tool_calls:
                         yield StreamEvent(
@@ -349,9 +349,9 @@ class DeerFlowClient:
                         event_data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
                         if usage:
                             event_data["usage_metadata"] = {
-                                "input_tokens": getattr(usage, "input_tokens", 0) or 0,
-                                "output_tokens": getattr(usage, "output_tokens", 0) or 0,
-                                "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+                                "input_tokens": usage.get("input_tokens", 0) or 0,
+                                "output_tokens": usage.get("output_tokens", 0) or 0,
+                                "total_tokens": usage.get("total_tokens", 0) or 0,
                             }
                         yield StreamEvent(type="messages-tuple", data=event_data)
 
