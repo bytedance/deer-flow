@@ -207,6 +207,14 @@ export interface Translations {
     failed: string;
   };
 
+  // Token Usage
+  tokenUsage: {
+    title: string;
+    input: string;
+    output: string;
+    total: string;
+  };
+
   // Settings
   settings: {
     title: string;
