@@ -646,47 +646,155 @@ class ChannelManager:
         text = msg.text.strip()
         parts = text.split(maxsplit=1)
         command = parts[0].lower().lstrip("/")
+        args = parts[1] if len(parts) > 1 else ""
 
         if command == "bootstrap":
             from dataclasses import replace as _dc_replace
 
-            chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
+            chat_text = args or "Initialize workspace"
             chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
             await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
             return
 
         if command == "new":
-            # Create a new thread on the LangGraph Server
-            client = self._get_client()
-            thread = await client.threads.create()
-            new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
-                msg.channel_name,
-                msg.chat_id,
-                new_thread_id,
-                topic_id=msg.topic_id,
-                user_id=msg.user_id,
-            )
-            reply = "New conversation started."
+            reply = await self._cmd_new(msg)
+        elif command == "clear":
+            reply = await self._cmd_clear(msg)
         elif command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
-            reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
+            reply = await self._cmd_status(msg)
+        elif command == "agent":
+            reply = await self._cmd_agent(msg, args)
+        elif command == "agents":
+            reply = await self._cmd_agents()
         elif command == "models":
             reply = await self._fetch_gateway("/api/models", "models")
         elif command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory")
         elif command == "help":
-            reply = (
-                "Available commands:\n"
-                "/bootstrap — Start a bootstrap session (enables agent setup)\n"
-                "/new — Start a new conversation\n"
-                "/status — Show current thread info\n"
-                "/models — List available models\n"
-                "/memory — Show memory status\n"
-                "/help — Show this help"
-            )
+            reply = self._cmd_help()
         else:
             reply = f"Unknown command: /{command}. Type /help for available commands."
+
+        outbound = OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            text=reply,
+            thread_ts=msg.thread_ts,
+        )
+        await self.bus.publish_outbound(outbound)
+
+    async def _cmd_new(self, msg: InboundMessage) -> str:
+        """Create a new thread."""
+        client = self._get_client()
+        thread = await client.threads.create()
+        new_thread_id = thread["thread_id"]
+        self.store.set_thread_id(
+            msg.channel_name,
+            msg.chat_id,
+            new_thread_id,
+            topic_id=msg.topic_id,
+            user_id=msg.user_id,
+        )
+        return "New conversation started."
+
+    async def _cmd_clear(self, msg: InboundMessage) -> str:
+        """Clear the current conversation by removing the thread mapping."""
+        removed = self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        if removed:
+            return "Conversation cleared. Type any message to start a new one."
+        return "No active conversation to clear."
+
+    async def _cmd_status(self, msg: InboundMessage) -> str:
+        """Show current thread and agent status."""
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        if not thread_id:
+            return "No active conversation."
+
+        # Get current agent for this thread
+        assistant_id, _, _ = self._resolve_run_params(msg, thread_id)
+        return f"Thread: {thread_id[:8]}...\nAgent: {assistant_id}"
+
+    async def _cmd_agent(self, msg: InboundMessage, args: str) -> str:
+        """Switch agent for the current conversation."""
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        if not thread_id:
+            return "No active conversation. Start one first with /new or send a message."
+
+        if not args:
+            # Show current agent
+            assistant_id, _, _ = self._resolve_run_params(msg, thread_id)
+            return f"Current agent: {assistant_id}\n\nTo switch: /agent <agent_id>"
+
+        # Validate agent ID format (basic check)
+        new_agent = args.strip()
+        if not new_agent or len(new_agent) > 100:
+            return "Invalid agent ID."
+
+        # Store the agent preference for this user/chat
+        # Note: This is a simplified implementation. In production, you might want
+        # to persist this to a database.
+        channel_layer, _ = self._resolve_session_layer(msg)
+        if msg.channel_name not in self._channel_sessions:
+            self._channel_sessions[msg.channel_name] = {}
+        if "users" not in self._channel_sessions[msg.channel_name]:
+            self._channel_sessions[msg.channel_name]["users"] = {}
+        if msg.user_id not in self._channel_sessions[msg.channel_name]["users"]:
+            self._channel_sessions[msg.channel_name]["users"][msg.user_id] = {}
+
+        self._channel_sessions[msg.channel_name]["users"][msg.user_id]["assistant_id"] = new_agent
+
+        return f"Agent switched to: {new_agent}\nThis will take effect for your next message."
+
+    async def _cmd_agents(self) -> str:
+        """List available agents from the gateway."""
+        try:
+            import httpx
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(f"{self._gateway_url}/api/agents", timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                agents = data.get("agents", [])
+                if not agents:
+                    return "No agents available."
+
+                lines = ["Available agents:"]
+                for agent in agents:
+                    name = agent.get("name", "unknown")
+                    desc = agent.get("description", "")
+                    line = f"• {name}"
+                    if desc:
+                        line += f" — {desc[:50]}"
+                    lines.append(line)
+                lines.append("\nUse /agent <name> to switch")
+                return "\n".join(lines)
+        except Exception:
+            logger.exception("Failed to fetch agents")
+            # Fallback: show the default and session-configured agents
+            return (
+                f"Default agent: {self._assistant_id}\n\n"
+                "To switch agent: /agent <agent_id>\n"
+                "Note: Agent must be configured in the system."
+            )
+
+    def _cmd_help(self) -> str:
+        """Show help message."""
+        return (
+            "🤖 Available commands:\n\n"
+            "Conversation:\n"
+            "  /new — Start a new conversation\n"
+            "  /clear — Clear current conversation\n"
+            "  /status — Show thread and agent info\n\n"
+            "Agent:\n"
+            "  /agents — List available agents\n"
+            "  /agent — Show current agent\n"
+            "  /agent <id> — Switch to a different agent\n\n"
+            "System:\n"
+            "  /models — List available models\n"
+            "  /memory — Show memory status\n"
+            "  /bootstrap — Start a bootstrap session\n\n"
+            "  /help — Show this help"
+        )
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
