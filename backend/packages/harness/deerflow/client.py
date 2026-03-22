@@ -266,7 +266,7 @@ class DeerFlowClient:
                     text_val = block.get("text")
                     if isinstance(text_val, str):
                         parts.append(text_val)
-            return "\n".join(parts) if parts else ""
+            return "".join(parts) if parts else ""
         return str(content)
 
     # ------------------------------------------------------------------
