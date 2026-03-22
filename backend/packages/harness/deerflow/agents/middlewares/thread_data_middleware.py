@@ -73,7 +73,19 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
         thread_id = runtime.context.get("thread_id")
         if thread_id is None:
+            # Fallback: LangGraph HTTP API puts thread_id in config.configurable
+            # but does NOT inject it into runtime.context. Bridge it here once,
+            # so all downstream middlewares and tools can read it normally.
+            from langgraph.config import get_config
+            config = get_config()
+            thread_id = config.get("configurable", {}).get("thread_id")
+        if thread_id is None:
             raise ValueError("Thread ID is required in the context")
+
+        # Global injection: propagate thread_id to runtime.context so every
+        # subsequent middleware and tool (sandbox, uploads, memory, etc.)
+        # can access it via runtime.context.get("thread_id").
+        runtime.context["thread_id"] = thread_id
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
