@@ -241,7 +241,7 @@ class DeerFlowClient:
         if isinstance(msg, ToolMessage):
             return {
                 "type": "tool",
-                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
@@ -254,17 +254,44 @@ class DeerFlowClient:
 
     @staticmethod
     def _extract_text(content) -> str:
-        """Extract plain text from AIMessage content (str or list of blocks)."""
+        """Extract plain text from AIMessage content (str or list of blocks).
+
+        String chunks are concatenated without separators to avoid corrupting
+        token/character deltas or chunked JSON payloads. Dict-based text blocks
+        are treated as full text blocks and joined with newlines to preserve
+        readability.
+        """
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            parts = []
+            if content and all(isinstance(block, str) for block in content):
+                chunk_like = len(content) > 1 and all(
+                    isinstance(block, str)
+                    and len(block) <= 20
+                    and any(ch in block for ch in '{}[]":,')
+                    for block in content
+                )
+                return "".join(content) if chunk_like else "\n".join(content)
+
+            pieces: list[str] = []
+            pending_str_parts: list[str] = []
+
+            def flush_pending_str_parts() -> None:
+                if pending_str_parts:
+                    pieces.append("".join(pending_str_parts))
+                    pending_str_parts.clear()
+
             for block in content:
                 if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block["text"])
-            return "\n".join(parts) if parts else ""
+                    pending_str_parts.append(block)
+                elif isinstance(block, dict):
+                    flush_pending_str_parts()
+                    text_val = block.get("text")
+                    if isinstance(text_val, str):
+                        pieces.append(text_val)
+
+            flush_pending_str_parts()
+            return "\n".join(pieces) if pieces else ""
         return str(content)
 
     # ------------------------------------------------------------------
@@ -360,7 +387,7 @@ class DeerFlowClient:
                         type="messages-tuple",
                         data={
                             "type": "tool",
-                            "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                            "content": self._extract_text(msg.content),
                             "name": getattr(msg, "name", None),
                             "tool_call_id": getattr(msg, "tool_call_id", None),
                             "id": msg_id,
