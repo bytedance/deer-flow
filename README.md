@@ -129,6 +129,34 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
+   CLI-backed provider examples:
+
+   ```yaml
+   models:
+     - name: gpt-5.4
+       display_name: GPT-5.4 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       supports_thinking: true
+       supports_reasoning_effort: true
+
+     - name: claude-sonnet-4.6
+       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       max_tokens: 4096
+       supports_thinking: true
+   ```
+
+   - Codex CLI reads `~/.codex/auth.json`
+   - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
+   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
+   - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
+
+   ```bash
+   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
+   ```
+   
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -149,6 +177,10 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    ```bash
    export OPENAI_API_KEY=your-openai-api-key
    ```
+
+   For CLI-backed providers:
+   - Codex CLI: `~/.codex/auth.json`
+   - Claude Code OAuth: explicit env/file handoff or `~/.claude/.credentials.json`
 
 - Option C: Edit `config.yaml` directly (Not recommended for production)
 
