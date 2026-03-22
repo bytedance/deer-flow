@@ -76,6 +76,12 @@ src/
 - **MagicUI** - Magic UI components
 - **React Bits** - React bits components
 
+### Interaction Ownership
+
+- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
+- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- `src/hooks/usePoseStream.ts` is a passive store selector; global WebSocket lifecycle stays in `App.tsx`.
+
 ## Resources
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)

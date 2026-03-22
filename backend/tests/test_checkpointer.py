@@ -5,8 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agents.checkpointer import get_checkpointer, reset_checkpointer
-from src.config.checkpointer_config import (
+import deerflow.config.app_config as app_config_module
+from deerflow.agents.checkpointer import get_checkpointer, reset_checkpointer
+from deerflow.config.checkpointer_config import (
     CheckpointerConfig,
     get_checkpointer_config,
     load_checkpointer_config_from_dict,
@@ -17,9 +18,11 @@ from src.config.checkpointer_config import (
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset singleton state before each test."""
+    app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
     yield
+    app_config_module._app_config = None
     set_checkpointer_config(None)
     reset_checkpointer()
 
@@ -75,7 +78,8 @@ class TestGetCheckpointer:
         """get_checkpointer should return InMemorySaver when not configured."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        cp = get_checkpointer()
+        with patch("deerflow.agents.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
+            cp = get_checkpointer()
         assert cp is not None
         assert isinstance(cp, InMemorySaver)
 
@@ -195,7 +199,7 @@ class TestClientCheckpointerFallback:
         """DeerFlowClient._ensure_agent falls back to get_checkpointer() when checkpointer=None."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        from src.client import DeerFlowClient
+        from deerflow.client import DeerFlowClient
 
         load_checkpointer_config_from_dict({"type": "memory"})
 
@@ -212,12 +216,12 @@ class TestClientCheckpointerFallback:
         config_mock.checkpointer = None
 
         with (
-            patch("src.client.get_app_config", return_value=config_mock),
-            patch("src.client.create_agent", side_effect=fake_create_agent),
-            patch("src.client.create_chat_model", return_value=MagicMock()),
-            patch("src.client._build_middlewares", return_value=[]),
-            patch("src.client.apply_prompt_template", return_value=""),
-            patch("src.client.DeerFlowClient._get_tools", return_value=[]),
+            patch("deerflow.client.get_app_config", return_value=config_mock),
+            patch("deerflow.client.create_agent", side_effect=fake_create_agent),
+            patch("deerflow.client.create_chat_model", return_value=MagicMock()),
+            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value=""),
+            patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):
             client = DeerFlowClient(checkpointer=None)
             config = client._get_runnable_config("test-thread")
@@ -228,7 +232,7 @@ class TestClientCheckpointerFallback:
 
     def test_client_explicit_checkpointer_takes_precedence(self):
         """An explicitly provided checkpointer is used even when config checkpointer is set."""
-        from src.client import DeerFlowClient
+        from deerflow.client import DeerFlowClient
 
         load_checkpointer_config_from_dict({"type": "memory"})
 
@@ -246,12 +250,12 @@ class TestClientCheckpointerFallback:
         config_mock.checkpointer = None
 
         with (
-            patch("src.client.get_app_config", return_value=config_mock),
-            patch("src.client.create_agent", side_effect=fake_create_agent),
-            patch("src.client.create_chat_model", return_value=MagicMock()),
-            patch("src.client._build_middlewares", return_value=[]),
-            patch("src.client.apply_prompt_template", return_value=""),
-            patch("src.client.DeerFlowClient._get_tools", return_value=[]),
+            patch("deerflow.client.get_app_config", return_value=config_mock),
+            patch("deerflow.client.create_agent", side_effect=fake_create_agent),
+            patch("deerflow.client.create_chat_model", return_value=MagicMock()),
+            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value=""),
+            patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):
             client = DeerFlowClient(checkpointer=explicit_cp)
             config = client._get_runnable_config("test-thread")

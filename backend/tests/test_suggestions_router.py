@@ -1,7 +1,7 @@
 import asyncio
 from unittest.mock import MagicMock
 
-from src.gateway.routers import suggestions
+from app.gateway.routers import suggestions
 
 
 def test_strip_markdown_code_fence_removes_wrapping():
@@ -62,6 +62,24 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
     )
     fake_model = MagicMock()
     fake_model.invoke.return_value = MagicMock(content=[{"type": "text", "text": '```json\n["Q1", "Q2"]\n```'}])
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(suggestions.generate_suggestions("t1", req))
+
+    assert result.suggestions == ["Q1", "Q2"]
+
+
+def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=2,
+        model_name=None,
+    )
+    fake_model = MagicMock()
+    fake_model.invoke.return_value = MagicMock(content=[{"type": "output_text", "text": '```json\n["Q1", "Q2"]\n```'}])
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
     result = asyncio.run(suggestions.generate_suggestions("t1", req))

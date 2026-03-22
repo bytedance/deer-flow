@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agents.middlewares.budget_enforcement_middleware import (
+from deerflow.agents.middlewares.budget_enforcement_middleware import (
     BudgetEnforcementMiddleware,
 )
-from src.tools.builtins.task_tool import _salvage_partial_output
+from deerflow.tools.builtins.task_tool import _salvage_partial_output
 
 
 def _make_runtime(thread_id: str = "test-thread") -> MagicMock:
