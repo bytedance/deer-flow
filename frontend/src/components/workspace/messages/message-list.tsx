@@ -168,9 +168,9 @@ export function MessageList({
                   {t.subtasks.executing(tasks.size)}
                 </div>,
               );
-              const taskIds = message.tool_calls?.map(
-                (toolCall) => toolCall.id,
-              );
+              const taskIds = message.tool_calls
+                ?.filter((toolCall) => toolCall.name === "task")
+                .map((toolCall) => toolCall.id);
               for (const taskId of taskIds ?? []) {
                 results.push(
                   <SubtaskCard
