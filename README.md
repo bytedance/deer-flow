@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md)
+English | [中文](./README_zh.md) | [日本語](./README_ja.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -160,6 +160,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
 **Production** (builds images locally, mounts runtime config and data):
 

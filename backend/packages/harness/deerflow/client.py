@@ -243,11 +243,13 @@ class DeerFlowClient:
             d: dict[str, Any] = {"type": "ai", "content": msg.content, "id": getattr(msg, "id", None)}
             if msg.tool_calls:
                 d["tool_calls"] = [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls]
+            if getattr(msg, "usage_metadata", None):
+                d["usage_metadata"] = msg.usage_metadata
             return d
         if isinstance(msg, ToolMessage):
             return {
                 "type": "tool",
-                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
@@ -260,17 +262,44 @@ class DeerFlowClient:
 
     @staticmethod
     def _extract_text(content) -> str:
-        """Extract plain text from AIMessage content (str or list of blocks)."""
+        """Extract plain text from AIMessage content (str or list of blocks).
+
+        String chunks are concatenated without separators to avoid corrupting
+        token/character deltas or chunked JSON payloads. Dict-based text blocks
+        are treated as full text blocks and joined with newlines to preserve
+        readability.
+        """
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            parts = []
+            if content and all(isinstance(block, str) for block in content):
+                chunk_like = len(content) > 1 and all(
+                    isinstance(block, str)
+                    and len(block) <= 20
+                    and any(ch in block for ch in '{}[]":,')
+                    for block in content
+                )
+                return "".join(content) if chunk_like else "\n".join(content)
+
+            pieces: list[str] = []
+            pending_str_parts: list[str] = []
+
+            def flush_pending_str_parts() -> None:
+                if pending_str_parts:
+                    pieces.append("".join(pending_str_parts))
+                    pending_str_parts.clear()
+
             for block in content:
                 if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block["text"])
-            return "\n".join(parts) if parts else ""
+                    pending_str_parts.append(block)
+                elif isinstance(block, dict):
+                    flush_pending_str_parts()
+                    text_val = block.get("text")
+                    if isinstance(text_val, str):
+                        pieces.append(text_val)
+
+            flush_pending_str_parts()
+            return "\n".join(pieces) if pieces else ""
         return str(content)
 
     # ------------------------------------------------------------------
@@ -304,9 +333,10 @@ class DeerFlowClient:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
             - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
+            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
-            - type="end"             data={}
+            - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
         if thread_id is None:
             thread_id = str(uuid.uuid4())
@@ -318,6 +348,7 @@ class DeerFlowClient:
         context = {"thread_id": thread_id}
 
         seen_ids: set[str] = set()
+        cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         for chunk in self._agent.stream(state, config=config, context=context, stream_mode="values"):
             messages = chunk.get("messages", [])
@@ -330,6 +361,13 @@ class DeerFlowClient:
                     seen_ids.add(msg_id)
 
                 if isinstance(msg, AIMessage):
+                    # Track token usage from AI messages
+                    usage = getattr(msg, "usage_metadata", None)
+                    if usage:
+                        cumulative_usage["input_tokens"] += usage.get("input_tokens", 0) or 0
+                        cumulative_usage["output_tokens"] += usage.get("output_tokens", 0) or 0
+                        cumulative_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
+
                     if msg.tool_calls:
                         yield StreamEvent(
                             type="messages-tuple",
@@ -343,17 +381,21 @@ class DeerFlowClient:
 
                     text = self._extract_text(msg.content)
                     if text:
-                        yield StreamEvent(
-                            type="messages-tuple",
-                            data={"type": "ai", "content": text, "id": msg_id},
-                        )
+                        event_data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
+                        if usage:
+                            event_data["usage_metadata"] = {
+                                "input_tokens": usage.get("input_tokens", 0) or 0,
+                                "output_tokens": usage.get("output_tokens", 0) or 0,
+                                "total_tokens": usage.get("total_tokens", 0) or 0,
+                            }
+                        yield StreamEvent(type="messages-tuple", data=event_data)
 
                 elif isinstance(msg, ToolMessage):
                     yield StreamEvent(
                         type="messages-tuple",
                         data={
                             "type": "tool",
-                            "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                            "content": self._extract_text(msg.content),
                             "name": getattr(msg, "name", None),
                             "tool_call_id": getattr(msg, "tool_call_id", None),
                             "id": msg_id,
@@ -370,7 +412,7 @@ class DeerFlowClient:
                 },
             )
 
-        yield StreamEvent(type="end", data={})
+        yield StreamEvent(type="end", data={"usage": cumulative_usage})
 
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
         """Send a message and return the final text response.
