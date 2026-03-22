@@ -23,7 +23,7 @@ export function useGlobalShortcuts(shortcuts: Shortcut[]) {
 
       for (const shortcut of shortcuts) {
         if (
-          event.key === shortcut.key &&
+          event.key.toLowerCase() === shortcut.key.toLowerCase() &&
           meta === shortcut.meta &&
           (shortcut.shift ?? false) === event.shiftKey
         ) {

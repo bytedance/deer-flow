@@ -39,11 +39,9 @@ export function CommandPalette() {
   }, [router]);
 
   const handleOpenSettings = useCallback(() => {
-    // Trigger the settings dialog by dispatching a custom event
-    // The settings dialog listens for this in settings-dialog.tsx
-    window.dispatchEvent(new CustomEvent("deerflow:open-settings"));
+    router.push("/workspace/settings");
     setOpen(false);
-  }, []);
+  }, [router]);
 
   const handleShowShortcuts = useCallback(() => {
     setOpen(false);
@@ -65,6 +63,7 @@ export function CommandPalette() {
   const isMac =
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
   const metaKey = isMac ? "⌘" : "Ctrl+";
+  const shiftKey = isMac ? "⇧" : "Shift+";
 
   return (
     <>
@@ -76,7 +75,7 @@ export function CommandPalette() {
             <CommandItem onSelect={handleNewChat}>
               <MessageSquarePlusIcon className="mr-2 h-4 w-4" />
               {t.sidebar.newChat}
-              <CommandShortcut>{metaKey}⇧N</CommandShortcut>
+              <CommandShortcut>{metaKey}{shiftKey}N</CommandShortcut>
             </CommandItem>
             <CommandItem onSelect={handleOpenSettings}>
               <SettingsIcon className="mr-2 h-4 w-4" />
@@ -103,7 +102,7 @@ export function CommandPalette() {
           <div className="space-y-3 text-sm">
             {[
               { keys: `${metaKey}K`, label: t.shortcuts.openCommandPalette },
-              { keys: `${metaKey}⇧N`, label: t.sidebar.newChat },
+              { keys: `${metaKey}${shiftKey}N`, label: t.sidebar.newChat },
               { keys: `${metaKey}B`, label: t.shortcuts.toggleSidebar },
               { keys: `${metaKey},`, label: t.common.settings },
               {
