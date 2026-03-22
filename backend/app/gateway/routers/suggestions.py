@@ -68,7 +68,7 @@ def _extract_response_text(content: object) -> str:
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
+            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
                 text = block.get("text")
                 if isinstance(text, str):
                     parts.append(text)
