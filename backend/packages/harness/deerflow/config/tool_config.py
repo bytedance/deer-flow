@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-_DEFAULT_MAX_CONTENT_CHARS = 16384
+_DEFAULT_MAX_CONTENT_CHARS = 8196
 
 
 def get_max_content_chars(tool_name: str = "web_fetch") -> int:
