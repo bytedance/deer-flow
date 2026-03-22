@@ -498,3 +498,34 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
     # Create second model
     factory_module.create_chat_model(name="minimax-m2.5-highspeed")
     assert captured.get("model") == "MiniMax-M2.5-highspeed"
+
+
+def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
+    model = ModelConfig(
+        name="gpt-5-responses",
+        display_name="GPT-5 Responses",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-5",
+        api_key="test-key",
+        use_responses_api=True,
+        output_version="responses/v1",
+        supports_thinking=False,
+        supports_vision=True,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="gpt-5-responses")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"
