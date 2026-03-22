@@ -181,6 +181,7 @@ Configuration priority:
 4. `config.yaml` in parent directory (project root - **recommended location**)
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
+`ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 **Extensions Configuration** (`extensions_config.json`):
 

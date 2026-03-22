@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 2
+config_version: 3
 
 # ============================================================================
 # Models Configuration
@@ -44,6 +44,16 @@ models:
   #   max_tokens: 4096
   #   temperature: 0.7
   #   supports_vision: true # Enable vision support for view_image tool
+
+  # Example: OpenAI Responses API model
+  # - name: gpt-5-responses
+  #   display_name: GPT-5 (Responses API)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-5
+  #   api_key: $OPENAI_API_KEY
+  #   use_responses_api: true
+  #   output_version: responses/v1
+  #   supports_vision: true
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet

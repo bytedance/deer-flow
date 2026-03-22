@@ -169,6 +169,15 @@ models:
     api_key: $OPENAI_API_KEY
     supports_thinking: false
     supports_vision: true
+
+  - name: gpt-5-responses
+    display_name: GPT-5 (Responses API)
+    use: langchain_openai:ChatOpenAI
+    model: gpt-5
+    api_key: $OPENAI_API_KEY
+    use_responses_api: true
+    output_version: responses/v1
+    supports_vision: true
 ```
 
 Set your API keys:
