@@ -187,6 +187,14 @@ class TelegramChannel(Channel):
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
 
     # -- internal ----------------------------------------------------------
+    @staticmethod
+    def _log_future_error(fut, name: str, msg_id: str):
+        try:
+            exc = fut.exception()
+            if exc:
+                logger.error("[Telegram] %s failed for msg_id=%s: %s", name, msg_id, exc)
+        except Exception:
+            logger.exception("[Telegram] Failed to inspect future for %s (msg_id=%s)", name, msg_id)
 
     def _run_polling(self) -> None:
         """Run telegram polling in a dedicated thread."""
@@ -259,7 +267,10 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+        else:
+            logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
     async def _on_text(self, update, context) -> None:
         """Handle regular text messages."""
@@ -298,4 +309,7 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+        else:
+            logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
