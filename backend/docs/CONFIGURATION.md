@@ -122,10 +122,10 @@ tools:
 
   - name: web_fetch
     group: web
-    use: src.community.jina_ai.tools:web_fetch_tool
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
-    # Maximum characters to return from fetched page content (default: 8192)
-    # max_content_chars: 8192
+    # Maximum characters to return from fetched page content (default: 16384)
+    # max_content_chars: 16384
 ```
 
 **Built-in Tools**:

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-_DEFAULT_MAX_CONTENT_CHARS = 8192
+_DEFAULT_MAX_CONTENT_CHARS = 16384
 
 
 def get_max_content_chars(tool_name: str = "web_fetch") -> int:
     """Read ``max_content_chars`` from the tool config in *config.yaml*.
 
-    The value is looked up under ``tools -> <tool_name> -> max_content_chars``.
-    Falls back to 8 192 when the key is absent, the tool is not configured,
+    The value is read from the tool entry in the top-level ``tools`` list
+    whose ``name`` equals ``tool_name``, using its ``max_content_chars`` field.
+    Falls back to 16 384 when the field is absent, the tool is not configured,
     or the stored value cannot be converted to a positive integer.
     """
     from .app_config import get_app_config

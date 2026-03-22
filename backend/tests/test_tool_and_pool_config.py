@@ -38,59 +38,59 @@ class TestGetMaxContentChars:
     def test_returns_default_when_tool_not_configured(self):
         app_config = MagicMock()
         app_config.get_tool_config.return_value = None
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
     def test_returns_default_when_key_absent(self):
         app_config = self._mock_app_config_with_extra({})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
     def test_returns_configured_int_value(self):
         app_config = self._mock_app_config_with_extra({"max_content_chars": 8192})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == 8192
 
     def test_returns_configured_string_value(self):
         """YAML may parse a bare number as string; int() should handle it."""
         app_config = self._mock_app_config_with_extra({"max_content_chars": "32768"})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == 32768
 
     def test_falls_back_on_invalid_string(self):
         """A malformed value like 'abc' should not crash — returns default."""
         app_config = self._mock_app_config_with_extra({"max_content_chars": "not_a_number"})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
     def test_falls_back_on_none_value(self):
         """max_content_chars explicitly set to None should not crash."""
         app_config = self._mock_app_config_with_extra({"max_content_chars": None})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
     def test_falls_back_on_empty_string(self):
         app_config = self._mock_app_config_with_extra({"max_content_chars": ""})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
     def test_clamps_zero_to_one(self):
         """A zero value should be clamped to 1."""
         app_config = self._mock_app_config_with_extra({"max_content_chars": 0})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == 1
 
     def test_clamps_negative_to_one(self):
         """A negative value should be clamped to 1."""
         app_config = self._mock_app_config_with_extra({"max_content_chars": -100})
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == 1
 
     def test_respects_tool_name_parameter(self):
         """get_tool_config is called with the provided tool_name."""
         app_config = MagicMock()
         app_config.get_tool_config.return_value = None
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             get_max_content_chars("custom_fetcher")
             app_config.get_tool_config.assert_called_once_with("custom_fetcher")
 
@@ -100,7 +100,7 @@ class TestGetMaxContentChars:
         tool = MagicMock()
         tool.model_extra = None
         app_config.get_tool_config.return_value = tool
-        with patch("src.config.app_config.get_app_config", return_value=app_config):
+        with patch("deerflow.config.tool_config.get_app_config", return_value=app_config):
             assert get_max_content_chars() == _DEFAULT_MAX_CONTENT_CHARS
 
 
