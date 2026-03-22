@@ -162,12 +162,24 @@ class TestExtractText:
     def test_list_plain_strings(self):
         assert _extract_text(["raw string"]) == "raw string"
 
+    def test_list_string_chunks_join_without_separator(self):
+        content = ["{\"user\"", ': "alice"}']
+        assert _extract_text(content) == '{"user": "alice"}'
+
     def test_list_mixed_strings_and_blocks(self):
         content = [
             "raw text",
             {"type": "text", "text": "block text"},
         ]
         assert _extract_text(content) == "raw text\nblock text"
+
+    def test_list_adjacent_string_chunks_then_block(self):
+        content = [
+            "prefix",
+            "-continued",
+            {"type": "text", "text": "block text"},
+        ]
+        assert _extract_text(content) == "prefix-continued\nblock text"
 
     def test_list_skips_non_text_blocks(self):
         content = [

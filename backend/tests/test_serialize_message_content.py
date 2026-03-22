@@ -38,7 +38,7 @@ class TestSerializeToolMessageContent:
         assert "{" not in result["content"]
 
     def test_multiple_text_blocks(self):
-        """Multiple text blocks should be joined with newlines."""
+        """Multiple full text blocks should be joined with newlines."""
         msg = ToolMessage(
             content=[
                 {"type": "text", "text": "line 1"},
@@ -49,6 +49,26 @@ class TestSerializeToolMessageContent:
         )
         result = DeerFlowClient._serialize_message(msg)
         assert result["content"] == "line 1\nline 2"
+
+    def test_string_chunks_are_joined_without_newlines(self):
+        """Chunked string payloads should not get artificial separators."""
+        msg = ToolMessage(
+            content=["{\"a\"", ": \"b\"}"] ,
+            tool_call_id="tc1",
+            name="search",
+        )
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["content"] == '{"a": "b"}'
+
+    def test_mixed_string_chunks_and_blocks(self):
+        """String chunks stay contiguous, but text blocks remain separated."""
+        msg = ToolMessage(
+            content=["prefix", "-continued", {"type": "text", "text": "block text"}],
+            tool_call_id="tc1",
+            name="search",
+        )
+        result = DeerFlowClient._serialize_message(msg)
+        assert result["content"] == "prefix-continued\nblock text"
 
     def test_mixed_blocks_with_non_text(self):
         """Non-text blocks (e.g. image) should be skipped gracefully."""

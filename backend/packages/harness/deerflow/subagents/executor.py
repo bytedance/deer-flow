@@ -288,15 +288,23 @@ class SubagentExecutor:
                     if isinstance(content, str):
                         result.result = content
                     elif isinstance(content, list):
-                        # Extract text from list of content blocks for final result only
+                        # Extract text from list of content blocks for final result only.
+                        # Concatenate raw string chunks directly, but preserve separation
+                        # between full text blocks for readability.
                         text_parts = []
+                        pending_str_parts = []
                         for block in content:
                             if isinstance(block, str):
-                                text_parts.append(block)
+                                pending_str_parts.append(block)
                             elif isinstance(block, dict):
+                                if pending_str_parts:
+                                    text_parts.append("".join(pending_str_parts))
+                                    pending_str_parts.clear()
                                 text_val = block.get("text")
                                 if isinstance(text_val, str):
                                     text_parts.append(text_val)
+                        if pending_str_parts:
+                            text_parts.append("".join(pending_str_parts))
                         result.result = "\n".join(text_parts) if text_parts else "No text content in response"
                     else:
                         result.result = str(content)
@@ -309,13 +317,19 @@ class SubagentExecutor:
                         result.result = raw_content
                     elif isinstance(raw_content, list):
                         parts = []
+                        pending_str_parts = []
                         for block in raw_content:
                             if isinstance(block, str):
-                                parts.append(block)
+                                pending_str_parts.append(block)
                             elif isinstance(block, dict):
+                                if pending_str_parts:
+                                    parts.append("".join(pending_str_parts))
+                                    pending_str_parts.clear()
                                 text_val = block.get("text")
                                 if isinstance(text_val, str):
                                     parts.append(text_val)
+                        if pending_str_parts:
+                            parts.append("".join(pending_str_parts))
                         result.result = "\n".join(parts) if parts else "No text content in response"
                     else:
                         result.result = str(raw_content)
