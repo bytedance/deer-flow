@@ -115,9 +115,19 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        model: google/gemini-2.5-flash-preview
        api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
        base_url: https://openrouter.ai/api/v1
+
+     - name: gpt-5-responses
+       display_name: GPT-5 (Responses API)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-5
+       api_key: $OPENAI_API_KEY
+       use_responses_api: true
+       output_version: responses/v1
    ```
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+
+   To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
 4. **Set API keys for your configured model(s)**
 
