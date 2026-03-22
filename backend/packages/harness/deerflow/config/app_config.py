@@ -224,17 +224,65 @@ class AppConfig(BaseModel):
 
 
 _app_config: AppConfig | None = None
+_app_config_path: Path | None = None
+_app_config_mtime: float | None = None
+_app_config_is_custom = False
+
+
+def _get_config_mtime(config_path: Path) -> float | None:
+    """Get the modification time of a config file if it exists."""
+    try:
+        return config_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
+    """Load config from disk and refresh cache metadata."""
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+
+    resolved_path = AppConfig.resolve_config_path(config_path)
+    _app_config = AppConfig.from_file(str(resolved_path))
+    _app_config_path = resolved_path
+    _app_config_mtime = _get_config_mtime(resolved_path)
+    _app_config_is_custom = False
+    return _app_config
 
 
 def get_app_config() -> AppConfig:
     """Get the DeerFlow config instance.
 
-    Returns a cached singleton instance. Use `reload_app_config()` to reload
-    from file, or `reset_app_config()` to clear the cache.
+    Returns a cached singleton instance and automatically reloads it when the
+    underlying config file path or modification time changes. Use
+    `reload_app_config()` to force a reload, or `reset_app_config()` to clear
+    the cache.
     """
-    global _app_config
-    if _app_config is None:
-        _app_config = AppConfig.from_file()
+    global _app_config, _app_config_path, _app_config_mtime
+
+    if _app_config is not None and _app_config_is_custom:
+        return _app_config
+
+    resolved_path = AppConfig.resolve_config_path()
+    current_mtime = _get_config_mtime(resolved_path)
+
+    should_reload = (
+        _app_config is None
+        or _app_config_path != resolved_path
+        or _app_config_mtime != current_mtime
+    )
+    if should_reload:
+        if (
+            _app_config_path == resolved_path
+            and _app_config_mtime is not None
+            and current_mtime is not None
+            and _app_config_mtime != current_mtime
+        ):
+            logger.info(
+                "Config file has been modified (mtime: %s -> %s), reloading AppConfig",
+                _app_config_mtime,
+                current_mtime,
+            )
+        _load_and_cache_app_config(str(resolved_path))
     return _app_config
 
 
@@ -251,9 +299,7 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
     Returns:
         The newly loaded AppConfig instance.
     """
-    global _app_config
-    _app_config = AppConfig.from_file(config_path)
-    return _app_config
+    return _load_and_cache_app_config(config_path)
 
 
 def reset_app_config() -> None:
@@ -263,8 +309,11 @@ def reset_app_config() -> None:
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _app_config
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
     _app_config = None
+    _app_config_path = None
+    _app_config_mtime = None
+    _app_config_is_custom = False
 
 
 def set_app_config(config: AppConfig) -> None:
@@ -275,5 +324,8 @@ def set_app_config(config: AppConfig) -> None:
     Args:
         config: The AppConfig instance to use.
     """
-    global _app_config
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
     _app_config = config
+    _app_config_path = None
+    _app_config_mtime = None
+    _app_config_is_custom = True
