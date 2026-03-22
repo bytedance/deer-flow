@@ -1,6 +1,7 @@
 """Memory updater for reading, writing, and updating memory data."""
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -14,6 +15,8 @@ from deerflow.agents.memory.prompt import (
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -113,6 +116,43 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     return memory_data
 
 
+def _extract_text(content: Any) -> str:
+    """Extract plain text from LLM response content (str or list of content blocks).
+
+    Modern LLMs may return structured content as a list of blocks instead of a
+    plain string, e.g. [{"type": "text", "text": "..."}]. Using str() on such
+    content produces Python repr instead of the actual text, breaking JSON
+    parsing downstream.
+
+    String chunks are concatenated without separators to avoid corrupting
+    chunked JSON/text payloads. Dict-based text blocks are treated as full text
+    blocks and joined with newlines for readability.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: list[str] = []
+        pending_str_parts: list[str] = []
+
+        def flush_pending_str_parts() -> None:
+            if pending_str_parts:
+                pieces.append("".join(pending_str_parts))
+                pending_str_parts.clear()
+
+        for block in content:
+            if isinstance(block, str):
+                pending_str_parts.append(block)
+            elif isinstance(block, dict):
+                flush_pending_str_parts()
+                text_val = block.get("text")
+                if isinstance(text_val, str):
+                    pieces.append(text_val)
+
+        flush_pending_str_parts()
+        return "\n".join(pieces)
+    return str(content)
+
+
 def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
     """Load memory data from file.
 
@@ -132,7 +172,7 @@ def _load_memory_from_file(agent_name: str | None = None) -> dict[str, Any]:
             data = json.load(f)
         return data
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to load memory file: {e}")
+        logger.warning("Failed to load memory file: %s", e)
         return _create_empty_memory()
 
 
@@ -173,6 +213,15 @@ def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str,
     return memory_data
 
 
+def _fact_content_key(content: Any) -> str | None:
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+    return stripped
+
+
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
     """Save memory data to file and update cache.
 
@@ -208,10 +257,10 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
 
         _memory_cache[agent_name] = (memory_data, mtime)
 
-        print(f"Memory saved to {file_path}")
+        logger.info("Memory saved to %s", file_path)
         return True
     except OSError as e:
-        print(f"Failed to save memory file: {e}")
+        logger.error("Failed to save memory file: %s", e)
         return False
 
 
@@ -269,7 +318,7 @@ class MemoryUpdater:
             # Call LLM
             model = self._get_model()
             response = model.invoke(prompt)
-            response_text = str(response.content).strip()
+            response_text = _extract_text(response.content).strip()
 
             # Parse response
             # Remove markdown code blocks if present
@@ -292,10 +341,10 @@ class MemoryUpdater:
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.exception("Memory update failed: %s", e)
             return False
 
     def _apply_updates(
@@ -343,19 +392,35 @@ class MemoryUpdater:
             current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
         # Add new facts
+        existing_fact_keys = {
+            fact_key
+            for fact_key in (
+                _fact_content_key(fact.get("content"))
+                for fact in current_memory.get("facts", [])
+            )
+            if fact_key is not None
+        }
         new_facts = update_data.get("newFacts", [])
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
+                raw_content = fact.get("content", "")
+                normalized_content = raw_content.strip()
+                fact_key = _fact_content_key(normalized_content)
+                if fact_key is not None and fact_key in existing_fact_keys:
+                    continue
+
                 fact_entry = {
                     "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": fact.get("content", ""),
+                    "content": normalized_content,
                     "category": fact.get("category", "context"),
                     "confidence": confidence,
                     "createdAt": now,
                     "source": thread_id or "unknown",
                 }
                 current_memory["facts"].append(fact_entry)
+                if fact_key is not None:
+                    existing_fact_keys.add(fact_key)
 
         # Enforce max facts limit
         if len(current_memory["facts"]) > config.max_facts:

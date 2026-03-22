@@ -943,6 +943,230 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_command_bootstrap_with_text(self):
+        """/bootstrap <text> should route to chat with is_bootstrap=True in run_context."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/bootstrap setup my workspace",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # Should go through the chat path (runs.wait), not the command reply path
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+
+            # The text sent to the agent should be the part after /bootstrap
+            assert call_args[1]["input"]["messages"][0]["content"] == "setup my workspace"
+
+            # run_context should contain is_bootstrap=True
+            assert call_args[1]["context"]["is_bootstrap"] is True
+
+            # Normal context fields should still be present
+            assert "thread_id" in call_args[1]["context"]
+
+            # Should get the agent response (not a command reply)
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_command_bootstrap_without_text(self):
+        """/bootstrap with no text should use a default message."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/bootstrap",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+
+            # Default text should be used when no text is provided
+            assert call_args[1]["input"]["messages"][0]["content"] == "Initialize workspace"
+            assert call_args[1]["context"]["is_bootstrap"] is True
+
+        _run(go())
+
+    def test_handle_command_bootstrap_feishu_uses_streaming(self, monkeypatch):
+        """/bootstrap from feishu should go through the streaming path."""
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            stream_events = [
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hello"},
+                            {"type": "ai", "content": "Bootstrap done"},
+                        ],
+                        "artifacts": [],
+                    },
+                ),
+            ]
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="/bootstrap hello",
+                msg_type=InboundMessageType.COMMAND,
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await manager.stop()
+
+            # Should use streaming path (runs.stream, not runs.wait)
+            mock_client.runs.stream.assert_called_once()
+            call_args = mock_client.runs.stream.call_args
+
+            assert call_args[1]["input"]["messages"][0]["content"] == "hello"
+            assert call_args[1]["context"]["is_bootstrap"] is True
+
+            # Final message should be published
+            final_msgs = [m for m in outbound_received if m.is_final]
+            assert len(final_msgs) == 1
+            assert final_msgs[0].text == "Bootstrap done"
+
+        _run(go())
+
+    def test_handle_command_bootstrap_creates_thread_if_needed(self):
+        """/bootstrap should create a new thread when none exists."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client(thread_id="bootstrap-thread")
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/bootstrap init",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # A thread should be created
+            mock_client.threads.create.assert_called_once()
+            assert store.get_thread_id("test", "chat1") == "bootstrap-thread"
+
+        _run(go())
+
+    def test_help_includes_bootstrap(self):
+        """/help output should mention /bootstrap."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture(msg):
+                 outbound_received.append(msg)
+                 
+            bus.subscribe_outbound(capture)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/help",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert "/bootstrap" in outbound_received[0].text
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # ChannelService tests
