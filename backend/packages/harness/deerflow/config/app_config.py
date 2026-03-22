@@ -233,7 +233,7 @@ def _get_config_mtime(config_path: Path) -> float | None:
     """Get the modification time of a config file if it exists."""
     try:
         return config_path.stat().st_mtime
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -268,14 +268,15 @@ def get_app_config() -> AppConfig:
     should_reload = (
         _app_config is None
         or _app_config_path != resolved_path
-        or (
-            _app_config_mtime is not None
-            and current_mtime is not None
-            and current_mtime > _app_config_mtime
-        )
+        or _app_config_mtime != current_mtime
     )
     if should_reload:
-        if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None:
+        if (
+            _app_config_path == resolved_path
+            and _app_config_mtime is not None
+            and current_mtime is not None
+            and _app_config_mtime != current_mtime
+        ):
             logger.info(
                 "Config file has been modified (mtime: %s -> %s), reloading AppConfig",
                 _app_config_mtime,
