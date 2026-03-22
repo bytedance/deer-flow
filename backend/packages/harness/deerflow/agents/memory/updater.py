@@ -1,6 +1,8 @@
 """Memory updater for reading, writing, and updating memory data."""
 
+import asyncio
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -14,6 +16,8 @@ from deerflow.agents.memory.prompt import (
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+
+logger = logging.getLogger(__name__)
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -241,7 +245,12 @@ class MemoryUpdater:
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
-    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+    async def aupdate_memory(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> bool:
         """Update memory based on conversation messages.
 
         Args:
@@ -277,7 +286,7 @@ class MemoryUpdater:
 
             # Call LLM
             model = self._get_model()
-            response = model.invoke(prompt)
+            response = await model.ainvoke(prompt)
             response_text = str(response.content).strip()
 
             # Parse response
@@ -301,11 +310,21 @@ class MemoryUpdater:
             return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response for memory update: {e}")
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
-            print(f"Memory update failed: {e}")
+            logger.exception("Memory update failed: %s", e)
             return False
+
+    def update_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+        """Synchronous compatibility wrapper for async memory updates."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.aupdate_memory(messages, thread_id, agent_name))
+
+        logger.warning("update_memory() called from a running event loop; offload or await aupdate_memory() instead")
+        return False
 
     def _apply_updates(
         self,
@@ -407,3 +426,13 @@ def update_memory_from_conversation(messages: list[Any], thread_id: str | None =
     """
     updater = MemoryUpdater()
     return updater.update_memory(messages, thread_id, agent_name)
+
+
+async def aupdate_memory_from_conversation(
+    messages: list[Any],
+    thread_id: str | None = None,
+    agent_name: str | None = None,
+) -> bool:
+    """Async convenience function to update memory from a conversation."""
+    updater = MemoryUpdater()
+    return await updater.aupdate_memory(messages, thread_id, agent_name)

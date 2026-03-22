@@ -71,7 +71,11 @@ Key environment variables (see `.env.example` for full list):
 NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
 # LangGraph API URLs (optional, uses nginx proxy by default)
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2024"
+# Comma-separated dev origins to allow when accessing the app from LAN IPs
+NEXT_ALLOWED_DEV_ORIGINS="http://192.168.1.10:3000,http://192.168.1.10:2026"
 ```
+
+If you access the development server from another device on your local network, add that device-facing origin to `NEXT_ALLOWED_DEV_ORIGINS` before running `pnpm dev`.
 
 ## Project Structure
 

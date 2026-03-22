@@ -17,6 +17,7 @@ import sys
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import anyio
 import pytest
 
 # Module names that need to be mocked to break circular imports
@@ -506,7 +507,7 @@ class TestAsyncToolSupport:
 
         async def mock_async_tool(*args, **kwargs):
             async_tool_calls.append("called")
-            await asyncio.sleep(0.01)  # Simulate async work
+            await anyio.sleep(0.01)  # Works across asyncio and trio backends
             return {"result": "async tool result"}
 
         mock_agent = MagicMock()

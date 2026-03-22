@@ -7,9 +7,12 @@ persisting in long-term memory:
   - _strip_upload_mentions_from_memory  (updater)
 """
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
+from deerflow.agents.memory.updater import MemoryUpdater, _strip_upload_mentions_from_memory
 from deerflow.agents.middlewares.memory_middleware import _filter_messages_for_memory
 
 # ---------------------------------------------------------------------------
@@ -212,3 +215,83 @@ class TestStripUploadMentionsFromMemory:
         mem = {"user": {}, "history": {}, "facts": []}
         result = _strip_upload_mentions_from_memory(mem)
         assert result == {"user": {}, "history": {}, "facts": []}
+
+
+def test_memory_updater_sync_wrapper_uses_async_model(monkeypatch):
+    updater = MemoryUpdater()
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(
+        return_value=MagicMock(
+            content='{"user": {}, "history": {}, "factsToRemove": [], "newFacts": []}'
+        )
+    )
+
+    monkeypatch.setattr(updater, "_get_model", lambda: fake_model)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.updater.get_memory_data",
+        lambda agent_name=None: {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {
+                "workContext": {"summary": "", "updatedAt": ""},
+                "personalContext": {"summary": "", "updatedAt": ""},
+                "topOfMind": {"summary": "", "updatedAt": ""},
+            },
+            "history": {
+                "recentMonths": {"summary": "", "updatedAt": ""},
+                "earlierContext": {"summary": "", "updatedAt": ""},
+                "longTermBackground": {"summary": "", "updatedAt": ""},
+            },
+            "facts": [],
+        },
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.updater._save_memory_to_file",
+        lambda memory_data, agent_name=None: True,
+    )
+
+    result = updater.update_memory([HumanMessage(content="Remember that I like Python.")], thread_id="t-1")
+
+    assert result is True
+    fake_model.ainvoke.assert_called_once()
+
+
+def test_memory_updater_async_entrypoint_uses_ainvoke(monkeypatch):
+    updater = MemoryUpdater()
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(
+        return_value=MagicMock(
+            content='{"user": {}, "history": {}, "factsToRemove": [], "newFacts": []}'
+        )
+    )
+
+    monkeypatch.setattr(updater, "_get_model", lambda: fake_model)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.updater.get_memory_data",
+        lambda agent_name=None: {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {
+                "workContext": {"summary": "", "updatedAt": ""},
+                "personalContext": {"summary": "", "updatedAt": ""},
+                "topOfMind": {"summary": "", "updatedAt": ""},
+            },
+            "history": {
+                "recentMonths": {"summary": "", "updatedAt": ""},
+                "earlierContext": {"summary": "", "updatedAt": ""},
+                "longTermBackground": {"summary": "", "updatedAt": ""},
+            },
+            "facts": [],
+        },
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.updater._save_memory_to_file",
+        lambda memory_data, agent_name=None: True,
+    )
+
+    result = asyncio.run(
+        updater.aupdate_memory([HumanMessage(content="Remember that I like Rust.")], thread_id="t-2")
+    )
+
+    assert result is True
+    fake_model.ainvoke.assert_called_once()
