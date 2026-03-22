@@ -213,6 +213,13 @@ export const enUS: Translations = {
     about: "About DeerFlow",
   },
 
+  // Export
+  export: {
+    exportConversation: "Export conversation",
+    asMarkdown: "Markdown (.md)",
+    asJSON: "JSON (.json)",
+  },
+
   // Conversation
   conversation: {
     noMessages: "No messages yet",

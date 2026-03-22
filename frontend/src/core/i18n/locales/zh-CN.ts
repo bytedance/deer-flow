@@ -202,6 +202,13 @@ export const zhCN: Translations = {
     about: "关于 DeerFlow",
   },
 
+  // Export
+  export: {
+    exportConversation: "导出对话",
+    asMarkdown: "Markdown (.md)",
+    asJSON: "JSON (.json)",
+  },
+
   // Conversation
   conversation: {
     noMessages: "还没有消息",

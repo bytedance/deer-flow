@@ -151,6 +151,13 @@ export interface Translations {
     about: string;
   };
 
+  // Export
+  export: {
+    exportConversation: string;
+    asMarkdown: string;
+    asJSON: string;
+  };
+
   // Conversation
   conversation: {
     noMessages: string;
