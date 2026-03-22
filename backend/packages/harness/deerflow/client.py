@@ -264,6 +264,15 @@ class DeerFlowClient:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
+            if content and all(isinstance(block, str) for block in content):
+                chunk_like = len(content) > 1 and all(
+                    isinstance(block, str)
+                    and len(block) <= 20
+                    and any(ch in block for ch in '{}[]":,')
+                    for block in content
+                )
+                return "".join(content) if chunk_like else "\n".join(content)
+
             pieces: list[str] = []
             pending_str_parts: list[str] = []
 
