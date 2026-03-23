@@ -5,9 +5,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.gateway.config import get_gateway_config
+from app.gateway.middleware import UserContextMiddleware
 from app.gateway.routers import (
     agents,
     artifacts,
+    auth,
     channels,
     mcp,
     memory,
@@ -140,11 +142,18 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "authentication",
+                "description": "User authentication and authorization for multi-tenant mode",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
         ],
     )
+
+    # Add user context middleware for multi-tenant isolation
+    app.add_middleware(UserContextMiddleware)
 
     # CORS is handled by nginx - no need for FastAPI middleware
 
@@ -175,6 +184,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Auth API is mounted at /api/auth
+    app.include_router(auth.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
