@@ -505,3 +505,38 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+
+# ============================================================================
+# Guardrails Configuration
+# ============================================================================
+# Optional pre-execution authorization for tool calls.
+# When enabled, every tool call passes through the configured provider
+# before execution. Three options: built-in allowlist, OAP policy provider,
+# or custom provider. See backend/docs/GUARDRAILS.md for full documentation.
+#
+# Providers are loaded by class path via resolve_variable (same as models/tools).
+
+# --- Option 1: Built-in AllowlistProvider (zero external deps) ---
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: deerflow.guardrails.builtin:AllowlistProvider
+#     config:
+#       denied_tools: ["bash", "write_file"]
+
+# --- Option 2: OAP passport provider (open standard, any implementation) ---
+#   The Open Agent Passport (OAP) spec defines passport format and decision codes.
+#   Any OAP-compliant provider works. Example using APort (reference implementation):
+#     pip install aport-agent-guardrails && aport setup --framework deerflow
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: aport_guardrails.providers.generic:OAPGuardrailProvider
+
+# --- Option 3: Custom provider (any class with evaluate/aevaluate methods) ---
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: my_package:MyGuardrailProvider
+#     config:
+#       key: value
