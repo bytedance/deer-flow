@@ -5,6 +5,8 @@ import sys
 
 import pytest
 from langchain_core.tools import tool as langchain_tool
+from langgraph.prebuilt import ToolRuntime
+from langgraph.types import Command
 
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.tools.builtins.tool_search import (
@@ -27,6 +29,17 @@ def _make_mock_tool(name: str, description: str):
 
     mock_tool.description = description
     return mock_tool
+
+
+def _make_runtime(*, state: dict | None = None, tool_call_id: str = "tc-1") -> ToolRuntime:
+    return ToolRuntime(
+        state=state or {},
+        context={},
+        config={},
+        stream_writer=lambda _: None,
+        tool_call_id=tool_call_id,
+        store=None,
+    )
 
 
 @pytest.fixture
@@ -176,22 +189,26 @@ class TestToolSearchTool:
     def test_no_registry(self):
         from deerflow.tools.builtins.tool_search import tool_search
 
-        result = tool_search.invoke({"query": "github"})
-        assert result == "No deferred tools available."
+        result = tool_search.func(query="github", runtime=_make_runtime())
+        assert isinstance(result, Command)
+        assert result.update["messages"][0].content == "No deferred tools available."
 
     def test_no_match(self, registry):
         from deerflow.tools.builtins.tool_search import tool_search
 
         set_deferred_registry(registry)
-        result = tool_search.invoke({"query": "nonexistent_xyz_tool"})
-        assert "No tools found matching" in result
+        result = tool_search.func(query="nonexistent_xyz_tool", runtime=_make_runtime())
+        assert isinstance(result, Command)
+        assert "No tools found matching" in result.update["messages"][0].content
 
     def test_returns_valid_json(self, registry):
         from deerflow.tools.builtins.tool_search import tool_search
 
         set_deferred_registry(registry)
-        result = tool_search.invoke({"query": "select:github_create_issue"})
-        parsed = json.loads(result)
+        result = tool_search.func(query="select:github_create_issue", runtime=_make_runtime())
+        assert isinstance(result, Command)
+        assert result.update["loaded_deferred_tools"] == ["github_create_issue"]
+        parsed = json.loads(result.update["messages"][0].content)
         assert isinstance(parsed, list)
         assert len(parsed) == 1
         assert parsed[0]["name"] == "github_create_issue"
@@ -200,8 +217,9 @@ class TestToolSearchTool:
         from deerflow.tools.builtins.tool_search import tool_search
 
         set_deferred_registry(registry)
-        result = tool_search.invoke({"query": "select:slack_send_message"})
-        parsed = json.loads(result)
+        result = tool_search.func(query="select:slack_send_message", runtime=_make_runtime())
+        assert isinstance(result, Command)
+        parsed = json.loads(result.update["messages"][0].content)
         func_def = parsed[0]
         # OpenAI function format should have these keys
         assert "name" in func_def
@@ -212,8 +230,9 @@ class TestToolSearchTool:
         from deerflow.tools.builtins.tool_search import tool_search
 
         set_deferred_registry(registry)
-        result = tool_search.invoke({"query": "github"})
-        parsed = json.loads(result)
+        result = tool_search.func(query="github", runtime=_make_runtime())
+        assert isinstance(result, Command)
+        parsed = json.loads(result.update["messages"][0].content)
         assert len(parsed) == 2
         names = {d["name"] for d in parsed}
         assert names == {"github_create_issue", "github_list_repos"}
@@ -308,11 +327,12 @@ class TestDeferredToolFilterMiddleware:
         deferred_tool = registry.entries[0].tool  # github_create_issue
 
         class FakeRequest:
-            def __init__(self, tools):
+            def __init__(self, tools, state=None):
                 self.tools = tools
+                self.state = state or {}
 
             def override(self, **kwargs):
-                return FakeRequest(kwargs.get("tools", self.tools))
+                return FakeRequest(kwargs.get("tools", self.tools), self.state)
 
         request = FakeRequest(tools=[active_tool, deferred_tool])
         filtered = middleware._filter_tools(request)
@@ -327,11 +347,12 @@ class TestDeferredToolFilterMiddleware:
         active_tool = _make_mock_tool("my_tool", "A tool")
 
         class FakeRequest:
-            def __init__(self, tools):
+            def __init__(self, tools, state=None):
                 self.tools = tools
+                self.state = state or {}
 
             def override(self, **kwargs):
-                return FakeRequest(kwargs.get("tools", self.tools))
+                return FakeRequest(kwargs.get("tools", self.tools), self.state)
 
         request = FakeRequest(tools=[active_tool])
         filtered = middleware._filter_tools(request)
@@ -350,14 +371,39 @@ class TestDeferredToolFilterMiddleware:
         active_tool = _make_mock_tool("my_active_tool", "Active")
 
         class FakeRequest:
-            def __init__(self, tools):
+            def __init__(self, tools, state=None):
                 self.tools = tools
+                self.state = state or {}
 
             def override(self, **kwargs):
-                return FakeRequest(kwargs.get("tools", self.tools))
+                return FakeRequest(kwargs.get("tools", self.tools), self.state)
 
         request = FakeRequest(tools=[dict_tool, active_tool])
         filtered = middleware._filter_tools(request)
 
         # dict_tool has no .name attr → getattr returns None → not in deferred_names → kept
         assert len(filtered.tools) == 2
+
+    def test_preserves_loaded_deferred_tools(self, registry):
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        set_deferred_registry(registry)
+        middleware = DeferredToolFilterMiddleware()
+        deferred_tool = registry.entries[0].tool
+
+        class FakeRequest:
+            def __init__(self, tools, state=None):
+                self.tools = tools
+                self.state = state or {}
+
+            def override(self, **kwargs):
+                return FakeRequest(kwargs.get("tools", self.tools), self.state)
+
+        request = FakeRequest(
+            tools=[deferred_tool],
+            state={"loaded_deferred_tools": [deferred_tool.name]},
+        )
+        filtered = middleware._filter_tools(request)
+
+        assert len(filtered.tools) == 1
+        assert filtered.tools[0].name == deferred_tool.name
