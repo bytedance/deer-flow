@@ -337,6 +337,9 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      loadingTools: "Loading tools...",
+      loadToolsError: "Failed to load tools",
+      noTools: "No tools available",
     },
     skills: {
       title: "Agent Skills",
@@ -347,6 +350,11 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
+      refreshSuccess: (count: number) =>
+        `Refreshed, ${count} skill${count === 1 ? "" : "s"} found`,
+      refreshError: "Failed to refresh",
+      refreshSkills: "Refresh skills",
+      allowExternalSkills: "Allow External Skills",
     },
     notification: {
       title: "Notification",

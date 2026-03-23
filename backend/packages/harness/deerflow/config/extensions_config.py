@@ -43,6 +43,7 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    disabled_tools: list[str] = Field(default_factory=list, description="List of tool names that are disabled for this server")
     model_config = ConfigDict(extra="allow")
 
 
@@ -63,6 +64,11 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    allow_external_skills: bool = Field(
+        default=False,
+        description="Whether to allow loading skills from symlinks pointing outside the skills root",
+        alias="allowExternalSkills",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

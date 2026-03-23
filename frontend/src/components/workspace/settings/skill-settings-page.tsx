@@ -1,8 +1,10 @@
 "use client";
 
-import { SparklesIcon } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { RefreshCwIcon, SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,7 +25,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
-import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import { loadSkills } from "@/core/skills";
+import { useEnableSkill, useSkills, useSkillsConfig, useUpdateSkillsConfig } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
@@ -57,16 +60,38 @@ function SkillSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<string>("public");
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const { mutate: enableSkill } = useEnableSkill();
+  const { data: config } = useSkillsConfig();
+  const { mutate: updateConfig } = useUpdateSkillsConfig();
+
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
   );
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      // Fetch fresh data directly, bypassing cache
+      const freshSkills = await loadSkills();
+      // Write directly into the query cache so UI updates immediately
+      queryClient.setQueryData(["skills"], freshSkills);
+      toast.success(t.settings.skills.refreshSuccess(freshSkills.length));
+    } catch {
+      toast.error(t.settings.skills.refreshError);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const handleCreateSkill = () => {
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");
   };
+
   return (
     <div className="flex w-full flex-col gap-4">
       <header className="flex justify-between">
@@ -78,7 +103,27 @@ function SkillSettingsList({
             </TabsList>
           </Tabs>
         </div>
-        <div>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mr-4">
+            <span className="text-sm text-muted-foreground whitespace-nowrap">
+              {t.settings.skills.allowExternalSkills || "Allow External Skills"}
+            </span>
+            <Switch
+              checked={config?.allowExternalSkills ?? false}
+              disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+              onCheckedChange={(checked) => updateConfig(checked)}
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isRefreshing || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+            onClick={() => void handleRefresh()}
+            aria-label={t.settings.skills.refreshSkills}
+            title={t.settings.skills.refreshSkills}
+          >
+            <RefreshCwIcon className={isRefreshing ? "animate-spin" : ""} />
+          </Button>
           <Button size="sm" onClick={handleCreateSkill}>
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}

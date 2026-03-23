@@ -323,6 +323,9 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      loadingTools: "加载工具中...",
+      loadToolsError: "加载工具失败",
+      noTools: "暂无可用工具",
     },
     skills: {
       title: "技能",
@@ -332,6 +335,10 @@ export const zhCN: Translations = {
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
+      refreshSuccess: (count: number) => `已刷新，共 ${count} 个技能`,
+      refreshError: "刷新失败",
+      refreshSkills: "刷新技能",
+      allowExternalSkills: "允许加载外部技能",
     },
     notification: {
       title: "通知",

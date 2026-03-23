@@ -1,5 +1,6 @@
 """Load MCP tools using langchain-mcp-adapters."""
 
+import asyncio
 import logging
 
 from langchain_core.tools import BaseTool
@@ -7,6 +8,10 @@ from langchain_core.tools import BaseTool
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+
+# Timeout for fetching all MCP tools (seconds). To prevent slow/unreachable
+# servers from blocking agent initialization indefinitely.
+MCP_SERVER_CONNECT_TIMEOUT = 20
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +60,26 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         client = MultiServerMCPClient(servers_config, tool_interceptors=tool_interceptors, tool_name_prefix=True)
 
-        # Get all tools from all servers
-        tools = await client.get_tools()
+        # Get all tools from all servers, with a hard timeout to prevent a
+        # slow/unreachable server from blocking agent initialization indefinitely.
+        try:
+            tools = await asyncio.wait_for(client.get_tools(), timeout=MCP_SERVER_CONNECT_TIMEOUT)
+        except TimeoutError:
+            logger.error(
+                f"MCP get_tools() timed out after {MCP_SERVER_CONNECT_TIMEOUT}s. "
+                "One or more configured MCP servers may be unreachable. Returning empty tool list."
+            )
+            return []
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
+
+        # Filter out disabled tools per server
+        disabled_tool_names: set[str] = set()
+        for server_config in extensions_config.get_enabled_mcp_servers().values():
+            disabled_tool_names.update(server_config.disabled_tools)
+
+        if disabled_tool_names:
+            tools = [t for t in tools if t.name not in disabled_tool_names]
+            logger.info(f"After filtering disabled tools, {len(tools)} tool(s) remain")
 
         return tools
 
