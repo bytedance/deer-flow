@@ -43,6 +43,10 @@ export const zhCN: Translations = {
     save: "保存",
     install: "安装",
     create: "创建",
+    export: "导出",
+    exportAsMarkdown: "导出为 Markdown",
+    exportAsJSON: "导出为 JSON",
+    exportSuccess: "对话已导出",
   },
 
   // Welcome
