@@ -193,6 +193,8 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Maximum characters to return from fetched page content (default: 16384)
+    # max_content_chars: 16384
 
   # Web fetch tool (uses InfoQuest AI reader)
   # - name: web_fetch
@@ -312,6 +314,10 @@ sandbox:
 # subagents:
 #   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
 #   timeout_seconds: 900
+#   # Number of workers in the scheduler thread pool (default: 3)
+#   scheduler_pool_size: 3
+#   # Number of workers in the execution thread pool (default: 3)
+#   execution_pool_size: 3
 #
 #   # Optional per-agent timeout overrides
 #   agents:

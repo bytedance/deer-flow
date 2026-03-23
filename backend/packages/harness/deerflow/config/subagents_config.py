@@ -25,6 +25,16 @@ class SubagentsAppConfig(BaseModel):
         ge=1,
         description="Default timeout in seconds for all subagents (default: 900 = 15 minutes)",
     )
+    scheduler_pool_size: int = Field(
+        default=3,
+        ge=1,
+        description="Number of workers in the scheduler thread pool (default: 3)",
+    )
+    execution_pool_size: int = Field(
+        default=3,
+        ge=1,
+        description="Number of workers in the execution thread pool (default: 3)",
+    )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
         description="Per-agent configuration overrides keyed by agent name",

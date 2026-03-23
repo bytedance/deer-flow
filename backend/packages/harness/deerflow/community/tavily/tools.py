@@ -3,14 +3,15 @@ import json
 from langchain.tools import tool
 from tavily import TavilyClient
 
-from deerflow.config import get_app_config
+from deerflow.config import get_app_config, get_max_content_chars
 
 
 def _get_tavily_client() -> TavilyClient:
     config = get_app_config().get_tool_config("web_search")
     api_key = None
-    if config is not None and "api_key" in config.model_extra:
-        api_key = config.model_extra.get("api_key")
+    extra = (config.model_extra or {}) if config is not None else {}
+    if "api_key" in extra:
+        api_key = extra.get("api_key")
     return TavilyClient(api_key=api_key)
 
 
@@ -23,8 +24,9 @@ def web_search_tool(query: str) -> str:
     """
     config = get_app_config().get_tool_config("web_search")
     max_results = 5
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results")
+    extra = (config.model_extra or {}) if config is not None else {}
+    if "max_results" in extra:
+        max_results = extra.get("max_results")
 
     client = _get_tavily_client()
     res = client.search(query, max_results=max_results)
@@ -57,6 +59,6 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
-        return f"# {result['title']}\n\n{result['raw_content'][:4096]}"
+        return f"# {result['title']}\n\n{result['raw_content'][:get_max_content_chars()]}"
     else:
         return "Error: No results found"

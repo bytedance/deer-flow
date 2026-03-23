@@ -159,6 +159,13 @@ tools:
     use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Optional
+
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+    # Maximum characters to return from fetched page content (default: 8196)
+    # max_content_chars: 16384
 ```
 
 **Built-in Tools**:

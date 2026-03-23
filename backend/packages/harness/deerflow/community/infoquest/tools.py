@@ -1,6 +1,6 @@
 from langchain.tools import tool
 
-from deerflow.config import get_app_config
+from deerflow.config import get_app_config, get_max_content_chars
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .infoquest_client import InfoQuestClient
@@ -10,19 +10,21 @@ readability_extractor = ReadabilityExtractor()
 
 def _get_infoquest_client() -> InfoQuestClient:
     search_config = get_app_config().get_tool_config("web_search")
+    search_extra = (search_config.model_extra or {}) if search_config is not None else {}
     search_time_range = -1
-    if search_config is not None and "search_time_range" in search_config.model_extra:
-        search_time_range = search_config.model_extra.get("search_time_range")
+    if "search_time_range" in search_extra:
+        search_time_range = search_extra.get("search_time_range")
     fetch_config = get_app_config().get_tool_config("web_fetch")
+    fetch_extra = (fetch_config.model_extra or {}) if fetch_config is not None else {}
     fetch_time = -1
-    if fetch_config is not None and "fetch_time" in fetch_config.model_extra:
-        fetch_time = fetch_config.model_extra.get("fetch_time")
+    if "fetch_time" in fetch_extra:
+        fetch_time = fetch_extra.get("fetch_time")
     fetch_timeout = -1
-    if fetch_config is not None and "timeout" in fetch_config.model_extra:
-        fetch_timeout = fetch_config.model_extra.get("timeout")
+    if "timeout" in fetch_extra:
+        fetch_timeout = fetch_extra.get("timeout")
     navigation_timeout = -1
-    if fetch_config is not None and "navigation_timeout" in fetch_config.model_extra:
-        navigation_timeout = fetch_config.model_extra.get("navigation_timeout")
+    if "navigation_timeout" in fetch_extra:
+        navigation_timeout = fetch_extra.get("navigation_timeout")
 
     return InfoQuestClient(
         search_time_range=search_time_range,
@@ -60,4 +62,4 @@ def web_fetch_tool(url: str) -> str:
     if result.startswith("Error: "):
         return result
     article = readability_extractor.extract_article(result)
-    return article.to_markdown()[:4096]
+    return article.to_markdown()[:get_max_content_chars()]

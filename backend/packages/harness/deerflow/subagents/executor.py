@@ -67,12 +67,38 @@ class SubagentResult:
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
-# Thread pool for background task scheduling and orchestration
-_scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
+# Thread pools — lazily initialized on first use so config.yaml values are available
+_scheduler_pool: ThreadPoolExecutor | None = None
+_execution_pool: ThreadPoolExecutor | None = None
+_pool_lock = threading.Lock()
 
-# Thread pool for actual subagent execution (with timeout support)
-# Larger pool to avoid blocking when scheduler submits execution tasks
-_execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+
+def get_scheduler_pool() -> ThreadPoolExecutor:
+    """Return the scheduler thread pool, creating it on first use."""
+    global _scheduler_pool
+    if _scheduler_pool is None:
+        with _pool_lock:
+            if _scheduler_pool is None:
+                from deerflow.config.subagents_config import get_subagents_app_config
+
+                size = get_subagents_app_config().scheduler_pool_size
+                _scheduler_pool = ThreadPoolExecutor(max_workers=size, thread_name_prefix="subagent-scheduler-")
+                logger.info(f"Scheduler pool initialized with {size} workers")
+    return _scheduler_pool
+
+
+def get_execution_pool() -> ThreadPoolExecutor:
+    """Return the execution thread pool, creating it on first use."""
+    global _execution_pool
+    if _execution_pool is None:
+        with _pool_lock:
+            if _execution_pool is None:
+                from deerflow.config.subagents_config import get_subagents_app_config
+
+                size = get_subagents_app_config().execution_pool_size
+                _execution_pool = ThreadPoolExecutor(max_workers=size, thread_name_prefix="subagent-exec-")
+                logger.info(f"Execution pool initialized with {size} workers")
+    return _execution_pool
 
 
 def _filter_tools(
@@ -424,7 +450,7 @@ class SubagentExecutor:
             try:
                 # Submit execution to execution pool with timeout
                 # Pass result_holder so execute() can update it in real-time
-                execution_future: Future = _execution_pool.submit(self.execute, task, result_holder)
+                execution_future: Future = get_execution_pool().submit(self.execute, task, result_holder)
                 try:
                     # Wait for execution with timeout
                     exec_result = execution_future.result(timeout=self.config.timeout_seconds)
@@ -449,7 +475,7 @@ class SubagentExecutor:
                     _background_tasks[task_id].error = str(e)
                     _background_tasks[task_id].completed_at = datetime.now()
 
-        _scheduler_pool.submit(run_task)
+        get_scheduler_pool().submit(run_task)
         return task_id
 
 
