@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.guardrails_config import load_guardrails_config_from_dict
 from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -106,6 +107,10 @@ class AppConfig(BaseModel):
         # Load tool_search config if present
         if "tool_search" in config_data:
             load_tool_search_config_from_dict(config_data["tool_search"])
+
+        # Load guardrails config if present
+        if "guardrails" in config_data:
+            load_guardrails_config_from_dict(config_data["guardrails"])
 
         # Load checkpointer config if present
         if "checkpointer" in config_data:

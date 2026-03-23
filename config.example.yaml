@@ -181,7 +181,7 @@ tools:
     max_results: 5
     # api_key: $TAVILY_API_KEY  # Set if needed
 
-  # Web search tool (requires InfoQuest API key)
+  # Web search tool (uses InfoQuest, requires InfoQuest API key)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.infoquest.tools:web_search_tool
@@ -194,7 +194,7 @@ tools:
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
 
-  # Web fetch tool (uses InfoQuest AI reader)
+  # Web fetch tool (uses InfoQuest)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.infoquest.tools:web_fetch_tool
@@ -211,6 +211,15 @@ tools:
     group: web
     use: deerflow.community.image_search.tools:image_search_tool
     max_results: 5
+
+  # Image search tool (uses InfoQuest)
+  # - name: image_search
+  #   group: web
+  #   use: deerflow.community.infoquest.tools:image_search_tool
+  #   # Used to limit the scope of image search results, only returns content within the specified time range. Set to -1 to disable time filtering
+  #   image_search_time_range: 10
+  #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
+  #   image_size: "i"
 
   # File operations tools
   - name: ls
@@ -496,3 +505,38 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+
+# ============================================================================
+# Guardrails Configuration
+# ============================================================================
+# Optional pre-execution authorization for tool calls.
+# When enabled, every tool call passes through the configured provider
+# before execution. Three options: built-in allowlist, OAP policy provider,
+# or custom provider. See backend/docs/GUARDRAILS.md for full documentation.
+#
+# Providers are loaded by class path via resolve_variable (same as models/tools).
+
+# --- Option 1: Built-in AllowlistProvider (zero external deps) ---
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: deerflow.guardrails.builtin:AllowlistProvider
+#     config:
+#       denied_tools: ["bash", "write_file"]
+
+# --- Option 2: OAP passport provider (open standard, any implementation) ---
+#   The Open Agent Passport (OAP) spec defines passport format and decision codes.
+#   Any OAP-compliant provider works. Example using APort (reference implementation):
+#     pip install aport-agent-guardrails && aport setup --framework deerflow
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: aport_guardrails.providers.generic:OAPGuardrailProvider
+
+# --- Option 3: Custom provider (any class with evaluate/aevaluate methods) ---
+# guardrails:
+#   enabled: true
+#   provider:
+#     use: my_package:MyGuardrailProvider
+#     config:
+#       key: value

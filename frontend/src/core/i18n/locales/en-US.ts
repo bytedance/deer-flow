@@ -274,6 +274,17 @@ export const enUS: Translations = {
     failed: "Subtask failed",
   },
 
+  // Shortcuts
+  shortcuts: {
+    searchActions: "Search actions...",
+    noResults: "No results found.",
+    actions: "Actions",
+    keyboardShortcuts: "Keyboard Shortcuts",
+    keyboardShortcutsDescription: "Navigate DeerFlow faster with keyboard shortcuts.",
+    openCommandPalette: "Open Command Palette",
+    toggleSidebar: "Toggle Sidebar",
+  },
+
   // Settings
   settings: {
     title: "Settings",
