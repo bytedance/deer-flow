@@ -12,6 +12,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    rewind,
     skills,
     suggestions,
     uploads,
@@ -172,6 +173,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Rewind API is mounted at /api/threads/{thread_id}/rewind
+    app.include_router(rewind.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

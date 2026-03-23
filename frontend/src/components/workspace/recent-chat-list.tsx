@@ -63,6 +63,7 @@ export function RecentChatList() {
   const pathname = usePathname();
   const { thread_id: threadIdFromPath } = useParams<{ thread_id: string }>();
   const { data: threads = [] } = useThreads();
+  const visibleThreads = threads.filter((thread) => !thread.values?.__hidden);
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
 
@@ -75,19 +76,21 @@ export function RecentChatList() {
     (threadId: string) => {
       deleteThread({ threadId });
       if (threadId === threadIdFromPath) {
-        const threadIndex = threads.findIndex((t) => t.thread_id === threadId);
+        const threadIndex = visibleThreads.findIndex(
+          (t) => t.thread_id === threadId,
+        );
         let nextThreadId = "new";
         if (threadIndex > -1) {
-          if (threads[threadIndex + 1]) {
-            nextThreadId = threads[threadIndex + 1]!.thread_id;
-          } else if (threads[threadIndex - 1]) {
-            nextThreadId = threads[threadIndex - 1]!.thread_id;
+          if (visibleThreads[threadIndex + 1]) {
+            nextThreadId = visibleThreads[threadIndex + 1]!.thread_id;
+          } else if (visibleThreads[threadIndex - 1]) {
+            nextThreadId = visibleThreads[threadIndex - 1]!.thread_id;
           }
         }
         void router.push(`/workspace/chats/${nextThreadId}`);
       }
     },
-    [deleteThread, router, threadIdFromPath, threads],
+    [deleteThread, router, threadIdFromPath, visibleThreads],
   );
 
   const handleRenameClick = useCallback(
@@ -153,7 +156,7 @@ export function RecentChatList() {
     [t],
   );
 
-  if (threads.length === 0) {
+  if (visibleThreads.length === 0) {
     return null;
   }
   return (
@@ -167,7 +170,7 @@ export function RecentChatList() {
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+              {visibleThreads.map((thread) => {
                 const isActive = pathOfThread(thread.thread_id) === pathname;
                 return (
                   <SidebarMenuItem

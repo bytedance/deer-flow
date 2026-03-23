@@ -406,7 +406,20 @@ export function useThreadStream({
         } as typeof thread)
       : thread;
 
-  return [mergedThread, sendMessage, isUploading] as const;
+  const refreshThread = useCallback(async () => {
+    const currentThreadId = threadIdRef.current;
+    if (!currentThreadId) {
+      return;
+    }
+    if (thread.isLoading) {
+      return;
+    }
+    setOnStreamThreadId(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setOnStreamThreadId(currentThreadId);
+  }, [thread.isLoading]);
+
+  return [mergedThread, sendMessage, refreshThread,isUploading] as const;
 }
 
 export function useThreads(
