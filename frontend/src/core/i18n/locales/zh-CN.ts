@@ -261,6 +261,12 @@ export const zhCN: Translations = {
     failed: "子任务失败",
   },
 
+  // Token Usage
+  tokenUsage: {
+    title: "Token 用量",
+    input: "输入",
+    output: "输出",
+    total: "总计",
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",
