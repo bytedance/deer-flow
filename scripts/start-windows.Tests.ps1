@@ -180,6 +180,62 @@ Describe 'scripts/start-windows.ps1' {
       (Get-Content -LiteralPath $target -Raw).Trim() | Should Be 'hello'
     }
 
+    It 'Get-MissingConfigEnvironmentVariables ignores commented example placeholders' {
+      $repoRoot = Join-Path $TestDrive 'repo-commented-env'
+      New-Item -ItemType Directory -Path $repoRoot | Out-Null
+
+      $configPath = Join-Path $repoRoot 'config.yaml'
+      Set-Content -LiteralPath $configPath -Encoding ASCII -Value @'
+models:
+  - name: glm-4-flash
+    api_key: direct-inline-key
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    model: glm-4-flash
+
+# Example values below should not be treated as required:
+# api_key: $OPENAI_API_KEY
+# api_key: $ANTHROPIC_API_KEY
+tools:
+  - name: web_search
+    use: deerflow.community.tavily.tools:web_search_tool
+    # api_key: $TAVILY_API_KEY
+'@
+
+      $missing = Get-MissingConfigEnvironmentVariables -ConfigPath $configPath
+
+      @($missing).Count | Should Be 0
+    }
+
+    It 'Get-MissingConfigEnvironmentVariables only reports active YAML values that still reference host env vars' {
+      $repoRoot = Join-Path $TestDrive 'repo-active-env'
+      New-Item -ItemType Directory -Path $repoRoot | Out-Null
+
+      $configPath = Join-Path $repoRoot 'config.yaml'
+      Set-Content -LiteralPath $configPath -Encoding ASCII -Value @'
+models:
+  - name: active-env-model
+    api_key: $ACTIVE_MODEL_KEY
+    base_url: https://example.com/v1
+    model: demo-model
+tools:
+  - name: web_search
+    use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $ACTIVE_TOOL_KEY
+'@
+
+      [Environment]::SetEnvironmentVariable('ACTIVE_MODEL_KEY', $null)
+      [Environment]::SetEnvironmentVariable('ACTIVE_TOOL_KEY', 'present-value')
+
+      try {
+        $missing = Get-MissingConfigEnvironmentVariables -ConfigPath $configPath
+
+        @($missing).Count | Should Be 1
+        $missing[0] | Should Be 'ACTIVE_MODEL_KEY'
+      } finally {
+        [Environment]::SetEnvironmentVariable('ACTIVE_TOOL_KEY', $null)
+      }
+    }
+
     It 'Test-PortFree returns false when a TCP listener is already bound' {
       $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
       $listener.Start()

@@ -240,22 +240,92 @@ function Get-MissingConfigEnvironmentVariables {
     return @()
   }
 
-  $content = Get-Content -LiteralPath $ConfigPath -Raw
-  $matches = [System.Text.RegularExpressions.Regex]::Matches($content, '\$([A-Z_][A-Z0-9_]*)')
-  if ($matches.Count -eq 0) {
+  $yamlContent = Get-Content -LiteralPath $ConfigPath -Raw
+  $parsed = $null
+
+  if (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue) {
+    try {
+      $parsed = ConvertFrom-Yaml -Yaml $yamlContent -ErrorAction Stop
+    } catch {
+      return @()
+    }
+  } elseif (Test-CommandExists 'python') {
+    $tempPath = [System.IO.Path]::GetTempFileName()
+    $tempScriptPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.py')
+    try {
+      Set-Content -LiteralPath $tempPath -Value $yamlContent -Encoding UTF8
+      $pythonScript = @'
+import json
+import pathlib
+import sys
+
+import yaml
+
+path = pathlib.Path(sys.argv[1])
+with path.open(encoding="utf-8") as fh:
+    data = yaml.safe_load(fh) or {}
+
+print(json.dumps(data))
+'@
+      Set-Content -LiteralPath $tempScriptPath -Value $pythonScript -Encoding UTF8
+      $json = & python $tempScriptPath $tempPath 2>$null
+      if ($LASTEXITCODE -ne 0 -or -not $json) {
+        return @()
+      }
+      $parsed = $json | ConvertFrom-Json
+    } finally {
+      Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
+    }
+  } else {
     return @()
   }
 
-  $names = @()
-  foreach ($match in $matches) {
-    $name = $match.Groups[1].Value
-    if ($names -notcontains $name) {
-      $names += $name
+  $names = [System.Collections.Generic.HashSet[string]]::new()
+
+  function Add-EnvReferencesFromValue {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+      return
+    }
+
+    if ($Value -is [string]) {
+      $stringValue = [string]$Value
+      if ($stringValue.StartsWith('$')) {
+        $envName = $stringValue.Substring(1)
+        if ($envName -match '^[A-Z_][A-Z0-9_]*$') {
+          [void]$names.Add($envName)
+        }
+      }
+      return
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+      foreach ($dictionaryValue in $Value.Values) {
+        Add-EnvReferencesFromValue -Value $dictionaryValue
+      }
+      return
+    }
+
+    if ($Value -is [psobject] -and $Value.PSObject.Properties.Count -gt 0) {
+      foreach ($property in $Value.PSObject.Properties) {
+        Add-EnvReferencesFromValue -Value $property.Value
+      }
+      return
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+      foreach ($item in $Value) {
+        Add-EnvReferencesFromValue -Value $item
+      }
     }
   }
 
+  Add-EnvReferencesFromValue -Value $parsed
+
   $missing = @()
-  foreach ($name in $names) {
+  foreach ($name in @($names)) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
       $missing += $name
     }
