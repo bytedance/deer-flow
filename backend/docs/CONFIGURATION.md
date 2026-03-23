@@ -136,6 +136,36 @@ models:
           type: enabled
 ```
 
+**Gemini with thinking via OpenAI-compatible gateway**:
+
+When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
+
+```
+HTTP 400 INVALID_ARGUMENT: function call `<tool>` in the N. content block is
+missing a `thought_signature`.
+```
+
+Standard `langchain_openai:ChatOpenAI` silently drops `thought_signature` when serialising messages.  Use `deerflow.models.patched_openai:PatchedChatOpenAI` instead — it re-injects the tool-call signatures (sourced from `AIMessage.additional_kwargs["tool_calls"]`) into every outgoing payload:
+
+```yaml
+models:
+  - name: gemini-2.5-pro-thinking
+    display_name: Gemini 2.5 Pro (Thinking)
+    use: deerflow.models.patched_openai:PatchedChatOpenAI
+    model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+    api_key: $GEMINI_API_KEY
+    base_url: https://<your-openai-compat-gateway>/v1
+    max_tokens: 16384
+    supports_thinking: true
+    supports_vision: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+```
+
+For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
+
 ### Tool Groups
 
 Organize tools into logical groups:
