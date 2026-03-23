@@ -22,7 +22,7 @@ help:
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
+	@echo "  make docker-init     - Pull the sandbox image"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
@@ -75,9 +75,13 @@ setup-sandbox:
 	fi; \
 	if command -v docker >/dev/null 2>&1; then \
 		echo "Pulling image using Docker..."; \
-		docker pull "$$IMAGE"; \
-		echo ""; \
-		echo "✓ Sandbox image pulled successfully"; \
+		if docker pull "$$IMAGE"; then \
+			echo ""; \
+			echo "✓ Sandbox image pulled successfully"; \
+		else \
+			echo ""; \
+			echo "⚠ Failed to pull sandbox image (this is OK for local sandbox mode)"; \
+		fi; \
 	else \
 		echo "✗ Neither Docker nor Apple Container is available"; \
 		echo "  Please install Docker: https://docs.docker.com/get-docker/"; \

@@ -9,6 +9,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
@@ -32,7 +33,7 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
 
-  const [thread, sendMessage, refreshThread] = useThreadStream({
+  const [thread, sendMessage, refreshThread, isUploading] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
@@ -84,7 +85,8 @@ export default function ChatPage() {
             <div className="flex w-full items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div>
+            <div className="flex items-center">
+              <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>
@@ -123,12 +125,18 @@ export default function ChatPage() {
                   isNewThread={isNewThread}
                   threadId={threadId}
                   autoFocus={isNewThread}
-                  status={thread.isLoading ? "streaming" : "ready"}
+                  status={
+                    thread.error
+                      ? "error"
+                      : thread.isLoading
+                        ? "streaming"
+                        : "ready"
+                  }
                   context={settings.context}
                   extraHeader={
                     isNewThread && <Welcome mode={settings.context.mode} />
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || isUploading}
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
