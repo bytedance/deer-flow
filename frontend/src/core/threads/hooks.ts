@@ -484,7 +484,7 @@ export function useDeleteThread() {
       await apiClient.threads.delete(threadId);
 
       const response = await fetch(
-        `${getBackendBaseURL()}/api/threads/${threadId}`,
+        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
         {
           method: "DELETE",
         },
@@ -503,7 +503,10 @@ export function useDeleteThread() {
           queryKey: ["threads", "search"],
           exact: false,
         },
-        (oldData: Array<AgentThread>) => {
+        (oldData: Array<AgentThread> | undefined) => {
+          if (oldData == null) {
+            return oldData;
+          }
           return oldData.filter((t) => t.thread_id !== threadId);
         },
       );

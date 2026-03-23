@@ -91,3 +91,19 @@ def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
 
     assert response.status_code == 422
     assert "Invalid thread_id" in response.json()["detail"]
+
+
+def test_delete_thread_data_returns_generic_500_error(tmp_path):
+    paths = Paths(tmp_path)
+
+    with (
+        patch.object(paths, "delete_thread_dir", side_effect=OSError("/secret/path")),
+        patch.object(threads.logger, "exception") as log_exception,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            threads._delete_thread_data("thread-cleanup", paths=paths)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to delete local thread data."
+    assert "/secret/path" not in exc_info.value.detail
+    log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")

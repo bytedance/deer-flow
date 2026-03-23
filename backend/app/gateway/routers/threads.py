@@ -24,8 +24,8 @@ def _delete_thread_data(thread_id: str, paths: Paths | None = None) -> ThreadDel
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        logger.error("Failed to delete thread data for %s: %s", thread_id, exc)
-        raise HTTPException(status_code=500, detail=f"Failed to delete thread data for {thread_id}: {str(exc)}") from exc
+        logger.exception("Failed to delete thread data for %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to delete local thread data.") from exc
 
     logger.info("Deleted local thread data for %s", thread_id)
     return ThreadDeleteResponse(success=True, message=f"Deleted local thread data for {thread_id}")
