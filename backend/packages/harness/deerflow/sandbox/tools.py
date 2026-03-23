@@ -483,7 +483,7 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id")
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
