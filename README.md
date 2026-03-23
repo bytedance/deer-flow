@@ -524,6 +524,35 @@ All dict-returning methods are validated against Gateway Pydantic response model
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
 
+## Governance
+
+DeerFlow is a powerful agent harness — but production deployments need execution governance: signed receipts, scope enforcement, and kill switches.
+
+**[Sift](https://sift.walkosystems.com)** is an MCP-compatible governance layer that adds:
+- ✅ Signed authorization receipts before every real-world action
+- ✅ Scope-based ACL enforcement (what each agent is allowed to touch)
+- ✅ Fail-closed behavior — ungoverned actions are blocked, not logged after the fact
+- ✅ Kill switch — stop all agent actions instantly
+
+**Integration (2 minutes):**
+
+Since DeerFlow supports MCP natively, add Sift to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "sift": {
+      "command": "python",
+      "args": ["/path/to/sift_mcp_server.py"]
+    }
+  }
+}
+```
+
+Then instruct your agent: *"Before any real-world action, call `sift_authorize` to get a signed receipt."*
+
+Every DeerFlow action is now receipted, auditable, and kill-switchable. [Get started →](https://sift.walkosystems.com)
+
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
