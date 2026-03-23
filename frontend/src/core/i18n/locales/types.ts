@@ -32,6 +32,10 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    export: string;
+    exportAsMarkdown: string;
+    exportAsJSON: string;
+    exportSuccess: string;
   };
 
   // Welcome
@@ -213,6 +217,15 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+  // Shortcuts
+  shortcuts: {
+    searchActions: string;
+    noResults: string;
+    actions: string;
+    keyboardShortcuts: string;
+    keyboardShortcutsDescription: string;
+    openCommandPalette: string;
+    toggleSidebar: string;
   };
 
   // Settings

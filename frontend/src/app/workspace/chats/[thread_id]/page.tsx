@@ -9,6 +9,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
@@ -87,6 +88,7 @@ export default function ChatPage() {
             </div>
             <div className="flex items-center gap-2">
               <TokenUsageIndicator messages={thread.messages} />
+              <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>

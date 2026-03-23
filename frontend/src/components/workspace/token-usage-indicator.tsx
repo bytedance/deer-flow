@@ -26,14 +26,15 @@ export function TokenUsageIndicator({
 
   const usage = useMemo(() => accumulateUsage(messages), [messages]);
 
-  if (usage.totalTokens === 0) {
+  if (!usage) {
     return null;
   }
 
   return (
     <Tooltip delayDuration={200}>
       <TooltipTrigger asChild>
-        <div
+        <button
+          type="button"
           className={cn(
             "text-muted-foreground flex cursor-default items-center gap-1 text-xs",
             className,
@@ -41,7 +42,7 @@ export function TokenUsageIndicator({
         >
           <CoinsIcon size={14} />
           <span>{formatTokenCount(usage.totalTokens)}</span>
-        </div>
+        </button>
       </TooltipTrigger>
       <TooltipContent side="bottom" align="end">
         <div className="space-y-1 text-xs">

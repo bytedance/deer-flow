@@ -32,21 +32,23 @@ function getUsageMetadata(
 /**
  * Accumulate token usage across all AI messages in a thread.
  */
-export function accumulateUsage(messages: Message[]): TokenUsage {
+export function accumulateUsage(messages: Message[]): TokenUsage | null {
   const cumulative: TokenUsage = {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
   };
+  let hasUsage = false;
   for (const message of messages) {
     const usage = getUsageMetadata(message);
     if (usage) {
+      hasUsage = true;
       cumulative.inputTokens += usage.inputTokens;
       cumulative.outputTokens += usage.outputTokens;
       cumulative.totalTokens += usage.totalTokens;
     }
   }
-  return cumulative;
+  return hasUsage ? cumulative : null;
 }
 
 /**

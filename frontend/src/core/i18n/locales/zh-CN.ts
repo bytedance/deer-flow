@@ -43,6 +43,10 @@ export const zhCN: Translations = {
     save: "保存",
     install: "安装",
     create: "创建",
+    export: "导出",
+    exportAsMarkdown: "导出为 Markdown",
+    exportAsJSON: "导出为 JSON",
+    exportSuccess: "对话已导出",
   },
 
   // Welcome
@@ -263,6 +267,15 @@ export const zhCN: Translations = {
     input: "输入",
     output: "输出",
     total: "总计",
+  // Shortcuts
+  shortcuts: {
+    searchActions: "搜索操作...",
+    noResults: "未找到结果。",
+    actions: "操作",
+    keyboardShortcuts: "键盘快捷键",
+    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 DeerFlow。",
+    openCommandPalette: "打开命令面板",
+    toggleSidebar: "切换侧边栏",
   },
 
   // Settings
