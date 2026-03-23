@@ -464,6 +464,22 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
+### Thread Cleanup
+
+Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
+
+```http
+DELETE /api/threads/{thread_id}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Deleted local thread data for abc123"
+}
+```
+
 ### Artifacts
 
 #### Get Artifact
