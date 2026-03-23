@@ -413,12 +413,16 @@ memory:
 # ============================================================================
 # Checkpointer Configuration
 # ============================================================================
-# Configure state persistence for the embedded DeerFlowClient.
-# The LangGraph Server manages its own state persistence separately
-# via the server infrastructure (this setting does not affect it).
+# Configure state persistence for graph checkpoints.
 #
-# When configured, DeerFlowClient will automatically use this checkpointer,
-# enabling multi-turn conversations to persist across process restarts.
+# This setting is used by:
+#   - The LangGraph Server (via the custom checkpointer in langgraph.json)
+#   - The embedded DeerFlowClient
+#
+# When configured, multi-turn conversations persist across process restarts.
+# Note: `make start` and `make dev-daemon` use a persistent launcher that
+# respects this config. `make dev` uses `langgraph dev` which may fall back
+# to in-memory storage for development convenience.
 #
 # Supported types:
 #   memory   - In-process only. State is lost when the process exits. (default)

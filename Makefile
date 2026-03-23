@@ -104,6 +104,7 @@ dev-daemon:
 stop:
 	@echo "Stopping all services..."
 	@-pkill -f "langgraph dev" 2>/dev/null || true
+	@-pkill -f "start_langgraph.py" 2>/dev/null || true
 	@-pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 	@-pkill -f "next dev" 2>/dev/null || true
 	@-pkill -f "next start" 2>/dev/null || true
