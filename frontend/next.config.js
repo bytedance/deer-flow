@@ -7,6 +7,26 @@ import "./src/env.js";
 /** @type {import("next").NextConfig} */
 const config = {
   devIndicators: false,
+  async rewrites() {
+    if (process.env.NODE_ENV !== "development") {
+      return {
+        fallback: [],
+      };
+    }
+
+    return {
+      fallback: [
+        {
+          source: "/api/langgraph/:path*",
+          destination: "http://localhost:2024/:path*",
+        },
+        {
+          source: "/api/:path*",
+          destination: "http://localhost:8001/api/:path*",
+        },
+      ],
+    };
+  },
 };
 
 export default config;

@@ -224,6 +224,30 @@ If you prefer running services locally:
 
 Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
 
+**Windows one-click startup**
+
+For the Windows local path, use `start-windows.bat` as the one-click entrypoint. It starts DeerFlow in local mode without Docker, opens `http://localhost:2026`, and uses the frontend dev proxy for the local backend/LangGraph, so nginx is not required on this path.
+Use this as an alternative to the manual local-development steps below.
+
+- Prerequisites: Node.js 22+, `pnpm`, Python 3.12+, `uv`; `git` is optional, but required for official auto-update checks
+- Install dependencies first:
+
+  ```bash
+  cd backend
+  uv sync
+  cd ..
+  cd frontend
+  pnpm install
+  ```
+
+- `start-windows.bat` can be run from the current checkout; if the branch is behind official `origin/main`, the script stops and asks you to update before retrying
+- The script does not kill existing processes; if required ports are already in use, it stops and prints the port owner PID/process name when available
+- For verification or troubleshooting, Windows-specific PowerShell checks live in `scripts/start-windows.Tests.ps1` and can be run with:
+
+  ```powershell
+  powershell -NoLogo -NoProfile -Command "Invoke-Pester -Script '.\\scripts\\start-windows.Tests.ps1'"
+  ```
+
 1. **Check prerequisites**:
    ```bash
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
