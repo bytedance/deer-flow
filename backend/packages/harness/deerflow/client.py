@@ -37,6 +37,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.agent import _build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
@@ -126,6 +127,9 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+
+        if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
+            raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
 
         self._checkpointer = checkpointer
         self._model_name = model_name
@@ -342,6 +346,8 @@ class DeerFlowClient:
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
+        if self._agent_name:
+            context["agent_name"] = self._agent_name
 
         seen_ids: set[str] = set()
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
