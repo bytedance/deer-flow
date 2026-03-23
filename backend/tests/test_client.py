@@ -56,6 +56,7 @@ class TestClientInit:
         assert client._thinking_enabled is True
         assert client._subagent_enabled is False
         assert client._plan_mode is False
+        assert client._agent_name is None
         assert client._checkpointer is None
         assert client._agent is None
 
@@ -66,11 +67,13 @@ class TestClientInit:
                 thinking_enabled=False,
                 subagent_enabled=True,
                 plan_mode=True,
+                agent_name="test-agent"
             )
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
         assert c._plan_mode is True
+        assert c._agent_name == "test-agent"
 
     def test_custom_config_path(self, mock_app_config):
         with (
