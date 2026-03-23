@@ -115,10 +115,48 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
        model: google/gemini-2.5-flash-preview
        api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
        base_url: https://openrouter.ai/api/v1
+
+     - name: gpt-5-responses
+       display_name: GPT-5 (Responses API)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-5
+       api_key: $OPENAI_API_KEY
+       use_responses_api: true
+       output_version: responses/v1
    ```
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+   To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
+
+   CLI-backed provider examples:
+
+   ```yaml
+   models:
+     - name: gpt-5.4
+       display_name: GPT-5.4 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       supports_thinking: true
+       supports_reasoning_effort: true
+
+     - name: claude-sonnet-4.6
+       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       max_tokens: 4096
+       supports_thinking: true
+   ```
+
+   - Codex CLI reads `~/.codex/auth.json`
+   - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
+   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
+   - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
+
+   ```bash
+   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
+   ```
+   
 4. **Set API keys for your configured model(s)**
 
    Choose one of the following methods:
@@ -140,6 +178,10 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
    export OPENAI_API_KEY=your-openai-api-key
    ```
 
+   For CLI-backed providers:
+   - Codex CLI: `~/.codex/auth.json`
+   - Claude Code OAuth: explicit env/file handoff or `~/.claude/.credentials.json`
+
 - Option C: Edit `config.yaml` directly (Not recommended for production)
 
    ```yaml
@@ -160,6 +202,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
 **Production** (builds images locally, mounts runtime config and data):
 
