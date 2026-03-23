@@ -106,6 +106,7 @@ class DeerFlowClient:
         thinking_enabled: bool = True,
         subagent_enabled: bool = False,
         plan_mode: bool = False,
+        agent_name: str | None = None,
     ):
         """Initialize the client.
 
@@ -120,6 +121,7 @@ class DeerFlowClient:
             thinking_enabled: Enable model's extended thinking.
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
+            agent_name: Name of the agent to use.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -130,6 +132,7 @@ class DeerFlowClient:
         self._thinking_enabled = thinking_enabled
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
+        self._agent_name = agent_name
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -202,10 +205,11 @@ class DeerFlowClient:
         kwargs: dict[str, Any] = {
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name),
+            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                agent_name=self._agent_name,
             ),
             "state_schema": ThreadState,
         }
@@ -219,7 +223,7 @@ class DeerFlowClient:
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
-        logger.info("Agent created: model=%s, thinking=%s", model_name, thinking_enabled)
+        logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
     def _get_tools(*, model_name: str | None, subagent_enabled: bool):
