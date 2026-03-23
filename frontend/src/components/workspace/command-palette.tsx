@@ -26,12 +26,14 @@ import {
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
+import { SettingsDialog } from "./settings";
 
 export function CommandPalette() {
   const { t } = useI18n();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleNewChat = useCallback(() => {
     router.push("/workspace/chats/new");
@@ -39,9 +41,9 @@ export function CommandPalette() {
   }, [router]);
 
   const handleOpenSettings = useCallback(() => {
-    router.push("/workspace/settings");
     setOpen(false);
-  }, [router]);
+    setSettingsOpen(true);
+  }, []);
 
   const handleShowShortcuts = useCallback(() => {
     setOpen(false);
@@ -60,6 +62,7 @@ export function CommandPalette() {
 
   useGlobalShortcuts(shortcuts);
 
+
   const isMac =
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
   const metaKey = isMac ? "⌘" : "Ctrl+";
@@ -67,6 +70,7 @@ export function CommandPalette() {
 
   return (
     <>
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <CommandDialog open={open} onOpenChange={setOpen}>
         <CommandInput placeholder={t.shortcuts.searchActions} />
         <CommandList>
