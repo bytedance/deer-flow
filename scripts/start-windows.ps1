@@ -261,7 +261,7 @@ function Get-MissingConfigEnvironmentVariables {
     }
   }
 
-  return $missing
+  return ,$missing
 }
 
 function Test-BackendDepsPresent {
