@@ -17,13 +17,15 @@ logger = logging.getLogger(__name__)
 class InfoQuestClient:
     """Client for interacting with the InfoQuest web search and fetch API."""
 
-    def __init__(self, fetch_time: int = -1, fetch_timeout: int = -1, fetch_navigation_timeout: int = -1, search_time_range: int = -1):
+    def __init__(self, fetch_time: int = -1, fetch_timeout: int = -1, fetch_navigation_timeout: int = -1, search_time_range: int = -1, image_search_time_range: int = -1, image_size: str = "i"):
         logger.info("\n============================================\n🚀 BytePlus InfoQuest Client Initialization 🚀\n============================================")
 
         self.fetch_time = fetch_time
         self.fetch_timeout = fetch_timeout
         self.fetch_navigation_timeout = fetch_navigation_timeout
         self.search_time_range = search_time_range
+        self.image_search_time_range = image_search_time_range
+        self.image_size = image_size
         self.api_key_set = bool(os.getenv("INFOQUEST_API_KEY"))
         if logger.isEnabledFor(logging.DEBUG):
             config_details = (
@@ -32,6 +34,8 @@ class InfoQuestClient:
                 f"├── Fetch Timeout: {fetch_timeout} {'(Default: No fetch timeout)' if fetch_timeout == -1 else '(Custom)'}\n"
                 f"├── Navigation Timeout: {fetch_navigation_timeout} {'(Default: No Navigation Timeout)' if fetch_navigation_timeout == -1 else '(Custom)'}\n"
                 f"├── Search Time Range: {search_time_range} {'(Default: No Search Time Range)' if search_time_range == -1 else '(Custom)'}\n"
+                f"├── Image Search Time Range: {image_search_time_range} {'(Default: No Image Search Time Range)' if image_search_time_range == -1 else '(Custom)'}\n"
+                f"├── Image Size: {image_size} {'(Default: Medium)' if image_size == 'm' else '(Custom)'}\n"
                 f"└── API Key: {'✅ Configured' if self.api_key_set else '❌ Not set'}"
             )
 
@@ -295,17 +299,106 @@ class InfoQuestClient:
                 images_results = results["images_results"]
                 for result in images_results:
                     clean_result = {}
-                    if "image_url" in result:
-                        clean_result["image_url"] = result["image_url"]
+                    if "original" in result:
+                        clean_result["image_url"] = result["original"]
                         url = clean_result["image_url"]
                         if isinstance(url, str) and url and url not in seen_urls:
                             seen_urls.add(url)
                             clean_results.append(clean_result)
                             counts["images"] += 1
-                    if "thumbnail_url" in result:
-                        clean_result["thumbnail_url"] = result["thumbnail_url"]
-                    if "url" in result:
-                        clean_result["url"] = result["url"]
+                    if "title" in result:
+                        clean_result["title"] = result["title"]
         logger.debug(f"Results processing completed | total_results={len(clean_results)} | images={counts['images']} | unique_urls={len(seen_urls)}")
 
         return clean_results
+
+    def image_search_raw_results(
+        self,
+        query: str,
+        site: str = "",
+        output_format: str = "JSON",
+    ) -> dict:
+        """Get image search results from the InfoQuest Web-Search API synchronously."""
+        headers = self._prepare_headers()
+
+        params = {"format": output_format, "query": query, "search_type": "Images"}
+
+        # Add time_range filter if specified (1-365)
+        if 1 <= self.image_search_time_range <= 365:
+            params["time_range"] = self.image_search_time_range
+        elif self.image_search_time_range > 0:
+            logger.warning(f"time_range {self.image_search_time_range} is out of valid range (1-365), ignoring")
+
+        # Add site filter if specified
+        if site:
+            params["site"] = site
+
+        # Add image_size filter if specified
+        if self.image_size and self.image_size in ["l", "m", "i"]:
+            params["image_size"] = self.image_size
+        elif self.image_size:
+            logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
+
+        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+        response.raise_for_status()
+
+        # Print partial response for debugging
+        response_json = response.json()
+        if logger.isEnabledFor(logging.DEBUG):
+            response_sample = json.dumps(response_json)[:200] + ("..." if len(json.dumps(response_json)) > 200 else "")
+            logger.debug(f"Image Search API request completed successfully | service=InfoQuest | status=success | response_sample={response_sample}")
+
+        return response_json
+
+    def image_search(
+        self,
+        query: str,
+        site: str = "",
+        output_format: str = "JSON",
+    ) -> str:
+        if logger.isEnabledFor(logging.DEBUG):
+            query_truncated = query[:50] + "..." if len(query) > 50 else query
+            logger.debug(
+                f"InfoQuest - Image Search API request initiated | "
+                f"operation=search images | "
+                f"query_truncated={query_truncated} | "
+                f"has_site_filter={bool(site)} | site={site} | "
+                f"image_search_time_range={self.image_search_time_range if self.image_search_time_range >= 1 and self.image_search_time_range <= 365 else 'default'} | "
+                f"image_size={self.image_size} |"
+                f"request_type=sync"
+            )
+
+        try:
+            logger.info("InfoQuest Image Search - Executing search with parameters")
+            raw_results = self.image_search_raw_results(
+                query,
+                site,
+                output_format,
+            )
+
+            if "search_result" in raw_results:
+                logger.debug("InfoQuest Image Search - Successfully extracted search_result from JSON response")
+                results = raw_results["search_result"]
+
+                logger.debug(f"InfoQuest Image Search - Processing raw image search results: {results}")
+                cleaned_results = self.clean_results_with_image_search(results["results"])
+
+                result_json = json.dumps(cleaned_results, indent=2, ensure_ascii=False)
+
+                logger.debug(f"InfoQuest Image Search - Image search tool execution completed | mode=synchronous | results_count={len(cleaned_results)}")
+                return result_json
+
+            elif "content" in raw_results:
+                # Fallback to content field if search_result is not available
+                error_message = "image search API return wrong format"
+                logger.error("image search API return wrong format, no search_result nor content field found in JSON response, content: %s", raw_results["content"])
+                return f"Error: {error_message}"
+            else:
+                # If neither field exists, return the original response
+                logger.warning("InfoQuest Image Search - Neither search_result nor content field found in JSON response")
+                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+
+        except Exception as e:
+            error_message = f"InfoQuest Image Search - Image search tool execution failed | mode=synchronous | error={str(e)}"
+            logger.error(error_message)
+            return f"Error: {error_message}"
