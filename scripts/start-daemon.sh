@@ -11,6 +11,7 @@ set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/scripts/langgraph-dev-state.sh"
 
 # ── Stop existing services ────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ trap cleanup_on_failure INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
+prepare_langgraph_dev_runtime "$REPO_ROOT"
 
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &

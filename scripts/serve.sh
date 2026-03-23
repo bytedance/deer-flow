@@ -8,6 +8,7 @@ set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/scripts/langgraph-dev-state.sh"
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ trap cleanup INT TERM
 # ── Start services ────────────────────────────────────────────────────────────
 
 mkdir -p logs
+prepare_langgraph_dev_runtime "$REPO_ROOT"
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS=""
