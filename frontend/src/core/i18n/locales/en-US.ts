@@ -43,6 +43,10 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    export: "Export",
+    exportAsMarkdown: "Export as Markdown",
+    exportAsJSON: "Export as JSON",
+    exportSuccess: "Conversation exported",
   },
 
   // Welcome

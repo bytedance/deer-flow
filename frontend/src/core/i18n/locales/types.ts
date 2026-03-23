@@ -32,6 +32,10 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    export: string;
+    exportAsMarkdown: string;
+    exportAsJSON: string;
+    exportSuccess: string;
   };
 
   // Welcome
