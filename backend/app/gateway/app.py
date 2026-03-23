@@ -14,6 +14,7 @@ from app.gateway.routers import (
     models,
     skills,
     suggestions,
+    threads,
     uploads,
 )
 from deerflow.config.app_config import get_app_config
@@ -128,6 +129,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Upload and manage user files for threads",
             },
             {
+                "name": "threads",
+                "description": "Manage DeerFlow thread-local filesystem data",
+            },
+            {
                 "name": "agents",
                 "description": "Create and manage custom agents with per-agent config and prompts",
             },
@@ -166,6 +171,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
+
+    # Thread cleanup API is mounted at /api/threads/{thread_id}
+    app.include_router(threads.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
