@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -9,6 +10,17 @@ from deerflow.models import create_chat_model
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["suggestions"])
+
+_LOCALE_TAG_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+
+
+def _sanitize_locale_tag(locale: str | None) -> str | None:
+    if locale is None:
+        return None
+    token = locale.strip().split()[0][:32] if locale.strip() else ""
+    if not token or not _LOCALE_TAG_RE.match(token):
+        return None
+    return token
 
 
 class SuggestionMessage(BaseModel):
@@ -20,6 +32,10 @@ class SuggestionsRequest(BaseModel):
     messages: list[SuggestionMessage] = Field(..., description="Recent conversation messages")
     n: int = Field(default=3, ge=1, le=5, description="Number of suggestions to generate")
     model_name: str | None = Field(default=None, description="Optional model override")
+    locale: str | None = Field(
+        default=None,
+        description="Optional BCP 47 locale (e.g. en-US, zh-CN) for suggestion language",
+    )
 
 
 class SuggestionsResponse(BaseModel):
@@ -106,12 +122,20 @@ async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> S
     if not conversation:
         return SuggestionsResponse(suggestions=[])
 
+    locale_tag = _sanitize_locale_tag(request.locale)
+    language_rule = (
+        f"- Questions MUST be written in the language indicated by the locale tag `{locale_tag}` "
+        "(BCP 47; treat it as the user's UI language, not the conversation transcript language).\n"
+        if locale_tag
+        else "- Questions must be written in the same language as the user.\n"
+    )
+
     prompt = (
         "You are generating follow-up questions to help the user continue the conversation.\n"
         f"Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
         "Requirements:\n"
         "- Questions must be relevant to the conversation.\n"
-        "- Questions must be written in the same language as the user.\n"
+        f"{language_rule}"
         "- Keep each question concise (ideally <= 20 words / <= 40 Chinese characters).\n"
         "- Do NOT include numbering, markdown, or any extra text.\n"
         "- Output MUST be a JSON array of strings only.\n\n"

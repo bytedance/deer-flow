@@ -330,6 +330,9 @@ export const zhCN: Translations = {
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
+      autoFollowupTitle: "后续问题建议",
+      autoFollowupDescription:
+        "助手回复后，自动生成你可能接着问的几个短问题。关闭后将不再请求建议并隐藏相关按钮。",
     },
     tools: {
       title: "工具",

@@ -344,6 +344,9 @@ export const enUS: Translations = {
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
+      autoFollowupTitle: "Follow-up questions",
+      autoFollowupDescription:
+        "After the assistant replies, suggest short questions you might ask next. Turn off to skip network calls and hide the suggestion chips.",
     },
     tools: {
       title: "Tools",

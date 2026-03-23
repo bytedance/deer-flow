@@ -58,6 +58,7 @@ import {
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { useLocalSettings } from "@/core/settings";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -89,7 +90,7 @@ function getResolvedMode(
   mode: InputMode | undefined,
   supportsThinking: boolean,
 ): InputMode {
-  if (!supportsThinking && mode !== "flash") {
+  if (mode === "thinking" && !supportsThinking) {
     return "flash";
   }
   if (mode) {
@@ -139,7 +140,8 @@ export function InputBox({
   onSubmit?: (message: PromptInputMessage) => void;
   onStop?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const [localSettings] = useLocalSettings();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
@@ -157,6 +159,14 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+
+  useEffect(() => {
+    if (!localSettings.behavior.auto_followup) {
+      setFollowups([]);
+      setFollowupsLoading(false);
+      setFollowupsHidden(true);
+    }
+  }, [localSettings.behavior.auto_followup]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -317,6 +327,11 @@ export function InputBox({
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
+
+    if (!localSettings.behavior.auto_followup) {
+      return;
+    }
+
     lastGeneratedForAiIdRef.current = lastAiId;
 
     const recent = thread.messages
@@ -345,6 +360,7 @@ export function InputBox({
         messages: recent,
         n: 3,
         model_name: context.model_name ?? undefined,
+        locale,
       }),
       signal: controller.signal,
     })
@@ -369,7 +385,16 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, thread.messages, threadId]);
+  }, [
+    context.model_name,
+    disabled,
+    isMock,
+    locale,
+    localSettings.behavior.auto_followup,
+    status,
+    thread.messages,
+    threadId,
+  ]);
 
   return (
     <div ref={promptRootRef} className="relative">

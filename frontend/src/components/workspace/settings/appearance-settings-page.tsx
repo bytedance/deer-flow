@@ -12,8 +12,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { enUS, isLocale, zhCN, type Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
+import { useLocalSettings } from "@/core/settings";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
@@ -26,6 +28,7 @@ const languageOptions: { value: Locale; label: string }[] = [
 export function AppearanceSettingsPage() {
   const { t, locale, changeLocale } = useI18n();
   const { theme, setTheme, systemTheme } = useTheme();
+  const [localSettings, setLocalSettings] = useLocalSettings();
   const currentTheme = (theme ?? "system") as "system" | "light" | "dark";
 
   const themeOptions = useMemo(
@@ -106,6 +109,22 @@ export function AppearanceSettingsPage() {
             ))}
           </SelectContent>
         </Select>
+      </SettingsSection>
+
+      <Separator />
+
+      <SettingsSection
+        title={t.settings.appearance.autoFollowupTitle}
+        description={t.settings.appearance.autoFollowupDescription}
+      >
+        <div className="flex max-w-md justify-end">
+          <Switch
+            checked={localSettings.behavior.auto_followup}
+            onCheckedChange={(checked) =>
+              setLocalSettings("behavior", { auto_followup: checked })
+            }
+          />
+        </div>
       </SettingsSection>
     </div>
   );
