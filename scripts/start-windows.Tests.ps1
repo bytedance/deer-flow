@@ -32,6 +32,7 @@ function Remove-TestOverrides {
     'Resolve-RepoRoot',
     'Invoke-ConservativeAutoUpdate',
     'Ensure-FileFromExample',
+    'Get-MissingConfigEnvironmentVariables',
     'Test-CommandExists',
     'Test-BackendDepsPresent',
     'Test-FrontendDepsPresent',
@@ -311,6 +312,28 @@ Describe 'scripts/start-windows.ps1' {
 
       ($script:HostMessages -join "`n") | Should Match 'Port\(s\) already in use: 8001'
       ($script:HostMessages -join "`n") | Should Match 'Port 8001 is owned by PID 4242 \(node\)'
+    }
+
+    It 'Invoke-DeerFlowWindowsStart throws early when config.yaml references missing environment variables' {
+      Set-HostCapture
+      $repoRoot = Join-Path $TestDrive 'repo-missing-config-env'
+      New-Item -ItemType Directory -Path $repoRoot | Out-Null
+
+      function Resolve-RepoRoot { $repoRoot }
+      function Invoke-ConservativeAutoUpdate { param([string]$RepoRoot) }
+      function Ensure-FileFromExample { param([string]$Path, [string]$ExamplePath, [switch]$AllowEmptyJson) }
+      function Test-CommandExists { param([string]$Name) $true }
+      function Test-BackendDepsPresent { param([string]$RepoRoot) $true }
+      function Test-FrontendDepsPresent { param([string]$RepoRoot) $true }
+      function Get-MissingConfigEnvironmentVariables {
+        param([string]$ConfigPath)
+        return @('ZHIPU_API_KEY', 'OPENAI_API_KEY')
+      }
+
+      { Invoke-DeerFlowWindowsStart } | Should Throw
+
+      ($script:HostMessages -join "`n") | Should Match 'Missing environment variables referenced by config\.yaml: ZHIPU_API_KEY, OPENAI_API_KEY'
+      ($script:HostMessages -join "`n") | Should Match 'Set the missing environment variables and run start-windows\.bat again\.'
     }
 
     It 'Invoke-DeerFlowWindowsStart schedules the exact service windows and browser target' {

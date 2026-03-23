@@ -233,6 +233,37 @@ function Ensure-FileFromExample {
   throw "Missing template file: $ExamplePath"
 }
 
+function Get-MissingConfigEnvironmentVariables {
+  param([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+  if (-not (Test-Path -LiteralPath $ConfigPath)) {
+    return @()
+  }
+
+  $content = Get-Content -LiteralPath $ConfigPath -Raw
+  $matches = [System.Text.RegularExpressions.Regex]::Matches($content, '\$([A-Z_][A-Z0-9_]*)')
+  if ($matches.Count -eq 0) {
+    return @()
+  }
+
+  $names = @()
+  foreach ($match in $matches) {
+    $name = $match.Groups[1].Value
+    if ($names -notcontains $name) {
+      $names += $name
+    }
+  }
+
+  $missing = @()
+  foreach ($name in $names) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+      $missing += $name
+    }
+  }
+
+  return $missing
+}
+
 function Test-BackendDepsPresent {
   param([Parameter(Mandatory = $true)][string]$RepoRoot)
   return Test-Path -LiteralPath (Join-Path $RepoRoot 'backend\.venv')
@@ -399,6 +430,13 @@ function Invoke-DeerFlowWindowsStart {
     Ensure-FileFromExample -Path (Join-Path $repoRoot '.env') -ExamplePath (Join-Path $repoRoot '.env.example')
     Ensure-FileFromExample -Path (Join-Path $repoRoot 'frontend\.env') -ExamplePath (Join-Path $repoRoot 'frontend\.env.example')
     Ensure-FileFromExample -Path (Join-Path $repoRoot 'extensions_config.json') -ExamplePath (Join-Path $repoRoot 'extensions_config.example.json') -AllowEmptyJson
+
+    $missingConfigEnv = Get-MissingConfigEnvironmentVariables -ConfigPath (Join-Path $repoRoot 'config.yaml')
+    if ($missingConfigEnv.Count -gt 0) {
+      Write-Err "Missing environment variables referenced by config.yaml: $($missingConfigEnv -join ', ')"
+      Write-Err 'Set the missing environment variables and run start-windows.bat again.'
+      throw (New-StartupAbortException 'Startup aborted because config.yaml references missing environment variables.')
+    }
 
     Write-Info 'Checking required commands...'
     $missing = @()
