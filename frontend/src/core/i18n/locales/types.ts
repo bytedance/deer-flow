@@ -211,6 +211,17 @@ export interface Translations {
     failed: string;
   };
 
+  // Shortcuts
+  shortcuts: {
+    searchActions: string;
+    noResults: string;
+    actions: string;
+    keyboardShortcuts: string;
+    keyboardShortcutsDescription: string;
+    openCommandPalette: string;
+    toggleSidebar: string;
+  };
+
   // Settings
   settings: {
     title: string;
