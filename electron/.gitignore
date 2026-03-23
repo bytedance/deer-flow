@@ -1,0 +1,38 @@
+# Electron Wrapper - Git Ignore
+
+# Dependencies and cache
+.cache/
+.local/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+out/
+release/
+*.dmg
+*.zip
+*.exe
+*.AppImage
+*.deb
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test outputs
+test-results/
+coverage/
