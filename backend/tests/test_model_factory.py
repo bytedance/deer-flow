@@ -423,11 +423,11 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
     """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m2.7",
+        display_name="MiniMax M2.7",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M2.7",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         max_tokens=4096,
@@ -447,9 +447,9 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    factory_module.create_chat_model(name="minimax-m2.5")
+    factory_module.create_chat_model(name="minimax-m2.7")
 
-    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("model") == "MiniMax-M2.7"
     assert captured.get("base_url") == "https://api.minimax.io/v1"
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
@@ -459,6 +459,30 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(
+        name="minimax-m2.7",
+        display_name="MiniMax M2.7",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.7",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    m2 = ModelConfig(
+        name="minimax-m2.7-highspeed",
+        display_name="MiniMax M2.7 Highspeed",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.7-highspeed",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    m3 = ModelConfig(
         name="minimax-m2.5",
         display_name="MiniMax M2.5",
         description=None,
@@ -470,7 +494,7 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         supports_vision=True,
         supports_thinking=False,
     )
-    m2 = ModelConfig(
+    m4 = ModelConfig(
         name="minimax-m2.5-highspeed",
         display_name="MiniMax M2.5 Highspeed",
         description=None,
@@ -482,7 +506,7 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         supports_vision=True,
         supports_thinking=False,
     )
-    cfg = _make_app_config([m1, m2])
+    cfg = _make_app_config([m1, m2, m3, m4])
     _patch_factory(monkeypatch, cfg)
 
     captured: dict = {}
@@ -494,11 +518,19 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    # Create first model
+    # Create M2.7 model
+    factory_module.create_chat_model(name="minimax-m2.7")
+    assert captured.get("model") == "MiniMax-M2.7"
+
+    # Create M2.7 highspeed model
+    factory_module.create_chat_model(name="minimax-m2.7-highspeed")
+    assert captured.get("model") == "MiniMax-M2.7-highspeed"
+
+    # Create M2.5 model (backward compatibility)
     factory_module.create_chat_model(name="minimax-m2.5")
     assert captured.get("model") == "MiniMax-M2.5"
 
-    # Create second model
+    # Create M2.5 highspeed model (backward compatibility)
     factory_module.create_chat_model(name="minimax-m2.5-highspeed")
     assert captured.get("model") == "MiniMax-M2.5-highspeed"
 
