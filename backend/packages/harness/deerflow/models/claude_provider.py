@@ -118,6 +118,23 @@ class ClaudeChatModel(ChatAnthropic):
             client.api_key = None
             client.auth_token = self._oauth_access_token
 
+    def _create(self, payload: dict) -> Any:
+        """Strip stale cache_control before every API call.
+
+        _apply_prompt_caching (called earlier in _get_request_payload)
+        re-adds cache_control when caching is wanted. This final strip
+        removes any cache_control that leaked from checkpointed messages,
+        upstream formatting, or LangChain internals. Safe because
+        _apply_prompt_caching already ran.
+        """
+        self._strip_cache_control(payload)
+        return super()._create(payload)
+
+    async def _acreate(self, payload: dict) -> Any:
+        """Strip stale cache_control before every API call."""
+        self._strip_cache_control(payload)
+        return await super()._acreate(payload)
+
     def _get_request_payload(
         self,
         input_: Any,
@@ -130,6 +147,11 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
+        elif self._is_oauth:
+            # OAuth tokens have a 4-block cache_control limit.
+            # Strip any cache_control that leaked in from checkpointed
+            # messages or upstream formatting to avoid 400 errors.
+            self._strip_cache_control(payload)
 
         if self.auto_thinking_budget:
             self._apply_thinking_budget(payload)
@@ -178,6 +200,25 @@ class ClaudeChatModel(ChatAnthropic):
         tools = payload.get("tools", [])
         if tools and isinstance(tools[-1], dict):
             tools[-1]["cache_control"] = {"type": "ephemeral"}
+
+    @staticmethod
+    def _strip_cache_control(payload: dict) -> None:
+        """Remove all cache_control entries from the payload."""
+        for section in ("system", "messages"):
+            items = payload.get(section, [])
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    item.pop("cache_control", None)
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                block.pop("cache_control", None)
+        for tool in payload.get("tools", []):
+            if isinstance(tool, dict):
+                tool.pop("cache_control", None)
 
     def _apply_thinking_budget(self, payload: dict) -> None:
         """Auto-allocate thinking budget (80% of max_tokens)."""
