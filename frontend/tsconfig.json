@@ -5,6 +5,7 @@
     "skipLibCheck": true,
     "target": "es2022",
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "moduleDetection": "force",
     "isolatedModules": true,

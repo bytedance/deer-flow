@@ -7,6 +7,7 @@ import {
   MoreHorizontal,
   Pencil,
   Share2,
+  SquareArrowOutUpRight,
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -56,6 +57,12 @@ import {
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
+import { isDesktop } from "@/lib/is-desktop";
+
+import {
+  openRecentChatInNewWindow,
+  shouldShowOpenInNewWindowAction,
+} from "./recent-chat-list-actions";
 
 export function RecentChatList() {
   const { t } = useI18n();
@@ -70,6 +77,11 @@ export function RecentChatList() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const isDesktopMode = isDesktop();
+  const showOpenInNewWindowAction = shouldShowOpenInNewWindowAction({
+    isDesktop: isDesktopMode,
+    staticWebsiteOnly: env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY,
+  });
 
   const handleDelete = useCallback(
     (threadId: string) => {
@@ -198,6 +210,21 @@ export function RecentChatList() {
                               side={"right"}
                               align={"start"}
                             >
+                              {showOpenInNewWindowAction && (
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    void openRecentChatInNewWindow(
+                                      thread.thread_id,
+                                      {
+                                        isDesktop: isDesktopMode,
+                                      },
+                                    );
+                                  }}
+                                >
+                                  <SquareArrowOutUpRight className="text-muted-foreground" />
+                                  <span>{t.common.openInNewWindow}</span>
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem
                                 onSelect={() =>
                                   handleRenameClick(

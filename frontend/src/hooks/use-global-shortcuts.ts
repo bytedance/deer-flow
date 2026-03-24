@@ -2,13 +2,45 @@
 
 import { useEffect } from "react";
 
-type ShortcutAction = () => void;
+import { isDesktop } from "../lib/is-desktop.js";
+import { openNewChatWindow } from "../lib/tauri.js";
 
-interface Shortcut {
+export type ShortcutAction = () => void;
+
+type OpenNewChatWindow = typeof openNewChatWindow;
+
+export interface Shortcut {
   key: string;
   meta: boolean;
   shift?: boolean;
   action: ShortcutAction;
+}
+
+type ExecuteGlobalShortcutActionOptions = {
+  isDesktop?: () => boolean;
+  openNewChatWindow?: OpenNewChatWindow;
+};
+
+function isNewChatShortcut(shortcut: Shortcut): boolean {
+  return (
+    shortcut.meta &&
+    (shortcut.shift ?? false) &&
+    shortcut.key.toLowerCase() === "n"
+  );
+}
+
+export function executeGlobalShortcutAction(
+  shortcut: Shortcut,
+  options: ExecuteGlobalShortcutActionOptions = {},
+): void | Promise<string | undefined> {
+  const detectDesktop = options.isDesktop ?? isDesktop;
+
+  if (detectDesktop() && isNewChatShortcut(shortcut)) {
+    return (options.openNewChatWindow ?? openNewChatWindow)();
+  }
+
+  shortcut.action();
+  return undefined;
 }
 
 /**

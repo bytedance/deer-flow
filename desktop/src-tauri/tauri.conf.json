@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DeerFlow",
+  "version": "0.1.0",
+  "identifier": "com.deerflow.desktop",
+  "build": {
+    "devUrl": null,
+    "frontendDist": "../src/fallback"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": ["default"]
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "DeerFlow",
+        "url": "/",
+        "width": 1280,
+        "height": 800,
+        "decorations": true
+      }
+    ]
+  }
+}
