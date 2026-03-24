@@ -79,7 +79,7 @@ export const enUS: Translations = {
     rewindConfirmAction: "Rewind",
     rewindTooltip: "Rewind to before this turn",
     rewindSuccessToast: "Rewound to before this turn",
-    rewindFailedToast: "Failed to rewind", 
+    rewindFailedToast: "Failed to rewind",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
     reasoningMode: "Reasoning",
@@ -286,7 +286,7 @@ export const enUS: Translations = {
     output: "Output",
     total: "Total",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
