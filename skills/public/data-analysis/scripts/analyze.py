@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -21,13 +22,13 @@ try:
     import duckdb
 except ImportError:
     logger.error("duckdb is not installed. Installing...")
-    os.system(f"{sys.executable} -m pip install duckdb openpyxl -q")
+    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
     import duckdb
 
 try:
     import openpyxl  # noqa: F401
 except ImportError:
-    os.system(f"{sys.executable} -m pip install openpyxl -q")
+    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
 
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
