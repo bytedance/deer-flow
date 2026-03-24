@@ -1,7 +1,13 @@
+mod tray;
 mod window;
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(tray::TrayState::default())
+        .setup(|app| {
+            tray::setup_tray(app)?;
+            Ok(())
+        })
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
