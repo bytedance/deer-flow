@@ -21,9 +21,9 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
+      working-directory: backend
       run: |
-        uv venv --python 3.12
-        uv pip install -e ".[dev]"
+        uv sync --group dev
 
     - name: Lint backend
       working-directory: backend
@@ -39,9 +39,11 @@ jobs:
       with:
         node-version: '22'
 
-    - name: Install pnpm
-      run: npm install -g pnpm
+    - name: Enable Corepack
+      run: corepack enable
 
+    - name: Use pinned pnpm version
+      run: corepack prepare pnpm@10.26.2 --activate
     - name: Install frontend dependencies
       run: |
         cd frontend
