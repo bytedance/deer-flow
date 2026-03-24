@@ -16,6 +16,7 @@ cd "$REPO_ROOT"
 
 echo "Stopping existing services if any..."
 pkill -f "langgraph dev" 2>/dev/null || true
+pkill -f "start_langgraph.py" 2>/dev/null || true
 pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
 nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
@@ -58,6 +59,7 @@ fi
 cleanup_on_failure() {
     echo "Failed to start services, cleaning up..."
     pkill -f "langgraph dev" 2>/dev/null || true
+    pkill -f "start_langgraph.py" 2>/dev/null || true
     pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
     pkill -f "next dev" 2>/dev/null || true
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
@@ -73,7 +75,9 @@ trap cleanup_on_failure INT TERM
 mkdir -p logs
 
 echo "Starting LangGraph server..."
-nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
+# Use start_langgraph.py for persistent storage instead of langgraph dev,
+# which forces in-memory storage (langchain-ai/langgraph#5790).
+nohup sh -c 'cd backend && NO_COLOR=1 uv run python ../scripts/start_langgraph.py --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "✗ LangGraph failed to start. Last log output:"
     tail -60 logs/langgraph.log
