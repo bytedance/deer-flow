@@ -52,3 +52,4 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+helm/deerflow/values.yaml

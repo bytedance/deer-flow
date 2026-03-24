@@ -1,20 +1,15 @@
 "use client";
 
 import { useMemo } from "react";
-import type { AnchorHTMLAttributes } from "react";
+import type { HTMLAttributes } from "react";
 
 import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
 import { streamdownPlugins } from "@/core/streamdown";
-import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
-
-function isExternalUrl(href: string | undefined): boolean {
-  return !!href && /^https?:\/\//.test(href);
-}
 
 export type MarkdownContentProps = {
   content: string;
@@ -35,7 +30,7 @@ export function MarkdownContent({
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
-      a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
+      a: (props: HTMLAttributes<HTMLAnchorElement>) => {
         if (typeof props.children === "string") {
           const match = /^citation:(.+)$/.exec(props.children);
           if (match) {
@@ -43,16 +38,7 @@ export function MarkdownContent({
             return <CitationLink {...props}>{text}</CitationLink>;
           }
         }
-        const { className, target, rel, ...rest } = props;
-        const external = isExternalUrl(props.href);
-        return (
-          <a
-            {...rest}
-            className={cn("text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/60 transition-colors", className)}
-            target={target ?? (external ? "_blank" : undefined)}
-            rel={rel ?? (external ? "noopener noreferrer" : undefined)}
-          />
-        );
+        return <a {...props} />;
       },
       ...componentsFromProps,
     };

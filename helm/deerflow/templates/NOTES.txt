@@ -1,0 +1,20 @@
+DeerFlow has been deployed!
+
+Services:
+  - Nginx (reverse proxy): {{ include "deerflow.fullname" . }}-nginx:2026
+  - Frontend:              {{ include "deerflow.fullname" . }}-frontend:3000
+  - Gateway API:           {{ include "deerflow.fullname" . }}-gateway:8001
+  - LangGraph Server:      {{ include "deerflow.fullname" . }}-langgraph:2024
+{{- if .Values.provisioner.enabled }}
+  - Provisioner:           {{ include "deerflow.fullname" . }}-provisioner:8002
+  - Sandbox namespace:     {{ .Values.provisioner.sandboxNamespace }}
+{{- end }}
+
+To access the application, set up port-forwarding:
+
+  kubectl port-forward svc/{{ include "deerflow.fullname" . }}-nginx 2026:2026 -n {{ .Release.Namespace }}
+
+Then open http://localhost:2026 in your browser.
+
+To expose externally, create an Ingress or LoadBalancer Service pointing to:
+  {{ include "deerflow.fullname" . }}-nginx on port 2026

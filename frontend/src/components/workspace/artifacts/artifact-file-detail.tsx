@@ -38,7 +38,7 @@ import { checkCodeFile, getFileName } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { ArtifactLink } from "../citations/artifact-link";
+import { CitationLink } from "../citations/citation-link";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
@@ -274,7 +274,7 @@ export function ArtifactFilePreview({
         <Streamdown
           className="size-full"
           {...streamdownPlugins}
-          components={{ a: ArtifactLink }}
+          components={{ a: CitationLink }}
         >
           {content ?? ""}
         </Streamdown>

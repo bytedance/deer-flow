@@ -1,0 +1,19 @@
+{{- if .Values.provisioner.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "deerflow.fullname" . }}-provisioner
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8002
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "deerflow.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+{{- end }}

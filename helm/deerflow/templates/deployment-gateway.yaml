@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deerflow.fullname" . }}-gateway
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.replicaCount.gateway }}
+  selector:
+    matchLabels:
+      {{- include "deerflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "deerflow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap-deerflow.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: gateway
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag }}"
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"]
+          workingDir: /app
+          ports:
+            - name: http
+              containerPort: 8001
+              protocol: TCP
+          env:
+            - name: CI
+              value: "true"
+            - name: DEER_FLOW_HOME
+              value: /app/backend/.deer-flow
+          envFrom:
+            - secretRef:
+                name: {{ include "deerflow.fullname" . }}-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources.gateway | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/backend/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: config
+              mountPath: /app/backend/extensions_config.json
+              subPath: extensions_config.json
+              readOnly: true
+            - name: deer-flow-home
+              mountPath: /app/backend/.deer-flow
+            - name: skills
+              mountPath: /app/skills
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "deerflow.fullname" . }}-config
+        - name: deer-flow-home
+          {{- if .Values.persistence.deerFlowHome.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "deerflow.fullname" . }}-home
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: skills
+          emptyDir: {}

@@ -1,0 +1,9 @@
+{{- if and .Values.provisioner.enabled (ne .Values.provisioner.sandboxNamespace .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.provisioner.sandboxNamespace }}
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox
+{{- end }}

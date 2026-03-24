@@ -131,7 +131,13 @@ export function extractTextFromMessage(message: Message) {
   }
   if (Array.isArray(message.content)) {
     return message.content
-      .map((content) => (content.type === "text" ? content.text : ""))
+      .map((content) =>
+        typeof content === "string"
+          ? content
+          : content.type === "text"
+            ? content.text
+            : "",
+      )
       .join("\n")
       .trim();
   }
@@ -145,6 +151,9 @@ export function extractContentFromMessage(message: Message) {
   if (Array.isArray(message.content)) {
     return message.content
       .map((content) => {
+        if (typeof content === "string") {
+          return content;
+        }
         switch (content.type) {
           case "text":
             return content.text;

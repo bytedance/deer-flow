@@ -1,0 +1,17 @@
+{{- if and .Values.provisioner.enabled .Values.provisioner.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "deerflow.fullname" . }}-provisioner
+  namespace: {{ .Values.provisioner.sandboxNamespace | default .Release.Namespace }}
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
+{{- end }}

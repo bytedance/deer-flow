@@ -1,0 +1,58 @@
+{{- if .Values.provisioner.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deerflow.fullname" . }}-provisioner
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+spec:
+  replicas: {{ .Values.replicaCount.provisioner }}
+  selector:
+    matchLabels:
+      {{- include "deerflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provisioner
+  template:
+    metadata:
+      labels:
+        {{- include "deerflow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: provisioner
+    spec:
+      serviceAccountName: {{ include "deerflow.fullname" . }}-provisioner
+      containers:
+        - name: provisioner
+          image: "{{ .Values.images.provisioner.repository }}:{{ .Values.images.provisioner.tag }}"
+          imagePullPolicy: {{ .Values.images.provisioner.pullPolicy }}
+          command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
+          ports:
+            - name: http
+              containerPort: 8002
+              protocol: TCP
+          env:
+            - name: K8S_NAMESPACE
+              value: {{ .Values.provisioner.sandboxNamespace | quote }}
+            - name: SANDBOX_IMAGE
+              value: {{ .Values.provisioner.sandboxImage | quote }}
+            - name: SANDBOX_USE_CLUSTER_DNS
+              value: "true"
+            - name: KUBECONFIG_PATH
+              value: ""
+            - name: SANDBOX_PVC_NAME
+              value: {{ include "deerflow.fullname" . }}-home
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources.provisioner | nindent 12 }}
+{{- end }}

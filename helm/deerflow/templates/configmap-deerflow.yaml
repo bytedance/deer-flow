@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "deerflow.fullname" . }}-config
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: config
+data:
+  config.yaml: |
+    config_version: 1
+
+    models:
+      - name: gemini-2.5-pro
+        display_name: Gemini 2.5 Pro
+        use: langchain_google_genai:ChatGoogleGenerativeAI
+        model: gemini-2.5-pro
+        google_api_key: $GOOGLE_API_KEY
+        max_tokens: 8192
+        supports_vision: true
+
+    tool_groups:
+      - name: web
+      - name: file:read
+      - name: file:write
+      - name: bash
+
+    tools:
+      - name: web_search
+        group: web
+        use: deerflow.community.tavily.tools:web_search_tool
+        max_results: 5
+
+      - name: web_fetch
+        group: web
+        use: deerflow.community.jina_ai.tools:web_fetch_tool
+        timeout: 10
+
+      - name: image_search
+        group: web
+        use: deerflow.community.image_search.tools:image_search_tool
+        max_results: 5
+
+      - name: ls
+        group: file:read
+        use: deerflow.sandbox.tools:ls_tool
+
+      - name: read_file
+        group: file:read
+        use: deerflow.sandbox.tools:read_file_tool
+
+      - name: write_file
+        group: file:write
+        use: deerflow.sandbox.tools:write_file_tool
+
+      - name: str_replace
+        group: file:write
+        use: deerflow.sandbox.tools:str_replace_tool
+
+      - name: bash
+        group: bash
+        use: deerflow.sandbox.tools:bash_tool
+
+    sandbox:
+      use: deerflow.community.aio_sandbox:AioSandboxProvider
+      provisioner_url: http://{{ include "deerflow.fullname" . }}-provisioner:8002
+
+    skills:
+      container_path: /mnt/skills
+
+    title:
+      enabled: true
+      max_words: 6
+      max_chars: 60
+      model_name: null
+
+    summarization:
+      enabled: true
+      model_name: null
+      trigger:
+        - type: tokens
+          value: 15564
+      keep:
+        type: messages
+        value: 10
+      trim_tokens_to_summarize: 15564
+      summary_prompt: null
+
+    memory:
+      enabled: true
+      storage_path: memory.json
+      debounce_seconds: 30
+      model_name: null
+      max_facts: 100
+      fact_confidence_threshold: 0.7
+      injection_enabled: true
+      max_injection_tokens: 2000
+
+    checkpointer:
+      type: sqlite
+      connection_string: checkpoints.db
+
+  extensions_config.json: |
+    {
+      "mcpServers": {},
+      "skills": {}
+    }

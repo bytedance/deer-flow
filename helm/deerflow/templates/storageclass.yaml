@@ -1,0 +1,15 @@
+{{- if .Values.persistence.deerFlowHome.createStorageClass }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.persistence.deerFlowHome.storageClass }}
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+provisioner: filestore.csi.storage.gke.io
+parameters:
+  tier: standard
+  network: {{ .Values.persistence.deerFlowHome.network }}
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+{{- end }}

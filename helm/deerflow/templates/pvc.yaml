@@ -1,0 +1,16 @@
+{{- if .Values.persistence.deerFlowHome.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "deerflow.fullname" . }}-home
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - {{ .Values.persistence.deerFlowHome.accessMode }}
+  storageClassName: {{ .Values.persistence.deerFlowHome.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.deerFlowHome.size }}
+{{- end }}

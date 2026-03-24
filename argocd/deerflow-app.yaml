@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deerflow
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/InfomineoGithub/Stellantis.git
+    targetRevision: HEAD
+    path: helm/deerflow
+    helm:
+      valueFiles:
+        - secrets://values.enc.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: deer-flow
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

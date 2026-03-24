@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deerflow.fullname" . }}-langgraph
+  labels:
+    {{- include "deerflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langgraph
+spec:
+  replicas: {{ .Values.replicaCount.langgraph }}
+  selector:
+    matchLabels:
+      {{- include "deerflow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: langgraph
+  template:
+    metadata:
+      labels:
+        {{- include "deerflow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: langgraph
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap-deerflow.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: langgraph
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag }}"
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: ["sh", "-c", "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"]
+          workingDir: /app
+          ports:
+            - name: http
+              containerPort: 2024
+              protocol: TCP
+          env:
+            - name: CI
+              value: "true"
+            - name: DEER_FLOW_HOME
+              value: /app/backend/.deer-flow
+            - name: DEER_FLOW_CONFIG_PATH
+              value: /app/config.yaml
+            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
+              value: /app/extensions_config.json
+            - name: LANGCHAIN_TRACING_V2
+              value: "{{ .Values.langsmith.enabled }}"
+            {{- if .Values.langsmith.enabled }}
+            - name: LANGSMITH_API_KEY
+              value: {{ .Values.langsmith.apiKey | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "deerflow.fullname" . }}-secrets
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources.langgraph | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: config
+              mountPath: /app/extensions_config.json
+              subPath: extensions_config.json
+              readOnly: true
+            - name: deer-flow-home
+              mountPath: /app/backend/.deer-flow
+            - name: skills
+              mountPath: /app/skills
+              readOnly: true
+            - name: langgraph-api
+              mountPath: /app/backend/.langgraph_api
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "deerflow.fullname" . }}-config
+        - name: deer-flow-home
+          {{- if .Values.persistence.deerFlowHome.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "deerflow.fullname" . }}-home
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: skills
+          emptyDir: {}
+        - name: langgraph-api
+          emptyDir: {}
