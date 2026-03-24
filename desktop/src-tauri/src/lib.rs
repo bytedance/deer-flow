@@ -1,11 +1,15 @@
+mod desktop_integration;
 mod tray;
 mod window;
 
 pub fn run() {
     tauri::Builder::default()
         .manage(tray::TrayState::default())
+        .plugin(desktop_integration::autostart_plugin())
+        .plugin(desktop_integration::global_shortcut_plugin())
         .setup(|app| {
             tray::setup_tray(app)?;
+            desktop_integration::setup(app)?;
             Ok(())
         })
         .plugin(tauri_plugin_window_state::Builder::default().build())

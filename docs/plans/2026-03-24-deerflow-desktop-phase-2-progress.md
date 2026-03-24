@@ -8,6 +8,7 @@
 - Keep frontend changes out of Card 1.
 - Card 1 only adds tray entrypoint and main-window visibility controls.
 - Do not include Card 2+ features in Card 1: global shortcut, autostart, file-drop, updater.
+- Card 2 only adds a desktop-global main-window shortcut plus autostart wiring; it does not move chat shortcut ownership into Rust.
 
 ## Dependency Graph
 
@@ -18,7 +19,7 @@
 | ID | Status | Depends | Goal | Files | Verification |
 |---|---|---|---|---|---|
 | 1 | done | - | Add tray entrypoint and main-window visibility controls | `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/src/lib.rs`, `desktop/src-tauri/src/tray.rs` | `cargo test` passed; manual tray/show/hide/quit verification recorded below |
-| 2 | pending | 1 | Add global shortcut and autostart integration | `desktop/src-tauri/...`, `frontend/src/lib/tauri.ts` | not started |
+| 2 | done | 1 | Add global shortcut and autostart integration | `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/src/lib.rs`, `desktop/src-tauri/src/desktop_integration.rs` | red `cargo test` failure observed first; fresh `cargo test` then passed; `pnpm tauri dev` loaded autostart wiring before the known Windows GUI exit-code false negative; direct debug-exe verification confirmed the desktop shortcut restores and focuses the main window |
 | 3 | pending | 2 | Add desktop file drag-and-drop bridge | `desktop/src-tauri/...`, `frontend/...` | not started |
 | 4 | pending | 3 | Add updater and distribution groundwork | `desktop/package.json`, `desktop/src-tauri/...`, `docs/plans/...` | not started |
 
@@ -153,3 +154,32 @@
   - Tray-icon visibility was manually confirmed by the user, but no in-repo desktop screenshot was retained because the user preferred not to archive desktop screenshots.
 - Next recommended action:
   - Treat Card 1 as complete and proceed to Card 2 only when the next assignment is given.
+
+### 2026-03-24 23:45
+
+- Card: 2
+- Status: done
+- Executor: Codex
+- Files touched:
+  - `desktop/src-tauri/Cargo.toml`
+  - `desktop/src-tauri/Cargo.lock`
+  - `desktop/src-tauri/src/lib.rs`
+  - `desktop/src-tauri/src/desktop_integration.rs`
+- Commands run:
+  - `cd desktop/src-tauri && cargo test`
+  - `cd desktop/src-tauri && cargo test` after adding the red helper tests
+  - `cd desktop/src-tauri && cargo test` after wiring the plugins
+  - `cd desktop && pnpm install`
+  - `cd desktop && pnpm tauri dev`
+  - direct launch of `desktop/src-tauri/target/debug/deerflow-desktop.exe`
+  - Windows window enumeration + `ShowWindowAsync(..., 6)` + low-level `Ctrl+Shift+Alt+D` key injection
+- Result summary:
+  - Added a desktop-global shortcut dedicated to `show-or-focus-main-window` and kept the existing Phase 1 in-page chat shortcut ownership untouched.
+  - Added autostart plugin wiring plus desktop-side persisted default state in the Tauri store; the first launch defaults to disabled until a saved desktop preference exists.
+  - Fresh Rust tests passed after the new helper coverage was implemented.
+  - Live Windows verification confirmed the DeerFlow `Tauri Window` moved from `IsIconic = true`, `Foreground = false` after manual minimize to `IsIconic = false`, `Foreground = true` after the global shortcut fired.
+- Blockers / deviations:
+  - `desktop/src-tauri/tauri.conf.json` and `frontend/src/lib/tauri.ts` were inspected but did not require code changes for this card. The full Card 2 wiring lived in Rust and did not need a new frontend bridge or config mutation.
+  - `pnpm tauri dev` in this Windows environment still reports the known misleading GUI exit code `0xffffffff` after launching the app, so direct debug-executable launch was used for the trustworthy window-level shortcut verification.
+- Next recommended action:
+  - Proceed to Card 3 only. Keep Card 3 scoped to native file drag-and-drop bridging and preserve the same frontend ownership boundary used in Card 2.
