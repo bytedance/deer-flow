@@ -20,7 +20,6 @@ class RewindRequest(BaseModel):
 
 class RewindResponse(BaseModel):
     thread_id: str
-    backup_thread_id: str | None
     filled_text: str
     rewound_to_message_count: int
 
@@ -74,6 +73,18 @@ async def _langgraph_request(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="LangGraph request failed")
     if response.status_code >= 400:
         body_preview = response.text[:1000]
+        upstream_detail: str | None = None
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
+                upstream_detail = parsed.get("detail")
+        except Exception:
+            upstream_detail = None
+
+        detail = (upstream_detail or body_preview or "").strip()
+        if len(detail) > 300:
+            detail = detail[:300]
+
         logger.error(
             "LangGraph response error: %s %s status=%s body=%s",
             method,
@@ -81,6 +92,11 @@ async def _langgraph_request(
             response.status_code,
             body_preview,
         )
+
+        if response.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail or "Thread not found")
+        if status.HTTP_400_BAD_REQUEST <= response.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR:
+            raise HTTPException(status_code=response.status_code, detail=detail or "LangGraph request rejected")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LangGraph response error (status={response.status_code})",
@@ -105,7 +121,7 @@ async def _langgraph_request(
     "/threads/{thread_id}/rewind",
     response_model=RewindResponse,
     summary="Rewind Conversation to Before a Turn",
-    description="Rewind the thread state to before a given human message, while creating a hidden backup thread with the previous messages/title/todos.",
+    description="Rewind the thread state to before a given human message.",
 )
 async def rewind_thread(thread_id: str, request: RewindRequest) -> RewindResponse:
     langgraph_url = _resolve_langgraph_url()
@@ -130,6 +146,14 @@ async def rewind_thread(thread_id: str, request: RewindRequest) -> RewindRespons
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Thread is running")
 
         state = await _langgraph_request(client, "GET", f"/threads/{thread_id}/state")
+        if not isinstance(state, dict):
+            logger.error(
+                "Invalid thread state response type: thread_id=%s type=%s",
+                thread_id,
+                type(state),
+            )
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid thread state")
+
         values = state.get("values")
         if not isinstance(values, dict):
             logger.error("Invalid thread state values: thread_id=%s", thread_id)
@@ -158,7 +182,6 @@ async def rewind_thread(thread_id: str, request: RewindRequest) -> RewindRespons
         filled_text = _extract_text_from_message(anchor_message)
         title = values.get("title") if isinstance(values.get("title"), str) else ""
 
-        backup_thread_id: str | None = None
 
         history_data = await _langgraph_request(
             client,
@@ -240,7 +263,6 @@ async def rewind_thread(thread_id: str, request: RewindRequest) -> RewindRespons
 
         return RewindResponse(
             thread_id=thread_id,
-            backup_thread_id=backup_thread_id,
             filled_text=filled_text,
             rewound_to_message_count=rewound_to_message_count,
         )

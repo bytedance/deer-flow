@@ -12,7 +12,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -146,7 +145,7 @@ export function MessageList({
         setConfirmAnchorId(null);
         toast.custom(
           () => (
-            <div className="w-full text-center">已回到本轮对话发起前</div>
+            <div className="w-full text-center">{t.inputBox.rewindSuccessToast}</div>
           ),
           {
             className:
@@ -160,7 +159,9 @@ export function MessageList({
         setOptimisticMessages(null);
         toast.custom(
           () => (
-            <div className="w-full text-center text-destructive">回撤失败</div>
+            <div className="w-full text-center text-destructive">
+              {t.inputBox.rewindFailedToast}
+            </div>
           ),
           {
             className: "w-fit max-w-[calc(100vw-2rem)]",
@@ -193,7 +194,7 @@ export function MessageList({
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确定要回到本轮对话发起前吗？</DialogTitle>
+            <DialogTitle>{t.inputBox.rewindConfirmTitle}</DialogTitle>
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -213,7 +214,7 @@ export function MessageList({
               }}
               disabled={!confirmAnchorId || thread.isLoading || !!rewindingAnchorId}
             >
-              确定
+              {t.inputBox.rewindConfirmAction}
             </Button>
           </DialogFooter>
         </DialogContent>

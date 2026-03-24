@@ -60,6 +60,10 @@ export interface Translations {
     createSkillPrompt: string;
     addAttachments: string;
     mode: string;
+    rewindConfirmTitle: string;
+    rewindConfirmAction: string;
+    rewindSuccessToast: string;
+    rewindFailedToast: string;
     flashMode: string;
     flashModeDescription: string;
     reasoningMode: string;
