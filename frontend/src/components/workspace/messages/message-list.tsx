@@ -94,19 +94,6 @@ export function MessageList({
     setConfirmOpen(true);
   }, [rewindingAnchorId, thread.isLoading]);
 
-  const confirmMessagePreview = (() => {
-    if (!confirmAnchorId) {
-      return "";
-    }
-    const msg = thread.messages.find(
-      (m) => m.type === "human" && m.id === confirmAnchorId,
-    );
-    if (!msg) {
-      return "";
-    }
-    return extractTextFromMessage(msg);
-  })();
-
   const handleRewind = useCallback(
     async (anchorUserMessageId: string) => {
       if (thread.isLoading || rewindingAnchorId) {
