@@ -1,0 +1,8 @@
+﻿Command: cargo test
+Directory: G:\deer-flow\deer-flow\desktop\src-tauri
+Result: PASS
+Summary:
+- lib tests: 7 passed, 0 failed
+- main tests: 0 passed, 0 failed
+- doc tests: 0 passed, 0 failed
+- total failing tests: 0

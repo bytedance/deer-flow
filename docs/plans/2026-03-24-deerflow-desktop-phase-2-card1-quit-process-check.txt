@@ -1,0 +1,1 @@
+﻿No deerflow-desktop process found after Quit verification.
