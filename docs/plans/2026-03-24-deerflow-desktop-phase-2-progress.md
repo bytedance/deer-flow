@@ -20,22 +20,18 @@
 |---|---|---|---|---|---|
 | 1 | done | - | Add tray entrypoint and main-window visibility controls | `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/src/lib.rs`, `desktop/src-tauri/src/tray.rs` | `cargo test` passed; manual tray/show/hide/quit verification recorded below |
 | 2 | done | 1 | Add global shortcut and autostart integration | `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/src/lib.rs`, `desktop/src-tauri/src/desktop_integration.rs` | red `cargo test` failure observed first; fresh `cargo test` then passed; `pnpm tauri dev` loaded autostart wiring before the known Windows GUI exit-code false negative; direct debug-exe verification confirmed the desktop shortcut restores and focuses the main window |
-| 3 | pending | 2 | Add desktop file drag-and-drop bridge | `desktop/src-tauri/...`, `frontend/...` | not started |
-| 4 | pending | 3 | Add updater and distribution groundwork | `desktop/package.json`, `desktop/src-tauri/...`, `docs/plans/...` | not started |
+| 3 | done | 2 | Add desktop file drag-and-drop bridge | `desktop/src-tauri/src/lib.rs`, `frontend/src/lib/file-drop.ts`, `frontend/src/lib/file-drop.test.ts`, `frontend/src/lib/tauri.ts`, `frontend/src/components/workspace/input-box.tsx`, `frontend/src/components/workspace/workspace-container.tsx` | `node --experimental-strip-types --test "src/lib/file-drop.test.ts" "src/core/config/index.test.ts"` passed; `pnpm typecheck` passed on the final integration branch |
+| 4 | done | 3 | Add updater and distribution groundwork | `desktop/package.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/src/lib.rs`, `desktop/src-tauri/tauri.conf.json`, `docs/plans/2026-03-24-deerflow-desktop-phase-2-release-notes.md` | `cargo test` passed; `pnpm tauri build --debug` passed on the final integration branch |
 
 ## Current Handoff
 
-- Current card: 1
-- Status: complete with follow-up verification notes recorded here
-- Product commit: `c270e62` (`feat(desktop): add tray-based window controls`)
-- Files in Card 1 product scope:
-  - `desktop/src-tauri/Cargo.toml`
-  - `desktop/src-tauri/src/lib.rs`
-  - `desktop/src-tauri/src/tray.rs`
-- Working-tree additions in this follow-up are documentation/evidence only.
-- Known verification deviation:
-  - `pnpm tauri dev` in this Windows environment can launch the app but later report a misleading `0xffffffff` GUI exit code.
-  - Because of that environment noise, the follow-up manual checks used the built debug executable plus direct process/window inspection.
+- Current branch: `codex/desktop-phase2-integration`
+- Status: Cards 2, 3, and 4 are integrated on top of the Card 1 baseline and have been re-verified together on this branch.
+- Shared-file integration owner resolution was required only in `desktop/src-tauri/src/lib.rs`, where the final branch keeps:
+  - Card 2 desktop integration plugin wiring
+  - Card 3 native file-drop bridge and `read_dropped_files` command
+  - Card 4 updater configuration, validation, and startup wiring
+- Final automated verification for the integrated branch is recorded in the session log below.
 
 ## Card 1 Verification
 
@@ -183,3 +179,27 @@
   - `pnpm tauri dev` in this Windows environment still reports the known misleading GUI exit code `0xffffffff` after launching the app, so direct debug-executable launch was used for the trustworthy window-level shortcut verification.
 - Next recommended action:
   - Proceed to Card 3 only. Keep Card 3 scoped to native file drag-and-drop bridging and preserve the same frontend ownership boundary used in Card 2.
+
+### 2026-03-25 05:15
+
+- Card: integration
+- Status: done
+- Executor: Codex
+- Files touched:
+  - `desktop/src-tauri/src/lib.rs`
+  - `docs/plans/2026-03-24-deerflow-desktop-phase-2-progress.md`
+  - `docs/plans/2026-03-24-deerflow-desktop-phase-2-release-notes.md`
+- Commands run:
+  - `cargo test`
+  - `node --experimental-strip-types --test "src/lib/file-drop.test.ts" "src/core/config/index.test.ts"`
+  - `pnpm typecheck`
+  - `pnpm tauri build --debug`
+- Result summary:
+  - Integrated Card 2, Card 3, and Card 4 onto `codex/desktop-phase2-integration` in the required order.
+  - Resolved the only shared-file content conflict in `desktop/src-tauri/src/lib.rs` by preserving the Card 2 plugin wiring, Card 3 file-drop bridge, and Card 4 updater setup together.
+  - Final automated verification passed for the integrated desktop shell and the Card 3 frontend bridge.
+- Blockers / deviations:
+  - `pnpm typecheck` and `pnpm tauri build --debug` required local `pnpm install` in the new integration worktree before verification could run.
+  - The build/test cache and bundle outputs were directed to `G:\deer-flow\desktop-target\phase2-integration` to avoid unnecessary `C:` growth.
+- Next recommended action:
+  - Treat this branch as the final Phase 2 integration candidate and use the final head commit for any downstream review or merge.

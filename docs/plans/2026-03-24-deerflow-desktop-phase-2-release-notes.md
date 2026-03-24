@@ -6,11 +6,10 @@
 - Scope remains limited to the existing Tauri desktop shell over the current DeerFlow web origin at `http://localhost:2026`.
 - This card does not add backend bundling, sidecars, agent-window support, or a custom release pipeline.
 
-## Desktop Baseline Included So Far
+## Integrated Baseline
 
-- Phase 1 established the Tauri shell, fallback preflight flow, desktop window commands, and the frontend desktop bridge.
-- Phase 2 Card 1 added tray-based show, hide, and quit controls.
-- Card 4 adds updater wiring groundwork plus packaging notes without changing chat or upload behavior.
+- This updater/distribution groundwork is integrated with the Phase 2 global shortcut, autostart, and native file-drop bridge on the final integration branch.
+- The shared desktop bootstrap in `desktop/src-tauri/src/lib.rs` now starts the updater wiring alongside the desktop integration and tray setup.
 
 ## Card 4 Additions
 
@@ -59,13 +58,12 @@
 - Automated verification for Card 4:
   - `cargo test` in `desktop/src-tauri/`
   - `pnpm tauri build --debug` in `desktop/`
-- Expected result:
-  - helper validation passes
-  - the debug desktop build completes with updater groundwork enabled
+- Result on the final integration branch:
+  - updater helper validation passed inside the full desktop test suite
+  - the debug desktop build completed and produced Windows MSI and NSIS bundles
 
 ## Known Gaps
 
 - There is still no desktop CI release workflow under `.github/workflows/`.
 - The updater endpoint remains a documented placeholder until a real release feed exists.
 - Signed updater artifacts are intentionally not enabled by default in `tauri.conf.json` yet.
-- Cards 2 and 3 from the Phase 2 implementation plan are still separate follow-up work.
