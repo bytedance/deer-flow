@@ -217,6 +217,8 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+  };
+  
   // Shortcuts
   shortcuts: {
     searchActions: string;
