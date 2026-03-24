@@ -34,7 +34,7 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
 
-  const [thread, sendMessage, refreshThread, isUploading] = useThreadStream({
+  const { thread, sendMessage, refreshThread, isUploading } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,

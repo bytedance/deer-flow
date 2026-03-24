@@ -420,7 +420,12 @@ export function useThreadStream({
     setOnStreamThreadId(currentThreadId);
   }, [thread.isLoading]);
 
-  return [mergedThread, sendMessage, refreshThread,isUploading] as const;
+  return {
+    thread: mergedThread,
+    sendMessage,
+    refreshThread,
+    isUploading,
+  } as const;
 }
 
 export function useThreads(

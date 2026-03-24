@@ -79,7 +79,7 @@ export const zhCN: Translations = {
     rewindConfirmAction: "回撤",
     rewindTooltip: "回到本轮对话发起前",
     rewindSuccessToast: "已回到本轮对话发起前",
-    rewindFailedToast: "回撤失败", 
+    rewindFailedToast: "回撤失败",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
     reasoningMode: "思考",
@@ -273,7 +273,7 @@ export const zhCN: Translations = {
     output: "输出",
     total: "总计",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",

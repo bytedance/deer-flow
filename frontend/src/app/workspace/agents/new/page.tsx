@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 
 import {
+  PromptInputProvider,
   PromptInput,
   PromptInputFooter,
   PromptInputSubmit,
@@ -42,7 +43,7 @@ export default function NewAgentPage() {
   // Stable thread ID — all turns belong to the same thread
   const threadId = useMemo(() => uuid(), []);
 
-  const [thread, sendMessage] = useThreadStream({
+  const { thread, sendMessage } = useThreadStream({
     threadId: step === "chat" ? threadId : undefined,
     context: {
       mode: "flash",
@@ -188,64 +189,66 @@ export default function NewAgentPage() {
   return (
     <ThreadContext.Provider value={{ thread }}>
       <ArtifactsProvider>
-        <div className="flex size-full flex-col">
-          {header}
+        <PromptInputProvider>
+          <div className="flex size-full flex-col">
+            {header}
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            {/* ── Message area ── */}
-            <div className="flex min-h-0 flex-1 justify-center">
-              <MessageList
-                className="size-full pt-10"
-                threadId={threadId}
-                thread={thread}
-              />
-            </div>
-
-            {/* ── Bottom action area ── */}
-            <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
-              <div className="w-full max-w-(--container-width-md)">
-                {agent ? (
-                  // ✅ Success card
-                  <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
-                    <CheckCircleIcon className="text-primary h-10 w-10" />
-                    <p className="font-semibold">{t.agents.agentCreated}</p>
-                    <div className="flex gap-2">
-                      <Button
-                        onClick={() =>
-                          router.push(
-                            `/workspace/agents/${agentName}/chats/new`,
-                          )
-                        }
-                      >
-                        {t.agents.startChatting}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => router.push("/workspace/agents")}
-                      >
-                        {t.agents.backToGallery}
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  // 📝 Normal input
-                  <PromptInput
-                    onSubmit={({ text }) => void handleChatSubmit(text)}
-                  >
-                    <PromptInputTextarea
-                      autoFocus
-                      placeholder={t.agents.createPageSubtitle}
-                      disabled={thread.isLoading}
-                    />
-                    <PromptInputFooter className="justify-end">
-                      <PromptInputSubmit disabled={thread.isLoading} />
-                    </PromptInputFooter>
-                  </PromptInput>
-                )}
+            <main className="flex min-h-0 flex-1 flex-col">
+              {/* ── Message area ── */}
+              <div className="flex min-h-0 flex-1 justify-center">
+                <MessageList
+                  className="size-full pt-10"
+                  threadId={threadId}
+                  thread={thread}
+                />
               </div>
-            </div>
-          </main>
-        </div>
+
+              {/* ── Bottom action area ── */}
+              <div className="bg-background flex shrink-0 justify-center border-t px-4 py-4">
+                <div className="w-full max-w-(--container-width-md)">
+                  {agent ? (
+                    // ✅ Success card
+                    <div className="flex flex-col items-center gap-4 rounded-2xl border py-8 text-center">
+                      <CheckCircleIcon className="text-primary h-10 w-10" />
+                      <p className="font-semibold">{t.agents.agentCreated}</p>
+                      <div className="flex gap-2">
+                        <Button
+                          onClick={() =>
+                            router.push(
+                              `/workspace/agents/${agentName}/chats/new`,
+                            )
+                          }
+                        >
+                          {t.agents.startChatting}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => router.push("/workspace/agents")}
+                        >
+                          {t.agents.backToGallery}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    // 📝 Normal input
+                    <PromptInput
+                      onSubmit={({ text }) => void handleChatSubmit(text)}
+                    >
+                      <PromptInputTextarea
+                        autoFocus
+                        placeholder={t.agents.createPageSubtitle}
+                        disabled={thread.isLoading}
+                      />
+                      <PromptInputFooter className="justify-end">
+                        <PromptInputSubmit disabled={thread.isLoading} />
+                      </PromptInputFooter>
+                    </PromptInput>
+                  )}
+                </div>
+              </div>
+            </main>
+          </div>
+        </PromptInputProvider>
       </ArtifactsProvider>
     </ThreadContext.Provider>
   );

@@ -109,7 +109,7 @@ export function MessageList({
       setRewindingAnchorId(anchorUserMessageId);
       try {
         const response = await fetch(
-          `${getBackendBaseURL()}/api/threads/${threadId}/rewind`,
+          `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/rewind`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

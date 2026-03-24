@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from deerflow.config.app_config import get_app_config
+from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,12 @@ async def _langgraph_request(
     description="Rewind the thread state to before a given human message.",
 )
 async def rewind_thread(thread_id: str, request: RewindRequest) -> RewindResponse:
+    try:
+        get_paths().thread_dir(thread_id)
+    except ValueError as exc:
+        logger.warning("Invalid thread_id for rewind: %r err=%s", thread_id, exc)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
     langgraph_url = _resolve_langgraph_url()
     async with httpx.AsyncClient(base_url=langgraph_url, timeout=30.0) as client:
         runs_data = await _langgraph_request(client, "GET", f"/threads/{thread_id}/runs")
