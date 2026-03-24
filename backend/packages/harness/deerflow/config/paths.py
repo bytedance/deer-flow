@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from pathlib import Path
 
 # Virtual path prefix seen by agents inside the sandbox
@@ -154,6 +155,15 @@ class Paths:
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
+
+    def delete_thread_dir(self, thread_id: str) -> None:
+        """Delete all persisted data for a thread.
+
+        The operation is idempotent: missing thread directories are ignored.
+        """
+        thread_dir = self.thread_dir(thread_id)
+        if thread_dir.exists():
+            shutil.rmtree(thread_dir)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
