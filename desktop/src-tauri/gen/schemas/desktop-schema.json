@@ -177,48 +177,6 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
-          "type": "string",
-          "const": "autostart:default",
-          "markdownDescription": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`"
-        },
-        {
-          "description": "Enables the disable command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:allow-disable",
-          "markdownDescription": "Enables the disable command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the enable command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:allow-enable",
-          "markdownDescription": "Enables the enable command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the is_enabled command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:allow-is-enabled",
-          "markdownDescription": "Enables the is_enabled command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the disable command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:deny-disable",
-          "markdownDescription": "Denies the disable command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the enable command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:deny-enable",
-          "markdownDescription": "Denies the enable command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the is_enabled command without any pre-configured scope.",
-          "type": "string",
-          "const": "autostart:deny-is-enabled",
-          "markdownDescription": "Denies the is_enabled command without any pre-configured scope."
-        },
-        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
@@ -2187,72 +2145,6 @@
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
         },
         {
-          "description": "No features are enabled by default, as we believe\nthe shortcuts can be inherently dangerous and it is\napplication specific if specific shortcuts should be\nregistered or unregistered.\n",
-          "type": "string",
-          "const": "global-shortcut:default",
-          "markdownDescription": "No features are enabled by default, as we believe\nthe shortcuts can be inherently dangerous and it is\napplication specific if specific shortcuts should be\nregistered or unregistered.\n"
-        },
-        {
-          "description": "Enables the is_registered command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:allow-is-registered",
-          "markdownDescription": "Enables the is_registered command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the register command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:allow-register",
-          "markdownDescription": "Enables the register command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the register_all command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:allow-register-all",
-          "markdownDescription": "Enables the register_all command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the unregister command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:allow-unregister",
-          "markdownDescription": "Enables the unregister command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the unregister_all command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:allow-unregister-all",
-          "markdownDescription": "Enables the unregister_all command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the is_registered command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:deny-is-registered",
-          "markdownDescription": "Denies the is_registered command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the register command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:deny-register",
-          "markdownDescription": "Denies the register command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the register_all command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:deny-register-all",
-          "markdownDescription": "Denies the register_all command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the unregister command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:deny-unregister",
-          "markdownDescription": "Denies the unregister command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the unregister_all command without any pre-configured scope.",
-          "type": "string",
-          "const": "global-shortcut:deny-unregister-all",
-          "markdownDescription": "Denies the unregister_all command without any pre-configured scope."
-        },
-        {
           "description": "This permission set configures what kind of\noperations are available from the store plugin.\n\n#### Granted Permissions\n\nAll operations are enabled by default.\n\n\n#### This default permission set includes:\n\n- `allow-load`\n- `allow-get-store`\n- `allow-set`\n- `allow-get`\n- `allow-has`\n- `allow-delete`\n- `allow-clear`\n- `allow-reset`\n- `allow-keys`\n- `allow-values`\n- `allow-entries`\n- `allow-length`\n- `allow-reload`\n- `allow-save`",
           "type": "string",
           "const": "store:default",
@@ -2425,6 +2317,60 @@
           "type": "string",
           "const": "store:deny-values",
           "markdownDescription": "Denies the values command without any pre-configured scope."
+        },
+        {
+          "description": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`",
+          "type": "string",
+          "const": "updater:default",
+          "markdownDescription": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`"
+        },
+        {
+          "description": "Enables the check command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-check",
+          "markdownDescription": "Enables the check command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-download",
+          "markdownDescription": "Enables the download command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the download_and_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-download-and-install",
+          "markdownDescription": "Enables the download_and_install command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-install",
+          "markdownDescription": "Enables the install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-check",
+          "markdownDescription": "Denies the check command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-download",
+          "markdownDescription": "Denies the download command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the download_and_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-download-and-install",
+          "markdownDescription": "Denies the download_and_install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the install command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-install",
+          "markdownDescription": "Denies the install command without any pre-configured scope."
         },
         {
           "description": "This permission set configures what kind of\noperations are available from the window state plugin.\n\n#### Granted Permissions\n\nAll operations are enabled by default.\n\n\n#### This default permission set includes:\n\n- `allow-filename`\n- `allow-restore-state`\n- `allow-save-window-state`",

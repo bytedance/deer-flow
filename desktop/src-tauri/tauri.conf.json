@@ -7,6 +7,11 @@
     "devUrl": null,
     "frontendDist": "../src/fallback"
   },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "icon": ["icons/icon.ico"]
+  },
   "app": {
     "withGlobalTauri": true,
     "security": {
@@ -22,5 +27,15 @@
         "decorations": true
       }
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://updates.example.invalid/deerflow/stable/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

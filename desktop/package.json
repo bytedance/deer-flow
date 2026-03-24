@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "tauri": "node ./scripts/run-tauri.mjs"
+    "tauri": "node ./scripts/run-tauri.mjs",
+    "tauri:build:debug": "node ./scripts/run-tauri.mjs build --debug",
+    "tauri:build:release": "node ./scripts/run-tauri.mjs build",
+    "tauri:signer:generate": "node ./scripts/run-tauri.mjs signer generate"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.1"
