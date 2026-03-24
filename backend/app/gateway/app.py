@@ -1,6 +1,9 @@
+import fcntl
 import logging
+import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -28,6 +31,12 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Cross-worker lock for singleton services (IM channels).
+# With --workers N, each worker runs lifespan() independently.
+# Telegram/Slack only allow one polling connection per bot token,
+# so we use a file lock to ensure only one worker starts channels.
+_CHANNEL_LOCK_PATH = Path(tempfile.gettempdir()) / "deer-flow-channel.lock"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -49,24 +58,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 2. Gateway and LangGraph Server are separate processes with independent caches
     # MCP tools are lazily initialized in LangGraph Server when first needed
 
-    # Start IM channel service if any channels are configured
+    # Start IM channel service if any channels are configured.
+    # Use a file lock so only one worker (out of --workers N) runs channels.
+    channel_lock_fd = None
+    owns_channels = False
     try:
-        from app.channels.service import start_channel_service
+        channel_lock_fd = open(_CHANNEL_LOCK_PATH, "w")  # noqa: SIM115
+        fcntl.flock(channel_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        owns_channels = True
+    except OSError:
+        # Another worker already holds the lock — skip channel startup
+        logger.info("Another worker owns IM channels — skipping channel startup in this worker")
+        if channel_lock_fd:
+            channel_lock_fd.close()
+            channel_lock_fd = None
 
-        channel_service = await start_channel_service()
-        logger.info("Channel service started: %s", channel_service.get_status())
-    except Exception:
-        logger.exception("No IM channels configured or channel service failed to start")
+    if owns_channels:
+        try:
+            from app.channels.service import start_channel_service
+
+            channel_service = await start_channel_service()
+            logger.info("Channel service started: %s", channel_service.get_status())
+        except Exception:
+            logger.exception("No IM channels configured or channel service failed to start")
 
     yield
 
-    # Stop channel service on shutdown
-    try:
-        from app.channels.service import stop_channel_service
+    # Stop channel service on shutdown (only in the worker that started it)
+    if owns_channels:
+        try:
+            from app.channels.service import stop_channel_service
 
-        await stop_channel_service()
-    except Exception:
-        logger.exception("Failed to stop channel service")
+            await stop_channel_service()
+        except Exception:
+            logger.exception("Failed to stop channel service")
+        if channel_lock_fd:
+            fcntl.flock(channel_lock_fd, fcntl.LOCK_UN)
+            channel_lock_fd.close()
     logger.info("Shutting down API Gateway")
 
 
