@@ -60,7 +60,7 @@ def load_skills(skills_path: Path | None = None, use_config: bool = True, enable
         if not category_path.exists() or not category_path.is_dir():
             continue
 
-        for current_root, dir_names, file_names in os.walk(category_path):
+        for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
             # Keep traversal deterministic and skip hidden directories.
             dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
             if "SKILL.md" not in file_names:
