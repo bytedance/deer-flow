@@ -92,13 +92,13 @@ export interface Translations {
     }[];
     suggestionsCreate: (
       | {
-          suggestion: string;
-          prompt: string;
-          icon: LucideIcon;
-        }
+        suggestion: string;
+        prompt: string;
+        icon: LucideIcon;
+      }
       | {
-          type: "separator";
-        }
+        type: "separator";
+      }
     )[];
   };
 
@@ -217,6 +217,8 @@ export interface Translations {
     input: string;
     output: string;
     total: string;
+  };
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
