@@ -13,53 +13,59 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Install the latest version of uv
-      uses: astral-sh/setup-uv@v7
-      with:
-        version: "latest"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-    - name: Install dependencies
-      working-directory: backend
-      run: |
-        uv sync --group dev
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
 
-    - name: Lint backend
-      working-directory: backend
-      run: make lint
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          uv sync --group dev
+
+      - name: Lint backend
+        working-directory: backend
+        run: make lint
 
   lint-frontend:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '22'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
-    - name: Enable Corepack
-      run: corepack enable
+      - name: Enable Corepack
+        run: corepack enable
 
-    - name: Use pinned pnpm version
-      run: corepack prepare pnpm@10.26.2 --activate
-    - name: Install frontend dependencies
-      run: |
-        cd frontend
-        pnpm install --frozen-lockfile
+      - name: Use pinned pnpm version
+        run: corepack prepare pnpm@10.26.2 --activate
 
-    - name: Run frontend linting
-      run: |
-        cd frontend
-        pnpm lint
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          pnpm install --frozen-lockfile
 
-    - name: Check TypeScript types
-      run: |
-        cd frontend
-        pnpm typecheck
+      - name: Run frontend linting
+        run: |
+          cd frontend
+          pnpm lint
 
-    - name: Build frontend
-      run: |
-        cd frontend
-        BETTER_AUTH_SECRET=local-dev-secret pnpm build
+      - name: Check TypeScript types
+        run: |
+          cd frontend
+          pnpm typecheck
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          BETTER_AUTH_SECRET=local-dev-secret pnpm build
