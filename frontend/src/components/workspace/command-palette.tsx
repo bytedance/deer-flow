@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
+
 import { SettingsDialog } from "./settings";
 
 export function CommandPalette() {

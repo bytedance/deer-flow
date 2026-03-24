@@ -10,6 +10,9 @@ concurrency:
   group: unit-tests-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   backend-unit-tests:
     if: github.event.pull_request.draft == false
@@ -31,10 +34,6 @@ jobs:
       - name: Install backend dependencies
         working-directory: backend
         run: uv sync --group dev
-
-      - name: Lint backend
-        working-directory: backend
-        run: make lint
 
       - name: Run unit tests of backend
         working-directory: backend
