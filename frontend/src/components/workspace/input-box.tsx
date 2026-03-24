@@ -60,6 +60,11 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  resolveDesktopDroppedFiles,
+  shouldSuppressBrowserDrop,
+} from "@/lib/file-drop";
+import { listenForNativeFileDrop } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
 import {
@@ -145,7 +150,9 @@ export function InputBox({
   const { models } = useModels();
   const { thread, isMock } = useThread();
   const { textInput } = usePromptInputController();
+  const { add: addAttachments } = usePromptInputAttachments();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const lastNativeDropAtRef = useRef<number | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const [followupsHidden, setFollowupsHidden] = useState(false);
@@ -255,6 +262,75 @@ export function InputBox({
     const form = promptRootRef.current?.querySelector("form");
     form?.requestSubmit();
   }, []);
+
+  useEffect(() => {
+    const suppressBrowserDrop = (event: DragEvent) => {
+      if (!event.dataTransfer?.types?.includes("Files")) {
+        return;
+      }
+
+      if (!shouldSuppressBrowserDrop(lastNativeDropAtRef.current)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    document.addEventListener("dragover", suppressBrowserDrop, true);
+    document.addEventListener("drop", suppressBrowserDrop, true);
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listenForNativeFileDrop((event) => {
+      if (event.payload.type === "leave") {
+        return;
+      }
+
+      lastNativeDropAtRef.current = Date.now();
+
+      if (event.payload.type !== "drop") {
+        return;
+      }
+
+      void resolveDesktopDroppedFiles(event.payload.paths)
+        .then((files) => {
+          if (files.length === 0) {
+            return;
+          }
+
+          addAttachments(files);
+        })
+        .catch((error) => {
+          console.error(
+            "Failed to bridge desktop file drop into attachments.",
+            error,
+          );
+        });
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
+        }
+
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        console.error(
+          "Failed to subscribe to desktop file drop events.",
+          error,
+        );
+      });
+
+    return () => {
+      disposed = true;
+      document.removeEventListener("dragover", suppressBrowserDrop, true);
+      document.removeEventListener("drop", suppressBrowserDrop, true);
+      unlisten?.();
+    };
+  }, [addAttachments]);
 
   const handleFollowupClick = useCallback(
     (suggestion: string) => {

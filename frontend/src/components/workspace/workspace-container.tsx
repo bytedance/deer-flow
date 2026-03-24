@@ -18,13 +18,19 @@ import { cn } from "@/lib/utils";
 import { GithubIcon } from "./github-icon";
 import { Tooltip } from "./tooltip";
 
+export const WORKSPACE_SURFACE_ATTRIBUTE = "data-workspace-surface";
+
 export function WorkspaceContainer({
   className,
   children,
   ...props
 }: React.ComponentProps<"div">) {
   return (
-    <div className={cn("flex h-screen w-full flex-col", className)} {...props}>
+    <div
+      data-workspace-surface="true"
+      className={cn("flex h-screen w-full flex-col", className)}
+      {...props}
+    >
       {children}
     </div>
   );
