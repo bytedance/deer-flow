@@ -61,6 +61,22 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]
 
+    # For Codex Responses API models: map thinking mode to reasoning_effort
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    if issubclass(model_class, CodexChatModel):
+        # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
+        model_settings_from_config.pop("max_tokens", None)
+
+        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+        explicit_effort = kwargs.pop("reasoning_effort", None)
+        if not thinking_enabled:
+            model_settings_from_config["reasoning_effort"] = "none"
+        elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
+            model_settings_from_config["reasoning_effort"] = explicit_effort
+        elif "reasoning_effort" not in model_settings_from_config:
+            model_settings_from_config["reasoning_effort"] = "medium"
+
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
     if is_tracing_enabled():

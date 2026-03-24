@@ -131,17 +131,19 @@ def get_checkpointer() -> Checkpointer:
     from deerflow.config.app_config import _app_config
     from deerflow.config.checkpointer_config import get_checkpointer_config
 
-    if _app_config is None:
-        # Only load config if it hasn't been initialized yet
-        # In tests, config may be set directly via set_checkpointer_config()
+    config = get_checkpointer_config()
+
+    if config is None and _app_config is None:
+        # Only load app config lazily when neither the app config nor an explicit
+        # checkpointer config has been initialized yet. This keeps tests that
+        # intentionally set the global checkpointer config isolated from any
+        # ambient config.yaml on disk.
         try:
             get_app_config()
         except FileNotFoundError:
-            # In test environments without config.yaml, this is expected
-            # Tests will set config directly via set_checkpointer_config()
+            # In test environments without config.yaml, this is expected.
             pass
-
-    config = get_checkpointer_config()
+        config = get_checkpointer_config()
     if config is None:
         from langgraph.checkpoint.memory import InMemorySaver
 

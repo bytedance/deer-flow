@@ -288,13 +288,23 @@ class SubagentExecutor:
                     if isinstance(content, str):
                         result.result = content
                     elif isinstance(content, list):
-                        # Extract text from list of content blocks for final result only
+                        # Extract text from list of content blocks for final result only.
+                        # Concatenate raw string chunks directly, but preserve separation
+                        # between full text blocks for readability.
                         text_parts = []
+                        pending_str_parts = []
                         for block in content:
                             if isinstance(block, str):
-                                text_parts.append(block)
-                            elif isinstance(block, dict) and "text" in block:
-                                text_parts.append(block["text"])
+                                pending_str_parts.append(block)
+                            elif isinstance(block, dict):
+                                if pending_str_parts:
+                                    text_parts.append("".join(pending_str_parts))
+                                    pending_str_parts.clear()
+                                text_val = block.get("text")
+                                if isinstance(text_val, str):
+                                    text_parts.append(text_val)
+                        if pending_str_parts:
+                            text_parts.append("".join(pending_str_parts))
                         result.result = "\n".join(text_parts) if text_parts else "No text content in response"
                     else:
                         result.result = str(content)
@@ -302,7 +312,27 @@ class SubagentExecutor:
                     # Fallback: use the last message if no AIMessage found
                     last_message = messages[-1]
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no AIMessage found, using last message: {type(last_message)}")
-                    result.result = str(last_message.content) if hasattr(last_message, "content") else str(last_message)
+                    raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
+                    if isinstance(raw_content, str):
+                        result.result = raw_content
+                    elif isinstance(raw_content, list):
+                        parts = []
+                        pending_str_parts = []
+                        for block in raw_content:
+                            if isinstance(block, str):
+                                pending_str_parts.append(block)
+                            elif isinstance(block, dict):
+                                if pending_str_parts:
+                                    parts.append("".join(pending_str_parts))
+                                    pending_str_parts.clear()
+                                text_val = block.get("text")
+                                if isinstance(text_val, str):
+                                    parts.append(text_val)
+                        if pending_str_parts:
+                            parts.append("".join(pending_str_parts))
+                        result.result = "\n".join(parts) if parts else "No text content in response"
+                    else:
+                        result.result = str(raw_content)
                 else:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
                     result.result = "No response generated"

@@ -464,6 +464,26 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
+### Thread Cleanup
+
+Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
+
+```http
+DELETE /api/threads/{thread_id}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Deleted local thread data for abc123"
+}
+```
+
+**Error behavior:**
+- `422` for invalid thread IDs
+- `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+
 ### Artifacts
 
 #### Get Artifact

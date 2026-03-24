@@ -1147,8 +1147,8 @@ class TestChannelManager:
             outbound_received = []
 
             async def capture(msg):
-                 outbound_received.append(msg)
-                 
+                outbound_received.append(msg)
+
             bus.subscribe_outbound(capture)
             await manager.start()
 
@@ -1945,6 +1945,36 @@ class TestTelegramPrivateChatThread:
             msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
             assert msg.topic_id == "20"
             assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+
+class TestTelegramProcessingOrder:
+    """Ensure 'working on it...' is sent before inbound is published."""
+
+    def test_running_reply_sent_before_publish(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            ch._main_loop = asyncio.get_event_loop()
+
+            order = []
+
+            async def mock_send_running_reply(chat_id, msg_id):
+                order.append("running_reply")
+
+            async def mock_publish_inbound(inbound):
+                order.append("publish_inbound")
+
+            ch._send_running_reply = mock_send_running_reply
+            ch.bus.publish_inbound = mock_publish_inbound
+
+            await ch._process_incoming_with_reply(chat_id="chat1", msg_id=123, inbound=InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hello"))
+
+            assert order == ["running_reply", "publish_inbound"]
 
         _run(go())
 

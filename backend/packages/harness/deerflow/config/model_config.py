@@ -13,6 +13,14 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
+    use_responses_api: bool | None = Field(
+        default=None,
+        description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",
+    )
+    output_version: str | None = Field(
+        default=None,
+        description="Structured output version for OpenAI responses content, e.g. responses/v1",
+    )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
     when_thinking_enabled: dict | None = Field(

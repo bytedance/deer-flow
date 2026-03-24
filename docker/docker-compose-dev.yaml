@@ -124,6 +124,19 @@ services:
       - ~/.cache/uv:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
     working_dir: /app
     environment:
       - CI=true
@@ -160,6 +173,19 @@ services:
       - ~/.cache/uv:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
       - /var/run/docker.sock:/var/run/docker.sock
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
     working_dir: /app
     environment:
       - CI=true
