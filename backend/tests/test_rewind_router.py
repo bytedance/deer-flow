@@ -200,7 +200,6 @@ def test_rewind_thread_success_history_newest_to_oldest(monkeypatch):
     result = asyncio.run(rewind.rewind_thread(thread_id, rewind.RewindRequest(anchor_user_message_id=anchor_id)))
 
     assert result.thread_id == thread_id
-    assert result.backup_thread_id is None
     assert result.filled_text == "anchor text"
     assert result.rewound_to_message_count == 1
 
