@@ -70,6 +70,40 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
+#### Linux: Docker daemon permission denied
+
+If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
+
+```text
+unable to get image 'deer-flow-dev-langgraph': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+```
+
+Recommended fix: add your current user to the `docker` group so Docker commands work without `sudo`.
+
+1. Confirm the `docker` group exists:
+   ```bash
+   getent group docker
+   ```
+2. Add your current user to the `docker` group:
+   ```bash
+   sudo usermod -aG docker $USER
+   ```
+3. Apply the new group membership. The most reliable option is to log out completely and then log back in. If you want to refresh the current shell session instead, run:
+   ```bash
+   newgrp docker
+   ```
+4. Verify Docker access:
+   ```bash
+   docker ps
+   ```
+5. Retry the DeerFlow command:
+   ```bash
+   make docker-stop
+   make docker-start
+   ```
+
+If `docker ps` still reports a permission error after `usermod`, fully log out and log back in before retrying.
+
 #### Docker Architecture
 
 ```
@@ -236,9 +270,9 @@ Nginx (port 2026) ← Unified entry point
 cd backend
 uv run pytest
 
-# Frontend tests
+# Frontend checks
 cd frontend
-pnpm test
+pnpm check
 ```
 
 ### PR Regression Checks
