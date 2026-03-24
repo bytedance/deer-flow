@@ -246,7 +246,7 @@ export function MessageList({
                   })}
                   {anchorId && canRewind && (
                     <div className="relative z-30 flex justify-end">
-                      <Tooltip content="回到本轮对话发起前">
+                      <Tooltip content={t.inputBox.rewindTooltip}>
                         <Button
                           size="icon-sm"
                           variant="ghost"

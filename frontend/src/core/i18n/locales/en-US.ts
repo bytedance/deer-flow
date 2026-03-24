@@ -77,6 +77,7 @@ export const enUS: Translations = {
     mode: "Mode",
     rewindConfirmTitle: "Rewind this turn?",
     rewindConfirmAction: "Rewind",
+    rewindTooltip: "Rewind to before this turn",
     rewindSuccessToast: "Rewound to before this turn",
     rewindFailedToast: "Failed to rewind", 
     flashMode: "Flash",

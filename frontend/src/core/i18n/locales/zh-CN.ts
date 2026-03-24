@@ -77,6 +77,7 @@ export const zhCN: Translations = {
     mode: "模式",
     rewindConfirmTitle: "确定要回到本轮对话发起前吗？",
     rewindConfirmAction: "回撤",
+    rewindTooltip: "回到本轮对话发起前",
     rewindSuccessToast: "已回到本轮对话发起前",
     rewindFailedToast: "回撤失败", 
     flashMode: "闪速",

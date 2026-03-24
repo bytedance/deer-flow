@@ -62,6 +62,7 @@ export interface Translations {
     mode: string;
     rewindConfirmTitle: string;
     rewindConfirmAction: string;
+    rewindTooltip: string;
     rewindSuccessToast: string;
     rewindFailedToast: string;
     flashMode: string;
