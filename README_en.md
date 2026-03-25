@@ -509,6 +509,14 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Strong tool-use** for reliable function calling and structured outputs
 - **GLM-5 (Zhipu)**: connect it via `langchain_openai:ChatOpenAI` + `base_url: https://open.bigmodel.cn/api/paas/v4/`.
 
+## GLM-5 Best Practices
+
+- Use the general API base URL `https://open.bigmodel.cn/api/paas/v4/` and do not mix it with the GLM Coding Plan endpoint `https://open.bigmodel.cn/api/coding/paas/v4`.
+- In `config.yaml`, set `model` to `glm-5`, point `api_key` at `ZAI_API_KEY`, and keep using `langchain_openai:ChatOpenAI`.
+- GLM-5 is a good fit for function calling, multi-step planning, and longer-context work. Use a smaller model for simple one-shot tasks to save cost.
+- When a task depends on tools, keep tool descriptions short and precise so the model can plan before it acts.
+- Official references: [Python SDK example](https://docs.bigmodel.cn/cn/guide/develop/python/introduction) / [Function calling docs](https://docs.bigmodel.cn/cn/guide/capabilities/function-calling)
+
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:

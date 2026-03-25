@@ -448,6 +448,14 @@ DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，
 - **稳定的 tool use 能力**，适合可靠的函数调用和结构化输出
 - **GLM-5（智谱）**：可通过 `langchain_openai:ChatOpenAI` + `base_url: https://open.bigmodel.cn/api/paas/v4/` 接入。
 
+## GLM-5 最佳实践
+
+- 使用通用 API 端点 `https://open.bigmodel.cn/api/paas/v4/`，不要和 GLM Coding Plan 的 `https://open.bigmodel.cn/api/coding/paas/v4` 混用。
+- 在 `config.yaml` 中把 `model` 设为 `glm-5`，`api_key` 指向 `ZAI_API_KEY`，并继续通过 `langchain_openai:ChatOpenAI` 接入。
+- GLM-5 适合函数调用、多步骤规划和长上下文任务。简单问答、一次性小任务可以切到更便宜的模型，降低成本。
+- 如果任务依赖工具调用，尽量把工具描述写短、写准，让模型先规划再执行。
+- 官方参考：[Python SDK 接入示例](https://docs.bigmodel.cn/cn/guide/develop/python/introduction) / [函数调用文档](https://docs.bigmodel.cn/cn/guide/capabilities/function-calling)
+
 ## 内嵌 Python Client
 
 DeerFlow 也可以作为内嵌的 Python 库使用，不必启动完整的 HTTP 服务。`DeerFlowClient` 提供了进程内的直接访问方式，覆盖所有 agent 和 Gateway 能力，返回的数据结构与 HTTP Gateway API 保持一致：
