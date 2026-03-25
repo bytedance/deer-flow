@@ -61,6 +61,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
       - [Claude Code Integration](#claude-code-integration)
+      - [OpenClaw Integration](#openclaw-integration)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
     - [Context Engineering](#context-engineering)

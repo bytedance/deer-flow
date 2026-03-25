@@ -49,6 +49,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
       - [Claude Code 集成](#claude-code-集成)
+      - [OpenClaw 集成](#openclaw-集成)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Context Engineering](#context-engineering)
