@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.subagent_limit_middleware import (
-    MAX_CONCURRENT_SUBAGENTS
+    MAX_CONCURRENT_SUBAGENTS,
     MAX_SUBAGENT_LIMIT,
     MIN_SUBAGENT_LIMIT,
     SubagentLimitMiddleware,
