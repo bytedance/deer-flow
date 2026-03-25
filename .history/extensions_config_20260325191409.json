@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/mnt/user-data"
+      ],
+      "env": {},
+      "url": null,
+      "headers": {},
+      "oauth": null,
+      "description": "Provides filesystem access within allowed directories"
+    }
+  },
+  "skills": {
+    "public": {
+      "enabled": true
+    },
+    "custom": {
+      "enabled": false
+    }
+  }
+}

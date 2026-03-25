@@ -118,7 +118,7 @@ services:
       - gateway-venv:/app/backend/.venv
       - ../config.yaml:/app/config.yaml
       - ../extensions_config.json:/app/extensions_config.json
-      - ../skills:/mnt/skills
+      - ../skills:/app/skills
       - ../logs:/app/logs
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
@@ -167,7 +167,7 @@ services:
       - langgraph-venv:/app/backend/.venv
       - ../config.yaml:/app/config.yaml
       - ../extensions_config.json:/app/extensions_config.json
-      - ../skills:/mnt/skills
+      - ../skills:/app/skills
       - ../logs:/app/logs
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv

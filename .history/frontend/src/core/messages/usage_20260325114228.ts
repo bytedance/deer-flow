@@ -31,7 +31,6 @@ function getUsageMetadata(
 
 /**
  * Accumulate token usage across all AI messages in a thread.
- * Deduplicates by message ID to prevent double-counting.
  */
 export function accumulateUsage(messages: Message[]): TokenUsage | null {
   const cumulative: TokenUsage = {
@@ -39,29 +38,16 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
     outputTokens: 0,
     totalTokens: 0,
   };
-  
-  // Track seen message IDs to prevent double-counting
-  const seenMessageIds = new Set<string>();
   let hasUsage = false;
-  
   for (const message of messages) {
-    // Skip if we've already counted this message
-    if (message.id && seenMessageIds.has(message.id)) {
-      continue;
-    }
-    
     const usage = getUsageMetadata(message);
     if (usage) {
       hasUsage = true;
-      if (message.id) {
-        seenMessageIds.add(message.id);
-      }
       cumulative.inputTokens += usage.inputTokens;
       cumulative.outputTokens += usage.outputTokens;
       cumulative.totalTokens += usage.totalTokens;
     }
   }
-  
   return hasUsage ? cumulative : null;
 }
 
