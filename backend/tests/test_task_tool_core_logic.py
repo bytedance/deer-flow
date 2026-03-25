@@ -1,5 +1,6 @@
 """Core behavior tests for task tool orchestration."""
 
+import asyncio
 import importlib
 from enum import Enum
 from types import SimpleNamespace
@@ -61,10 +62,18 @@ def _make_result(
     )
 
 
+def _run_task_tool(**kwargs):
+    return asyncio.run(task_tool_module.task_tool.coroutine(**kwargs))
+
+
+async def _no_sleep(_: float) -> None:
+    return None
+
+
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None)
 
-    result = task_tool_module.task_tool.func(
+    result = _run_task_tool(
         runtime=None,
         description="执行任务",
         prompt="do work",
@@ -109,11 +118,11 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "Skills Appendix")
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=runtime,
         description="运行子任务",
         prompt="collect diagnostics",
@@ -155,10 +164,10 @@ def test_task_tool_returns_failed_message(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.FAILED, error="subagent crashed"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="do fail",
@@ -189,10 +198,10 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="do timeout",
@@ -225,10 +234,10 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="never finish",
@@ -261,7 +270,7 @@ def test_cleanup_called_on_completed(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -269,7 +278,7 @@ def test_cleanup_called_on_completed(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="complete task",
@@ -301,7 +310,7 @@ def test_cleanup_called_on_failed(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.FAILED, error="error"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -309,7 +318,7 @@ def test_cleanup_called_on_failed(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="fail task",
@@ -341,7 +350,7 @@ def test_cleanup_called_on_timed_out(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.TIMED_OUT, error="timeout"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -349,7 +358,7 @@ def test_cleanup_called_on_timed_out(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="timeout task",
@@ -388,7 +397,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
         lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
-    monkeypatch.setattr(task_tool_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -396,7 +405,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
         lambda task_id: cleanup_calls.append(task_id),
     )
 
-    output = task_tool_module.task_tool.func(
+    output = _run_task_tool(
         runtime=_make_runtime(),
         description="执行任务",
         prompt="never finish",
