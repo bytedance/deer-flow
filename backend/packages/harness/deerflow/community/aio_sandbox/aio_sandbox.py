@@ -39,7 +39,7 @@ class AioSandbox(Sandbox):
             self._home_dir = context.home_dir
         return self._home_dir
 
-    def execute_command(self, command: str) -> str:
+    async def execute_command(self, command: str) -> str:
         """Execute a shell command in the sandbox.
 
         Args:
@@ -49,6 +49,9 @@ class AioSandbox(Sandbox):
             The output of the command.
         """
         try:
+            # Note: agent-sandbox client is synchronous, but we wrap it in async
+            # for interface consistency. A future improvement would be using
+            # an async client for the sandbox API.
             result = self._client.shell.exec_command(command=command)
             output = result.data.output if result.data else ""
             return output if output else "(no output)"

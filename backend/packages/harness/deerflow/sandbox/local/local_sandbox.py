@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import subprocess
@@ -32,22 +33,41 @@ class LocalSandbox(Sandbox):
             return shell_from_path
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command(self, command: str) -> str:
-        result = subprocess.run(
-            command,
-            executable=self._get_shell(),
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\nStd Error:\n{result.stderr}" if output else result.stderr
-        if result.returncode != 0:
-            output += f"\nExit Code: {result.returncode}"
+    async def execute_command(self, command: str) -> str:
+        try:
+            # Use asyncio for non-blocking command execution
+            process = await asyncio.create_subprocess_shell(
+                command,
+                executable=self._get_shell(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
-        return output if output else "(no output)"
+            try:
+                # Wait for command completion with timeout
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+                stdout_text = stdout.decode("utf-8", errors="replace")
+                stderr_text = stderr.decode("utf-8", errors="replace")
+                return_code = process.returncode
+            except asyncio.TimeoutError:
+                # Terminate the process on timeout
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+                return f"Error: Command timed out after 600 seconds"
+
+            output = stdout_text
+            if stderr_text:
+                output += f"\nStd Error:\n{stderr_text}" if output else stderr_text
+            if return_code != 0:
+                output += f"\nExit Code: {return_code}"
+
+            return output if output else "(no output)"
+
+        except Exception as e:
+            return f"Error executing command: {str(e)}"
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         return list_dir(path, max_depth)

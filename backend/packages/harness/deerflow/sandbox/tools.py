@@ -540,7 +540,7 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
+async def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
 
 
@@ -559,9 +559,9 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         if is_local_sandbox(runtime):
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            output = sandbox.execute_command(command)
+            output = await sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
-        return sandbox.execute_command(command)
+        return await sandbox.execute_command(command)
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:

@@ -1,7 +1,7 @@
 """Task tool for delegating work to subagents."""
 
+import asyncio
 import logging
-import time
 import uuid
 from dataclasses import replace
 from typing import Annotated, Literal
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @tool("task", parse_docstring=True)
-def task_tool(
+async def task_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
     description: str,
     prompt: str,
@@ -179,7 +179,7 @@ def task_tool(
             return f"Task timed out. Error: {result.error}"
 
         # Still running, wait before next poll
-        time.sleep(5)  # Poll every 5 seconds
+        await asyncio.sleep(5)  # Poll every 5 seconds
         poll_count += 1
 
         # Polling timeout as a safety net (in case thread pool timeout doesn't work)

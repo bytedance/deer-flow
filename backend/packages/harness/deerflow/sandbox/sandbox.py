@@ -14,7 +14,7 @@ class Sandbox(ABC):
         return self._id
 
     @abstractmethod
-    def execute_command(self, command: str) -> str:
+    async def execute_command(self, command: str) -> str:
         """Execute bash command in sandbox.
 
         Args:

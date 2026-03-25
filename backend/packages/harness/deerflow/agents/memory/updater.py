@@ -347,6 +347,69 @@ class MemoryUpdater:
             logger.exception("Memory update failed: %s", e)
             return False
 
+    async def aupdate_memory(self, messages: list[Any], thread_id: str | None = None, agent_name: str | None = None) -> bool:
+        """Asynchronously update memory based on conversation messages.
+
+        Args:
+            messages: List of conversation messages.
+            thread_id: Optional thread ID for tracking source.
+            agent_name: If provided, updates per-agent memory. If None, updates global memory.
+
+        Returns:
+            True if update was successful, False otherwise.
+        """
+        config = get_memory_config()
+        if not config.enabled:
+            return False
+
+        if not messages:
+            return False
+
+        try:
+            # Get current memory
+            current_memory = get_memory_data(agent_name)
+
+            # Format conversation for prompt
+            conversation_text = format_conversation_for_update(messages)
+
+            if not conversation_text.strip():
+                return False
+
+            # Build prompt
+            prompt = MEMORY_UPDATE_PROMPT.format(
+                current_memory=json.dumps(current_memory, indent=2),
+                conversation=conversation_text,
+            )
+
+            # Call LLM asynchronously
+            model = self._get_model()
+            response = await model.ainvoke(prompt)
+            response_text = _extract_text(response.content).strip()
+
+            # Parse response
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+            update_data = json.loads(response_text)
+
+            # Apply updates
+            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+
+            # Strip file-upload mentions
+            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+
+            # Save (still sync file I/O for now as suggested by TODO)
+            return _save_memory_to_file(updated_memory, agent_name)
+
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
+            return False
+        except Exception as e:
+            logger.exception("Memory update failed: %s", e)
+            return False
+
     def _apply_updates(
         self,
         current_memory: dict[str, Any],

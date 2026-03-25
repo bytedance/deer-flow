@@ -9,6 +9,7 @@ import logging
 import os
 from typing import Any
 
+import httpx
 import requests
 
 logger = logging.getLogger(__name__)
@@ -96,11 +97,46 @@ class InfoQuestClient:
                 logger.debug("Response is not in JSON format, returning as-is")
                 return response.text
 
-            # Print partial response for debugging
-            if logger.isEnabledFor(logging.DEBUG):
-                response_sample = response.text[:200] + ("..." if len(response.text) > 200 else "")
-                logger.debug("Successfully received response, content length: %d bytes, first 200 chars: %s", len(response.text), response_sample)
             return response.text
+        except Exception as e:
+            error_message = f"fetch API failed: {str(e)}"
+            logger.error(error_message)
+            return f"Error: {error_message}"
+
+    async def afetch(self, url: str, return_format: str = "html") -> str:
+        """Asynchronously fetch the contents of a web page."""
+        if logger.isEnabledFor(logging.DEBUG):
+            url_truncated = url[:50] + "..." if len(url) > 50 else url
+            logger.debug(
+                f"InfoQuest - Fetch API request initiated | "
+                f"operation=crawl url | "
+                f"url_truncated={url_truncated} | "
+                f"request_type=async"
+            )
+
+        headers = self._prepare_headers()
+        data = self._prepare_crawl_request_data(url, return_format)
+
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                response = await client.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data)
+
+                if response.status_code != 200:
+                    return f"Error: fetch API returned status {response.status_code}: {response.text}"
+
+                if not response.text or not response.text.strip():
+                    return "Error: no result found"
+
+                try:
+                    response_data = response.json()
+                    if "reader_result" in response_data:
+                        return response_data["reader_result"]
+                    elif "content" in response_data:
+                        return response_data["content"]
+                except Exception:
+                    return response.text
+
+                return response.text
         except Exception as e:
             error_message = f"fetch API failed: {str(e)}"
             logger.error(error_message)
@@ -174,6 +210,27 @@ class InfoQuestClient:
             logger.debug(f"Search API request completed successfully | service=InfoQuest | status=success | response_sample={response_sample}")
 
         return response_json
+
+    async def aweb_search_raw_results(
+        self,
+        query: str,
+        site: str,
+        output_format: str = "JSON",
+    ) -> dict:
+        """Get results from the InfoQuest Web-Search API asynchronously."""
+        headers = self._prepare_headers()
+
+        params = {"format": output_format, "query": query}
+        if self.search_time_range > 0:
+            params["time_range"] = self.search_time_range
+
+        if site != "":
+            params["site"] = site
+
+        async with httpx.AsyncClient(timeout=600) as client:
+            response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+            response.raise_for_status()
+            return response.json()
 
     @staticmethod
     def clean_results(raw_results: list[dict[str, dict[str, dict[str, Any]]]]) -> list[dict]:
@@ -279,6 +336,78 @@ class InfoQuestClient:
 
         except Exception as e:
             error_message = f"InfoQuest Web-Search - Search tool execution failed | mode=synchronous | error={str(e)}"
+            logger.error(error_message)
+            return f"Error: {error_message}"
+
+    async def aweb_search(
+        self,
+        query: str,
+        site: str = "",
+        output_format: str = "JSON",
+    ) -> str:
+        """Asynchronously search the web."""
+        if logger.isEnabledFor(logging.DEBUG):
+            query_truncated = query[:50] + "..." if len(query) > 50 else query
+            logger.debug(
+                f"InfoQuest - Search API request initiated | "
+                f"operation=search webs | "
+                f"query_truncated={query_truncated} | "
+                f"request_type=async"
+            )
+
+        try:
+            raw_results = await self.aweb_search_raw_results(
+                query,
+                site,
+                output_format,
+            )
+            if "search_result" in raw_results:
+                results = raw_results["search_result"]
+                cleaned_results = self.clean_results(results["results"])
+                return json.dumps(cleaned_results, indent=2, ensure_ascii=False)
+            else:
+                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+        except Exception as e:
+            error_message = f"InfoQuest Web-Search failed: {str(e)}"
+            logger.error(error_message)
+            return f"Error: {error_message}"
+
+    async def aimage_search(
+        self,
+        query: str,
+    ) -> str:
+        """Asynchronously search for images."""
+        if logger.isEnabledFor(logging.DEBUG):
+            query_truncated = query[:50] + "..." if len(query) > 50 else query
+            logger.debug(
+                f"InfoQuest - Image Search API request initiated | "
+                f"query_truncated={query_truncated} | "
+                f"request_type=async"
+            )
+
+        try:
+            headers = self._prepare_headers()
+            params = {
+                "format": "JSON",
+                "query": query,
+                "image_size": self.image_size,
+            }
+            if self.image_search_time_range > 0:
+                params["time_range"] = self.image_search_time_range
+
+            async with httpx.AsyncClient(timeout=600) as client:
+                response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+                response.raise_for_status()
+                raw_results = response.json()
+
+            if "search_result" in raw_results:
+                results = raw_results["search_result"]
+                cleaned_results = self.clean_results_with_image_search(results["results"])
+                return json.dumps(cleaned_results, indent=2, ensure_ascii=False)
+            else:
+                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+        except Exception as e:
+            error_message = f"InfoQuest Image Search failed: {str(e)}"
             logger.error(error_message)
             return f"Error: {error_message}"
 
