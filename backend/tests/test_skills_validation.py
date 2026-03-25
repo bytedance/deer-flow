@@ -20,6 +20,7 @@ class TestValidateSkillFrontmatter:
         )
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is True
+        assert msg == "Skill is valid!"
         assert name == "my-skill"
 
     def test_valid_with_all_allowed_fields(self, tmp_path):
@@ -29,6 +30,8 @@ class TestValidateSkillFrontmatter:
         )
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
 
     def test_missing_skill_md(self, tmp_path):
         valid, msg, name = _validate_skill_frontmatter(tmp_path)
@@ -38,13 +41,13 @@ class TestValidateSkillFrontmatter:
 
     def test_no_frontmatter(self, tmp_path):
         skill_dir = _write_skill(tmp_path, "# Just markdown\n\nNo front matter.\n")
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "frontmatter" in msg.lower()
 
     def test_invalid_yaml(self, tmp_path):
         skill_dir = _write_skill(tmp_path, "---\n[invalid yaml: {{\n---\n\nBody\n")
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "YAML" in msg
 
@@ -53,7 +56,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\ndescription: A skill without a name\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "name" in msg.lower()
 
@@ -62,7 +65,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: my-skill\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "description" in msg.lower()
 
@@ -71,7 +74,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: my-skill\ndescription: test\ncustom-field: bad\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "custom-field" in msg
 
@@ -80,7 +83,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: MySkill\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "hyphen-case" in msg
 
@@ -89,7 +92,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: -my-skill\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, _, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
 
     def test_name_no_trailing_hyphen(self, tmp_path):
@@ -97,7 +100,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: my-skill-\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, _, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
 
     def test_name_no_consecutive_hyphens(self, tmp_path):
@@ -105,7 +108,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: my--skill\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, _, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
 
     def test_name_too_long(self, tmp_path):
@@ -114,7 +117,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             f"---\nname: {long_name}\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "too long" in msg.lower()
 
@@ -123,7 +126,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: my-skill\ndescription: Has <html> tags\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "angle brackets" in msg.lower()
 
@@ -133,7 +136,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             f"---\nname: my-skill\ndescription: {long_desc}\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "too long" in msg.lower()
 
@@ -142,7 +145,7 @@ class TestValidateSkillFrontmatter:
             tmp_path,
             "---\nname: ''\ndescription: test\n---\n\nBody\n",
         )
-        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "empty" in msg.lower()
 
