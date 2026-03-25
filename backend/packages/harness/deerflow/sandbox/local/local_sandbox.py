@@ -34,7 +34,7 @@ class LocalSandbox(Sandbox):
 
         # Try each mapping (longest prefix first for more specific matches)
         for container_path, local_path in sorted(self.path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
-            if path_str.startswith(container_path):
+            if path_str == container_path or path_str.startswith(container_path + "/"):
                 # Replace the container path prefix with local path
                 relative = path_str[len(container_path) :].lstrip("/")
                 resolved = str(Path(local_path) / relative) if relative else local_path
@@ -123,8 +123,10 @@ class LocalSandbox(Sandbox):
         if not sorted_mappings:
             return command
 
-        # Create pattern that matches any of the container paths
-        patterns = [re.escape(container_path) + r"(?:/[^\s\"';&|<>()]*)??" for container_path, _ in sorted_mappings]
+        # Create pattern that matches any of the container paths.
+        # The lookahead (?=/|$|...) ensures we only match at a path-segment boundary,
+        # preventing /mnt/skills from matching inside /mnt/skills-extra.
+        patterns = [re.escape(container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>()]*)?" for container_path, _ in sorted_mappings]
         pattern = re.compile("|".join(f"({p})" for p in patterns))
 
         def replace_match(match: re.Match) -> str:

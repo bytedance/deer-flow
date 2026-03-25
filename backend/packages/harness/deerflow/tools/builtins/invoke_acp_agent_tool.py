@@ -51,7 +51,9 @@ def _build_permission_response(options: list[Any]):
 
             option_id = getattr(option, "option_id", None)
             if option_id is None:
-                option_id = getattr(option, "optionId")
+                option_id = getattr(option, "optionId", None)
+            if option_id is None:
+                continue
 
             return RequestPermissionResponse(
                 outcome=AllowedOutcome(outcome="selected", optionId=option_id),
@@ -99,7 +101,8 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
     _agents = dict(agents)
 
     async def _invoke(agent: str, prompt: str) -> str:
-        logger.info("Invoking ACP agent %s with prompt %s", agent, prompt)
+        logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
+        logger.debug("Invoking ACP agent %s with prompt: %.200s%s", agent, prompt, "..." if len(prompt) > 200 else "")
         if agent not in _agents:
             available = ", ".join(_agents.keys())
             return f"Error: Unknown agent '{agent}'. Available: {available}"

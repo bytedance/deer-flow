@@ -1,6 +1,10 @@
+import logging
+
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+
+logger = logging.getLogger(__name__)
 
 _singleton: LocalSandbox | None = None
 
@@ -34,7 +38,7 @@ class LocalSandboxProvider(SandboxProvider):
                 mappings[container_path] = str(skills_path)
         except Exception as e:
             # Log but don't fail if config loading fails
-            print(f"Warning: Could not setup skills path mapping: {e}")
+            logger.warning("Could not setup skills path mapping: %s", e, exc_info=True)
 
         return mappings
 

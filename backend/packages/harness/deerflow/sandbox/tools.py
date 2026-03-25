@@ -111,8 +111,9 @@ def _is_acp_workspace_path(path: str) -> bool:
 def _get_acp_workspace_host_path() -> str | None:
     """Get the ACP workspace host filesystem path.
 
-    Derives the path from configured ACP agents' work_dir, or falls back to
-    ``{base_dir}/acp-workspace``.  Returns None if the directory does not exist.
+    Uses ``{base_dir}/acp-workspace`` (derived from :func:`get_paths`). The result
+    is cached after the first successful resolution. Returns ``None`` if the
+    directory does not exist.
     """
     cached = getattr(_get_acp_workspace_host_path, "_cached", None)
     if cached is not None:
@@ -417,7 +418,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     In local mode, commands must use virtual paths under /mnt/user-data for
     user data access. Skills paths under /mnt/skills and ACP workspace paths
-    under /mnt/acp-workspace are allowed for reading.
+    under /mnt/acp-workspace are allowed (path-traversal checks only; write
+    prevention for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null).
     """
@@ -436,7 +438,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             _reject_path_traversal(absolute_path)
             continue
 
-        # Allow ACP workspace path (read-only access for copying results)
+        # Allow ACP workspace path (path-traversal check only)
         if _is_acp_workspace_path(absolute_path):
             _reject_path_traversal(absolute_path)
             continue
