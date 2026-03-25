@@ -402,6 +402,16 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
 
+#### OpenClaw 集成
+
+OpenClaw 也可以通过同样的 HTTP API 和 DeerFlow 交互。最小做法是写一个 OpenClaw workspace skill（例如 `~/.openclaw/workspace/skills/deerflow/SKILL.md`），把下面这些调用包起来：
+
+- 先导出 `DEERFLOW_URL` / `DEERFLOW_GATEWAY_URL` / `DEERFLOW_LANGGRAPH_URL`
+- 用 `curl` 调用 `/health`、`/api/models`、`/api/skills` 和 `/threads/<thread_id>/runs/stream`
+- 在 OpenClaw 里把这个 skill 当作一个本地 wrapper 触发
+
+如果你已经有 `claude-to-deerflow` skill，可以直接复用它的 HTTP 请求流程。OpenClaw 只需要一个薄封装，不需要修改 DeerFlow 本身。
+
 ### Sub-Agents
 
 复杂任务通常不可能一次完成，DeerFlow 会先拆解，再执行。

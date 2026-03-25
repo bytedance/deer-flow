@@ -461,6 +461,16 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
+#### OpenClaw Integration
+
+OpenClaw can talk to DeerFlow through the same HTTP API. The minimal setup is a workspace skill (for example `~/.openclaw/workspace/skills/deerflow/SKILL.md`) that wraps the same calls used by `claude-to-deerflow`:
+
+- Export `DEERFLOW_URL`, `DEERFLOW_GATEWAY_URL`, and `DEERFLOW_LANGGRAPH_URL`
+- Call `/health`, `/api/models`, `/api/skills`, and `/threads/<thread_id>/runs/stream` with `curl`
+- Trigger that skill from OpenClaw as a thin local wrapper
+
+If you already have the `claude-to-deerflow` skill, you can reuse its HTTP request flow directly. No DeerFlow code change is required.
+
 ### Sub-Agents
 
 Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
