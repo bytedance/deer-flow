@@ -1,6 +1,8 @@
 """Tool error handling middleware and shared runtime middleware builders."""
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -17,7 +19,29 @@ _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
-    """Convert tool exceptions into error ToolMessages so the run can continue."""
+    """Convert tool exceptions into error ToolMessages so the run can continue.
+
+    Includes automatic retry logic for transient errors (e.g. rate limits, network timeouts).
+    """
+
+    def __init__(self, max_retries: int = 2, retry_delay: float = 1.0):
+        super().__init__()
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+
+    def _should_retry(self, exc: Exception) -> bool:
+        """Determine if an exception is transient and should be retried."""
+        exc_str = str(exc).lower()
+        transient_indicators = [
+            "rate limit",
+            "timeout",
+            "connection error",
+            "too many requests",
+            "service unavailable",
+            "429",
+            "503",
+        ]
+        return any(indicator in exc_str for indicator in transient_indicators)
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -40,14 +64,33 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        try:
-            return handler(request)
-        except GraphBubbleUp:
-            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-            raise
-        except Exception as exc:
-            logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
-            return self._build_error_message(request, exc)
+        last_exc = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return handler(request)
+            except GraphBubbleUp:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.max_retries and self._should_retry(exc):
+                    logger.warning(
+                        "Tool execution failed (sync), retrying (%d/%d): %s",
+                        attempt + 1,
+                        self.max_retries,
+                        exc,
+                    )
+                    time.sleep(self.retry_delay * (2**attempt))  # Exponential backoff
+                    continue
+                
+                logger.exception(
+                    "Tool execution failed (sync): name=%s id=%s",
+                    request.tool_call.get("name"),
+                    request.tool_call.get("id"),
+                )
+                return self._build_error_message(request, exc)
+        
+        # Should not reach here, but for completeness
+        return self._build_error_message(request, last_exc)
 
     @override
     async def awrap_tool_call(
@@ -55,14 +98,32 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        try:
-            return await handler(request)
-        except GraphBubbleUp:
-            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-            raise
-        except Exception as exc:
-            logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
-            return self._build_error_message(request, exc)
+        last_exc = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await handler(request)
+            except GraphBubbleUp:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.max_retries and self._should_retry(exc):
+                    logger.warning(
+                        "Tool execution failed (async), retrying (%d/%d): %s",
+                        attempt + 1,
+                        self.max_retries,
+                        exc,
+                    )
+                    await asyncio.sleep(self.retry_delay * (2**attempt))  # Exponential backoff
+                    continue
+                
+                logger.exception(
+                    "Tool execution failed (async): name=%s id=%s",
+                    request.tool_call.get("name"),
+                    request.tool_call.get("id"),
+                )
+                return self._build_error_message(request, exc)
+        
+        return self._build_error_message(request, last_exc)
 
 
 def _build_runtime_middlewares(
