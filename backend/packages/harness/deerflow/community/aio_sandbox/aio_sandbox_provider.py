@@ -403,7 +403,8 @@ class AioSandboxProvider(SandboxProvider):
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                if hasattr(fcntl, "flock"):
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
                 # Re-check in-process caches under the file lock in case another
                 # thread in this process won the race while we were waiting.
                 with self._lock:
@@ -437,7 +438,8 @@ class AioSandboxProvider(SandboxProvider):
 
                 return self._create_sandbox(thread_id, sandbox_id)
             finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                if hasattr(fcntl, "flock"):
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.

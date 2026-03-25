@@ -59,8 +59,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return False
 
         # Count user and assistant messages
-        user_messages = [m for m in messages if m.type == "human"]
-        assistant_messages = [m for m in messages if m.type == "ai"]
+        # Fix: Check message.type correctly for first complete exchange
+        user_messages = [m for m in messages if getattr(m, "type", None) == "human"]
+        assistant_messages = [m for m in messages if getattr(m, "type", None) == "ai"]
 
         # Generate title after first complete exchange
         return len(user_messages) == 1 and len(assistant_messages) >= 1
@@ -73,8 +74,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = get_title_config()
         messages = state.get("messages", [])
 
-        user_msg_content = next((m.content for m in messages if m.type == "human"), "")
-        assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
+        user_msg_content = next((m.content for m in messages if getattr(m, "type", None) == "human"), "")
+        assistant_msg_content = next((m.content for m in messages if getattr(m, "type", None) == "ai"), "")
 
         user_msg = self._normalize_content(user_msg_content)
         assistant_msg = self._normalize_content(assistant_msg_content)

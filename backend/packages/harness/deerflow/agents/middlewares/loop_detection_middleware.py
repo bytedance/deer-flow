@@ -151,11 +151,28 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._evict_if_needed()
 
             history = self._history[thread_id]
+            
+            # P0 bug fix: Check if this hash was the VERY LAST one added to history.
+            # Middlewares are called once per model response. If we see the same
+            # hash consecutively, it means the agent produced the same tool calls
+            # again. If there are other calls in between, it's not necessarily a loop.
+            is_consecutive = history and history[-1] == call_hash
+            
             history.append(call_hash)
             if len(history) > self.window_size:
                 history[:] = history[-self.window_size:]
 
-            count = history.count(call_hash)
+            # Only count if it's consecutive repetition
+            if not is_consecutive and len(history) > 1:
+                return None, False
+
+            count = 0
+            for h in reversed(history):
+                if h == call_hash:
+                    count += 1
+                else:
+                    break
+
             tool_names = [tc.get("name", "?") for tc in tool_calls]
 
             if count >= self.hard_limit:
