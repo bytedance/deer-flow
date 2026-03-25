@@ -1,4 +1,8 @@
-"""Tests for skill frontmatter validation."""
+"""Tests for skill frontmatter validation.
+
+Consolidates all _validate_skill_frontmatter tests (previously split across
+test_skills_router.py and this module) into a single dedicated module.
+"""
 
 from pathlib import Path
 
@@ -156,3 +160,21 @@ class TestValidateSkillFrontmatter:
         assert "name" in ALLOWED_FRONTMATTER_PROPERTIES
         assert "description" in ALLOWED_FRONTMATTER_PROPERTIES
         assert "license" in ALLOWED_FRONTMATTER_PROPERTIES
+
+    def test_reads_utf8_on_windows_locale(self, tmp_path, monkeypatch):
+        skill_dir = _write_skill(
+            tmp_path,
+            '---\nname: demo-skill\ndescription: "Curly quotes: \u201cutf8\u201d"\n---\n\n# Demo Skill\n',
+        )
+        original_read_text = Path.read_text
+
+        def read_text_with_gbk_default(self, *args, **kwargs):
+            kwargs.setdefault("encoding", "gbk")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text_with_gbk_default)
+
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "demo-skill"
