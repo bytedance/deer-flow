@@ -107,6 +107,20 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
+   智谱 `GLM-5` 也可以用同样的 OpenAI-compatible 方式接入。智谱开放平台的通用 API 端点是 `https://open.bigmodel.cn/api/paas/v4/`，建议配合 `ZAI_API_KEY` 使用：
+
+   ```yaml
+   models:
+     - name: zhipu-glm-5
+       display_name: GLM-5 (Zhipu)
+       use: langchain_openai:ChatOpenAI
+       model: glm-5
+       api_key: $ZAI_API_KEY
+       base_url: https://open.bigmodel.cn/api/paas/v4/
+   ```
+
+   如果你使用的是智谱 Coding Plan 端点，请注意它和通用 API 不是同一条线路。DeerFlow 这里建议使用通用 API 端点来接入 `glm-5`。
+
 4. **为已配置的模型设置 API key**
 
    可任选以下一种方式：
@@ -432,6 +446,7 @@ DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，
 - **推理能力**，适合自适应规划和复杂拆解
 - **多模态输入**，适合理解图片和视频
 - **稳定的 tool use 能力**，适合可靠的函数调用和结构化输出
+- **GLM-5（智谱）**：可通过 `langchain_openai:ChatOpenAI` + `base_url: https://open.bigmodel.cn/api/paas/v4/` 接入。
 
 ## 内嵌 Python Client
 

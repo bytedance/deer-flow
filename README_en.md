@@ -127,6 +127,20 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+   Zhipu's `GLM-5` can be connected the same way through an OpenAI-compatible endpoint. The standard Zhipu API base URL is `https://open.bigmodel.cn/api/paas/v4/`, and the recommended API key env var is `ZAI_API_KEY`:
+
+   ```yaml
+   models:
+     - name: zhipu-glm-5
+       display_name: GLM-5 (Zhipu)
+       use: langchain_openai:ChatOpenAI
+       model: glm-5
+       api_key: $ZAI_API_KEY
+       base_url: https://open.bigmodel.cn/api/paas/v4/
+   ```
+
+   If you are using Zhipu's Coding Plan endpoints, note that they are separate from the general API. For DeerFlow, use the general API endpoint to connect `glm-5`.
+
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
    CLI-backed provider examples:
@@ -493,6 +507,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Reasoning capabilities** for adaptive planning and complex decomposition
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
+- **GLM-5 (Zhipu)**: connect it via `langchain_openai:ChatOpenAI` + `base_url: https://open.bigmodel.cn/api/paas/v4/`.
 
 ## Embedded Python Client
 
