@@ -356,8 +356,10 @@ sandbox:
 #     model: null
 #
 #   codex:
-#     command: codex-acp
-#     args: []
+#     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
+#     # speak ACP directly. Install `codex-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/codex-acp"]
 #     description: Codex CLI for repository tasks and code generation
 #     model: null
 

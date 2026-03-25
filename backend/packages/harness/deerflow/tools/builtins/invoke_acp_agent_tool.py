@@ -1,7 +1,7 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
 import logging
-import os
+import shutil
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -12,58 +12,23 @@ logger = logging.getLogger(__name__)
 
 class _InvokeACPAgentInput(BaseModel):
     agent: str = Field(description="Name of the ACP agent to invoke")
-    prompt: str = Field(description="The task prompt to send to the agent")
-    cwd: str | None = Field(
-        default=None,
-        description="Working directory for the agent subprocess. "
-        "Use /mnt/user-data/workspace to run in the thread workspace. "
-        "Defaults to the current thread's workspace when available.",
-    )
+    prompt: str = Field(description="The concise task prompt to send to the agent")
 
 
-def _resolve_cwd(cwd: str | None) -> str:
-    """Resolve cwd: translate virtual paths and apply thread-workspace default.
+def _get_work_dir() -> str:
+    """Get the fixed ACP workspace directory: ``{base_dir}/acp-workspace/``.
 
-    Args:
-        cwd: Virtual or physical path, or None to use the thread workspace default.
+    The directory is created automatically if it does not exist.
 
     Returns:
         An absolute physical filesystem path to use as the working directory.
     """
-    if cwd is None:
-        # Try to use the current thread's workspace directory
-        try:
-            from langgraph.config import get_config
+    from deerflow.config.paths import get_paths
 
-            config = get_config()
-            thread_id = config.get("configurable", {}).get("thread_id")
-            if thread_id:
-                from deerflow.config.paths import get_paths
-
-                workspace = get_paths().sandbox_work_dir(thread_id)
-                if workspace.exists():
-                    return str(workspace)
-        except Exception:
-            pass
-        return os.path.abspath(os.getcwd())
-
-    # Translate DeerFlow virtual paths (/mnt/user-data/...) to physical paths
-    from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-
-    if cwd.startswith(VIRTUAL_PATH_PREFIX) or cwd.startswith("/mnt/user-data"):
-        try:
-            from langgraph.config import get_config
-
-            config = get_config()
-            thread_id = config.get("configurable", {}).get("thread_id")
-            if thread_id:
-                from deerflow.config.paths import get_paths
-
-                return str(get_paths().resolve_virtual_path(thread_id, cwd))
-        except Exception as e:
-            logger.warning("Failed to translate virtual path %r: %s", cwd, e)
-
-    return os.path.abspath(cwd)
+    work_dir = get_paths().base_dir / "acp-workspace"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("ACP agent work_dir: %s", work_dir)
+    return str(work_dir)
 
 
 def _build_mcp_servers() -> dict[str, dict[str, Any]]:
@@ -95,6 +60,26 @@ def _build_permission_response(options: list[Any]):
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
+def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
+    """Return a user-facing ACP invocation error with actionable remediation."""
+    if not isinstance(exc, FileNotFoundError):
+        return f"Error invoking ACP agent '{agent}': {exc}"
+
+    message = f"Error invoking ACP agent '{agent}': Command '{cmd}' was not found on PATH."
+    if cmd == "codex-acp" and shutil.which("codex"):
+        return (
+            f"{message} The installed `codex` CLI does not speak ACP directly. "
+            "Install a Codex ACP adapter "
+            "(for example `npx @zed-industries/codex-acp`) or update "
+            "`acp_agents.codex.command` and `args` in config.yaml."
+        )
+
+    return (
+        f"{message} Install the agent binary or update "
+        f"`acp_agents.{agent}.command` in config.yaml."
+    )
+
+
 def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
     """Create the ``invoke_acp_agent`` tool with a description generated from configured agents.
 
@@ -108,12 +93,21 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         A LangChain ``BaseTool`` ready to be included in the tool list.
     """
     agent_lines = "\n".join(f"- {name}: {cfg.description}" for name, cfg in agents.items())
-    description = f"Invoke an external ACP-compatible agent and return its final response.\n\nAvailable agents:\n{agent_lines}"
+    description = (
+        "Invoke an external ACP-compatible agent and return its final response.\n\n"
+        "Available agents:\n"
+        f"{agent_lines}\n\n"
+        "IMPORTANT: ACP agents operate in their own independent workspace. "
+        "Do NOT include /mnt/user-data paths in the prompt. "
+        "Give the agent a self-contained task description — it will produce results in its own workspace. "
+        "After the agent completes, its output files are accessible at /mnt/acp-workspace/ (read-only)."
+    )
 
     # Capture agents in closure so the function can reference it
     _agents = dict(agents)
 
-    async def _invoke(agent: str, prompt: str, cwd: str | None = None) -> str:
+    async def _invoke(agent: str, prompt: str) -> str:
+        logger.info("Invoking ACP agent %s with prompt %s", agent, prompt)
         if agent not in _agents:
             available = ", ".join(_agents.keys())
             return f"Error: Unknown agent '{agent}'. Available: {available}"
@@ -160,13 +154,14 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         client = _CollectingClient()
         cmd = agent_config.command
         args = agent_config.args or []
-        physical_cwd = _resolve_cwd(cwd)
+        physical_cwd = _get_work_dir()
         mcp_servers = _build_mcp_servers()
 
         try:
             from acp import spawn_agent_process
 
             async with spawn_agent_process(client, cmd, *args, cwd=physical_cwd) as (conn, proc):
+                logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
                 await conn.initialize(
                     protocol_version=PROTOCOL_VERSION,
                     client_capabilities=ClientCapabilities(),
@@ -181,11 +176,12 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     prompt=[text_block(prompt)],
                 )
             result = client.collected_text
+            logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return f"Error invoking ACP agent '{agent}': {e}"
+            return _format_invocation_error(agent, cmd, e)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

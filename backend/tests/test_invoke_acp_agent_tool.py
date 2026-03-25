@@ -1,7 +1,6 @@
 """Tests for the built-in ACP invocation tool."""
 
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +10,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig,
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_mcp_servers,
     _build_permission_response,
-    _resolve_cwd,
+    _get_work_dir,
     build_invoke_acp_agent_tool,
 )
 from deerflow.tools.tools import get_available_tools
@@ -79,36 +78,30 @@ async def test_build_invoke_tool_description_and_unknown_agent_error():
     assert "Available agents:" in tool.description
     assert "- codex: Codex CLI" in tool.description
     assert "- claude_code: Claude Code" in tool.description
+    assert "Do NOT include /mnt/user-data paths" in tool.description
+    assert "/mnt/acp-workspace/" in tool.description
 
     result = await tool.coroutine(agent="missing", prompt="do work")
     assert result == "Error: Unknown agent 'missing'. Available: codex, claude_code"
 
 
+def test_get_work_dir_uses_base_dir(monkeypatch, tmp_path):
+    """_get_work_dir always uses {base_dir}/acp-workspace/."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    result = _get_work_dir()
+    expected = tmp_path / "acp-workspace"
+    assert result == str(expected)
+    assert expected.exists()
+
+
 @pytest.mark.anyio
-async def test_invoke_acp_agent_forwards_workspace_mcp_and_model(monkeypatch, tmp_path):
-    thread_id = "thread-123"
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    uploads = tmp_path / "uploads"
-    uploads.mkdir()
+async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
+    """ACP agent uses the fixed {base_dir}/acp-workspace/ directory."""
+    from deerflow.config import paths as paths_module
 
-    monkeypatch.setitem(
-        sys.modules,
-        "langgraph.config",
-        SimpleNamespace(get_config=lambda: {"configurable": {"thread_id": thread_id}}),
-    )
-
-    class DummyPaths:
-        def sandbox_work_dir(self, incoming_thread_id: str) -> Path:
-            assert incoming_thread_id == thread_id
-            return workspace
-
-        def resolve_virtual_path(self, incoming_thread_id: str, virtual_path: str) -> Path:
-            assert incoming_thread_id == thread_id
-            assert virtual_path == "/mnt/user-data/uploads"
-            return uploads
-
-    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: DummyPaths())
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
 
     monkeypatch.setattr(
         "deerflow.config.extensions_config.ExtensionsConfig.from_file",
@@ -197,6 +190,8 @@ async def test_invoke_acp_agent_forwards_workspace_mcp_and_model(monkeypatch, tm
     )
     text_content_block = sys.modules["acp.schema"].TextContentBlock
 
+    expected_cwd = str(tmp_path / "acp-workspace")
+
     tool = build_invoke_acp_agent_tool(
         {
             "codex": ACPAgentConfig(
@@ -212,17 +207,15 @@ async def test_invoke_acp_agent_forwards_workspace_mcp_and_model(monkeypatch, tm
         result = await tool.coroutine(
             agent="codex",
             prompt="Implement the fix",
-            cwd="/mnt/user-data/uploads",
         )
     finally:
         sys.modules.pop("acp", None)
         sys.modules.pop("acp.schema", None)
-        sys.modules.pop("langgraph.config", None)
 
     assert result == "ACP result"
-    assert captured["spawn"] == {"cmd": "codex-acp", "args": ["--json"], "cwd": str(uploads)}
+    assert captured["spawn"] == {"cmd": "codex-acp", "args": ["--json"], "cwd": expected_cwd}
     assert captured["new_session"] == {
-        "cwd": str(uploads),
+        "cwd": expected_cwd,
         "mcp_servers": {
             "github": {"transport": "stdio", "command": "npx", "args": ["github-mcp"]},
         },
@@ -232,130 +225,6 @@ async def test_invoke_acp_agent_forwards_workspace_mcp_and_model(monkeypatch, tm
         "session_id": "session-1",
         "prompt": [{"type": "text", "text": "Implement the fix"}],
     }
-
-
-@pytest.mark.anyio
-async def test_invoke_acp_agent_defaults_cwd_to_thread_workspace(monkeypatch, tmp_path):
-    thread_id = "thread-default-cwd"
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "langgraph.config",
-        SimpleNamespace(get_config=lambda: {"configurable": {"thread_id": thread_id}}),
-    )
-
-    class DummyPaths:
-        def sandbox_work_dir(self, incoming_thread_id: str) -> Path:
-            assert incoming_thread_id == thread_id
-            return workspace
-
-    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: DummyPaths())
-
-    captured: dict[str, object] = {}
-
-    class DummyClient:
-        def __init__(self) -> None:
-            self._chunks: list[str] = []
-
-        @property
-        def collected_text(self) -> str:
-            return "".join(self._chunks)
-
-        async def session_update(self, session_id: str, update, **kwargs) -> None:
-            if hasattr(update, "content") and hasattr(update.content, "text"):
-                self._chunks.append(update.content.text)
-
-        async def request_permission(self, options, session_id: str, tool_call, **kwargs):
-            raise AssertionError("request_permission should not be called in this test")
-
-    class DummyConn:
-        async def initialize(self, **kwargs):
-            captured["initialize"] = kwargs
-
-        async def new_session(self, **kwargs):
-            captured["new_session"] = kwargs
-            return SimpleNamespace(session_id="session-2")
-
-        async def prompt(self, **kwargs):
-            client = captured["client"]
-            await client.session_update(
-                "session-2",
-                SimpleNamespace(content=text_content_block("workspace default")),
-            )
-
-    class DummyProcessContext:
-        def __init__(self, client, cmd, *args, cwd):
-            captured["client"] = client
-            captured["spawn"] = {"cmd": cmd, "args": list(args), "cwd": cwd}
-
-        async def __aenter__(self):
-            return DummyConn(), object()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    class DummyRequestError(Exception):
-        @staticmethod
-        def method_not_found(method: str):
-            return DummyRequestError(method)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "acp",
-        SimpleNamespace(
-            PROTOCOL_VERSION="2026-03-24",
-            Client=DummyClient,
-            RequestError=DummyRequestError,
-            spawn_agent_process=lambda client, cmd, *args, cwd: DummyProcessContext(client, cmd, *args, cwd=cwd),
-            text_block=lambda text: {"type": "text", "text": text},
-        ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "acp.schema",
-        SimpleNamespace(
-            ClientCapabilities=lambda: {"supports": []},
-            Implementation=lambda **kwargs: kwargs,
-            TextContentBlock=type(
-                "TextContentBlock",
-                (),
-                {"__init__": lambda self, text: setattr(self, "text", text)},
-            ),
-        ),
-    )
-    text_content_block = sys.modules["acp.schema"].TextContentBlock
-
-    tool = build_invoke_acp_agent_tool(
-        {
-            "codex": ACPAgentConfig(
-                command="codex-acp",
-                description="Codex CLI",
-            )
-        }
-    )
-
-    try:
-        result = await tool.coroutine(agent="codex", prompt="Inspect the repo")
-    finally:
-        sys.modules.pop("acp", None)
-        sys.modules.pop("acp.schema", None)
-        sys.modules.pop("langgraph.config", None)
-
-    assert result == "workspace default"
-    assert captured["spawn"] == {"cmd": "codex-acp", "args": [], "cwd": str(workspace)}
-    assert captured["new_session"] == {
-        "cwd": str(workspace),
-        "mcp_servers": {},
-    }
-
-
-def test_resolve_cwd_defaults_to_os_cwd_when_thread_workspace_missing(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setitem(sys.modules, "langgraph.config", SimpleNamespace(get_config=lambda: {"configurable": {}}))
-    assert _resolve_cwd(None) == str(tmp_path)
-    sys.modules.pop("langgraph.config", None)
 
 
 def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(monkeypatch):

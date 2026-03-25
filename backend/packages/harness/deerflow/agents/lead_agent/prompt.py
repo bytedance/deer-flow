@@ -250,6 +250,12 @@ You: "Deploying to staging..." [proceed]
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - All temporary work happens in `/mnt/user-data/workspace`
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_file` tool
+
+**ACP Agent Tasks (invoke_acp_agent):**
+- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`
+- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths
+- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files
+- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_file`
 </working_directory>
 
 <response_style>
