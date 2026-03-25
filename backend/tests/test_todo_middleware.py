@@ -151,6 +151,6 @@ class TestAbeforeModel:
             "messages": [HumanMessage(content="hi")],
             "todos": _sample_todos(),
         }
-        result = asyncio.get_event_loop().run_until_complete(mw.abefore_model(state, _make_runtime()))
+        result = asyncio.run(mw.abefore_model(state, _make_runtime()))
         assert result is not None
         assert result["messages"][0].name == "todo_reminder"
