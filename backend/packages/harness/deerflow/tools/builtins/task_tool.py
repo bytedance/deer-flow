@@ -181,7 +181,6 @@ def task_tool(
             return f"Task timed out. Error: {result.error}"
 
         # Still running, wait before next poll
-        logger.info(f"[TASK_TOOL] polling task_id={task_id} status={result.status.value} poll_count={poll_count}")
         time.sleep(5)  # Poll every 5 seconds
         poll_count += 1
 
