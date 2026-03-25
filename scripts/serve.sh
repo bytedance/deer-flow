@@ -9,6 +9,13 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Load environment variables from .env ──────────────────────────────────────
+if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 DEV_MODE=true
@@ -122,7 +129,10 @@ else
 fi
 
 echo "Starting LangGraph server..."
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
+# Read log_level from config.yaml, fallback to env var, then to "info"
+CONFIG_LOG_LEVEL=$(grep -m1 '^log_level:' config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ')
+LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
+(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --server-log-level $LANGGRAPH_LOG_LEVEL $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "  See logs/langgraph.log for details"
     tail -20 logs/langgraph.log

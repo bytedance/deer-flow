@@ -15,6 +15,20 @@
 config_version: 3
 
 # ============================================================================
+# Logging
+# ============================================================================
+# Log level for deerflow modules (debug/info/warning/error)
+log_level: info
+
+# ============================================================================
+# Token Usage Tracking
+# ============================================================================
+# Track LLM token usage per model call (input/output/total tokens)
+# Logs at info level via TokenUsageMiddleware
+token_usage:
+  enabled: false
+
+# ============================================================================
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
