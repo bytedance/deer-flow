@@ -1,8 +1,8 @@
 """Tests for DanglingToolCallMiddleware."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
@@ -142,24 +142,33 @@ class TestWrapModelCall:
 
         result = mw.wrap_model_call(request, handler)
 
+        # Verify override was called with the patched messages
         request.override.assert_called_once()
+        call_kwargs = request.override.call_args
+        passed_messages = call_kwargs.kwargs["messages"]
+        assert len(passed_messages) == 2
+        assert isinstance(passed_messages[1], ToolMessage)
+        assert passed_messages[1].tool_call_id == "call_1"
+
         handler.assert_called_once_with(patched_request)
         assert result == "response"
 
 
 class TestAwrapModelCall:
-    def test_async_no_patch(self):
+    @pytest.mark.anyio
+    async def test_async_no_patch(self):
         mw = DanglingToolCallMiddleware()
         request = MagicMock()
         request.messages = [AIMessage(content="hello")]
         handler = AsyncMock(return_value="response")
 
-        result = asyncio.get_event_loop().run_until_complete(mw.awrap_model_call(request, handler))
+        result = await mw.awrap_model_call(request, handler)
 
         handler.assert_called_once_with(request)
         assert result == "response"
 
-    def test_async_patched(self):
+    @pytest.mark.anyio
+    async def test_async_patched(self):
         mw = DanglingToolCallMiddleware()
         request = MagicMock()
         request.messages = [_ai_with_tool_calls([_tc("bash", "call_1")])]
@@ -167,8 +176,15 @@ class TestAwrapModelCall:
         request.override.return_value = patched_request
         handler = AsyncMock(return_value="response")
 
-        result = asyncio.get_event_loop().run_until_complete(mw.awrap_model_call(request, handler))
+        result = await mw.awrap_model_call(request, handler)
 
+        # Verify override was called with the patched messages
         request.override.assert_called_once()
+        call_kwargs = request.override.call_args
+        passed_messages = call_kwargs.kwargs["messages"]
+        assert len(passed_messages) == 2
+        assert isinstance(passed_messages[1], ToolMessage)
+        assert passed_messages[1].tool_call_id == "call_1"
+
         handler.assert_called_once_with(patched_request)
         assert result == "response"
