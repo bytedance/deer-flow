@@ -137,7 +137,7 @@ models:
   #       thinking:
   #         type: enabled
 
-  # Example: MiniMax (OpenAI-compatible)
+  # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window
   # Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
   # - name: minimax-m2.5
@@ -159,6 +159,30 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+
+  # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
+  # MiniMax provides high-performance models with 204K context window
+  # Docs: https://platform.minimaxi.com/docs/api-reference/text-openai-api
+  # - name: minimax-m2.7
+  #   display_name: MiniMax M2.7
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.7
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+
+  # - name: minimax-m2.5-highspeed
+  #   display_name: MiniMax M2.5 Highspeed
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.5-highspeed
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+
   
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
