@@ -330,6 +330,24 @@ sandbox:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 
 # ============================================================================
+# ACP Agents Configuration
+# ============================================================================
+# Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
+
+# acp_agents:
+#   claude_code:
+#     command: claude-code-acp
+#     args: []
+#     description: Claude Code for implementation, refactoring, and debugging
+#     model: null
+#
+#   codex:
+#     command: codex-acp
+#     args: []
+#     description: Codex CLI for repository tasks and code generation
+#     model: null
+
+# ============================================================================
 # Skills Configuration
 # ============================================================================
 # Configure skills directory for specialized agent workflows
