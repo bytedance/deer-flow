@@ -1,0 +1,20 @@
+helm:
+  parameters:
+  - name: images.backend.repository
+    value: europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-backend/api
+    forcestring: true
+  - name: images.backend.tag
+    value: latest@sha256:0a9a5b6b6f1c59d1254ce416652328f142cba8447cff42c8009e474ce3736ca8
+    forcestring: true
+  - name: images.frontend.repository
+    value: europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-frontend/deer-flow-frontend
+    forcestring: true
+  - name: images.frontend.tag
+    value: latest@sha256:4a758dd6ac2d717584f0fc51904115f3c8eb7bb1b4bdae1a0b188e210219857e
+    forcestring: true
+  - name: images.provisioner.repository
+    value: europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-provisioner/provisioner
+    forcestring: true
+  - name: images.provisioner.tag
+    value: latest@sha256:f1b11b6a73b1bd1c6296aad98a0aef07844fdbafd0edf0b6031743c24b369215
+    forcestring: true
