@@ -38,10 +38,10 @@ export default function ChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: settings.context,
     isMock,
-    onStart: () => {
+    onStart: (id) => {
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(null, "", `/workspace/chats/${threadId}`);
+      history.replaceState(null, "", `/workspace/chats/${id}`);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
