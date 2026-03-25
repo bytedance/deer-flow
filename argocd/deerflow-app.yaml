@@ -3,15 +3,31 @@ kind: Application
 metadata:
   name: deerflow
   namespace: argocd
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: >-
+      backend=europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-backend/api:latest,
+      frontend=europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-frontend/deer-flow-frontend:latest,
+      provisioner=europe-west1-docker.pkg.dev/stellantis-490509/deer-flow-provisioner/provisioner:latest
+    argocd-image-updater.argoproj.io/write-back-method: git
+    argocd-image-updater.argoproj.io/git-branch: main
+    argocd-image-updater.argoproj.io/backend.update-strategy: digest
+    argocd-image-updater.argoproj.io/backend.helm.image-name: images.backend.repository
+    argocd-image-updater.argoproj.io/backend.helm.image-tag: images.backend.tag
+    argocd-image-updater.argoproj.io/frontend.update-strategy: digest
+    argocd-image-updater.argoproj.io/frontend.helm.image-name: images.frontend.repository
+    argocd-image-updater.argoproj.io/frontend.helm.image-tag: images.frontend.tag
+    argocd-image-updater.argoproj.io/provisioner.update-strategy: digest
+    argocd-image-updater.argoproj.io/provisioner.helm.image-name: images.provisioner.repository
+    argocd-image-updater.argoproj.io/provisioner.helm.image-tag: images.provisioner.tag
 spec:
   project: default
   source:
-    repoURL: https://github.com/InfomineoGithub/Stellantis.git
+    repoURL: git@github.com:InfomineoGithub/Stellantis.git
     targetRevision: HEAD
     path: helm/deerflow
     helm:
       valueFiles:
-        - secrets://values.enc.yaml
+        - secrets+gpg-import:///helm-secrets-private-keys/key.asc?values.enc.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: deer-flow

@@ -96,8 +96,8 @@ data:
       max_injection_tokens: 2000
 
     checkpointer:
-      type: sqlite
-      connection_string: checkpoints.db
+      type: {{ .Values.checkpointer.type }}
+      connection_string: {{ .Values.checkpointer.connectionString }}
 
   extensions_config.json: |
     {
