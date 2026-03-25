@@ -257,6 +257,7 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    loadingSkill: (skillName: string) => `Loading skill: ${skillName}`,
   },
 
   // Subtasks

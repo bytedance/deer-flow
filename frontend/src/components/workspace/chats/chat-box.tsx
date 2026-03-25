@@ -99,6 +99,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
       orientation="horizontal"
       defaultLayout={{ chat: 100, artifacts: 0 }}
       groupRef={layoutRef}
+      id="chat-artifacts-panel"
     >
       <ResizablePanel className="relative" defaultSize={100} id="chat">
         {children}

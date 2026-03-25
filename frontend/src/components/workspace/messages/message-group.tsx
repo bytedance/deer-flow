@@ -9,6 +9,7 @@ import {
   MessageCircleQuestionMarkIcon,
   NotebookPenIcon,
   SearchIcon,
+  SparklesIcon,
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -29,6 +30,11 @@ import {
   findToolCallResult,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import {
+  extractSkillName,
+  getSkillDisplayName,
+  isSkillPath,
+} from "@/core/tools/utils";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -313,12 +319,30 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (name === "read_file") {
+    const { path } = args as { path: string; content: string };
+
+    // Check if this is a skill file being loaded
+    if (path && isSkillPath(path)) {
+      const skillName = extractSkillName(path);
+      const displayName = skillName ? getSkillDisplayName(skillName) : "Skill";
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={t.toolCalls.loadingSkill(displayName)}
+          icon={SparklesIcon}
+        >
+          <ChainOfThoughtSearchResult className="cursor-pointer text-primary">
+            {skillName || path}
+          </ChainOfThoughtSearchResult>
+        </ChainOfThoughtStep>
+      );
+    }
+
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
       description = t.toolCalls.readFile;
     }
-    const { path } = args as { path: string; content: string };
     return (
       <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
         {path && (
