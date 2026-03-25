@@ -56,7 +56,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
         # Eager initialization (original behavior)
         if "sandbox" not in state or state["sandbox"] is None:
-            thread_id = runtime.context["thread_id"]
+            thread_id = (runtime.context or {}).get("thread_id")
+            if thread_id is None:
+                return super().before_agent(state, runtime)
             sandbox_id = self._acquire_sandbox(thread_id)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
@@ -71,7 +73,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             get_sandbox_provider().release(sandbox_id)
             return None
 
-        if runtime.context.get("sandbox_id") is not None:
+        if (runtime.context or {}).get("sandbox_id") is not None:
             sandbox_id = runtime.context.get("sandbox_id")
             logger.info(f"Releasing sandbox {sandbox_id} from context")
             get_sandbox_provider().release(sandbox_id)
