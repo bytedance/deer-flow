@@ -6,6 +6,8 @@ from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from deerflow.subagents.config import SubagentConfig
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -68,6 +70,11 @@ def _run_task_tool(**kwargs):
 
 async def _no_sleep(_: float) -> None:
     return None
+
+
+class _DummyScheduledTask:
+    def add_done_callback(self, _callback):
+        return None
 
 
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
@@ -415,4 +422,118 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
 
     assert output.startswith("Task polling timed out after 0 minutes")
     # cleanup should NOT be called because the task is still RUNNING
+    assert cleanup_calls == []
+
+
+def test_cleanup_scheduled_on_cancellation(monkeypatch):
+    """Verify cancellation schedules deferred cleanup for the background task."""
+    config = _make_subagent_config()
+    events = []
+    cleanup_calls = []
+    scheduled_cleanup_coros = []
+    poll_count = 0
+
+    def get_result(_: str):
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return _make_result(FakeSubagentStatus.RUNNING, ai_messages=[])
+        return _make_result(FakeSubagentStatus.COMPLETED, result="done")
+
+    async def cancel_on_first_sleep(_: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "create_task",
+        lambda coro: scheduled_cleanup_coros.append(coro) or _DummyScheduledTask(),
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="执行任务",
+            prompt="cancel task",
+            subagent_type="general-purpose",
+            tool_call_id="tc-cancelled-cleanup",
+        )
+
+    assert cleanup_calls == []
+    assert len(scheduled_cleanup_coros) == 1
+
+    asyncio.run(scheduled_cleanup_coros.pop())
+
+    assert cleanup_calls == ["tc-cancelled-cleanup"]
+
+
+def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
+    """Verify deferred cleanup gives up after a bounded number of polls."""
+    config = _make_subagent_config()
+    config.timeout_seconds = 1
+    events = []
+    cleanup_calls = []
+    scheduled_cleanup_coros = []
+
+    async def cancel_on_first_sleep(_: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_skills_prompt_section", lambda: "")
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "create_task",
+        lambda coro: scheduled_cleanup_coros.append(coro) or _DummyScheduledTask(),
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        lambda task_id: cleanup_calls.append(task_id),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="执行任务",
+            prompt="cancel task",
+            subagent_type="general-purpose",
+            tool_call_id="tc-cancelled-timeout",
+        )
+
+    async def bounded_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", bounded_sleep)
+    asyncio.run(scheduled_cleanup_coros.pop())
+
     assert cleanup_calls == []
