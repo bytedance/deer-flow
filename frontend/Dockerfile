@@ -8,8 +8,11 @@ ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
 # ── Base: shared setup ────────────────────────────────────────────────────────
 FROM node:22-alpine AS base
 ARG PNPM_STORE_PATH
+ARG NPM_REGISTRY
 RUN corepack enable && corepack install -g pnpm@10.26.2
 RUN pnpm config set store-dir ${PNPM_STORE_PATH}
+# Optionally override npm registry for restricted networks (e.g. NPM_REGISTRY=https://registry.npmmirror.com)
+RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
 WORKDIR /app
 COPY frontend ./frontend
 

@@ -1,7 +1,19 @@
 # Backend Development Dockerfile
-FROM python:3.12-slim
+
+# UV source image (override for restricted networks that cannot reach ghcr.io)
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.7.20
+FROM ${UV_IMAGE} AS uv-source
+
+FROM python:3.12-slim-bookworm
 
 ARG NODE_MAJOR=22
+ARG APT_MIRROR
+
+# Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 # Install system dependencies + Node.js (provides npx for MCP servers)
 RUN apt-get update && apt-get install -y \
@@ -19,8 +31,8 @@ RUN apt-get update && apt-get install -y \
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-# Install uv from a pinned versioned image (avoids curl|sh from untrusted remote)
-COPY --from=ghcr.io/astral-sh/uv:0.7.20 /uv /uvx /usr/local/bin/
+# Install uv (source image overridable via UV_IMAGE build arg)
+COPY --from=uv-source /uv /uvx /usr/local/bin/
 
 # Set working directory
 WORKDIR /app
