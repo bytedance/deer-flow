@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.subagent_limit_middleware import (
+    MAX_CONCURRENT_SUBAGENTS
     MAX_SUBAGENT_LIMIT,
     MIN_SUBAGENT_LIMIT,
     SubagentLimitMiddleware,
@@ -44,7 +45,7 @@ class TestClampSubagentLimit:
 class TestSubagentLimitMiddlewareInit:
     def test_default_max_concurrent(self):
         mw = SubagentLimitMiddleware()
-        assert mw.max_concurrent == 3  # MAX_CONCURRENT_SUBAGENTS default
+        assert mw.max_concurrent == MAX_CONCURRENT_SUBAGENTS
 
     def test_custom_max_concurrent_clamped(self):
         mw = SubagentLimitMiddleware(max_concurrent=1)
