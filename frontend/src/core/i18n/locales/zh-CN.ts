@@ -261,6 +261,25 @@ export const zhCN: Translations = {
     failed: "子任务失败",
   },
 
+  // Token Usage
+  tokenUsage: {
+    title: "Token 用量",
+    input: "输入",
+    output: "输出",
+    total: "总计",
+  },
+  
+  // Shortcuts
+  shortcuts: {
+    searchActions: "搜索操作...",
+    noResults: "未找到结果。",
+    actions: "操作",
+    keyboardShortcuts: "键盘快捷键",
+    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 DeerFlow。",
+    openCommandPalette: "打开命令面板",
+    toggleSidebar: "切换侧边栏",
+  },
+
   // Settings
   settings: {
     title: "设置",

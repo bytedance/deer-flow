@@ -90,6 +90,31 @@ def _build_runtime_middlewares(
 
         middlewares.append(DanglingToolCallMiddleware())
 
+    # Guardrail middleware (if configured)
+    from deerflow.config.guardrails_config import get_guardrails_config
+
+    guardrails_config = get_guardrails_config()
+    if guardrails_config.enabled and guardrails_config.provider:
+        import inspect
+
+        from deerflow.guardrails.middleware import GuardrailMiddleware
+        from deerflow.reflection import resolve_variable
+
+        provider_cls = resolve_variable(guardrails_config.provider.use)
+        provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
+        # Pass framework hint if the provider accepts it (e.g. for config discovery).
+        # Built-in providers like AllowlistProvider don't need it, so only inject
+        # when the constructor accepts 'framework' or '**kwargs'.
+        if "framework" not in provider_kwargs:
+            try:
+                sig = inspect.signature(provider_cls.__init__)
+                if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                    provider_kwargs["framework"] = "deerflow"
+            except (ValueError, TypeError):
+                pass
+        provider = provider_cls(**provider_kwargs)
+        middlewares.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
+
     middlewares.append(ToolErrorHandlingMiddleware())
     return middlewares
 

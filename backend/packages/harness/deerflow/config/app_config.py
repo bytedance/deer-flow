@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.guardrails_config import load_guardrails_config_from_dict
 from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -16,6 +17,7 @@ from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import load_subagents_config_from_dict
 from deerflow.config.summarization_config import load_summarization_config_from_dict
 from deerflow.config.title_config import load_title_config_from_dict
+from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
+    log_level: str = Field(default="info", description="Logging level for deerflow modules (debug/info/warning/error)")
+    token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
@@ -107,6 +111,10 @@ class AppConfig(BaseModel):
         if "tool_search" in config_data:
             load_tool_search_config_from_dict(config_data["tool_search"])
 
+        # Load guardrails config if present
+        if "guardrails" in config_data:
+            load_guardrails_config_from_dict(config_data["guardrails"])
+
         # Load checkpointer config if present
         if "checkpointer" in config_data:
             load_checkpointer_config_from_dict(config_data["checkpointer"])
@@ -158,8 +166,7 @@ class AppConfig(BaseModel):
 
         if user_version < example_version:
             logger.warning(
-                "Your config.yaml (version %d) is outdated — the latest version is %d. "
-                "Run `make config-upgrade` to merge new fields into your config.",
+                "Your config.yaml (version %d) is outdated — the latest version is %d. Run `make config-upgrade` to merge new fields into your config.",
                 user_version,
                 example_version,
             )
