@@ -5,7 +5,6 @@ import pytest
 
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
-    _ACP_WORKSPACE_VIRTUAL_PATH,
     _is_acp_workspace_path,
     _is_skills_path,
     _reject_path_traversal,
@@ -30,10 +29,7 @@ _THREAD_DATA = {
 
 
 def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
-    assert (
-        Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix()
-        == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
-    )
+    assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 

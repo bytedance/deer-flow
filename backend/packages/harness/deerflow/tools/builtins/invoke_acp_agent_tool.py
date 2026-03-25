@@ -67,17 +67,9 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
 
     message = f"Error invoking ACP agent '{agent}': Command '{cmd}' was not found on PATH."
     if cmd == "codex-acp" and shutil.which("codex"):
-        return (
-            f"{message} The installed `codex` CLI does not speak ACP directly. "
-            "Install a Codex ACP adapter "
-            "(for example `npx @zed-industries/codex-acp`) or update "
-            "`acp_agents.codex.command` and `args` in config.yaml."
-        )
+        return f"{message} The installed `codex` CLI does not speak ACP directly. Install a Codex ACP adapter (for example `npx @zed-industries/codex-acp`) or update `acp_agents.codex.command` and `args` in config.yaml."
 
-    return (
-        f"{message} Install the agent binary or update "
-        f"`acp_agents.{agent}.command` in config.yaml."
-    )
+    return f"{message} Install the agent binary or update `acp_agents.{agent}.command` in config.yaml."
 
 
 def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
@@ -118,10 +110,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             from acp import PROTOCOL_VERSION, Client, text_block
             from acp.schema import ClientCapabilities, Implementation
         except ImportError:
-            return (
-                "Error: agent-client-protocol package is not installed. "
-                "Run `uv sync` to install project dependencies."
-            )
+            return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
 
         class _CollectingClient(Client):
             """Minimal ACP Client that collects streamed text from session updates."""

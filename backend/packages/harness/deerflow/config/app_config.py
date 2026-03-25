@@ -276,18 +276,9 @@ def get_app_config() -> AppConfig:
     resolved_path = AppConfig.resolve_config_path()
     current_mtime = _get_config_mtime(resolved_path)
 
-    should_reload = (
-        _app_config is None
-        or _app_config_path != resolved_path
-        or _app_config_mtime != current_mtime
-    )
+    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_mtime != current_mtime
     if should_reload:
-        if (
-            _app_config_path == resolved_path
-            and _app_config_mtime is not None
-            and current_mtime is not None
-            and _app_config_mtime != current_mtime
-        ):
+        if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None and _app_config_mtime != current_mtime:
             logger.info(
                 "Config file has been modified (mtime: %s -> %s), reloading AppConfig",
                 _app_config_mtime,
