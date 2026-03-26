@@ -96,7 +96,7 @@ models:
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
-  #   max_tokens: 16384
+  #   max_tokens: 8192
   #   supports_thinking: true
   #   supports_vision: false  # DeepSeek V3 does not support vision
   #   when_thinking_enabled:
