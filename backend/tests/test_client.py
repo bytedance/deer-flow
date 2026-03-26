@@ -2146,7 +2146,12 @@ class TestUploadDeleteSymlink:
 
             # Create a symlink inside uploads dir pointing to outside file.
             link = uploads_dir / "harmless.txt"
-            link.symlink_to(outside)
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
 
             with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
                 # The resolved path of the symlink escapes uploads_dir,

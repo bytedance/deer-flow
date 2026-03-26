@@ -5,11 +5,12 @@ Both Gateway and Client delegate to these functions.
 """
 
 import logging
+import posixpath
 import shutil
 import stat
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.loader import get_skills_root_path
 from deerflow.skills.validation import _validate_skill_frontmatter
@@ -26,8 +27,13 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     name = info.filename
     if not name:
         return False
-    path = Path(name)
+    normalized = name.replace("\\", "/")
+    if normalized.startswith("/"):
+        return True
+    path = PurePosixPath(normalized)
     if path.is_absolute():
+        return True
+    if PureWindowsPath(name).is_absolute():
         return True
     if ".." in path.parts:
         return True
@@ -90,7 +96,8 @@ def safe_extract_skill_archive(
             logger.warning("Skipping symlink entry in skill archive: %s", info.filename)
             continue
 
-        member_path = dest_root / info.filename
+        normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
+        member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
         member_path.parent.mkdir(parents=True, exist_ok=True)
