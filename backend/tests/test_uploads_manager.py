@@ -87,7 +87,12 @@ class TestValidatePathTraversal:
         target = tmp_path.parent / "secret.txt"
         target.touch()
         link = tmp_path / "escape"
-        link.symlink_to(target)
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
         with pytest.raises(PathTraversalError, match="traversal"):
             validate_path_traversal(link, tmp_path)
 

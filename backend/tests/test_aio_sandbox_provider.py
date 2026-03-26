@@ -3,6 +3,8 @@
 import importlib
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.config.paths import Paths
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
@@ -71,3 +73,33 @@ def test_get_thread_mounts_includes_user_data_dirs(tmp_path, monkeypatch):
     assert "/mnt/user-data/workspace" in container_paths
     assert "/mnt/user-data/uploads" in container_paths
     assert "/mnt/user-data/outputs" in container_paths
+
+
+def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatch):
+    """Unlock should not run if exclusive locking itself fails."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock = aio_mod.AioSandboxProvider._discover_or_create_with_lock.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        aio_mod,
+        "_lock_file_exclusive",
+        lambda _lock_file: (_ for _ in ()).throw(RuntimeError("lock failed")),
+    )
+
+    unlock_calls: list[object] = []
+    monkeypatch.setattr(
+        aio_mod,
+        "_unlock_file",
+        lambda lock_file: unlock_calls.append(lock_file),
+    )
+
+    with patch.object(provider, "_create_sandbox", return_value="sandbox-id"):
+        with pytest.raises(RuntimeError, match="lock failed"):
+            provider._discover_or_create_with_lock("thread-5", "sandbox-5")
+
+    assert unlock_calls == []
