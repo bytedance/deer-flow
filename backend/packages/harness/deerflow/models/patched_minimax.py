@@ -86,9 +86,7 @@ def _with_reasoning_content(
     additional_kwargs = dict(message.additional_kwargs)
     if preserve_whitespace:
         existing = additional_kwargs.get("reasoning_content")
-        additional_kwargs["reasoning_content"] = (
-            f"{existing}{reasoning}" if isinstance(existing, str) else reasoning
-        )
+        additional_kwargs["reasoning_content"] = f"{existing}{reasoning}" if isinstance(existing, str) else reasoning
     else:
         additional_kwargs["reasoning_content"] = _merge_reasoning(
             additional_kwargs.get("reasoning_content"),
@@ -129,11 +127,7 @@ class PatchedChatMiniMax(ChatOpenAI):
 
         token_usage = chunk.get("usage")
         choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
-        usage_metadata = (
-            _create_usage_metadata(token_usage, chunk.get("service_tier"))
-            if token_usage
-            else None
-        )
+        usage_metadata = _create_usage_metadata(token_usage, chunk.get("service_tier")) if token_usage else None
 
         if len(choices) == 0:
             generation_chunk = ChatGenerationChunk(

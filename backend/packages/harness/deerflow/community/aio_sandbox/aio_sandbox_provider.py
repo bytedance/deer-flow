@@ -199,6 +199,9 @@ class AioSandboxProvider(SandboxProvider):
             (str(host_paths.sandbox_work_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
             (str(host_paths.sandbox_uploads_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
             (str(host_paths.sandbox_outputs_dir(thread_id)), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            # ACP workspace: read-only inside the sandbox (lead agent reads results;
+            # the ACP subprocess writes from the host side, not from within the container).
+            (str(host_paths.acp_workspace_dir(thread_id)), "/mnt/acp-workspace", True),
         ]
 
     @staticmethod

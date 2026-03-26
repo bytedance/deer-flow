@@ -64,13 +64,7 @@ class TestClientInit:
 
     def test_custom_params(self, mock_app_config):
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-            c = DeerFlowClient(
-                model_name="gpt-4",
-                thinking_enabled=False,
-                subagent_enabled=True,
-                plan_mode=True,
-                agent_name="test-agent"
-            )
+            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent")
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
@@ -210,7 +204,7 @@ class TestStream:
             patch.object(client, "_agent", agent),
         ):
             list(client.stream("hi", thread_id="t1"))
-        
+
         # Verify context passed to agent.stream
         agent.stream.assert_called_once()
         call_kwargs = agent.stream.call_args.kwargs
@@ -755,7 +749,8 @@ class TestUploads:
                 return client.upload_files("thread-async", [first, second])
 
             with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
                 patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
                 patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor),
@@ -1492,7 +1487,8 @@ class TestScenarioEdgeCases:
             pdf_file.write_bytes(b"%PDF-1.4 fake content")
 
             with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
                 patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=Exception("conversion failed")),
             ):
@@ -1719,7 +1715,6 @@ class TestGatewayConformance:
         assert parsed.data.version == "1.0"
 
 
-
 # ===========================================================================
 # Hardening — install_skill security gates
 # ===========================================================================
@@ -1743,6 +1738,7 @@ class TestInstallSkillSecurity:
 
             # Patch max_total_size to a small value to trigger the bomb check.
             from deerflow.skills import installer as _installer
+
             orig = _installer.safe_extract_skill_archive
 
             def patched_extract(zf, dest, max_total_size=100):
