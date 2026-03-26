@@ -15,6 +15,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
+_URL_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'`;&|<>()]+")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -464,8 +465,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     unsafe_paths: list[str] = []
+    command_without_urls = _URL_PATTERN.sub("", command)
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command_without_urls):
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             _reject_path_traversal(absolute_path)
             continue

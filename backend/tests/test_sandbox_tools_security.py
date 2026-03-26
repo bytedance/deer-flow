@@ -236,6 +236,20 @@ def test_validate_local_bash_command_paths_allows_virtual_and_system_paths() -> 
     )
 
 
+def test_validate_local_bash_command_paths_allows_https_url_arguments() -> None:
+    validate_local_bash_command_paths(
+        "curl -X POST https://example.com/api/v1/risk/check",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_allows_multiple_url_schemes() -> None:
+    validate_local_bash_command_paths(
+        "curl https://example.com/a && curl http://demo.invalid/b",
+        _THREAD_DATA,
+    )
+
+
 def test_validate_local_bash_command_paths_blocks_traversal_in_user_data() -> None:
     """Bash commands with traversal in user-data paths should be blocked."""
     with pytest.raises(PermissionError, match="path traversal"):
