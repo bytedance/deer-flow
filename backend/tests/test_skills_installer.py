@@ -144,10 +144,13 @@ class TestSafeExtract:
         assert not (dest / "link.txt").exists()
 
     def test_normal_archive(self, tmp_path):
-        zip_path = self._make_zip(tmp_path, {
-            "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
-            "my-skill/README.md": "readme",
-        })
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/README.md": "readme",
+            },
+        )
         dest = tmp_path / "out"
         dest.mkdir()
         with zipfile.ZipFile(zip_path) as zf:

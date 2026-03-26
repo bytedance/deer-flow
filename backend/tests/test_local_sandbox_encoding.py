@@ -23,7 +23,7 @@ def test_read_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
 
 def test_write_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
     path = tmp_path / "utf8.txt"
-    text = "emoji \U0001F600"
+    text = "emoji \U0001f600"
     base = builtins.open
 
     monkeypatch.setattr(local_sandbox, "open", lambda file, mode="r", *args, **kwargs: _open(base, file, mode, *args, **kwargs), raising=False)

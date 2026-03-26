@@ -14,6 +14,7 @@ class MockArgs(BaseModel):
 
 def test_mcp_tool_sync_wrapper_generation():
     """Test that get_mcp_tools correctly adds a sync func to async-only tools."""
+
     async def mock_coro(x: int):
         return f"result: {x}"
 
@@ -22,27 +23,28 @@ def test_mcp_tool_sync_wrapper_generation():
         description="test description",
         args_schema=MockArgs,
         func=None,  # Sync func is missing
-        coroutine=mock_coro
+        coroutine=mock_coro,
     )
 
     mock_client_instance = MagicMock()
     # Use AsyncMock for get_tools as it's awaited (Fix for Comment 5)
     mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool])
 
-    with patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance), \
-         patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"), \
-         patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}), \
-         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}):
-        
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client_instance),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file"),
+        patch("deerflow.mcp.tools.build_servers_config", return_value={"test-server": {}}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+    ):
         # Run the async function manually with asyncio.run
         tools = asyncio.run(get_mcp_tools())
-        
+
         assert len(tools) == 1
         patched_tool = tools[0]
-        
+
         # Verify func is now populated
         assert patched_tool.func is not None
-        
+
         # Verify it works (sync call)
         result = patched_tool.func(x=42)
         assert result == "result: 42"
@@ -50,6 +52,7 @@ def test_mcp_tool_sync_wrapper_generation():
 
 def test_mcp_tool_sync_wrapper_in_running_loop():
     """Test the actual helper function from production code (Fix for Comment 1 & 3)."""
+
     async def mock_coro(x: int):
         await asyncio.sleep(0.01)
         return f"async_result: {x}"
@@ -68,6 +71,7 @@ def test_mcp_tool_sync_wrapper_in_running_loop():
 
 def test_mcp_tool_sync_wrapper_exception_logging():
     """Test the actual helper's error logging (Fix for Comment 3)."""
+
     async def error_coro():
         raise ValueError("Tool failure")
 
