@@ -392,14 +392,7 @@ class MemoryUpdater:
             current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
         # Add new facts
-        existing_fact_keys = {
-            fact_key
-            for fact_key in (
-                _fact_content_key(fact.get("content"))
-                for fact in current_memory.get("facts", [])
-            )
-            if fact_key is not None
-        }
+        existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
         new_facts = update_data.get("newFacts", [])
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)

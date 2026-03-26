@@ -281,12 +281,7 @@ class DeerFlowClient:
             return content
         if isinstance(content, list):
             if content and all(isinstance(block, str) for block in content):
-                chunk_like = len(content) > 1 and all(
-                    isinstance(block, str)
-                    and len(block) <= 20
-                    and any(ch in block for ch in '{}[]":,')
-                    for block in content
-                )
+                chunk_like = len(content) > 1 and all(isinstance(block, str) and len(block) <= 20 and any(ch in block for ch in '{}[]":,') for block in content)
                 return "".join(content) if chunk_like else "\n".join(content)
 
             pieces: list[str] = []
@@ -873,6 +868,7 @@ class DeerFlowClient:
         except ValueError as exc:
             if "traversal" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError
+
                 raise PathTraversalError("Path traversal detected") from exc
             raise
         if not actual.exists():
