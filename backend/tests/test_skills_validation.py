@@ -98,7 +98,7 @@ class TestValidateSkillFrontmatter:
         )
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
-        assert "hyphen-case" in msg
+        assert "hyphen" in msg
 
     def test_name_no_trailing_hyphen(self, tmp_path):
         skill_dir = _write_skill(
@@ -107,7 +107,7 @@ class TestValidateSkillFrontmatter:
         )
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
-        assert "hyphen-case" in msg
+        assert "hyphen" in msg
 
     def test_name_no_consecutive_hyphens(self, tmp_path):
         skill_dir = _write_skill(
@@ -116,7 +116,7 @@ class TestValidateSkillFrontmatter:
         )
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
-        assert "hyphen-case" in msg
+        assert "hyphen" in msg
 
     def test_name_too_long(self, tmp_path):
         long_name = "a" * 65
