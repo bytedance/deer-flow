@@ -305,6 +305,32 @@ def test_validate_local_bash_command_paths_still_blocks_other_paths() -> None:
             validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
 
 
+def test_validate_local_bash_command_paths_allows_urls() -> None:
+    """URLs (https://, http://) should not be mistaken for absolute paths (#1385)."""
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        # Should not raise — these are URLs, not local paths
+        validate_local_bash_command_paths(
+            "curl -X POST https://example.com/api/v1/risk/check", _THREAD_DATA
+        )
+        validate_local_bash_command_paths(
+            "curl http://localhost:8080/health", _THREAD_DATA
+        )
+        validate_local_bash_command_paths(
+            "wget https://example.com/file.txt -O /mnt/user-data/workspace/file.txt",
+            _THREAD_DATA,
+        )
+
+
+def test_validate_local_bash_command_paths_still_blocks_after_url_fix() -> None:
+    """Ensure the URL fix does not weaken detection of real absolute paths."""
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+            validate_local_bash_command_paths(
+                "curl https://example.com/file.txt -o /home/user/secret.txt",
+                _THREAD_DATA,
+            )
+
+
 def test_validate_local_tool_path_skills_custom_container_path() -> None:
     """Skills with a custom container_path in config should also work."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/custom/skills"):
