@@ -34,6 +34,11 @@ class MemoryUpdateQueue:
         self._timer: threading.Timer | None = None
         self._processing = False
 
+    @staticmethod
+    def _target_key(thread_id: str, agent_name: str | None) -> tuple[str, str | None]:
+        """Build dedupe key for a memory target."""
+        return thread_id, agent_name
+
     def add(self, thread_id: str, messages: list[Any], agent_name: str | None = None) -> None:
         """Add a conversation to the update queue.
 
@@ -53,9 +58,11 @@ class MemoryUpdateQueue:
         )
 
         with self._lock:
-            # Check if this thread already has a pending update
-            # If so, replace it with the newer one
-            self._queue = [c for c in self._queue if c.thread_id != thread_id]
+            # Check if this memory target already has a pending update.
+            # Dedupe by (thread_id, agent_name) so different agents on the
+            # same thread do not overwrite each other's pending updates.
+            target_key = self._target_key(thread_id, agent_name)
+            self._queue = [c for c in self._queue if self._target_key(c.thread_id, c.agent_name) != target_key]
             self._queue.append(context)
 
             # Reset or start the debounce timer
