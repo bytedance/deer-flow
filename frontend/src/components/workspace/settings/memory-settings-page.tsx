@@ -5,7 +5,7 @@ import { Streamdown } from "streamdown";
 import { useI18n } from "@/core/i18n/hooks";
 import { useMemory } from "@/core/memory/hooks";
 import type { UserMemory } from "@/core/memory/types";
-import { streamdownPlugins } from "@/core/streamdown/plugins";
+import { streamdownPluginsSafe } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
@@ -31,6 +31,22 @@ function confidenceToLevelKey(confidence: unknown): {
   return { key: "normal", value };
 }
 
+function escapeMarkdownText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeTableCell(value: string): string {
+  return escapeMarkdownText(value).replace(/\r?\n/g, " ").trim();
+}
+
 function formatMemorySection(
   title: string,
   summary: string,
@@ -38,14 +54,14 @@ function formatMemorySection(
   t: ReturnType<typeof useI18n>["t"],
 ): string {
   const content =
-    summary.trim() ||
-    `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`;
+    (summary.trim() ? escapeMarkdownText(summary.trim()) : "") ||
+    `_${escapeMarkdownText(t.settings.memory.markdown.empty)}_`;
   return [
-    `### ${title}`,
+    `### ${escapeMarkdownText(title)}`,
     content,
     "",
     updatedAt &&
-      `> ${t.settings.memory.markdown.updatedAt}: \`${formatTimeAgo(updatedAt)}\``,
+      `> ${escapeMarkdownText(t.settings.memory.markdown.updatedAt)}: \`${formatTimeAgo(updatedAt)}\``,
   ]
     .filter(Boolean)
     .join("\n");
@@ -59,7 +75,7 @@ function memoryToMarkdown(
 
   parts.push(`## ${t.settings.memory.markdown.overview}`);
   parts.push(
-    `- **${t.common.lastUpdated}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
+    `- **${escapeMarkdownText(t.common.lastUpdated)}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
   );
 
   parts.push(`\n## ${t.settings.memory.markdown.userContext}`);
@@ -116,13 +132,11 @@ function memoryToMarkdown(
 
   parts.push(`\n## ${t.settings.memory.markdown.facts}`);
   if (memory.facts.length === 0) {
-    parts.push(
-      `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`,
-    );
+    parts.push(`_${escapeMarkdownText(t.settings.memory.markdown.empty)}_`);
   } else {
     parts.push(
       [
-        `| ${t.settings.memory.markdown.table.category} | ${t.settings.memory.markdown.table.confidence} | ${t.settings.memory.markdown.table.content} | ${t.settings.memory.markdown.table.source} | ${t.settings.memory.markdown.table.createdAt} |`,
+        `| ${escapeMarkdownText(t.settings.memory.markdown.table.category)} | ${escapeMarkdownText(t.settings.memory.markdown.table.confidence)} | ${escapeMarkdownText(t.settings.memory.markdown.table.content)} | ${escapeMarkdownText(t.settings.memory.markdown.table.source)} | ${escapeMarkdownText(t.settings.memory.markdown.table.createdAt)} |`,
         "|---|---|---|---|---|",
         ...memory.facts.map((f) => {
           const { key, value } = confidenceToLevelKey(f.confidence);
@@ -130,7 +144,11 @@ function memoryToMarkdown(
             t.settings.memory.markdown.table.confidenceLevel[key];
           const confidenceText =
             typeof value === "number" ? `${levelLabel}` : levelLabel;
-          return `| ${upperFirst(f.category)} | ${confidenceText} | ${f.content} | [${t.settings.memory.markdown.table.view}](${pathOfThread(f.source)}) | ${formatTimeAgo(f.createdAt)} |`;
+          const sourceLink =
+            f.source && f.source !== "unknown"
+              ? `[${escapeMarkdownText(t.settings.memory.markdown.table.view)}](${pathOfThread(encodeURIComponent(f.source))})`
+              : "-";
+          return `| ${escapeTableCell(upperFirst(f.category))} | ${escapeTableCell(confidenceText)} | ${escapeTableCell(f.content)} | ${sourceLink} | ${escapeTableCell(formatTimeAgo(f.createdAt))} |`;
         }),
       ].join("\n"),
     );
@@ -175,7 +193,7 @@ export function MemorySettingsPage() {
         <div className="rounded-lg border p-4">
           <Streamdown
             className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-            {...streamdownPlugins}
+            {...streamdownPluginsSafe}
           >
             {memoryToMarkdown(memory, t)}
           </Streamdown>

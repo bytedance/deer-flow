@@ -17,6 +17,15 @@ export const streamdownPlugins = {
   ] as StreamdownProps["rehypePlugins"],
 };
 
+// Safe plugins for user-controlled markdown content (no raw HTML parsing)
+export const streamdownPluginsSafe = {
+  remarkPlugins: [
+    remarkGfm,
+    [remarkMath, { singleDollarTextMath: true }],
+  ] as StreamdownProps["remarkPlugins"],
+  rehypePlugins: [[rehypeKatex, { output: "html" }]] as StreamdownProps["rehypePlugins"],
+};
+
 export const streamdownPluginsWithWordAnimation = {
   remarkPlugins: [
     remarkGfm,
