@@ -278,6 +278,19 @@ tools:
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
 
+  # Xiaohongshu search tool (requires local xhs CLI)
+  - name: xhs_search
+    group: web
+    use: deerflow.community.xhs_cli_adapter.tools:xhs_search_tool
+    executable: xhs
+    default_pages: 1
+
+  # Xiaohongshu post detail tool (requires local xhs CLI)
+  - name: xhs_read
+    group: web
+    use: deerflow.community.xhs_cli_adapter.tools:xhs_read_tool
+    executable: xhs
+
   # File operations tools
   - name: ls
     group: file:read
