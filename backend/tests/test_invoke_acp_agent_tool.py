@@ -48,7 +48,8 @@ def test_build_permission_response_prefers_allow_once():
             SimpleNamespace(kind="reject_once", optionId="deny"),
             SimpleNamespace(kind="allow_always", optionId="always"),
             SimpleNamespace(kind="allow_once", optionId="once"),
-        ]
+        ],
+        auto_approve=True,
     )
 
     assert response.outcome.outcome == "selected"
@@ -60,7 +61,21 @@ def test_build_permission_response_denies_when_no_allow_option():
         [
             SimpleNamespace(kind="reject_once", optionId="deny"),
             SimpleNamespace(kind="reject_always", optionId="deny-forever"),
-        ]
+        ],
+        auto_approve=True,
+    )
+
+    assert response.outcome.outcome == "cancelled"
+
+
+def test_build_permission_response_denies_when_auto_approve_false():
+    """P1.2: When auto_approve=False, permission is always denied regardless of options."""
+    response = _build_permission_response(
+        [
+            SimpleNamespace(kind="allow_once", optionId="once"),
+            SimpleNamespace(kind="allow_always", optionId="always"),
+        ],
+        auto_approve=False,
     )
 
     assert response.outcome.outcome == "cancelled"
@@ -85,12 +100,34 @@ async def test_build_invoke_tool_description_and_unknown_agent_error():
     assert result == "Error: Unknown agent 'missing'. Available: codex, claude_code"
 
 
-def test_get_work_dir_uses_base_dir(monkeypatch, tmp_path):
-    """_get_work_dir always uses {base_dir}/acp-workspace/."""
+def test_get_work_dir_uses_base_dir_when_no_thread_id(monkeypatch, tmp_path):
+    """_get_work_dir(None) uses {base_dir}/acp-workspace/ (global fallback)."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
-    result = _get_work_dir()
+    result = _get_work_dir(None)
+    expected = tmp_path / "acp-workspace"
+    assert result == str(expected)
+    assert expected.exists()
+
+
+def test_get_work_dir_uses_per_thread_path_when_thread_id_given(monkeypatch, tmp_path):
+    """P1.1: _get_work_dir(thread_id) uses {base_dir}/threads/{thread_id}/acp-workspace/."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    result = _get_work_dir("thread-abc-123")
+    expected = tmp_path / "threads" / "thread-abc-123" / "acp-workspace"
+    assert result == str(expected)
+    assert expected.exists()
+
+
+def test_get_work_dir_falls_back_to_global_for_invalid_thread_id(monkeypatch, tmp_path):
+    """P1.1: Invalid thread_id (e.g. path traversal chars) falls back to global workspace."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    result = _get_work_dir("../../evil")
     expected = tmp_path / "acp-workspace"
     assert result == str(expected)
     assert expected.exists()
@@ -98,7 +135,7 @@ def test_get_work_dir_uses_base_dir(monkeypatch, tmp_path):
 
 @pytest.mark.anyio
 async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
-    """ACP agent uses the fixed {base_dir}/acp-workspace/ directory."""
+    """ACP agent uses {base_dir}/acp-workspace/ when no thread_id is available (no config)."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -223,6 +260,99 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
         "session_id": "session-1",
         "prompt": [{"type": "text", "text": "Implement the fix"}],
     }
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_config(monkeypatch, tmp_path):
+    """P1.1: When thread_id is in the RunnableConfig, ACP agent uses per-thread workspace."""
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self._chunks: list[str] = []
+
+        @property
+        def collected_text(self) -> str:
+            return "".join(self._chunks)
+
+        async def session_update(self, session_id, update, **kwargs):
+            pass
+
+        async def request_permission(self, options, session_id, tool_call, **kwargs):
+            raise AssertionError("should not be called")
+
+    class DummyConn:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            captured["new_session"] = kwargs
+            return SimpleNamespace(session_id="s1")
+
+        async def prompt(self, **kwargs):
+            pass
+
+    class DummyProcessContext:
+        def __init__(self, client, cmd, *args, cwd):
+            captured["cwd"] = cwd
+
+        async def __aenter__(self):
+            return DummyConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyRequestError(Exception):
+        @staticmethod
+        def method_not_found(method):
+            return DummyRequestError(method)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "acp",
+        SimpleNamespace(
+            PROTOCOL_VERSION="2026-03-24",
+            Client=DummyClient,
+            RequestError=DummyRequestError,
+            spawn_agent_process=lambda client, cmd, *args, cwd: DummyProcessContext(client, cmd, *args, cwd=cwd),
+            text_block=lambda text: {"type": "text", "text": text},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "acp.schema",
+        SimpleNamespace(
+            ClientCapabilities=lambda: {},
+            Implementation=lambda **kwargs: kwargs,
+            TextContentBlock=type("TextContentBlock", (), {"__init__": lambda self, text: setattr(self, "text", text)}),
+        ),
+    )
+
+    thread_id = "thread-xyz-789"
+    expected_cwd = str(tmp_path / "threads" / thread_id / "acp-workspace")
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI")})
+
+    try:
+        await tool.coroutine(
+            agent="codex",
+            prompt="Do something",
+            config={"configurable": {"thread_id": thread_id}},
+        )
+    finally:
+        sys.modules.pop("acp", None)
+        sys.modules.pop("acp.schema", None)
+
+    assert captured["cwd"] == expected_cwd
 
 
 def test_get_available_tools_includes_invoke_acp_agent_when_agents_configured(monkeypatch):

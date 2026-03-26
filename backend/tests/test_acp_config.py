@@ -65,11 +65,18 @@ def test_acp_agent_config_defaults():
     cfg = ACPAgentConfig(command="my-agent", description="My agent")
     assert cfg.args == []
     assert cfg.model is None
+    assert cfg.auto_approve_permissions is False
 
 
 def test_acp_agent_config_with_model():
     cfg = ACPAgentConfig(command="my-agent", description="desc", model="claude-opus-4")
     assert cfg.model == "claude-opus-4"
+
+
+def test_acp_agent_config_auto_approve_permissions():
+    """P1.2: auto_approve_permissions can be explicitly enabled."""
+    cfg = ACPAgentConfig(command="my-agent", description="desc", auto_approve_permissions=True)
+    assert cfg.auto_approve_permissions is True
 
 
 def test_acp_agent_config_missing_command_raises():

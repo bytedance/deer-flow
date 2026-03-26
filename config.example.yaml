@@ -378,6 +378,7 @@ sandbox:
 #     args: []
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #
 #   codex:
 #     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
@@ -386,6 +387,7 @@ sandbox:
 #     args: ["-y", "@zed-industries/codex-acp"]
 #     description: Codex CLI for repository tasks and code generation
 #     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 
 # ============================================================================
 # Skills Configuration

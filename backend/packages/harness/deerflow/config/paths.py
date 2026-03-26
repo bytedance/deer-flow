@@ -131,6 +131,17 @@ class Paths:
         """
         return self.thread_dir(thread_id) / "user-data" / "outputs"
 
+    def acp_workspace_dir(self, thread_id: str) -> Path:
+        """
+        Host path for the ACP workspace of a specific thread.
+        Host: `{base_dir}/threads/{thread_id}/acp-workspace/`
+        Sandbox: `/mnt/acp-workspace/`
+
+        Each thread gets its own isolated ACP workspace so that concurrent
+        sessions cannot read each other's ACP agent outputs.
+        """
+        return self.thread_dir(thread_id) / "acp-workspace"
+
     def sandbox_user_data_dir(self, thread_id: str) -> Path:
         """
         Host path for the user-data root.

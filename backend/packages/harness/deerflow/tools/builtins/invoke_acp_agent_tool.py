@@ -2,9 +2,10 @@
 
 import logging
 import shutil
-from typing import Any
+from typing import Annotated, Any
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -15,8 +16,15 @@ class _InvokeACPAgentInput(BaseModel):
     prompt: str = Field(description="The concise task prompt to send to the agent")
 
 
-def _get_work_dir() -> str:
-    """Get the fixed ACP workspace directory: ``{base_dir}/acp-workspace/``.
+def _get_work_dir(thread_id: str | None) -> str:
+    """Get the per-thread ACP workspace directory.
+
+    Each thread gets an isolated workspace under
+    ``{base_dir}/threads/{thread_id}/acp-workspace/`` so that concurrent
+    sessions cannot read or overwrite each other's ACP agent outputs.
+
+    Falls back to the legacy global ``{base_dir}/acp-workspace/`` when
+    ``thread_id`` is not available (e.g. embedded / direct invocation).
 
     The directory is created automatically if it does not exist.
 
@@ -25,7 +33,16 @@ def _get_work_dir() -> str:
     """
     from deerflow.config.paths import get_paths
 
-    work_dir = get_paths().base_dir / "acp-workspace"
+    paths = get_paths()
+    if thread_id:
+        try:
+            work_dir = paths.acp_workspace_dir(thread_id)
+        except ValueError:
+            logger.warning("Invalid thread_id %r for ACP workspace, falling back to global", thread_id)
+            work_dir = paths.base_dir / "acp-workspace"
+    else:
+        work_dir = paths.base_dir / "acp-workspace"
+
     work_dir.mkdir(parents=True, exist_ok=True)
     logger.info("ACP agent work_dir: %s", work_dir)
     return str(work_dir)
@@ -39,25 +56,32 @@ def _build_mcp_servers() -> dict[str, dict[str, Any]]:
     return build_servers_config(ExtensionsConfig.from_file())
 
 
-def _build_permission_response(options: list[Any]):
-    """Auto-approve ACP permission requests one call at a time when possible."""
+def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any:
+    """Build an ACP permission response.
+
+    When ``auto_approve`` is True, selects the first ``allow_once`` (preferred)
+    or ``allow_always`` option.  When False (the default), always cancels —
+    permission requests must be handled by the ACP agent's own policy or the
+    agent must be configured to operate without requesting permissions.
+    """
     from acp import RequestPermissionResponse
     from acp.schema import AllowedOutcome, DeniedOutcome
 
-    for preferred_kind in ("allow_once", "allow_always"):
-        for option in options:
-            if getattr(option, "kind", None) != preferred_kind:
-                continue
+    if auto_approve:
+        for preferred_kind in ("allow_once", "allow_always"):
+            for option in options:
+                if getattr(option, "kind", None) != preferred_kind:
+                    continue
 
-            option_id = getattr(option, "option_id", None)
-            if option_id is None:
-                option_id = getattr(option, "optionId", None)
-            if option_id is None:
-                continue
+                option_id = getattr(option, "option_id", None)
+                if option_id is None:
+                    option_id = getattr(option, "optionId", None)
+                if option_id is None:
+                    continue
 
-            return RequestPermissionResponse(
-                outcome=AllowedOutcome(outcome="selected", optionId=option_id),
-            )
+                return RequestPermissionResponse(
+                    outcome=AllowedOutcome(outcome="selected", optionId=option_id),
+                )
 
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
@@ -100,7 +124,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
     # Capture agents in closure so the function can reference it
     _agents = dict(agents)
 
-    async def _invoke(agent: str, prompt: str) -> str:
+    async def _invoke(agent: str, prompt: str, config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:
         logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
         logger.debug("Invoking ACP agent %s with prompt: %.200s%s", agent, prompt, "..." if len(prompt) > 200 else "")
         if agent not in _agents:
@@ -108,6 +132,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             return f"Error: Unknown agent '{agent}'. Available: {available}"
 
         agent_config = _agents[agent]
+        thread_id: str | None = ((config or {}).get("configurable") or {}).get("thread_id")
 
         try:
             from acp import PROTOCOL_VERSION, Client, text_block
@@ -135,18 +160,18 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     pass
 
             async def request_permission(self, options, session_id: str, tool_call, **kwargs):  # type: ignore[override]
-                response = _build_permission_response(options)
+                response = _build_permission_response(options, auto_approve=agent_config.auto_approve_permissions)
                 outcome = response.outcome.outcome
                 if outcome == "selected":
                     logger.info("ACP permission auto-approved for tool call %s in session %s", tool_call.tool_call_id, session_id)
                 else:
-                    logger.warning("ACP permission denied for tool call %s in session %s", tool_call.tool_call_id, session_id)
+                    logger.warning("ACP permission denied for tool call %s in session %s (set auto_approve_permissions: true in config.yaml to enable)", tool_call.tool_call_id, session_id)
                 return response
 
         client = _CollectingClient()
         cmd = agent_config.command
         args = agent_config.args or []
-        physical_cwd = _get_work_dir()
+        physical_cwd = _get_work_dir(thread_id)
         mcp_servers = _build_mcp_servers()
 
         try:

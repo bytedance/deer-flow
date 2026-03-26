@@ -108,13 +108,47 @@ def _is_acp_workspace_path(path: str) -> bool:
     return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(f"{_ACP_WORKSPACE_VIRTUAL_PATH}/")
 
 
-def _get_acp_workspace_host_path() -> str | None:
+def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
+    """Extract thread_id from thread_data by inspecting workspace_path.
+
+    The workspace_path has the form
+    ``{base_dir}/threads/{thread_id}/user-data/workspace``, so
+    ``Path(workspace_path).parent.parent.name`` yields the thread_id.
+    """
+    if thread_data is None:
+        return None
+    workspace_path = thread_data.get("workspace_path")
+    if not workspace_path:
+        return None
+    try:
+        # {base_dir}/threads/{thread_id}/user-data/workspace → parent.parent = threads/{thread_id}
+        return Path(workspace_path).parent.parent.name
+    except Exception:
+        return None
+
+
+def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
     """Get the ACP workspace host filesystem path.
 
-    Uses ``{base_dir}/acp-workspace`` (derived from :func:`get_paths`). The result
-    is cached after the first successful resolution. Returns ``None`` if the
-    directory does not exist.
+    When *thread_id* is provided, returns the per-thread workspace
+    ``{base_dir}/threads/{thread_id}/acp-workspace/`` (not cached — the
+    directory is created on demand by ``invoke_acp_agent_tool``).
+
+    Falls back to the global ``{base_dir}/acp-workspace/`` when *thread_id*
+    is ``None``; that result is cached after the first successful resolution.
+    Returns ``None`` if the directory does not exist.
     """
+    if thread_id is not None:
+        try:
+            from deerflow.config.paths import get_paths
+
+            host_path = get_paths().acp_workspace_dir(thread_id)
+            if host_path.exists():
+                return str(host_path)
+        except Exception:
+            pass
+        return None
+
     cached = getattr(_get_acp_workspace_host_path, "_cached", None)
     if cached is not None:
         return cached
@@ -131,11 +165,13 @@ def _get_acp_workspace_host_path() -> str | None:
     return None
 
 
-def _resolve_acp_workspace_path(path: str) -> str:
+def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
     """Resolve a virtual ACP workspace path to a host filesystem path.
 
     Args:
         path: Virtual path (e.g. /mnt/acp-workspace/hello_world.py)
+        thread_id: Current thread ID for per-thread workspace resolution.
+                   When ``None``, falls back to the global workspace.
 
     Returns:
         Resolved host path.
@@ -146,7 +182,7 @@ def _resolve_acp_workspace_path(path: str) -> str:
     """
     _reject_path_traversal(path)
 
-    host_path = _get_acp_workspace_host_path()
+    host_path = _get_acp_workspace_host_path(thread_id)
     if host_path is None:
         raise FileNotFoundError(f"ACP workspace directory not available for path: {path}")
 
@@ -275,7 +311,8 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             result = pattern.sub(replace_skills, result)
 
     # Mask ACP workspace host paths
-    acp_host = _get_acp_workspace_host_path()
+    _thread_id = _extract_thread_id_from_thread_data(thread_data)
+    acp_host = _get_acp_workspace_host_path(_thread_id)
     if acp_host:
         raw_base = str(Path(acp_host))
         resolved_base = str(Path(acp_host).resolve())
@@ -477,12 +514,13 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         result = skills_pattern.sub(replace_skills_match, result)
 
     # Replace ACP workspace paths
-    acp_host = _get_acp_workspace_host_path()
+    _thread_id = _extract_thread_id_from_thread_data(thread_data)
+    acp_host = _get_acp_workspace_host_path(_thread_id)
     if acp_host and _ACP_WORKSPACE_VIRTUAL_PATH in result:
         acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
 
-        def replace_acp_match(match: re.Match) -> str:
-            return _resolve_acp_workspace_path(match.group(0))
+        def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
+            return _resolve_acp_workspace_path(match.group(0), _tid)
 
         result = acp_pattern.sub(replace_acp_match, result)
 
@@ -692,7 +730,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
             if _is_skills_path(path):
                 path = _resolve_skills_path(path)
             elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path)
+                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
             else:
                 path = _resolve_and_validate_user_data_path(path, thread_data)
         children = sandbox.list_dir(path)
@@ -735,7 +773,7 @@ def read_file_tool(
             if _is_skills_path(path):
                 path = _resolve_skills_path(path)
             elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path)
+                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
             else:
                 path = _resolve_and_validate_user_data_path(path, thread_data)
         content = sandbox.read_file(path)

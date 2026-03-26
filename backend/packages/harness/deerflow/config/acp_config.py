@@ -15,6 +15,14 @@ class ACPAgentConfig(BaseModel):
     args: list[str] = Field(default_factory=list, description="Additional command arguments")
     description: str = Field(description="Description of the agent's capabilities (shown in tool description)")
     model: str | None = Field(default=None, description="Model hint passed to the agent (optional)")
+    auto_approve_permissions: bool = Field(
+        default=False,
+        description=(
+            "When True, DeerFlow automatically approves all ACP permission requests from this agent "
+            "(allow_once preferred over allow_always). When False (default), all permission requests "
+            "are denied — the agent must be configured to operate without requesting permissions."
+        ),
+    )
 
 
 _acp_agents: dict[str, ACPAgentConfig] = {}
