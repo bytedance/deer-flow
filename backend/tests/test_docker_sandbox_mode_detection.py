@@ -5,9 +5,16 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
+from shutil import which
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
+BASH_EXECUTABLE = which("bash") or r"C:\Program Files\Git\bin\bash.exe"
+
+if not Path(BASH_EXECUTABLE).exists():
+    pytestmark = pytest.mark.skip(reason="bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:
@@ -19,7 +26,7 @@ def _detect_mode_with_config(config_content: str) -> str:
         command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmp_root}' && detect_sandbox_mode"
 
         output = subprocess.check_output(
-            ["bash", "-lc", command],
+            [BASH_EXECUTABLE, "-lc", command],
             text=True,
         ).strip()
 
@@ -30,7 +37,7 @@ def test_detect_mode_defaults_to_local_when_config_missing():
     """No config file should default to local mode."""
     with tempfile.TemporaryDirectory() as tmpdir:
         command = f"source '{SCRIPT_PATH}' && PROJECT_ROOT='{tmpdir}' && detect_sandbox_mode"
-        output = subprocess.check_output(["bash", "-lc", command], text=True).strip()
+        output = subprocess.check_output([BASH_EXECUTABLE, "-lc", command], text=True).strip()
 
     assert output == "local"
 

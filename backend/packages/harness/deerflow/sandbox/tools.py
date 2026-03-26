@@ -99,11 +99,19 @@ def _resolve_skills_path(path: str) -> str:
         return skills_host
 
     relative = path[len(skills_container):].lstrip("/")
-    return str(Path(skills_host) / relative) if relative else skills_host
+    return _join_path_preserving_style(skills_host, relative)
 
 
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
+
+
+def _join_path_preserving_style(base: str, relative: str) -> str:
+    if not relative:
+        return base
+    if "/" in base and "\\" not in base:
+        return f"{base.rstrip('/')}/{relative}"
+    return str(Path(base) / relative)
 
 
 def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
@@ -148,7 +156,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             return actual_base
         if path.startswith(f"{virtual_base}/"):
             rest = path[len(virtual_base) :].lstrip("/")
-            return str(Path(actual_base) / rest) if rest else actual_base
+            return _join_path_preserving_style(actual_base, rest)
 
     return path
 

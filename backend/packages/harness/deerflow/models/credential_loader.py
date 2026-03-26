@@ -60,7 +60,14 @@ def _resolve_credential_path(env_var: str, default_relative_path: str) -> Path:
     configured_path = os.getenv(env_var)
     if configured_path:
         return Path(configured_path).expanduser()
-    return Path.home() / default_relative_path
+    return _home_dir() / default_relative_path
+
+
+def _home_dir() -> Path:
+    home = os.getenv("HOME")
+    if home:
+        return Path(home).expanduser()
+    return Path.home()
 
 
 def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
@@ -90,7 +97,7 @@ def _read_secret_from_file_descriptor(env_var: str) -> str | None:
         return None
 
     try:
-        secret = Path(f"/dev/fd/{fd}").read_text().strip()
+        secret = os.read(fd, 1024 * 1024).decode().strip()
     except OSError as e:
         logger.warning(f"Failed to read {env_var}: {e}")
         return None
@@ -111,7 +118,7 @@ def _iter_claude_code_credential_paths() -> list[Path]:
     if override_path:
         paths.append(Path(override_path).expanduser())
 
-    default_path = Path.home() / ".claude/.credentials.json"
+    default_path = _home_dir() / ".claude/.credentials.json"
     if not paths or paths[-1] != default_path:
         paths.append(default_path)
 
