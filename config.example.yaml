@@ -81,7 +81,7 @@ models:
   #     thinking:
   #       type: enabled
 
-  # Example: Google Gemini model
+  # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
   #   display_name: Gemini 2.5 Pro
   #   use: langchain_google_genai:ChatGoogleGenerativeAI
@@ -89,6 +89,25 @@ models:
   #   gemini_api_key: $GEMINI_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true
+
+  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
+  # are preserved across multi-turn tool-call conversations — required by the
+  # Gemini API when thinking is enabled. See:
+  # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+  # - name: gemini-2.5-pro-thinking
+  #   display_name: Gemini 2.5 Pro (Thinking)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   api_key: $GEMINI_API_KEY
+  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   max_tokens: 16384
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
