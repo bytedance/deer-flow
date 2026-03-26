@@ -68,6 +68,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Modèles recommandés](#modèles-recommandés)
   - [Client Python intégré](#client-python-intégré)
   - [Documentation](#documentation)
+  - [⚠️ Avertissement de sécurité](#️-avertissement-de-sécurité)
   - [Contribuer](#contribuer)
   - [Licence](#licence)
   - [Remerciements](#remerciements)
@@ -526,6 +527,24 @@ Toutes les méthodes retournant des dicts sont validées en CI contre les modèl
 - [Guide de configuration](backend/docs/CONFIGURATION.md) - Instructions d'installation et de configuration
 - [Vue d'ensemble de l'architecture](backend/CLAUDE.md) - Détails de l'architecture technique
 - [Architecture backend](backend/README.md) - Architecture backend et référence API
+
+## ⚠️ Avertissement de sécurité
+
+### Un déploiement inapproprié peut introduire des risques de sécurité
+
+DeerFlow dispose de capacités clés à hauts privilèges, notamment **l'exécution de commandes système, les opérations sur les ressources et l'invocation de logique métier**. Il est conçu par défaut pour être **déployé dans un environnement local de confiance (accessible uniquement via l'interface de loopback 127.0.0.1)**. Si vous déployez l'agent dans des environnements non fiables — tels que des réseaux LAN, des serveurs cloud publics ou d'autres environnements accessibles depuis plusieurs terminaux — sans mesures de sécurité strictes, cela peut introduire des risques, notamment :
+
+- **Invocation non autorisée** : les fonctionnalités de l'agent pourraient être découvertes par des tiers non autorisés ou des scanners malveillants, déclenchant des requêtes non autorisées en masse qui exécutent des opérations à haut risque (commandes système, lecture/écriture de fichiers), pouvant causer de graves conséquences.
+- **Risques juridiques et de conformité** : si l'agent est utilisé illégalement pour mener des cyberattaques, du vol de données ou d'autres activités illicites, cela peut entraîner des responsabilités juridiques et des risques de conformité.
+
+### Recommandations de sécurité
+
+**Note : nous recommandons fortement de déployer DeerFlow dans un environnement réseau local de confiance.** Si vous avez besoin d'un déploiement multi-appareils ou multi-réseaux, vous devez mettre en place des mesures de sécurité strictes, par exemple :
+
+- **Liste blanche d'IP** : utilisez `iptables`, ou déployez des pare-feux matériels / commutateurs avec ACL, pour **configurer des règles de liste blanche d'IP** et refuser l'accès à toutes les autres adresses IP.
+- **Passerelle d'authentification** : configurez un proxy inverse (ex. nginx) et **activez une authentification forte en amont**, bloquant tout accès non authentifié.
+- **Isolation réseau** : si possible, placez l'agent et les appareils de confiance dans le **même VLAN dédié**, isolé des autres équipements réseau.
+- **Restez informé** : continuez à suivre les mises à jour de sécurité du projet DeerFlow.
 
 ## Contribuer
 
