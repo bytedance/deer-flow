@@ -168,6 +168,37 @@ class TestSingleton:
         reset_deferred_registry()
         assert get_deferred_registry() is None
 
+    def test_contextvar_isolation_across_contexts(self, registry):
+        """P2: Each async context gets its own independent registry value."""
+        import contextvars
+
+        reg_a = DeferredToolRegistry()
+        reg_a.register(_make_mock_tool("tool_a", "Tool A"))
+
+        reg_b = DeferredToolRegistry()
+        reg_b.register(_make_mock_tool("tool_b", "Tool B"))
+
+        seen: dict[str, object] = {}
+
+        def run_in_context_a():
+            set_deferred_registry(reg_a)
+            seen["ctx_a"] = get_deferred_registry()
+
+        def run_in_context_b():
+            set_deferred_registry(reg_b)
+            seen["ctx_b"] = get_deferred_registry()
+
+        ctx_a = contextvars.copy_context()
+        ctx_b = contextvars.copy_context()
+        ctx_a.run(run_in_context_a)
+        ctx_b.run(run_in_context_b)
+
+        # Each context got its own registry, neither bleeds into the other
+        assert seen["ctx_a"] is reg_a
+        assert seen["ctx_b"] is reg_b
+        # The current context is unchanged
+        assert get_deferred_registry() is None
+
 
 # ── tool_search Tool Tests ──
 
