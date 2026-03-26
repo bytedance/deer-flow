@@ -25,6 +25,7 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 )
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+_ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
 
 
 def _get_skills_container_path() -> str:
@@ -98,8 +99,108 @@ def _resolve_skills_path(path: str) -> str:
     if path == skills_container:
         return skills_host
 
-    relative = path[len(skills_container):].lstrip("/")
+    relative = path[len(skills_container) :].lstrip("/")
     return str(Path(skills_host) / relative) if relative else skills_host
+
+
+def _is_acp_workspace_path(path: str) -> bool:
+    """Check if a path is under the ACP workspace virtual path."""
+    return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(f"{_ACP_WORKSPACE_VIRTUAL_PATH}/")
+
+
+def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
+    """Extract thread_id from thread_data by inspecting workspace_path.
+
+    The workspace_path has the form
+    ``{base_dir}/threads/{thread_id}/user-data/workspace``, so
+    ``Path(workspace_path).parent.parent.name`` yields the thread_id.
+    """
+    if thread_data is None:
+        return None
+    workspace_path = thread_data.get("workspace_path")
+    if not workspace_path:
+        return None
+    try:
+        # {base_dir}/threads/{thread_id}/user-data/workspace → parent.parent = threads/{thread_id}
+        return Path(workspace_path).parent.parent.name
+    except Exception:
+        return None
+
+
+def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
+    """Get the ACP workspace host filesystem path.
+
+    When *thread_id* is provided, returns the per-thread workspace
+    ``{base_dir}/threads/{thread_id}/acp-workspace/`` (not cached — the
+    directory is created on demand by ``invoke_acp_agent_tool``).
+
+    Falls back to the global ``{base_dir}/acp-workspace/`` when *thread_id*
+    is ``None``; that result is cached after the first successful resolution.
+    Returns ``None`` if the directory does not exist.
+    """
+    if thread_id is not None:
+        try:
+            from deerflow.config.paths import get_paths
+
+            host_path = get_paths().acp_workspace_dir(thread_id)
+            if host_path.exists():
+                return str(host_path)
+        except Exception:
+            pass
+        return None
+
+    cached = getattr(_get_acp_workspace_host_path, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        from deerflow.config.paths import get_paths
+
+        host_path = get_paths().base_dir / "acp-workspace"
+        if host_path.exists():
+            value = str(host_path)
+            _get_acp_workspace_host_path._cached = value  # type: ignore[attr-defined]
+            return value
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
+    """Resolve a virtual ACP workspace path to a host filesystem path.
+
+    Args:
+        path: Virtual path (e.g. /mnt/acp-workspace/hello_world.py)
+        thread_id: Current thread ID for per-thread workspace resolution.
+                   When ``None``, falls back to the global workspace.
+
+    Returns:
+        Resolved host path.
+
+    Raises:
+        FileNotFoundError: If ACP workspace directory does not exist.
+        PermissionError: If path traversal is detected.
+    """
+    _reject_path_traversal(path)
+
+    host_path = _get_acp_workspace_host_path(thread_id)
+    if host_path is None:
+        raise FileNotFoundError(f"ACP workspace directory not available for path: {path}")
+
+    if path == _ACP_WORKSPACE_VIRTUAL_PATH:
+        return host_path
+
+    relative = path[len(_ACP_WORKSPACE_VIRTUAL_PATH) :].lstrip("/")
+    if not relative:
+        return host_path
+
+    resolved = Path(host_path).resolve() / relative
+    # Ensure resolved path stays inside the ACP workspace
+    try:
+        resolved.resolve().relative_to(Path(host_path).resolve())
+    except ValueError:
+        raise PermissionError("Access denied: path traversal detected")
+
+    return str(resolved)
 
 
 def _path_variants(path: str) -> set[str]:
@@ -186,7 +287,7 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
-    Handles both user-data paths (per-thread) and skills paths (global).
+    Handles user-data paths (per-thread), skills paths, and ACP workspace paths (global).
     """
     result = output
 
@@ -204,10 +305,29 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
                 matched_path = match.group(0)
                 if matched_path == _base:
                     return skills_container
-                relative = matched_path[len(_base):].lstrip("/\\")
+                relative = matched_path[len(_base) :].lstrip("/\\")
                 return f"{skills_container}/{relative}" if relative else skills_container
 
             result = pattern.sub(replace_skills, result)
+
+    # Mask ACP workspace host paths
+    _thread_id = _extract_thread_id_from_thread_data(thread_data)
+    acp_host = _get_acp_workspace_host_path(_thread_id)
+    if acp_host:
+        raw_base = str(Path(acp_host))
+        resolved_base = str(Path(acp_host).resolve())
+        for base in _path_variants(raw_base) | _path_variants(resolved_base):
+            escaped = re.escape(base).replace(r"\\", r"[/\\]")
+            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+            def replace_acp(match: re.Match, _base: str = base) -> str:
+                matched_path = match.group(0)
+                if matched_path == _base:
+                    return _ACP_WORKSPACE_VIRTUAL_PATH
+                relative = matched_path[len(_base) :].lstrip("/\\")
+                return f"{_ACP_WORKSPACE_VIRTUAL_PATH}/{relative}" if relative else _ACP_WORKSPACE_VIRTUAL_PATH
+
+            result = pattern.sub(replace_acp, result)
 
     # Mask user-data host paths
     if thread_data is None:
@@ -228,7 +348,7 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
                 matched_path = match.group(0)
                 if matched_path == _base:
                     return _virtual
-                relative = matched_path[len(_base):].lstrip("/\\")
+                relative = matched_path[len(_base) :].lstrip("/\\")
                 return f"{_virtual}/{relative}" if relative else _virtual
 
             result = pattern.sub(replace_match, result)
@@ -256,11 +376,12 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
+      - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
 
     Args:
         path: The virtual path to validate.
         thread_data: Thread data (must be present for local sandbox).
-        read_only: When True, skills paths are permitted.
+        read_only: When True, skills and ACP workspace paths are permitted.
 
     Raises:
         SandboxRuntimeError: If thread data is missing.
@@ -277,11 +398,17 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to skills path is not allowed: {path}")
         return
 
+    # ACP workspace paths — read-only access only
+    if _is_acp_workspace_path(path):
+        if not read_only:
+            raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/ or {_get_skills_container_path()}/ are allowed")
+    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, or {_ACP_WORKSPACE_VIRTUAL_PATH}/ are allowed")
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
@@ -327,7 +454,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     """Validate absolute paths in local-sandbox bash commands.
 
     In local mode, commands must use virtual paths under /mnt/user-data for
-    user data access. Skills paths under /mnt/skills are allowed for reading.
+    user data access. Skills paths under /mnt/skills and ACP workspace paths
+    under /mnt/acp-workspace are allowed (path-traversal checks only; write
+    prevention for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null).
     """
@@ -346,10 +475,12 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
             _reject_path_traversal(absolute_path)
             continue
 
-        if any(
-            absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix)
-            for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES
-        ):
+        # Allow ACP workspace path (path-traversal check only)
+        if _is_acp_workspace_path(absolute_path):
+            _reject_path_traversal(absolute_path)
+            continue
+
+        if any(absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
             continue
 
         unsafe_paths.append(absolute_path)
@@ -360,7 +491,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
-    """Replace all virtual paths (/mnt/user-data and /mnt/skills) in a command string.
+    """Replace all virtual paths (/mnt/user-data, /mnt/skills, /mnt/acp-workspace) in a command string.
 
     Args:
         command: The command string that may contain virtual paths.
@@ -381,6 +512,17 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
             return _resolve_skills_path(match.group(0))
 
         result = skills_pattern.sub(replace_skills_match, result)
+
+    # Replace ACP workspace paths
+    _thread_id = _extract_thread_id_from_thread_data(thread_data)
+    acp_host = _get_acp_workspace_host_path(_thread_id)
+    if acp_host and _ACP_WORKSPACE_VIRTUAL_PATH in result:
+        acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
+
+        def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
+            return _resolve_acp_workspace_path(match.group(0), _tid)
+
+        result = acp_pattern.sub(replace_acp_match, result)
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
@@ -587,6 +729,8 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
             validate_local_tool_path(path, thread_data, read_only=True)
             if _is_skills_path(path):
                 path = _resolve_skills_path(path)
+            elif _is_acp_workspace_path(path):
+                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
             else:
                 path = _resolve_and_validate_user_data_path(path, thread_data)
         children = sandbox.list_dir(path)
@@ -628,6 +772,8 @@ def read_file_tool(
             validate_local_tool_path(path, thread_data, read_only=True)
             if _is_skills_path(path):
                 path = _resolve_skills_path(path)
+            elif _is_acp_workspace_path(path):
+                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
             else:
                 path = _resolve_and_validate_user_data_path(path, thread_data)
         content = sandbox.read_file(path)

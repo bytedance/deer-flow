@@ -213,36 +213,23 @@ class TestToolCallFlow:
     def test_tool_call_produces_events(self, client):
         """When the LLM decides to use a tool, we see tool call + result events."""
         # Give a clear instruction that forces a tool call
-        events = list(client.stream(
-            "Use the bash tool to run: echo hello_e2e_test"
-        ))
+        events = list(client.stream("Use the bash tool to run: echo hello_e2e_test"))
 
         types = [e.type for e in events]
         assert types[-1] == "end"
 
         # Should have at least one tool call event
-        tool_call_events = [
-            e for e in events
-            if e.type == "messages-tuple" and e.data.get("tool_calls")
-        ]
-        tool_result_events = [
-            e for e in events
-            if e.type == "messages-tuple" and e.data.get("type") == "tool"
-        ]
+        tool_call_events = [e for e in events if e.type == "messages-tuple" and e.data.get("tool_calls")]
+        tool_result_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "tool"]
         assert len(tool_call_events) >= 1, "Expected at least one tool_call event"
         assert len(tool_result_events) >= 1, "Expected at least one tool result event"
 
     @requires_llm
     def test_tool_call_event_structure(self, client):
         """Tool call events contain name, args, and id fields."""
-        events = list(client.stream(
-            "Use the read_file tool to read /mnt/user-data/workspace/nonexistent.txt"
-        ))
+        events = list(client.stream("Use the read_file tool to read /mnt/user-data/workspace/nonexistent.txt"))
 
-        tc_events = [
-            e for e in events
-            if e.type == "messages-tuple" and e.data.get("tool_calls")
-        ]
+        tc_events = [e for e in events if e.type == "messages-tuple" and e.data.get("tool_calls")]
         if tc_events:
             tc = tc_events[0].data["tool_calls"][0]
             assert "name" in tc
@@ -274,6 +261,7 @@ class TestFileUploadIntegration:
 
         # Physically exists
         from deerflow.config.paths import get_paths
+
         assert (get_paths().sandbox_uploads_dir(tid) / "readme.txt").exists()
 
     def test_upload_duplicate_rename(self, e2e_env, tmp_path):
@@ -410,6 +398,7 @@ class TestMiddlewareChain:
         # ThreadDataMiddleware should have set paths in the state.
         # We verify the paths singleton can resolve the thread dir.
         from deerflow.config.paths import get_paths
+
         thread_dir = get_paths().thread_dir(tid)
         assert str(thread_dir).endswith(tid)
 
@@ -422,10 +411,7 @@ class TestMiddlewareChain:
         types = [e.type for e in events]
         assert types[-1] == "end"
         # Should have at least one AI response
-        ai_events = [
-            e for e in events
-            if e.type == "messages-tuple" and e.data.get("type") == "ai"
-        ]
+        ai_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai"]
         assert len(ai_events) >= 1
 
 
@@ -552,9 +538,7 @@ class TestSkillInstallation:
         """Create a minimal valid .skill archive."""
         skill_dir = tmp_path / "build" / skill_name
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n"
-        )
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n")
         archive_path = tmp_path / f"{skill_name}.skill"
         with zipfile.ZipFile(archive_path, "w") as zf:
             for file in skill_dir.rglob("*"):
@@ -680,6 +664,7 @@ class TestConfigManagement:
 
         # Force reload so the singleton picks up our test file
         from deerflow.config.extensions_config import reload_extensions_config
+
         reload_extensions_config()
 
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
@@ -705,6 +690,7 @@ class TestConfigManagement:
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         from deerflow.config.extensions_config import reload_extensions_config
+
         reload_extensions_config()
 
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
@@ -732,6 +718,7 @@ class TestConfigManagement:
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         from deerflow.config.extensions_config import reload_extensions_config
+
         reload_extensions_config()
 
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)

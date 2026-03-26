@@ -33,8 +33,6 @@ class UploadResponse(BaseModel):
     message: str
 
 
-
-
 @router.post("", response_model=UploadResponse)
 async def upload_files(
     thread_id: str,

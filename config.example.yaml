@@ -81,14 +81,33 @@ models:
   #     thinking:
   #       type: enabled
 
-  # Example: Google Gemini model
+  # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
   #   display_name: Gemini 2.5 Pro
   #   use: langchain_google_genai:ChatGoogleGenerativeAI
   #   model: gemini-2.5-pro
-  #   google_api_key: $GOOGLE_API_KEY
+  #   gemini_api_key: $GEMINI_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true
+
+  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
+  # are preserved across multi-turn tool-call conversations — required by the
+  # Gemini API when thinking is enabled. See:
+  # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+  # - name: gemini-2.5-pro-thinking
+  #   display_name: Gemini 2.5 Pro (Thinking)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   api_key: $GEMINI_API_KEY
+  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   max_tokens: 16384
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -96,7 +115,7 @@ models:
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
-  #   max_tokens: 16384
+  #   max_tokens: 8192
   #   supports_thinking: true
   #   supports_vision: false  # DeepSeek V3 does not support vision
   #   when_thinking_enabled:
@@ -366,6 +385,30 @@ sandbox:
 #       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
+
+# ============================================================================
+# ACP Agents Configuration
+# ============================================================================
+# Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
+
+# acp_agents:
+#   claude_code:
+#     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
+#     # speak ACP directly. Install `claude-agent-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/claude-agent-acp"]
+#     description: Claude Code for implementation, refactoring, and debugging
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#
+#   codex:
+#     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
+#     # speak ACP directly. Install `codex-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/codex-acp"]
+#     description: Codex CLI for repository tasks and code generation
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 
 # ============================================================================
 # Skills Configuration
