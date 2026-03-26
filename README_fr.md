@@ -48,6 +48,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Site officiel](#site-officiel)
   - [InfoQuest](#infoquest)
   - [Table des matières](#table-des-matières)
+  - [Installation en une phrase pour un coding agent](#installation-en-une-phrase-pour-un-coding-agent)
   - [Démarrage rapide](#démarrage-rapide)
     - [Configuration](#configuration)
     - [Lancer l'application](#lancer-lapplication)
@@ -74,6 +75,16 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Remerciements](#remerciements)
     - [Contributeurs principaux](#contributeurs-principaux)
   - [Star History](#star-history)
+
+## Installation en une phrase pour un coding agent
+
+Si vous utilisez Claude Code, Codex, Cursor, Windsurf ou un autre coding agent, vous pouvez simplement lui envoyer cette phrase :
+
+```text
+Aide-moi à cloner DeerFlow si nécessaire, puis à initialiser son environnement de développement local en suivant https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
+```
+
+Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt si nécessaire, de privilégier Docker quand il est disponible, puis de s'arrêter avec la commande exacte pour lancer DeerFlow et la liste des configurations encore manquantes.
 
 ## Démarrage rapide
 

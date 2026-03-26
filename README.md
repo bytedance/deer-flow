@@ -48,6 +48,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Official Website](#official-website)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
+  - [One-Line Agent Setup](#one-line-agent-setup)
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
     - [Running the Application](#running-the-application)
@@ -74,6 +75,16 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Acknowledgments](#acknowledgments)
     - [Key Contributors](#key-contributors)
   - [Star History](#star-history)
+
+## One-Line Agent Setup
+
+If you use Claude Code, Codex, Cursor, Windsurf, or another coding agent, you can hand it the setup instructions in one sentence:
+
+```text
+Help me clone DeerFlow if needed, then bootstrap it for local development by following https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
+```
+
+That prompt is intended for coding agents. It tells the agent to clone the repo if needed, choose Docker when available, and stop with the exact next command plus any missing config the user still needs to provide.
 
 ## Quick Start
 
