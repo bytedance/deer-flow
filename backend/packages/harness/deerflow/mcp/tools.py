@@ -100,7 +100,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         # Get all tools from all servers
         tools = await client.get_tools()
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
-        
+
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in tools:
             if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:

@@ -591,8 +591,8 @@ def test_codex_provider_strips_unsupported_max_tokens(monkeypatch):
     factory_module.create_chat_model(name="codex", thinking_enabled=True)
 
     assert "max_tokens" not in FakeChatModel.captured_kwargs
-    
-    
+
+
 def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
     model = ModelConfig(
         name="gpt-5-responses",
