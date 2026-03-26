@@ -428,8 +428,10 @@ class AioSandboxProvider(SandboxProvider):
         lock_path = paths.thread_dir(thread_id) / f"{sandbox_id}.lock"
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
+            locked = False
             try:
                 _lock_file_exclusive(lock_file)
+                locked = True
                 # Re-check in-process caches under the file lock in case another
                 # thread in this process won the race while we were waiting.
                 with self._lock:
@@ -463,7 +465,8 @@ class AioSandboxProvider(SandboxProvider):
 
                 return self._create_sandbox(thread_id, sandbox_id)
             finally:
-                _unlock_file(lock_file)
+                if locked:
+                    _unlock_file(lock_file)
 
     def _evict_oldest_warm(self) -> str | None:
         """Destroy the oldest container in the warm pool to free capacity.

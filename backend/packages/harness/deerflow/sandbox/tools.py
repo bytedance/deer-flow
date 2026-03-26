@@ -1,3 +1,4 @@
+import posixpath
 import re
 from pathlib import Path
 
@@ -192,9 +193,14 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
     relative = path[len(_ACP_WORKSPACE_VIRTUAL_PATH) :].lstrip("/")
     resolved = _join_path_preserving_style(host_path, relative)
 
-    # Preserve POSIX-style mock paths on Windows for testability and
-    # cross-platform consistency when callers provide slash-based paths.
     if "/" in host_path and "\\" not in host_path:
+        base_path = posixpath.normpath(host_path)
+        candidate_path = posixpath.normpath(resolved)
+        try:
+            if posixpath.commonpath([base_path, candidate_path]) != base_path:
+                raise PermissionError("Access denied: path traversal detected")
+        except ValueError:
+            raise PermissionError("Access denied: path traversal detected") from None
         return resolved
 
     resolved_path = Path(resolved).resolve()

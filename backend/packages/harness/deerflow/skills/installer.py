@@ -10,7 +10,7 @@ import shutil
 import stat
 import tempfile
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.loader import get_skills_root_path
 from deerflow.skills.validation import _validate_skill_frontmatter
@@ -32,6 +32,8 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
         return True
     path = PurePosixPath(normalized)
     if path.is_absolute():
+        return True
+    if PureWindowsPath(name).is_absolute():
         return True
     if ".." in path.parts:
         return True
