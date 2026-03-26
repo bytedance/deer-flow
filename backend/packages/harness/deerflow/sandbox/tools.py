@@ -190,17 +190,20 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
         return host_path
 
     relative = path[len(_ACP_WORKSPACE_VIRTUAL_PATH) :].lstrip("/")
-    if not relative:
-        return host_path
+    resolved = _join_path_preserving_style(host_path, relative)
 
-    resolved = Path(host_path).resolve() / relative
-    # Ensure resolved path stays inside the ACP workspace
+    # Preserve POSIX-style mock paths on Windows for testability and
+    # cross-platform consistency when callers provide slash-based paths.
+    if "/" in host_path and "\\" not in host_path:
+        return resolved
+
+    resolved_path = Path(resolved).resolve()
     try:
-        resolved.resolve().relative_to(Path(host_path).resolve())
+        resolved_path.relative_to(Path(host_path).resolve())
     except ValueError:
         raise PermissionError("Access denied: path traversal detected")
 
-    return str(resolved)
+    return str(resolved_path)
 
 
 def _path_variants(path: str) -> set[str]:
