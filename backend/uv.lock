@@ -17,6 +17,18 @@ members = [
 ]
 
 [[package]]
+name = "agent-client-protocol"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/7b/7cdac86db388809d9e3bc58cac88cc7dfa49b7615b98fab304a828cd7f8a/agent_client_protocol-0.8.1.tar.gz", hash = "sha256:1bbf15663bf51f64942597f638e32a6284c5da918055d9672d3510e965143dbd", size = 68866, upload-time = "2026-02-13T15:34:54.567Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4b/f3/219eeca0ad4a20843d4b9eaac5532f87018b9d25730a62a16f54f6c52d1a/agent_client_protocol-0.8.1-py3-none-any.whl", hash = "sha256:9421a11fd435b4831660272d169c3812d553bb7247049c138c3ca127e4b8af8e", size = 54529, upload-time = "2026-02-13T15:34:53.344Z" },
+]
+
+[[package]]
 name = "agent-sandbox"
 version = "0.0.19"
 source = { registry = "https://pypi.org/simple" }
@@ -694,6 +706,7 @@ name = "deerflow-harness"
 version = "0.1.0"
 source = { editable = "packages/harness" }
 dependencies = [
+    { name = "agent-client-protocol" },
     { name = "agent-sandbox" },
     { name = "ddgs" },
     { name = "dotenv" },
@@ -724,6 +737,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-client-protocol", specifier = ">=0.4.0" },
     { name = "agent-sandbox", specifier = ">=0.0.19" },
     { name = "ddgs", specifier = ">=9.10.0" },
     { name = "dotenv", specifier = ">=0.9.9" },
