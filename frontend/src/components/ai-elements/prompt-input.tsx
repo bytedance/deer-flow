@@ -1186,7 +1186,7 @@ export const PromptInputSpeechButton = ({
         recognitionRef.current.stop();
       }
     };
-  }, [textareaRef, onTranscriptionChange]);
+  }, []);
 
   const toggleListening = useCallback(() => {
     if (!recognition) {
