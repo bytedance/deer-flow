@@ -321,6 +321,10 @@ export const enUS: Translations = {
         "This fact will be removed from memory immediately. This action cannot be undone.",
       factDeleteSuccess: "Fact deleted",
       noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
       markdown: {
         overview: "Overview",
         userContext: "User context",

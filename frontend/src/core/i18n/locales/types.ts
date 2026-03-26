@@ -255,6 +255,9 @@ export interface Translations {
       factDeleteConfirmDescription: string;
       factDeleteSuccess: string;
       noFacts: string;
+      summaryReadOnly: string;
+      memoryFullyEmpty: string;
+      factPreviewLabel: string;
       markdown: {
         overview: string;
         userContext: string;

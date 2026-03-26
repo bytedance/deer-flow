@@ -27,6 +27,15 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
+interface MemoryFact {
+  id: string;
+  content: string;
+  category: string;
+  confidence: number;
+  createdAt: string;
+  source: string;
+}
+
 function confidenceToLevelKey(confidence: unknown): {
   key: "veryHigh" | "high" | "normal" | "unknown";
   value?: number;
@@ -149,13 +158,32 @@ function memoryToMarkdown(
   return out.join("\n");
 }
 
+function isMemorySummaryEmpty(memory: UserMemory) {
+  return (
+    memory.user.workContext.summary.trim() === "" &&
+    memory.user.personalContext.summary.trim() === "" &&
+    memory.user.topOfMind.summary.trim() === "" &&
+    memory.history.recentMonths.summary.trim() === "" &&
+    memory.history.earlierContext.summary.trim() === "" &&
+    memory.history.longTermBackground.summary.trim() === ""
+  );
+}
+
+function truncateFactPreview(content: string, maxLength = 140) {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
   const clearMemory = useClearMemory();
   const deleteMemoryFact = useDeleteMemoryFact();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
-  const [factToDelete, setFactToDelete] = useState<string | null>(null);
+  const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
 
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
   const clearAllConfirmTitle =
@@ -173,6 +201,13 @@ export function MemorySettingsPage() {
   const factDeleteSuccess =
     t.settings.memory.factDeleteSuccess ?? "Fact deleted";
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
+  const summaryReadOnly =
+    t.settings.memory.summaryReadOnly ??
+    "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.";
+  const memoryFullyEmpty =
+    t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
+  const factPreviewLabel =
+    t.settings.memory.factPreviewLabel ?? "Fact to delete";
 
   async function handleClearMemory() {
     try {
@@ -188,7 +223,7 @@ export function MemorySettingsPage() {
     if (!factToDelete) return;
 
     try {
-      await deleteMemoryFact.mutateAsync(factToDelete);
+      await deleteMemoryFact.mutateAsync(factToDelete.id);
       toast.success(factDeleteSuccess);
       setFactToDelete(null);
     } catch (err) {
@@ -212,6 +247,12 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
+            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
+              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+                {memoryFullyEmpty}
+              </div>
+            ) : null}
+
             <div className="flex justify-end">
               <Button
                 variant="destructive"
@@ -223,6 +264,9 @@ export function MemorySettingsPage() {
             </div>
 
             <div className="rounded-lg border p-4">
+              <div className="text-muted-foreground mb-4 text-sm">
+                {summaryReadOnly}
+              </div>
               <Streamdown
                 className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                 {...streamdownPlugins}
@@ -286,7 +330,7 @@ export function MemorySettingsPage() {
                           variant="ghost"
                           size="icon"
                           className="text-destructive hover:text-destructive shrink-0"
-                          onClick={() => setFactToDelete(fact.id)}
+                          onClick={() => setFactToDelete(fact)}
                           disabled={deleteMemoryFact.isPending}
                           title={t.common.delete}
                         >
@@ -344,6 +388,16 @@ export function MemorySettingsPage() {
               {factDeleteConfirmDescription}
             </DialogDescription>
           </DialogHeader>
+          {factToDelete ? (
+            <div className="bg-muted rounded-md border p-3 text-sm">
+              <div className="text-muted-foreground mb-1 font-medium">
+                {factPreviewLabel}
+              </div>
+              <p className="break-words">
+                {truncateFactPreview(factToDelete.content)}
+              </p>
+            </div>
+          ) : null}
           <DialogFooter>
             <Button
               variant="outline"
