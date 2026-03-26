@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from starlette.requests import Request
+from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
 
@@ -25,3 +26,16 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
 
     assert bytes(response.body).decode("utf-8") == text
     assert response.media_type == "text/plain"
+
+
+def test_get_artifact_forces_download_for_html(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "poc.html"
+    artifact_path.write_text("<html><body><script>alert('xss')</script></body></html>", encoding="utf-8")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/poc.html", request))
+
+    assert isinstance(response, FileResponse)
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
