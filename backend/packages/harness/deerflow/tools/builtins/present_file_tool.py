@@ -33,7 +33,7 @@ def _normalize_presented_filepath(
     if runtime.state is None:
         raise ValueError("Thread runtime state is not available")
 
-    thread_id = runtime.context.get("thread_id")
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
     if not thread_id:
         raise ValueError("Thread ID is not available in runtime context")
 
