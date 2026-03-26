@@ -11,6 +11,7 @@ from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
@@ -57,7 +58,7 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
 
     # Prepare model parameter
     if config.model_name:
-        model = config.model_name
+        model = create_chat_model(name=config.model_name, thinking_enabled=False)
     else:
         # Use a lightweight model for summarization to save costs
         # Falls back to default model if not explicitly specified
@@ -227,6 +228,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
+    # Add TokenUsageMiddleware when token_usage tracking is enabled
+    if get_app_config().token_usage.enabled:
+        middlewares.append(TokenUsageMiddleware())
+
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
 
@@ -243,6 +248,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
     if app_config.tool_search.enabled:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
         middlewares.append(DeferredToolFilterMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls

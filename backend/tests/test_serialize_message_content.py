@@ -53,7 +53,7 @@ class TestSerializeToolMessageContent:
     def test_string_chunks_are_joined_without_newlines(self):
         """Chunked string payloads should not get artificial separators."""
         msg = ToolMessage(
-            content=["{\"a\"", ": \"b\"}"] ,
+            content=['{"a"', ': "b"}'],
             tool_call_id="tc1",
             name="search",
         )
@@ -118,9 +118,7 @@ class TestExtractText:
         assert DeerFlowClient._extract_text("hello") == "hello"
 
     def test_list_text_blocks(self):
-        assert DeerFlowClient._extract_text(
-            [{"type": "text", "text": "hi"}]
-        ) == "hi"
+        assert DeerFlowClient._extract_text([{"type": "text", "text": "hi"}]) == "hi"
 
     def test_empty_list(self):
         assert DeerFlowClient._extract_text([]) == ""

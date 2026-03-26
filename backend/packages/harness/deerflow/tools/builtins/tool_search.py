@@ -9,6 +9,7 @@ call them until it fetches their full schema via the tool_search tool.
 Source-agnostic: no mention of MCP or tool origin.
 """
 
+import contextvars
 import json
 import logging
 import re
@@ -108,24 +109,31 @@ def _regex_score(pattern: str, entry: DeferredToolEntry) -> int:
     return len(regex.findall(f"{entry.name} {entry.description}"))
 
 
-# ── Singleton ──
+# ── Per-request registry (ContextVar) ──
+#
+# Using a ContextVar instead of a module-level global prevents concurrent
+# requests from clobbering each other's registry.  In asyncio-based LangGraph
+# each graph run executes in its own async context, so each request gets an
+# independent registry value.  For synchronous tools run via
+# loop.run_in_executor, Python copies the current context to the worker thread,
+# so the ContextVar value is correctly inherited there too.
 
-_registry: DeferredToolRegistry | None = None
+_registry_var: contextvars.ContextVar[DeferredToolRegistry | None] = contextvars.ContextVar(
+    "deferred_tool_registry", default=None
+)
 
 
 def get_deferred_registry() -> DeferredToolRegistry | None:
-    return _registry
+    return _registry_var.get()
 
 
 def set_deferred_registry(registry: DeferredToolRegistry) -> None:
-    global _registry
-    _registry = registry
+    _registry_var.set(registry)
 
 
 def reset_deferred_registry() -> None:
-    """Reset the deferred registry singleton. Useful for testing."""
-    global _registry
-    _registry = None
+    """Reset the deferred registry for the current async context."""
+    _registry_var.set(None)
 
 
 # ── Tool ──

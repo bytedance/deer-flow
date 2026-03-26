@@ -163,7 +163,7 @@ class TestExtractText:
         assert _extract_text(["raw string"]) == "raw string"
 
     def test_list_string_chunks_join_without_separator(self):
-        content = ["{\"user\"", ': "alice"}']
+        content = ['{"user"', ': "alice"}']
         assert _extract_text(content) == '{"user": "alice"}'
 
     def test_list_mixed_strings_and_blocks(self):

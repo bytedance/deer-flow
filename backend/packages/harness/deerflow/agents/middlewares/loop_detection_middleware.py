@@ -21,7 +21,7 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -61,16 +61,9 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
-_WARNING_MSG = (
-    "[LOOP DETECTED] You are repeating the same tool calls. "
-    "Stop calling tools and produce your final answer now. "
-    "If you cannot complete the task, summarize what you accomplished so far."
-)
+_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
-_HARD_STOP_MSG = (
-    "[FORCED STOP] Repeated tool calls exceeded the safety limit. "
-    "Producing final answer with results collected so far."
-)
+_HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
 
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
@@ -106,7 +99,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
-        thread_id = runtime.context.get("thread_id")
+        thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id:
             return thread_id
         return "default"
@@ -153,7 +146,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             history = self._history[thread_id]
             history.append(call_hash)
             if len(history) > self.window_size:
-                history[:] = history[-self.window_size:]
+                history[:] = history[-self.window_size :]
 
             count = history.count(call_hash)
             tool_names = [tc.get("name", "?") for tc in tool_calls]
@@ -196,15 +189,22 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # Strip tool_calls from the last AIMessage to force text output
             messages = state.get("messages", [])
             last_msg = messages[-1]
-            stripped_msg = last_msg.model_copy(update={
-                "tool_calls": [],
-                "content": (last_msg.content or "") + f"\n\n{_HARD_STOP_MSG}",
-            })
+            stripped_msg = last_msg.model_copy(
+                update={
+                    "tool_calls": [],
+                    "content": (last_msg.content or "") + f"\n\n{_HARD_STOP_MSG}",
+                }
+            )
             return {"messages": [stripped_msg]}
 
         if warning:
-            # Inject a system message warning the model
-            return {"messages": [SystemMessage(content=warning)]}
+            # Inject as HumanMessage instead of SystemMessage to avoid
+            # Anthropic's "multiple non-consecutive system messages" error.
+            # Anthropic models require system messages only at the start of
+            # the conversation; injecting one mid-conversation crashes
+            # langchain_anthropic's _format_messages(). HumanMessage works
+            # with all providers. See #1299.
+            return {"messages": [HumanMessage(content=warning)]}
 
         return None
 
