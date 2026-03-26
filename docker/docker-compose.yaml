@@ -50,6 +50,7 @@ services:
     container_name: deer-flow-frontend
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - TZ=${TZ:-UTC}
     env_file:
       - ../frontend/.env
     networks:
@@ -94,6 +95,7 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:
@@ -146,6 +148,7 @@ services:
       # Disable LangSmith tracing — LANGSMITH_API_KEY is not required.
       # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
       - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:
@@ -174,6 +177,7 @@ services:
       - KUBECONFIG_PATH=/root/.kube/config
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:

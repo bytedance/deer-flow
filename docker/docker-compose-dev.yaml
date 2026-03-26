@@ -43,6 +43,7 @@ services:
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
       # which is unreachable from inside the container
       - K8S_API_SERVER=https://host.docker.internal:26443
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:
@@ -100,6 +101,7 @@ services:
       - NODE_ENV=development
       - WATCHPACK_POLLING=true
       - CI=true
+      - TZ=${TZ:-UTC}
     env_file:
       - ../frontend/.env
     networks:
@@ -149,6 +151,7 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:
@@ -201,6 +204,7 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - TZ=${TZ:-UTC}
     env_file:
       - ../.env
     extra_hosts:
