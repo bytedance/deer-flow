@@ -1,3 +1,4 @@
+import posixpath
 import re
 from pathlib import Path
 
@@ -99,8 +100,8 @@ def _resolve_skills_path(path: str) -> str:
     if path == skills_container:
         return skills_host
 
-    relative = path[len(skills_container) :].lstrip("/")
-    return str(Path(skills_host) / relative) if relative else skills_host
+    relative = path[len(skills_container):].lstrip("/")
+    return _join_path_preserving_style(skills_host, relative)
 
 
 def _is_acp_workspace_path(path: str) -> bool:
@@ -190,21 +191,37 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
         return host_path
 
     relative = path[len(_ACP_WORKSPACE_VIRTUAL_PATH) :].lstrip("/")
-    if not relative:
-        return host_path
+    resolved = _join_path_preserving_style(host_path, relative)
 
-    resolved = Path(host_path).resolve() / relative
-    # Ensure resolved path stays inside the ACP workspace
+    if "/" in host_path and "\\" not in host_path:
+        base_path = posixpath.normpath(host_path)
+        candidate_path = posixpath.normpath(resolved)
+        try:
+            if posixpath.commonpath([base_path, candidate_path]) != base_path:
+                raise PermissionError("Access denied: path traversal detected")
+        except ValueError:
+            raise PermissionError("Access denied: path traversal detected") from None
+        return resolved
+
+    resolved_path = Path(resolved).resolve()
     try:
-        resolved.resolve().relative_to(Path(host_path).resolve())
+        resolved_path.relative_to(Path(host_path).resolve())
     except ValueError:
         raise PermissionError("Access denied: path traversal detected")
 
-    return str(resolved)
+    return str(resolved_path)
 
 
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
+
+
+def _join_path_preserving_style(base: str, relative: str) -> str:
+    if not relative:
+        return base
+    if "/" in base and "\\" not in base:
+        return f"{base.rstrip('/')}/{relative}"
+    return str(Path(base) / relative)
 
 
 def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
@@ -249,7 +266,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             return actual_base
         if path.startswith(f"{virtual_base}/"):
             rest = path[len(virtual_base) :].lstrip("/")
-            return str(Path(actual_base) / rest) if rest else actual_base
+            return _join_path_preserving_style(actual_base, rest)
 
     return path
 
