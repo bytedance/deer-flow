@@ -60,6 +60,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
+    # Flush pending memory updates before shutdown to reduce data loss
+    # within debounce windows.
+    try:
+        from deerflow.agents.memory.queue import get_memory_queue
+
+        get_memory_queue().flush()
+    except Exception:
+        logger.exception("Failed to flush memory queue during shutdown")
+
     # Stop channel service on shutdown
     try:
         from app.channels.service import stop_channel_service
