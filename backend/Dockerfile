@@ -33,6 +33,35 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional: Install acli (Atlassian CLI) for Jira integration
+# Set INSTALL_ACLI=true to include acli in the image
+ARG INSTALL_ACLI=false
+RUN if [ "$INSTALL_ACLI" = "true" ]; then \
+        ARCH=$(dpkg --print-architecture) \
+        && case "$ARCH" in \
+            amd64) ACLI_ARCH="amd64" ;; \
+            arm64) ACLI_ARCH="arm64" ;; \
+            *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+        esac \
+        && curl -fsSL "https://acli.atlassian.com/linux/latest/acli_linux_${ACLI_ARCH}/acli" -o /tmp/acli \
+        && install -o root -g root -m 0755 /tmp/acli /usr/local/bin/acli \
+        && rm /tmp/acli; \
+    fi
+
+# Optional: Install GitHub CLI (gh) for PR creation and GitHub operations
+# Set INSTALL_GH=true to include gh in the image
+ARG INSTALL_GH=false
+RUN if [ "$INSTALL_GH" = "true" ]; then \
+        ARCH=$(dpkg --print-architecture) \
+        && curl -fsSL "https://github.com/cli/cli/releases/latest/download/gh_$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+')_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz \
+        && tar -xzf /tmp/gh.tar.gz -C /tmp \
+        && install -o root -g root -m 0755 /tmp/gh_*/bin/gh /usr/local/bin/gh \
+        && rm -rf /tmp/gh.tar.gz /tmp/gh_*; \
+    fi
+
+# Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
 
@@ -82,6 +111,12 @@ COPY --from=builder /app/backend ./backend
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024
+
+# Copy entrypoint script (handles acli auto-login before starting services)
+COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Default command (can be overridden in docker-compose)
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]

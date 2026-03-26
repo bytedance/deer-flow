@@ -35,6 +35,7 @@ THREAD_BUSY_MESSAGE = "This conversation is already processing another request. 
 
 CHANNEL_CAPABILITIES = {
     "feishu": {"supports_streaming": True},
+    "jira": {"supports_streaming": False},
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},

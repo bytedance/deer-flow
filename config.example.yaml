@@ -693,6 +693,12 @@ checkpointer:
 #     app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
 #     allowed_users: []               # empty = allow all
 #
+#   jira:
+#     enabled: false
+#     sse_url: $JIRA_WEBHOOK_SSE_URL       # SSE endpoint for Jira webhook events
+#     bot_account_id: "your-jira-bot-account-id"   # Jira account ID to watch for @mentions
+#     allowed_labels: []                    # Labels to match for task assignment events (empty = match all)
+#
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
