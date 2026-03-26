@@ -21,6 +21,7 @@ from typing import Any
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ class ClaudeChatModel(ChatAnthropic):
     prompt_cache_size: int = 3
     auto_thinking_budget: bool = True
     retry_max_attempts: int = MAX_RETRIES
-    _is_oauth: bool = False
-    _oauth_access_token: str = ""
+    _is_oauth: bool = PrivateAttr(default=False)
+    _oauth_access_token: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -82,20 +83,10 @@ class ClaudeChatModel(ChatAnthropic):
             else:
                 logger.warning("No Anthropic API key or explicit Claude Code OAuth credential found.")
 
-        # Detect OAuth token and configure Bearer auth
+        is_oauth_credential = is_oauth_token(current_key)
         if is_oauth_token(current_key):
-            self._is_oauth = True
-            self._oauth_access_token = current_key
             # Set the token as api_key temporarily (will be swapped to auth_token on client)
             self.anthropic_api_key = SecretStr(current_key)
-            # Add required beta headers for OAuth
-            self.default_headers = {
-                **(self.default_headers or {}),
-                "anthropic-beta": OAUTH_ANTHROPIC_BETAS,
-            }
-            # OAuth tokens have a limit of 4 cache_control blocks — disable prompt caching
-            self.enable_prompt_caching = False
-            logger.info("OAuth token detected — will use Authorization: Bearer header")
         else:
             if current_key:
                 self.anthropic_api_key = SecretStr(current_key)
@@ -106,11 +97,24 @@ class ClaudeChatModel(ChatAnthropic):
 
         super().model_post_init(__context)
 
-        # Patch clients immediately after creation for OAuth Bearer auth.
-        # This must happen after super() because clients are lazily created.
-        if self._is_oauth:
+        if is_oauth_credential:
+            self._configure_oauth(current_key, OAUTH_ANTHROPIC_BETAS)
+            # Patch clients immediately after creation for OAuth Bearer auth.
+            # This must happen after super() because clients are lazily created.
             self._patch_client_oauth(self._client)
             self._patch_client_oauth(self._async_client)
+
+    def _configure_oauth(self, access_token: str, beta_headers: str) -> None:
+        """Configure OAuth-specific settings after base model initialization."""
+        self._is_oauth = True
+        self._oauth_access_token = access_token
+        self.default_headers = {
+            **(self.default_headers or {}),
+            "anthropic-beta": beta_headers,
+        }
+        # OAuth tokens have a limit of 4 cache_control blocks — disable prompt caching
+        self.enable_prompt_caching = False
+        logger.info("OAuth token detected — will use Authorization: Bearer header")
 
     def _patch_client_oauth(self, client: Any) -> None:
         """Swap api_key → auth_token on an Anthropic SDK client for OAuth Bearer auth."""
@@ -191,6 +195,39 @@ class ClaudeChatModel(ChatAnthropic):
 
         max_tokens = payload.get("max_tokens", 8192)
         thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+
+    @staticmethod
+    def _strip_cache_control(payload: dict[str, Any]) -> None:
+        """Remove cache_control from payload blocks before sending OAuth requests."""
+        for section in ("system", "messages"):
+            items = payload.get(section, [])
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item.pop("cache_control", None)
+                content = item.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+
+        for tool in payload.get("tools", []):
+            if isinstance(tool, dict):
+                tool.pop("cache_control", None)
+
+    def _create(self, payload: dict) -> Any:
+        """Strip cache_control before OAuth requests are sent."""
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return super()._create(payload)
+
+    async def _acreate(self, payload: dict) -> Any:
+        """Strip cache_control before async OAuth requests are sent."""
+        if self._is_oauth:
+            self._strip_cache_control(payload)
+        return await super()._acreate(payload)
 
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, **kwargs: Any) -> Any:
         """Override with OAuth patching and retry logic."""

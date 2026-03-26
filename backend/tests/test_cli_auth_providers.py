@@ -6,7 +6,7 @@ import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.models.claude_provider import ClaudeChatModel
-from deerflow.models.credential_loader import CodexCliCredential
+from deerflow.models.credential_loader import ClaudeCodeCredential, CodexCliCredential
 from deerflow.models.openai_codex_provider import CodexChatModel
 
 
@@ -63,6 +63,80 @@ def test_codex_provider_flattens_structured_text_blocks(monkeypatch):
 def test_claude_provider_rejects_non_positive_retry_attempts():
     with pytest.raises(ValueError, match="retry_max_attempts must be >= 1"):
         ClaudeChatModel(model="claude-sonnet-4-6", retry_max_attempts=0)
+
+
+def test_claude_provider_preserves_oauth_settings_after_init(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.models.credential_loader.load_claude_code_credential",
+        lambda: ClaudeCodeCredential(
+            access_token="sk-ant-oat01-test-token",
+            source="test",
+        ),
+    )
+
+    model = ClaudeChatModel(model="claude-sonnet-4-6")
+
+    assert model._is_oauth is True
+    assert model.enable_prompt_caching is False
+    assert model.default_headers is not None
+    assert "anthropic-beta" in model.default_headers
+    assert model._client.api_key is None
+    assert model._client.auth_token == "sk-ant-oat01-test-token"
+
+
+def test_claude_provider_strips_cache_control_before_oauth_requests(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.models.credential_loader.load_claude_code_credential",
+        lambda: ClaudeCodeCredential(
+            access_token="sk-ant-oat01-test-token",
+            source="test",
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_create(self, payload):
+        captured["payload"] = payload
+        return payload
+
+    monkeypatch.setattr("langchain_anthropic.ChatAnthropic._create", fake_create)
+
+    model = ClaudeChatModel(model="claude-sonnet-4-6")
+    payload = {
+        "system": [
+            {
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "hello",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
+        "tools": [
+            {
+                "name": "bash",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
+
+    model._create(payload)
+
+    sent_payload = captured["payload"]
+    assert isinstance(sent_payload, dict)
+    assert "cache_control" not in sent_payload["system"][0]
+    assert "cache_control" not in sent_payload["messages"][0]["content"][0]
+    assert "cache_control" not in sent_payload["tools"][0]
 
 
 def test_codex_provider_skips_terminal_sse_markers(monkeypatch):
