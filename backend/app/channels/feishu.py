@@ -466,7 +466,7 @@ class FeishuChannel(Channel):
 
             # Parse message content
             content = json.loads(message.content)
-            
+
             if "text" in content:
                 # Handle plain text messages
                 text = content["text"]
@@ -486,13 +486,13 @@ class FeishuChannel(Channel):
                         if paragraph_text_parts:
                             # Join text segments within a paragraph with spaces to avoid "helloworld"
                             text_paragraphs.append(" ".join(paragraph_text_parts))
-                
+
                 # Join paragraphs with blank lines to preserve paragraph boundaries
                 text = "\n\n".join(text_paragraphs)
             else:
                 text = ""
             text = text.strip()
-            
+
             logger.info(
                 "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
                 chat_id,
