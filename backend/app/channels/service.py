@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
+    "dingtalk": "app.channels.dingtalk:DingTalkChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
