@@ -27,6 +27,12 @@ class WeComChannel(Channel):
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
 
+    def _clear_ws_context(self, thread_ts: str | None) -> None:
+        if not thread_ts:
+            return
+        self._ws_frames.pop(thread_ts, None)
+        self._ws_stream_ids.pop(thread_ts, None)
+
     async def start(self) -> None:
         if self._running:
             return
@@ -81,6 +87,29 @@ class WeComChannel(Channel):
             return
         logger.warning("[WeCom] send called but WebSocket client is not available")
 
+    async def _on_outbound(self, msg: OutboundMessage) -> None:
+        if msg.channel_name != self.name:
+            return
+
+        try:
+            await self.send(msg)
+        except Exception:
+            logger.exception("Failed to send outbound message on channel %s", self.name)
+            if msg.is_final:
+                self._clear_ws_context(msg.thread_ts)
+            return
+
+        for attachment in msg.attachments:
+            try:
+                success = await self.send_file(msg, attachment)
+                if not success:
+                    logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
+            except Exception:
+                logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+
+        if msg.is_final:
+            self._clear_ws_context(msg.thread_ts)
+
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not msg.is_final:
             return True
@@ -115,7 +144,7 @@ class WeComChannel(Channel):
 
             body = {media_type: {"media_id": media_id}, "msgtype": media_type}
             await self._ws_client.reply(frame, body)
-            logger.info("[WeCom] %s sent via ws: %s", media_type, attachment.filename)
+            logger.debug("[WeCom] %s sent via ws: %s", media_type, attachment.filename)
             return True
         except Exception:
             logger.exception("[WeCom] failed to upload/send file via ws: %s", attachment.filename)
@@ -263,9 +292,6 @@ class WeComChannel(Channel):
             for attempt in range(_max_retries):
                 try:
                     await self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final))
-                    if msg.is_final:
-                        self._ws_frames.pop(msg.thread_ts, None)
-                        self._ws_stream_ids.pop(msg.thread_ts, None)
                     return
                 except Exception as exc:
                     last_exc = exc
@@ -297,7 +323,6 @@ class WeComChannel(Channel):
     ) -> str | None:
         if not self._ws_client:
             return None
-
         try:
             from aibot import generate_req_id
         except Exception:
