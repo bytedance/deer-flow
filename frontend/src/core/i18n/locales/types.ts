@@ -247,14 +247,14 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
-      clearAll?: string;
-      clearAllConfirmTitle?: string;
-      clearAllConfirmDescription?: string;
-      clearAllSuccess?: string;
-      factDeleteConfirmTitle?: string;
-      factDeleteConfirmDescription?: string;
-      factDeleteSuccess?: string;
-      noFacts?: string;
+      clearAll: string;
+      clearAllConfirmTitle: string;
+      clearAllConfirmDescription: string;
+      clearAllSuccess: string;
+      factDeleteConfirmTitle: string;
+      factDeleteConfirmDescription: string;
+      factDeleteSuccess: string;
+      noFacts: string;
       markdown: {
         overview: string;
         userContext: string;

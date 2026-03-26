@@ -298,6 +298,16 @@ export const zhCN: Translations = {
         "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
+      clearAll: "清空全部记忆",
+      clearAllConfirmTitle: "要清空全部记忆吗？",
+      clearAllConfirmDescription:
+        "这会删除所有已保存的摘要和事实。此操作无法撤销。",
+      clearAllSuccess: "已清空全部记忆",
+      factDeleteConfirmTitle: "要删除这条事实吗？",
+      factDeleteConfirmDescription:
+        "这条事实会立即从记忆中删除。此操作无法撤销。",
+      factDeleteSuccess: "事实已删除",
+      noFacts: "还没有保存的事实。",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",
