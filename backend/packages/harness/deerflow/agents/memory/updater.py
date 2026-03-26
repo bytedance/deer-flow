@@ -116,6 +116,37 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     return memory_data
 
 
+def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> bool:
+    """Delete a single fact by ID.
+
+    Args:
+        fact_id: The unique identifier of the fact to delete.
+        agent_name: If provided, deletes from per-agent memory. If None, deletes from global memory.
+
+    Returns:
+        True if the fact was found and deleted, False if not found.
+    """
+    memory_data = get_memory_data(agent_name)
+    original_count = len(memory_data.get("facts", []))
+    memory_data["facts"] = [f for f in memory_data.get("facts", []) if f.get("id") != fact_id]
+    if len(memory_data["facts"]) == original_count:
+        return False
+    return _save_memory_to_file(memory_data, agent_name)
+
+
+def clear_memory(agent_name: str | None = None) -> bool:
+    """Clear all memory data, resetting to the empty state.
+
+    Args:
+        agent_name: If provided, clears per-agent memory. If None, clears global memory.
+
+    Returns:
+        True if memory was cleared successfully, False otherwise.
+    """
+    empty = _create_empty_memory()
+    return _save_memory_to_file(empty, agent_name)
+
+
 def _extract_text(content: Any) -> str:
     """Extract plain text from LLM response content (str or list of content blocks).
 

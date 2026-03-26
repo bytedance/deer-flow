@@ -1,9 +1,9 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.updater import get_memory_data, reload_memory_data
+from deerflow.agents.memory.updater import clear_memory, delete_memory_fact, get_memory_data, reload_memory_data
 from deerflow.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
@@ -199,3 +199,53 @@ async def get_memory_status() -> MemoryStatusResponse:
         ),
         data=MemoryResponse(**memory_data),
     )
+
+
+class DeleteFactResponse(BaseModel):
+    """Response model for fact deletion."""
+
+    success: bool = Field(..., description="Whether the fact was deleted")
+
+
+@router.delete(
+    "/memory/facts/{fact_id}",
+    response_model=DeleteFactResponse,
+    summary="Delete Memory Fact",
+    description="Delete a single fact from memory by its ID.",
+)
+async def delete_fact(fact_id: str) -> DeleteFactResponse:
+    """Delete a specific memory fact.
+
+    Args:
+        fact_id: The unique identifier of the fact to delete.
+
+    Returns:
+        Success status.
+
+    Raises:
+        HTTPException: 404 if the fact ID was not found.
+    """
+    success = delete_memory_fact(fact_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Fact with id '{fact_id}' not found")
+    return DeleteFactResponse(success=True)
+
+
+@router.delete(
+    "/memory",
+    response_model=MemoryResponse,
+    summary="Clear All Memory",
+    description="Clear all memory data, resetting user context, history, and facts to empty state.",
+)
+async def clear_all_memory() -> MemoryResponse:
+    """Clear all memory data.
+
+    This resets the entire memory to its initial empty state,
+    removing all user context, history summaries, and facts.
+
+    Returns:
+        The cleared (empty) memory data.
+    """
+    clear_memory()
+    memory_data = get_memory_data()
+    return MemoryResponse(**memory_data)
