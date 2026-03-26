@@ -86,7 +86,7 @@ models:
   #   display_name: Gemini 2.5 Pro
   #   use: langchain_google_genai:ChatGoogleGenerativeAI
   #   model: gemini-2.5-pro
-  #   gemini_api_key: $GEMINI_API_KEY
+  #   google_api_key: $GOOGLE_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true
 
@@ -516,6 +516,12 @@ checkpointer:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
 #     app_secret: $FEISHU_APP_SECRET
+#
+#   dingtalk:
+#     enabled: false
+#     app_key: $DINGTALK_APP_KEY       # AppKey from DingTalk Open Platform
+#     app_secret: $DINGTALK_APP_SECRET # AppSecret from DingTalk Open Platform
+#     allowed_users: []                # empty = allow all
 #
 #   slack:
 #     enabled: false
