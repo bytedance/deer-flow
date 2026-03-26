@@ -2,8 +2,12 @@
 
 import json
 import logging
+import os
 import re
+import threading
 import uuid
+from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +21,11 @@ from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 def _get_memory_file_path(agent_name: str | None = None) -> Path:
@@ -62,6 +71,57 @@ def _create_empty_memory() -> dict[str, Any]:
 # Per-agent memory cache: keyed by agent_name (None = global)
 # Value: (memory_data, file_mtime)
 _memory_cache: dict[str | None, tuple[dict[str, Any], float | None]] = {}
+_memory_cache_lock = threading.Lock()
+_memory_file_locks: dict[str, threading.RLock] = {}
+_memory_file_locks_guard = threading.Lock()
+
+
+def _get_local_memory_lock(file_path: Path) -> threading.RLock:
+    """Get an in-process lock for the target memory file path."""
+    key = str(file_path.resolve())
+    with _memory_file_locks_guard:
+        lock = _memory_file_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _memory_file_locks[key] = lock
+        return lock
+
+
+def _acquire_os_file_lock(lock_file) -> None:
+    """Acquire cross-process exclusive lock for the given lock file."""
+    if os.name == "nt":
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+
+def _release_os_file_lock(lock_file) -> None:
+    """Release cross-process lock for the given lock file."""
+    if os.name == "nt":
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _memory_file_lock(file_path: Path):
+    """Lock memory file across threads and processes."""
+    local_lock = _get_local_memory_lock(file_path)
+    with local_lock:
+        lock_path = file_path.with_name(f"{file_path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as lock_file:
+            # Ensure at least 1 byte exists so region locking works on Windows.
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            _acquire_os_file_lock(lock_file)
+            try:
+                yield
+            finally:
+                _release_os_file_lock(lock_file)
 
 
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
@@ -84,15 +144,17 @@ def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     except OSError:
         current_mtime = None
 
-    cached = _memory_cache.get(agent_name)
+    with _memory_cache_lock:
+        cached = _memory_cache.get(agent_name)
 
     # Invalidate cache if file has been modified or doesn't exist
     if cached is None or cached[1] != current_mtime:
         memory_data = _load_memory_from_file(agent_name)
-        _memory_cache[agent_name] = (memory_data, current_mtime)
-        return memory_data
+        with _memory_cache_lock:
+            _memory_cache[agent_name] = (memory_data, current_mtime)
+        return deepcopy(memory_data)
 
-    return cached[0]
+    return deepcopy(cached[0])
 
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
@@ -112,8 +174,9 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     except OSError:
         mtime = None
 
-    _memory_cache[agent_name] = (memory_data, mtime)
-    return memory_data
+    with _memory_cache_lock:
+        _memory_cache[agent_name] = (memory_data, mtime)
+    return deepcopy(memory_data)
 
 
 def _extract_text(content: Any) -> str:
@@ -242,7 +305,7 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         memory_data["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
 
         # Write atomically using temp file
-        temp_path = file_path.with_suffix(".tmp")
+        temp_path = file_path.with_name(f"{file_path.name}.{uuid.uuid4().hex}.tmp")
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
@@ -255,7 +318,8 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
         except OSError:
             mtime = None
 
-        _memory_cache[agent_name] = (memory_data, mtime)
+        with _memory_cache_lock:
+            _memory_cache[agent_name] = (deepcopy(memory_data), mtime)
 
         logger.info("Memory saved to %s", file_path)
         return True
@@ -328,17 +392,21 @@ class MemoryUpdater:
 
             update_data = json.loads(response_text)
 
-            # Apply updates
-            updated_memory = self._apply_updates(current_memory, update_data, thread_id)
+            file_path = _get_memory_file_path(agent_name)
+            with _memory_file_lock(file_path):
+                # Reload latest state under lock to reduce lost updates when
+                # multiple workers/processes update memory concurrently.
+                latest_memory = _load_memory_from_file(agent_name)
+                updated_memory = self._apply_updates(latest_memory, update_data, thread_id)
 
-            # Strip file-upload mentions from all summaries before saving.
-            # Uploaded files are session-scoped and won't exist in future sessions,
-            # so recording upload events in long-term memory causes the agent to
-            # try (and fail) to locate those files in subsequent conversations.
-            updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+                # Strip file-upload mentions from all summaries before saving.
+                # Uploaded files are session-scoped and won't exist in future sessions,
+                # so recording upload events in long-term memory causes the agent to
+                # try (and fail) to locate those files in subsequent conversations.
+                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
 
-            # Save
-            return _save_memory_to_file(updated_memory, agent_name)
+                # Save
+                return _save_memory_to_file(updated_memory, agent_name)
 
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
