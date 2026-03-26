@@ -16,6 +16,7 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
+    "wecom-aibot-python-sdk>=0.1.0",
 ]
 
 [dependency-groups]
@@ -23,6 +24,10 @@ dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
 
 [tool.uv.workspace]
 members = ["packages/harness"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
