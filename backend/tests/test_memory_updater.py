@@ -1,7 +1,12 @@
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
-from deerflow.agents.memory.updater import MemoryUpdater, _extract_text
+from deerflow.agents.memory.updater import (
+    MemoryUpdater,
+    _extract_text,
+    clear_memory_data,
+    delete_memory_fact,
+)
 from deerflow.config.memory_config import MemoryConfig
 
 
@@ -136,6 +141,57 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     ]
     assert all(fact["content"] != "User likes noisy logs" for fact in result["facts"])
     assert result["facts"][1]["source"] == "thread-9"
+
+
+def test_clear_memory_data_resets_all_sections() -> None:
+    with patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True):
+        result = clear_memory_data()
+
+    assert result["version"] == "1.0"
+    assert result["facts"] == []
+    assert result["user"]["workContext"]["summary"] == ""
+    assert result["history"]["recentMonths"]["summary"] == ""
+
+
+def test_delete_memory_fact_removes_only_matching_fact() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_keep",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_delete",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-b",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = delete_memory_fact("fact_delete")
+
+    assert [fact["id"] for fact in result["facts"]] == ["fact_keep"]
+
+
+def test_delete_memory_fact_raises_for_unknown_id() -> None:
+    with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
+        try:
+            delete_memory_fact("fact_missing")
+        except KeyError as exc:
+            assert exc.args == ("fact_missing",)
+        else:
+            raise AssertionError("Expected KeyError for missing fact id")
 
 
 # ---------------------------------------------------------------------------

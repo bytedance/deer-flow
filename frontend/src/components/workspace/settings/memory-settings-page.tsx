@@ -1,9 +1,25 @@
 "use client";
 
+import { Trash2Icon } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
-import { useMemory } from "@/core/memory/hooks";
+import {
+  useClearMemory,
+  useDeleteMemoryFact,
+  useMemory,
+} from "@/core/memory/hooks";
 import type { UserMemory } from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
@@ -114,28 +130,6 @@ function memoryToMarkdown(
     ),
   );
 
-  parts.push(`\n## ${t.settings.memory.markdown.facts}`);
-  if (memory.facts.length === 0) {
-    parts.push(
-      `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`,
-    );
-  } else {
-    parts.push(
-      [
-        `| ${t.settings.memory.markdown.table.category} | ${t.settings.memory.markdown.table.confidence} | ${t.settings.memory.markdown.table.content} | ${t.settings.memory.markdown.table.source} | ${t.settings.memory.markdown.table.createdAt} |`,
-        "|---|---|---|---|---|",
-        ...memory.facts.map((f) => {
-          const { key, value } = confidenceToLevelKey(f.confidence);
-          const levelLabel =
-            t.settings.memory.markdown.table.confidenceLevel[key];
-          const confidenceText =
-            typeof value === "number" ? `${levelLabel}` : levelLabel;
-          return `| ${upperFirst(f.category)} | ${confidenceText} | ${f.content} | [${t.settings.memory.markdown.table.view}](${pathOfThread(f.source)}) | ${formatTimeAgo(f.createdAt)} |`;
-        }),
-      ].join("\n"),
-    );
-  }
-
   const markdown = parts.join("\n\n");
 
   // Ensure every level-2 heading (##) is preceded by a horizontal rule.
@@ -158,30 +152,217 @@ function memoryToMarkdown(
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
+  const clearMemory = useClearMemory();
+  const deleteMemoryFact = useDeleteMemoryFact();
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [factToDelete, setFactToDelete] = useState<string | null>(null);
+
+  const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
+  const clearAllConfirmTitle =
+    t.settings.memory.clearAllConfirmTitle ?? "Clear all memory?";
+  const clearAllConfirmDescription =
+    t.settings.memory.clearAllConfirmDescription ??
+    "This will remove all saved summaries and facts. This action cannot be undone.";
+  const clearAllSuccess =
+    t.settings.memory.clearAllSuccess ?? "All memory cleared";
+  const factDeleteConfirmTitle =
+    t.settings.memory.factDeleteConfirmTitle ?? "Delete this fact?";
+  const factDeleteConfirmDescription =
+    t.settings.memory.factDeleteConfirmDescription ??
+    "This fact will be removed from memory immediately. This action cannot be undone.";
+  const factDeleteSuccess =
+    t.settings.memory.factDeleteSuccess ?? "Fact deleted";
+  const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
+
+  async function handleClearMemory() {
+    try {
+      await clearMemory.mutateAsync();
+      toast.success(clearAllSuccess);
+      setClearDialogOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDeleteFact() {
+    if (!factToDelete) return;
+
+    try {
+      await deleteMemoryFact.mutateAsync(factToDelete);
+      toast.success(factDeleteSuccess);
+      setFactToDelete(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
-    <SettingsSection
-      title={t.settings.memory.title}
-      description={t.settings.memory.description}
-    >
-      {isLoading ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : error ? (
-        <div>Error: {error.message}</div>
-      ) : !memory ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.memory.empty}
-        </div>
-      ) : (
-        <div className="rounded-lg border p-4">
-          <Streamdown
-            className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-            {...streamdownPlugins}
-          >
-            {memoryToMarkdown(memory, t)}
-          </Streamdown>
-        </div>
-      )}
-    </SettingsSection>
+    <>
+      <SettingsSection
+        title={t.settings.memory.title}
+        description={t.settings.memory.description}
+      >
+        {isLoading ? (
+          <div className="text-muted-foreground text-sm">{t.common.loading}</div>
+        ) : error ? (
+          <div>Error: {error.message}</div>
+        ) : !memory ? (
+          <div className="text-muted-foreground text-sm">
+            {t.settings.memory.empty}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button
+                variant="destructive"
+                onClick={() => setClearDialogOpen(true)}
+                disabled={clearMemory.isPending}
+              >
+                {clearMemory.isPending ? t.common.loading : clearAllLabel}
+              </Button>
+            </div>
+
+            <div className="rounded-lg border p-4">
+              <Streamdown
+                className="size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                {...streamdownPlugins}
+              >
+                {memoryToMarkdown(memory, t)}
+              </Streamdown>
+            </div>
+
+            <div className="rounded-lg border p-4">
+              <div className="mb-4">
+                <h3 className="text-base font-medium">
+                  {t.settings.memory.markdown.facts}
+                </h3>
+              </div>
+
+              {memory.facts.length === 0 ? (
+                <div className="text-muted-foreground text-sm">{noFacts}</div>
+              ) : (
+                <div className="space-y-3">
+                  {memory.facts.map((fact) => {
+                    const { key } = confidenceToLevelKey(fact.confidence);
+                    const confidenceText =
+                      t.settings.memory.markdown.table.confidenceLevel[key];
+
+                    return (
+                      <div
+                        key={fact.id}
+                        className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
+                      >
+                        <div className="min-w-0 space-y-2">
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.category}:
+                              </span>{" "}
+                              {upperFirst(fact.category)}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.confidence}:
+                              </span>{" "}
+                              {confidenceText}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.createdAt}:
+                              </span>{" "}
+                              {formatTimeAgo(fact.createdAt)}
+                            </span>
+                          </div>
+                          <p className="break-words text-sm">{fact.content}</p>
+                          <a
+                            href={pathOfThread(fact.source)}
+                            className="text-primary text-sm underline-offset-4 hover:underline"
+                          >
+                            {t.settings.memory.markdown.table.view}
+                          </a>
+                        </div>
+
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive shrink-0"
+                          onClick={() => setFactToDelete(fact.id)}
+                          disabled={deleteMemoryFact.isPending}
+                          title={t.common.delete}
+                        >
+                          <Trash2Icon className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </SettingsSection>
+
+      <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{clearAllConfirmTitle}</DialogTitle>
+            <DialogDescription>
+              {clearAllConfirmDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setClearDialogOpen(false)}
+              disabled={clearMemory.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleClearMemory()}
+              disabled={clearMemory.isPending}
+            >
+              {clearMemory.isPending ? t.common.loading : clearAllLabel}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={factToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFactToDelete(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{factDeleteConfirmTitle}</DialogTitle>
+            <DialogDescription>
+              {factDeleteConfirmDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setFactToDelete(null)}
+              disabled={deleteMemoryFact.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleDeleteFact()}
+              disabled={deleteMemoryFact.isPending}
+            >
+              {deleteMemoryFact.isPending ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
