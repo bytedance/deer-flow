@@ -1,13 +1,9 @@
 """Tests for AioSandboxProvider mount helpers."""
 
 import importlib
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deerflow.config.paths import Paths
-
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
