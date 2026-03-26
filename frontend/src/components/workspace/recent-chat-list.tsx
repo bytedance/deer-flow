@@ -6,12 +6,14 @@ import {
   FileText,
   MoreHorizontal,
   Pencil,
+  Search,
   Share2,
   Trash2,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useDeferredValue, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -65,6 +67,17 @@ export function RecentChatList() {
   const { data: threads = [] } = useThreads();
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const deferredQuery = useDeferredValue(searchQuery);
+  const filteredThreads = deferredQuery
+    ? threads.filter((thread) =>
+        titleOfThread(thread)
+          .toLowerCase()
+          .includes(deferredQuery.toLowerCase()),
+      )
+    : threads;
 
   // Rename dialog state
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -165,9 +178,32 @@ export function RecentChatList() {
             : t.sidebar.demoChats}
         </SidebarGroupLabel>
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
+          <div className="relative mb-2 px-1">
+            <Search className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2" />
+            <Input
+              className="h-7 pl-7 pr-7 text-xs"
+              placeholder={t.sidebar.searchThreads}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <button
+                className="text-muted-foreground hover:text-foreground absolute right-3 top-1/2 -translate-y-1/2"
+                onClick={() => setSearchQuery("")}
+                aria-label="Clear search"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
+          </div>
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+              {filteredThreads.length === 0 && searchQuery && (
+                <p className="text-muted-foreground px-2 py-4 text-center text-xs">
+                  {t.sidebar.noMatchingThreads}
+                </p>
+              )}
+              {filteredThreads.map((thread) => {
                 const isActive = pathOfThread(thread.thread_id) === pathname;
                 return (
                   <SidebarMenuItem
