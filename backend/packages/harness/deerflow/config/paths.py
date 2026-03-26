@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from pathlib import Path
 
 # Virtual path prefix seen by agents inside the sandbox
@@ -130,6 +131,17 @@ class Paths:
         """
         return self.thread_dir(thread_id) / "user-data" / "outputs"
 
+    def acp_workspace_dir(self, thread_id: str) -> Path:
+        """
+        Host path for the ACP workspace of a specific thread.
+        Host: `{base_dir}/threads/{thread_id}/acp-workspace/`
+        Sandbox: `/mnt/acp-workspace/`
+
+        Each thread gets its own isolated ACP workspace so that concurrent
+        sessions cannot read each other's ACP agent outputs.
+        """
+        return self.thread_dir(thread_id) / "acp-workspace"
+
     def sandbox_user_data_dir(self, thread_id: str) -> Path:
         """
         Host path for the user-data root.
@@ -146,14 +158,28 @@ class Paths:
         write to the volume-mounted paths without "Permission denied" errors.
         The explicit chmod() call is necessary because Path.mkdir(mode=...) is
         subject to the process umask and may not yield the intended permissions.
+
+        Includes the ACP workspace directory so it can be volume-mounted into
+        the sandbox container at ``/mnt/acp-workspace`` even before the first
+        ACP agent invocation.
         """
         for d in [
             self.sandbox_work_dir(thread_id),
             self.sandbox_uploads_dir(thread_id),
             self.sandbox_outputs_dir(thread_id),
+            self.acp_workspace_dir(thread_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
+
+    def delete_thread_dir(self, thread_id: str) -> None:
+        """Delete all persisted data for a thread.
+
+        The operation is idempotent: missing thread directories are ignored.
+        """
+        thread_dir = self.thread_dir(thread_id)
+        if thread_dir.exists():
+            shutil.rmtree(thread_dir)
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

@@ -123,15 +123,37 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
     logger.info(f"Converting script to audio using {max_workers} workers...")
 
     total = len(script.lines)
+    
+    # Handle empty script case
+    if total == 0:
+        raise ValueError("Script contains no lines to process")
+
+    # Validate required environment variables before starting TTS
+    if not os.getenv("VOLCENGINE_TTS_APPID") or not os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN"):
+        raise ValueError(
+            "Missing required environment variables: VOLCENGINE_TTS_APPID and VOLCENGINE_TTS_ACCESS_TOKEN must be set"
+        )
+
     tasks = [(i, line, total) for i, line in enumerate(script.lines)]
 
     # Use ThreadPoolExecutor for parallel TTS generation
     results: dict[int, Optional[bytes]] = {}
+    failed_indices: list[int] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_process_line, task): task[0] for task in tasks}
         for future in as_completed(futures):
             idx, audio = future.result()
             results[idx] = audio
+            # Use `not audio` to catch both None and empty bytes
+            if not audio:
+                failed_indices.append(idx)
+
+    # Log failed lines with 1-based indices for user-friendly output
+    if failed_indices:
+        logger.warning(
+            f"Failed to generate audio for {len(failed_indices)}/{total} lines: "
+            f"line numbers {sorted(i + 1 for i in failed_indices)}"
+        )
 
     # Collect results in order, skipping failed ones
     audio_chunks = []
@@ -140,15 +162,30 @@ def tts_node(script: Script, max_workers: int = 4) -> list[bytes]:
         if audio:
             audio_chunks.append(audio)
 
-    logger.info(f"Generated {len(audio_chunks)} audio chunks")
+    logger.info(f"Generated {len(audio_chunks)}/{total} audio chunks successfully")
+    
+    if not audio_chunks:
+        raise ValueError(
+            f"TTS generation failed for all {total} lines. "
+            "Please check VOLCENGINE_TTS_APPID and VOLCENGINE_TTS_ACCESS_TOKEN environment variables."
+        )
+    
     return audio_chunks
 
 
 def mix_audio(audio_chunks: list[bytes]) -> bytes:
     """Combine audio chunks into a single audio file."""
     logger.info("Mixing audio chunks...")
+    
+    if not audio_chunks:
+        raise ValueError("No audio chunks to mix - TTS generation may have failed")
+    
     output = b"".join(audio_chunks)
-    logger.info("Audio mixing complete")
+    
+    if len(output) == 0:
+        raise ValueError("Mixed audio is empty - TTS generation may have failed")
+    
+    logger.info(f"Audio mixing complete: {len(output)} bytes")
     return output
 
 

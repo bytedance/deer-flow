@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,14 @@ class TelegramChannel(Channel):
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
 
     # -- internal ----------------------------------------------------------
+    @staticmethod
+    def _log_future_error(fut, name: str, msg_id: str):
+        try:
+            exc = fut.exception()
+            if exc:
+                logger.error("[Telegram] %s failed for msg_id=%s: %s", name, msg_id, exc)
+        except Exception:
+            logger.exception("[Telegram] Failed to inspect future for %s (msg_id=%s)", name, msg_id)
 
     def _run_polling(self) -> None:
         """Run telegram polling in a dedicated thread."""
@@ -224,6 +232,10 @@ class TelegramChannel(Channel):
             return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
+    async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
+        await self._send_running_reply(chat_id, msg_id)
+        await self.bus.publish_inbound(inbound)
+
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
         if not self._check_user(update.effective_user.id):
@@ -255,8 +267,10 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+        else:
+            logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
     async def _on_text(self, update, context) -> None:
         """Handle regular text messages."""
@@ -295,5 +309,7 @@ class TelegramChannel(Channel):
         inbound.topic_id = topic_id
 
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
-            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
+            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+        else:
+            logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")

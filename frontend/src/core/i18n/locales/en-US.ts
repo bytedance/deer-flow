@@ -43,6 +43,10 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    export: "Export",
+    exportAsMarkdown: "Export as Markdown",
+    exportAsJSON: "Export as JSON",
+    exportSuccess: "Conversation exported",
   },
 
   // Welcome
@@ -268,6 +272,25 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+  },
+
+  // Token Usage
+  tokenUsage: {
+    title: "Token Usage",
+    input: "Input",
+    output: "Output",
+    total: "Total",
+  },
+  
+  // Shortcuts
+  shortcuts: {
+    searchActions: "Search actions...",
+    noResults: "No results found.",
+    actions: "Actions",
+    keyboardShortcuts: "Keyboard Shortcuts",
+    keyboardShortcutsDescription: "Navigate DeerFlow faster with keyboard shortcuts.",
+    openCommandPalette: "Open Command Palette",
+    toggleSidebar: "Toggle Sidebar",
   },
 
   // Settings

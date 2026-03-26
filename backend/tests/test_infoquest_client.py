@@ -123,16 +123,6 @@ class TestInfoQuestClient:
         assert cleaned[1]["type"] == "news"
         assert cleaned[1]["title"] == "Test News"
 
-    def test_clean_results_with_image_search(self):
-        """Test clean_results_with_image_search method with sample raw results."""
-        raw_results = [{"content": {"results": {"images_results": [{"image_url": "https://example.com/image1.jpg", "thumbnail_url": "https://example.com/thumb1.jpg", "url": "https://example.com/page1"}]}}}]
-        cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
-
-        assert len(cleaned) == 1
-        assert cleaned[0]["image_url"] == "https://example.com/image1.jpg"
-        assert cleaned[0]["thumbnail_url"] == "https://example.com/thumb1.jpg"
-        assert cleaned[0]["url"] == "https://example.com/page1"
-
     @patch("deerflow.community.infoquest.tools._get_infoquest_client")
     def test_web_search_tool(self, mock_get_client):
         """Test web_search_tool function."""
@@ -163,7 +153,12 @@ class TestInfoQuestClient:
     def test_get_infoquest_client(self, mock_get_app_config):
         """Test _get_infoquest_client function with config."""
         mock_config = MagicMock()
-        mock_config.get_tool_config.side_effect = [MagicMock(model_extra={"search_time_range": 24}), MagicMock(model_extra={"fetch_time": 10, "timeout": 30, "navigation_timeout": 60})]
+        # Add image_search config to the side_effect
+        mock_config.get_tool_config.side_effect = [
+            MagicMock(model_extra={"search_time_range": 24}),  # web_search config
+            MagicMock(model_extra={"fetch_time": 10, "timeout": 30, "navigation_timeout": 60}),  # web_fetch config
+            MagicMock(model_extra={"image_search_time_range": 7, "image_size": "l"}),  # image_search config
+        ]
         mock_get_app_config.return_value = mock_config
 
         client = tools._get_infoquest_client()
@@ -172,6 +167,8 @@ class TestInfoQuestClient:
         assert client.fetch_time == 10
         assert client.fetch_timeout == 30
         assert client.fetch_navigation_timeout == 60
+        assert client.image_search_time_range == 7
+        assert client.image_size == "l"
 
     @patch("deerflow.community.infoquest.infoquest_client.requests.post")
     def test_web_search_api_error(self, mock_post):
@@ -182,3 +179,170 @@ class TestInfoQuestClient:
         result = client.web_search("test query")
 
         assert "Error" in result
+
+    def test_clean_results_with_image_search(self):
+        """Test clean_results_with_image_search method with sample raw results."""
+        raw_results = [{"content": {"results": {"images_results": [{"original": "https://example.com/image1.jpg", "title": "Test Image 1", "url": "https://example.com/page1"}]}}}]
+        cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
+
+        assert len(cleaned) == 1
+        assert cleaned[0]["image_url"] == "https://example.com/image1.jpg"
+        assert cleaned[0]["title"] == "Test Image 1"
+
+    def test_clean_results_with_image_search_empty(self):
+        """Test clean_results_with_image_search method with empty results."""
+        raw_results = [{"content": {"results": {"images_results": []}}}]
+        cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
+
+        assert len(cleaned) == 0
+
+    def test_clean_results_with_image_search_no_images(self):
+        """Test clean_results_with_image_search method with no images_results field."""
+        raw_results = [{"content": {"results": {"organic": [{"title": "Test Page"}]}}}]
+        cleaned = InfoQuestClient.clean_results_with_image_search(raw_results)
+
+        assert len(cleaned) == 0
+
+
+class TestImageSearch:
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_raw_results_success(self, mock_post):
+        """Test successful image_search_raw_results operation."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"search_result": {"results": [{"content": {"results": {"images_results": [{"original": "https://example.com/image1.jpg", "title": "Test Image", "url": "https://example.com/page1"}]}}}]}}
+        mock_post.return_value = mock_response
+
+        client = InfoQuestClient()
+        result = client.image_search_raw_results("test query")
+
+        assert "search_result" in result
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert args[0] == "https://search.infoquest.bytepluses.com"
+        assert kwargs["json"]["query"] == "test query"
+
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_raw_results_with_parameters(self, mock_post):
+        """Test image_search_raw_results with all parameters."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"search_result": {"results": [{"content": {"results": {"images_results": [{"original": "https://example.com/image1.jpg"}]}}}]}}
+        mock_post.return_value = mock_response
+
+        client = InfoQuestClient(image_search_time_range=30, image_size="l")
+        client.image_search_raw_results(query="cat", site="unsplash.com", output_format="JSON")
+
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert kwargs["json"]["query"] == "cat"
+        assert kwargs["json"]["time_range"] == 30
+        assert kwargs["json"]["site"] == "unsplash.com"
+        assert kwargs["json"]["image_size"] == "l"
+        assert kwargs["json"]["format"] == "JSON"
+
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_raw_results_invalid_time_range(self, mock_post):
+        """Test image_search_raw_results with invalid time_range parameter."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_response.json.return_value = {"search_result": {"results": [{"content": {"results": {"images_results": []}}}]}}
+        mock_post.return_value = mock_response
+
+        # Create client with invalid time_range (should be ignored)
+        client = InfoQuestClient(image_search_time_range=400, image_size="x")
+        client.image_search_raw_results(
+            query="test",
+            site="",
+        )
+
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert kwargs["json"]["query"] == "test"
+        assert "time_range" not in kwargs["json"]
+        assert "image_size" not in kwargs["json"]
+
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_success(self, mock_post):
+        """Test successful image_search operation."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_response.json.return_value = {"search_result": {"results": [{"content": {"results": {"images_results": [{"original": "https://example.com/image1.jpg", "title": "Test Image", "url": "https://example.com/page1"}]}}}]}}
+        mock_post.return_value = mock_response
+
+        client = InfoQuestClient()
+        result = client.image_search("cat")
+
+        # Check if result is a valid JSON string with expected content
+        result_data = json.loads(result)
+
+        assert len(result_data) == 1
+
+        assert result_data[0]["image_url"] == "https://example.com/image1.jpg"
+
+        assert result_data[0]["title"] == "Test Image"
+
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_with_all_parameters(self, mock_post):
+        """Test image_search with all optional parameters."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_response.json.return_value = {"search_result": {"results": [{"content": {"results": {"images_results": [{"original": "https://example.com/image1.jpg"}]}}}]}}
+        mock_post.return_value = mock_response
+
+        # Create client with image search parameters
+        client = InfoQuestClient(image_search_time_range=7, image_size="m")
+        client.image_search(query="dog", site="flickr.com", output_format="JSON")
+
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert kwargs["json"]["query"] == "dog"
+        assert kwargs["json"]["time_range"] == 7
+        assert kwargs["json"]["site"] == "flickr.com"
+        assert kwargs["json"]["image_size"] == "m"
+
+    @patch("deerflow.community.infoquest.infoquest_client.requests.post")
+    def test_image_search_api_error(self, mock_post):
+        """Test image_search operation with API error."""
+        mock_post.side_effect = Exception("Connection error")
+
+        client = InfoQuestClient()
+        result = client.image_search("test query")
+
+        assert "Error" in result
+
+    @patch("deerflow.community.infoquest.tools._get_infoquest_client")
+    def test_image_search_tool(self, mock_get_client):
+        """Test image_search_tool function."""
+        mock_client = MagicMock()
+        mock_client.image_search.return_value = json.dumps([{"image_url": "https://example.com/image1.jpg"}])
+        mock_get_client.return_value = mock_client
+
+        result = tools.image_search_tool.run({"query": "test query"})
+
+        # Check if result is a valid JSON string
+        result_data = json.loads(result)
+        assert len(result_data) == 1
+        assert result_data[0]["image_url"] == "https://example.com/image1.jpg"
+        mock_get_client.assert_called_once()
+        mock_client.image_search.assert_called_once_with("test query")
+
+    # In /Users/bytedance/python/deer-flowv2/deer-flow/backend/tests/test_infoquest_client.py
+
+    @patch("deerflow.community.infoquest.tools._get_infoquest_client")
+    def test_image_search_tool_with_parameters(self, mock_get_client):
+        """Test image_search_tool function with all parameters (extra parameters will be ignored)."""
+        mock_client = MagicMock()
+        mock_client.image_search.return_value = json.dumps([{"image_url": "https://example.com/image1.jpg"}])
+        mock_get_client.return_value = mock_client
+
+        # Pass all parameters as a dictionary (extra parameters will be ignored)
+        tools.image_search_tool.run({"query": "sunset", "time_range": 30, "site": "unsplash.com", "image_size": "l"})
+
+        mock_get_client.assert_called_once()
+        # image_search_tool only passes query to client.image_search
+        # site parameter is empty string by default
+        mock_client.image_search.assert_called_once_with("sunset")
