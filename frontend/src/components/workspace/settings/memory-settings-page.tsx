@@ -18,6 +18,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useClearMemory, useDeleteFact, useMemory } from "@/core/memory/hooks";
 import type { UserMemory } from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
+import { useThreads } from "@/core/threads/hooks";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
@@ -147,6 +148,13 @@ function FactsTable({
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const deleteFact = useDeleteFact();
+  const { data: threads } = useThreads();
+  const threadTitleMap = new Map(
+    (threads ?? []).map((thread) => [
+      thread.thread_id,
+      thread.values?.title ?? "",
+    ]),
+  );
 
   const handleDelete = useCallback(
     (factId: string) => {
@@ -204,8 +212,17 @@ function FactsTable({
                   <a
                     href={pathOfThread(f.source)}
                     className="text-primary hover:underline"
+                    title={threadTitleMap.get(f.source) ?? f.source}
                   >
-                    {t.settings.memory.markdown.table.view}
+                    {(() => {
+                      const title = threadTitleMap.get(f.source);
+                      if (title && title.length > 0) {
+                        return title.length > 30
+                          ? `${title.slice(0, 30)}\u2026`
+                          : title;
+                      }
+                      return f.source.slice(0, 8);
+                    })()}
                   </a>
                 </td>
                 <td className="py-2 pr-3">{formatTimeAgo(f.createdAt)}</td>
