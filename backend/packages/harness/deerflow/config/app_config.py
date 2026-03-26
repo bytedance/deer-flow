@@ -7,6 +7,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import load_guardrails_config_from_dict
@@ -118,6 +119,9 @@ class AppConfig(BaseModel):
         # Load checkpointer config if present
         if "checkpointer" in config_data:
             load_checkpointer_config_from_dict(config_data["checkpointer"])
+
+        # Always refresh ACP agent config so removed entries do not linger across reloads.
+        load_acp_config_from_dict(config_data.get("acp_agents", {}))
 
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()
@@ -272,18 +276,9 @@ def get_app_config() -> AppConfig:
     resolved_path = AppConfig.resolve_config_path()
     current_mtime = _get_config_mtime(resolved_path)
 
-    should_reload = (
-        _app_config is None
-        or _app_config_path != resolved_path
-        or _app_config_mtime != current_mtime
-    )
+    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_mtime != current_mtime
     if should_reload:
-        if (
-            _app_config_path == resolved_path
-            and _app_config_mtime is not None
-            and current_mtime is not None
-            and _app_config_mtime != current_mtime
-        ):
+        if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None and _app_config_mtime != current_mtime:
             logger.info(
                 "Config file has been modified (mtime: %s -> %s), reloading AppConfig",
                 _app_config_mtime,
