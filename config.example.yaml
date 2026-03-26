@@ -368,6 +368,30 @@ sandbox:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 
 # ============================================================================
+# ACP Agents Configuration
+# ============================================================================
+# Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
+
+# acp_agents:
+#   claude_code:
+#     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
+#     # speak ACP directly. Install `claude-agent-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/claude-agent-acp"]
+#     description: Claude Code for implementation, refactoring, and debugging
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#
+#   codex:
+#     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
+#     # speak ACP directly. Install `codex-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/codex-acp"]
+#     description: Codex CLI for repository tasks and code generation
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+
+# ============================================================================
 # Skills Configuration
 # ============================================================================
 # Configure skills directory for specialized agent workflows

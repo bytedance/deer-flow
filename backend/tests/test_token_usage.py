@@ -177,12 +177,7 @@ class TestStreamUsageIntegration:
             events = list(client.stream("hi", thread_id="t1"))
 
         # Find the AI text messages-tuple event
-        ai_text_events = [
-            e for e in events
-            if e.type == "messages-tuple"
-            and e.data.get("type") == "ai"
-            and e.data.get("content") == "Hello!"
-        ]
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content") == "Hello!"]
         assert len(ai_text_events) == 1
         event_data = ai_text_events[0].data
         assert "usage_metadata" in event_data
@@ -244,12 +239,7 @@ class TestStreamUsageIntegration:
             events = list(client.stream("hi", thread_id="t1"))
 
         # messages-tuple AI event should NOT have usage_metadata
-        ai_text_events = [
-            e for e in events
-            if e.type == "messages-tuple"
-            and e.data.get("type") == "ai"
-            and e.data.get("content") == "Hello!"
-        ]
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content") == "Hello!"]
         assert len(ai_text_events) == 1
         assert "usage_metadata" not in ai_text_events[0].data
 
@@ -290,12 +280,7 @@ class TestStreamUsageIntegration:
             events = list(client.stream("search", thread_id="t1"))
 
         # Final AI text event should have usage_metadata
-        ai_text_events = [
-            e for e in events
-            if e.type == "messages-tuple"
-            and e.data.get("type") == "ai"
-            and e.data.get("content") == "Here is the answer."
-        ]
+        ai_text_events = [e for e in events if e.type == "messages-tuple" and e.data.get("type") == "ai" and e.data.get("content") == "Here is the answer."]
         assert len(ai_text_events) == 1
         assert ai_text_events[0].data["usage_metadata"]["total_tokens"] == 300
 
