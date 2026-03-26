@@ -331,7 +331,7 @@ def make_lead_agent(config: RunnableConfig):
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
             state_schema=ThreadState,
-        )
+        ).with_config({"recursion_limit": 10_000})
 
     # Default lead agent (unchanged behavior)
     return create_agent(
@@ -340,4 +340,4 @@ def make_lead_agent(config: RunnableConfig):
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
-    )
+    ).with_config({"recursion_limit": 10_000})
