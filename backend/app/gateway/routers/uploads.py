@@ -67,6 +67,7 @@ async def upload_files(
             content = await file.read()
             file_path = uploads_dir / safe_filename
             file_path.write_bytes(content)
+            file_path.chmod(0o666)
 
             virtual_path = upload_virtual_path(safe_filename)
 
@@ -87,6 +88,7 @@ async def upload_files(
             if file_ext in CONVERTIBLE_EXTENSIONS:
                 md_path = await convert_file_to_markdown(file_path)
                 if md_path:
+                    md_path.chmod(0o666)
                     md_virtual_path = upload_virtual_path(md_path.name)
 
                     if sandbox_id != "local":
