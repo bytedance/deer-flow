@@ -69,7 +69,23 @@ models:
   #   output_version: responses/v1
   #   supports_vision: true
 
-  # Example: Anthropic Claude model
+  # Example: Claude via CLI (Pro/Max subscription — no API key needed)
+  # Uses the `claude` CLI in --print mode. Requires:
+  #   1. Claude Code CLI installed: curl -fsSL https://claude.ai/install.sh | bash
+  #   2. Authenticated: claude /login
+  # - name: claude-sonnet
+  #   display_name: Claude Sonnet 4.6 (Max subscription)
+  #   use: deerflow.models.claude_cli_provider:ClaudeCLIModel
+  #   model: claude-sonnet-4-6
+  #   max_tokens: 16384
+  #
+  # - name: claude-opus
+  #   display_name: Claude Opus 4.6 (Max subscription)
+  #   use: deerflow.models.claude_cli_provider:ClaudeCLIModel
+  #   model: claude-opus-4-6
+  #   max_tokens: 16384
+
+  # Example: Anthropic Claude model (API key)
   # - name: claude-3-5-sonnet
   #   display_name: Claude 3.5 Sonnet
   #   use: langchain_anthropic:ChatAnthropic
