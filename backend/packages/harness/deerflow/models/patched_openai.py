@@ -1,4 +1,4 @@
-"""Patched ChatOpenAI that preserves thought_signature for Gemini thinking models.
+"""Patched ChatOpenAI for OpenAI-compatible provider quirks.
 
 When using Gemini with thinking enabled via an OpenAI-compatible gateway (e.g.
 Vertex AI, Google AI Studio, or any proxy), the API requires that the
@@ -14,9 +14,13 @@ signature.  That causes an HTTP 400 ``INVALID_ARGUMENT`` error:
     Unable to submit request because function call `<tool>` in the N. content
     block is missing a `thought_signature`.
 
-This module fixes the problem by overriding ``_get_request_payload`` to
-re-inject tool-call signatures back into the outgoing payload for any assistant
-message that originally carried them.
+Some OpenAI-compatible providers also reject text-only content part arrays and
+expect plain string message content instead. This module fixes both issues by
+overriding ``_get_request_payload`` to:
+
+- collapse text-only content-part arrays back into plain strings
+- re-inject tool-call signatures back into the outgoing payload for any
+  assistant message that originally carried them
 """
 
 from __future__ import annotations
@@ -76,6 +80,11 @@ class PatchedChatOpenAI(ChatOpenAI):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
         payload_messages = payload.get("messages", [])
+        for payload_msg in payload_messages:
+            content = payload_msg.get("content")
+            normalized_content = _normalize_text_only_content(content)
+            if normalized_content is not content:
+                payload_msg["content"] = normalized_content
 
         if len(payload_messages) == len(original_messages):
             for payload_msg, orig_msg in zip(payload_messages, original_messages):
@@ -132,3 +141,48 @@ def _restore_tool_call_signatures(payload_msg: dict, orig_msg: AIMessage) -> Non
         sig = raw_tc.get("thought_signature") or raw_tc.get("thoughtSignature")
         if sig:
             payload_tc["thought_signature"] = sig
+
+
+def _normalize_text_only_content(content: Any) -> Any:
+    """Collapse text-only content arrays into a provider-friendly plain string."""
+    if isinstance(content, dict):
+        part_type = content.get("type")
+        text = content.get("text")
+        if part_type in {"text", "input_text", "output_text"} and isinstance(text, str):
+            return text
+        return content
+
+    if not isinstance(content, list):
+        return content
+
+    if not content:
+        return ""
+
+    parts: list[str] = []
+    pending_text = ""
+
+    for item in content:
+        if isinstance(item, str):
+            pending_text += item
+            continue
+
+        if not isinstance(item, dict):
+            return content
+
+        part_type = item.get("type")
+        if part_type not in {"text", "input_text", "output_text"}:
+            return content
+
+        text = item.get("text")
+        if not isinstance(text, str):
+            return content
+
+        if pending_text:
+            parts.append(pending_text)
+            pending_text = ""
+        parts.append(text)
+
+    if pending_text:
+        parts.append(pending_text)
+
+    return "\n".join(part for part in parts if part)

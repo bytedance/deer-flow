@@ -2,15 +2,15 @@
 
 These tests verify that _restore_tool_call_signatures correctly re-injects
 ``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
+``additional_kwargs["tool_calls"]``, and that text-only content blocks are
+collapsed back into plain strings for stricter OpenAI-compatible providers.
 """
 
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import _normalize_text_only_content, _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,6 +44,39 @@ PAYLOAD_TC_2 = {
 
 def _ai_msg_with_raw_tool_calls(raw_tool_calls: list[dict]) -> AIMessage:
     return AIMessage(content="", additional_kwargs={"tool_calls": raw_tool_calls})
+
+
+def test_normalize_text_only_content_returns_plain_string():
+    content = [{"type": "text", "text": "hello"}]
+
+    assert _normalize_text_only_content(content) == "hello"
+
+
+def test_normalize_text_only_content_handles_single_text_block_object():
+    content = {"type": "text", "text": "hello"}
+
+    assert _normalize_text_only_content(content) == "hello"
+
+
+def test_normalize_text_only_content_merges_string_chunks_and_text_blocks():
+    content = ["prefix", "-continued", {"type": "text", "text": "block text"}]
+
+    assert _normalize_text_only_content(content) == "prefix-continued\nblock text"
+
+
+def test_normalize_text_only_content_preserves_multimodal_payloads():
+    content = [
+        {"type": "text", "text": "describe this"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+    ]
+
+    assert _normalize_text_only_content(content) == content
+
+
+def test_normalize_text_only_content_rejects_unknown_block_shapes():
+    content = [{"type": "text", "value": "missing text field"}]
+
+    assert _normalize_text_only_content(content) == content
 
 
 # ---------------------------------------------------------------------------
