@@ -5,13 +5,19 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.path_utils import resolve_thread_virtual_path
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
+
+ACTIVE_CONTENT_MIME_TYPES = {
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+}
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -76,7 +82,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
 
     Returns:
         The file content as a FileResponse with appropriate content type:
-        - HTML files: Rendered as HTML
+        - Active content (HTML/XHTML/SVG): Served as download attachment
         - Text files: Plain text with proper MIME type
         - Binary files: Inline display with download option
 
@@ -146,8 +152,10 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
     if request.query_params.get("download"):
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
 
-    if mime_type and mime_type == "text/html":
-        return HTMLResponse(content=actual_path.read_text(encoding="utf-8"))
+    # Always force download for active content types to prevent script execution
+    # in the application origin when users open generated artifacts.
+    if mime_type in ACTIVE_CONTENT_MIME_TYPES:
+        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
 
     if mime_type and mime_type.startswith("text/"):
         return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
