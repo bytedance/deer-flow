@@ -157,7 +157,7 @@ class TestInfoQuestClient:
         mock_config.get_tool_config.side_effect = [
             MagicMock(model_extra={"search_time_range": 24}),  # web_search config
             MagicMock(model_extra={"fetch_time": 10, "timeout": 30, "navigation_timeout": 60}),  # web_fetch config
-            MagicMock(model_extra={"image_search_time_range": 7, "image_size": "l"})  # image_search config
+            MagicMock(model_extra={"image_search_time_range": 7, "image_size": "l"}),  # image_search config
         ]
         mock_get_app_config.return_value = mock_config
 

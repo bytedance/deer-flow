@@ -16,9 +16,7 @@ def test_get_skills_root_path_points_to_project_root_skills():
     """get_skills_root_path() should point to deer-flow/skills (sibling of backend/), not backend/packages/skills."""
     path = get_skills_root_path()
     assert path.name == "skills", f"Expected 'skills', got '{path.name}'"
-    assert (path.parent / "backend").is_dir(), (
-        f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
-    )
+    assert (path.parent / "backend").is_dir(), f"Expected skills path's parent to be project root containing 'backend/', but got {path}"
 
 
 def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: Path):
