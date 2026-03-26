@@ -158,11 +158,16 @@ class Paths:
         write to the volume-mounted paths without "Permission denied" errors.
         The explicit chmod() call is necessary because Path.mkdir(mode=...) is
         subject to the process umask and may not yield the intended permissions.
+
+        Includes the ACP workspace directory so it can be volume-mounted into
+        the sandbox container at ``/mnt/acp-workspace`` even before the first
+        ACP agent invocation.
         """
         for d in [
             self.sandbox_work_dir(thread_id),
             self.sandbox_uploads_dir(thread_id),
             self.sandbox_outputs_dir(thread_id),
+            self.acp_workspace_dir(thread_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
