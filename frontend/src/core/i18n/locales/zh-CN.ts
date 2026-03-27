@@ -311,6 +311,11 @@ export const zhCN: Translations = {
       summaryReadOnly: "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
       memoryFullyEmpty: "还没有保存任何记忆。",
       factPreviewLabel: "即将删除的事实",
+      searchPlaceholder: "搜索记忆",
+      filterAll: "全部",
+      filterFacts: "事实",
+      filterSummaries: "摘要",
+      noMatches: "没有找到匹配的记忆。",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",

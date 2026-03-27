@@ -254,11 +254,16 @@ export interface Translations {
       factDeleteConfirmTitle: string;
       factDeleteConfirmDescription: string;
       factDeleteSuccess: string;
-      noFacts: string;
-      summaryReadOnly: string;
-      memoryFullyEmpty: string;
-      factPreviewLabel: string;
-      markdown: {
+        noFacts: string;
+        summaryReadOnly: string;
+        memoryFullyEmpty: string;
+        factPreviewLabel: string;
+        searchPlaceholder: string;
+        filterAll: string;
+        filterFacts: string;
+        filterSummaries: string;
+        noMatches: string;
+        markdown: {
         overview: string;
         userContext: string;
         work: string;
