@@ -45,7 +45,7 @@ jobs:
           node-version: 22
           cache: 'pnpm'
           cache-dependency-path: './frontend/pnpm-lock.yaml'
-      - run: cd frontend && pnpm install && pnpm run build
+      - run: cd frontend && pnpm install && pnpm run build && cd ..
 
       - name: 构建并推送前端镜像到 GHCR
         run: |
