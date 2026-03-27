@@ -168,7 +168,7 @@ echo "Starting Frontend..."
 echo "✓ Frontend started on localhost:3000"
 
 echo "Starting Nginx reverse proxy..."
-nginx -g 'daemon off;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" > logs/nginx.log 2>&1 &
+nginx -g 'daemon off; error_log stderr warn;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" > logs/nginx.log 2>&1 &
 NGINX_PID=$!
 ./scripts/wait-for-port.sh 2026 10 "Nginx" || {
     echo "  See logs/nginx.log for details"
