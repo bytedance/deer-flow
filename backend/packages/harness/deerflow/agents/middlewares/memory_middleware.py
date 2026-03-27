@@ -120,7 +120,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
 
         # Get thread ID from runtime context
-        thread_id = runtime.context.get("thread_id")
+        thread_id = runtime.context.get("thread_id") if runtime.context else None
         if not thread_id:
             print("MemoryMiddleware: No thread_id in context, skipping memory update")
             return None
