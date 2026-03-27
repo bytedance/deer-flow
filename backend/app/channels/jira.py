@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from app.channels.base import Channel
@@ -19,13 +18,36 @@ JIRA_CHAT_ID = "jira:mentions"
 _MAX_BACKOFF = 60
 
 
+def _extract_adf_text(node: dict[str, Any]) -> str:
+    """Recursively extract plain text from an ADF document node."""
+    parts: list[str] = []
+    if node.get("type") == "text":
+        parts.append(node.get("text", ""))
+    elif node.get("type") == "mention":
+        parts.append(node.get("attrs", {}).get("text", ""))
+    for child in node.get("content", []):
+        if isinstance(child, dict):
+            parts.append(_extract_adf_text(child))
+    return "".join(parts)
+
+
+def _adf_has_mention(node: dict[str, Any], account_id: str) -> bool:
+    """Check if an ADF document contains a mention node for the given account ID."""
+    if node.get("type") == "mention" and node.get("attrs", {}).get("id") == account_id:
+        return True
+    for child in node.get("content", []):
+        if isinstance(child, dict) and _adf_has_mention(child, account_id):
+            return True
+    return False
+
+
 class JiraChannel(Channel):
     """Jira IM channel that listens for webhook events via SSE.
 
     Configuration keys (in ``config.yaml`` under ``channels.jira``):
         - ``sse_url``: URL of the Jira webhook SSE endpoint.
         - ``bot_account_id``: Jira account ID to watch for @mentions.
-        - ``allowed_labels``: (optional) Labels to match for task assignment events (default: ``["anna"]``).
+        - ``allowed_labels``: (optional) Labels to match for task assignment events (default: ``[]`` — no label filter).
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -102,6 +124,13 @@ class JiraChannel(Channel):
                                 event_type = ""
                                 data_lines = []
 
+                        # SSE stream ended cleanly (EOF) — apply backoff before reconnecting
+                        if not self._running:
+                            return
+                        logger.info("[Jira] SSE stream ended, reconnecting in %ds", backoff)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, _MAX_BACKOFF)
+
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -148,8 +177,17 @@ class JiraChannel(Channel):
             logger.warning("[Jira] comment event missing comment field")
             return
 
-        body = comment.get("body", "")
-        if f"[~accountid:{self._bot_account_id}]" not in body:
+        raw_body = comment.get("body", "")
+        body: str
+        if isinstance(raw_body, dict):
+            # ADF (Atlassian Document Format) object — check for mention nodes and extract plain text
+            body = _extract_adf_text(raw_body)
+            mentioned = _adf_has_mention(raw_body, self._bot_account_id)
+        else:
+            body = raw_body
+            mentioned = f"[~accountid:{self._bot_account_id}]" in body
+
+        if not mentioned:
             logger.debug("[Jira] bot not mentioned in comment on %s, skipping", issue.get("key", "?"))
             return
 
@@ -190,7 +228,6 @@ class JiraChannel(Channel):
         lines.append("- See your CLAUDE.md for the exact ADF template")
 
         content = "\n".join(lines)
-        timestamp = datetime.fromtimestamp(payload.get("timestamp", 0) / 1000, tz=timezone.utc).isoformat()
 
         inbound = self._make_inbound(
             chat_id=JIRA_CHAT_ID,
@@ -212,23 +249,23 @@ class JiraChannel(Channel):
         labels = [label.lower() for label in (fields.get("labels") or [])]
         has_matching_label = not self._allowed_labels or any(label in labels for label in self._allowed_labels)
         is_open = (fields.get("status", {}).get("name", "")).lower() == "open"
+        assignee = fields.get("assignee")
+        is_assigned_to_bot = bool(assignee and assignee.get("accountId") == self._bot_account_id)
 
-        if not is_task or not has_matching_label or not is_open:
+        if not is_task or not has_matching_label or not is_open or not is_assigned_to_bot:
             logger.debug(
-                "[Jira] issue %s does not match criteria (type=%s, labels=%s, status=%s), skipping",
+                "[Jira] issue %s does not match criteria (type=%s, labels=%s, status=%s, assignee=%s), skipping",
                 issue_key,
                 fields.get("issuetype", {}).get("name"),
                 fields.get("labels"),
                 fields.get("status", {}).get("name"),
+                (assignee.get("accountId") if assignee else None),
             )
             return
 
         logger.info("[Jira] task assigned: %s - %s", issue_key, fields.get("summary", ""))
-
-        assignee = fields.get("assignee")
         reporter = fields.get("reporter")
         status = fields.get("status", {})
-        timestamp = datetime.fromtimestamp(payload.get("timestamp", 0) / 1000, tz=timezone.utc).isoformat()
 
         lines: list[str] = [
             "Jira Task Assignment",
@@ -250,8 +287,9 @@ class JiraChannel(Channel):
             email_part = f", email: {reporter['emailAddress']}" if reporter.get("emailAddress") else ""
             lines.append(f"Reporter: {reporter.get('displayName', '')} (accountId: {reporter.get('accountId', '')}{email_part})")
 
-        description = fields.get("description")
-        if description:
+        raw_description = fields.get("description")
+        if raw_description:
+            description = _extract_adf_text(raw_description) if isinstance(raw_description, dict) else raw_description
             lines.extend(["", "Description:", "---", description, "---"])
 
         lines.extend(["", 'Follow the "Handle Task Assignment" skill in your CLAUDE.md to process this ticket.'])

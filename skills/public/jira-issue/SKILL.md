@@ -52,7 +52,7 @@ Post a comment acknowledging the task, then transition to **In Progress**:
 acli jira workitem comment create --key "{ISSUE_KEY}" --body-file /tmp/jira-reply.json
 
 # Check available transitions
-acli jira workitem transitions --key "{ISSUE_KEY}"
+acli jira workitem transition --key "{ISSUE_KEY}" --list
 
 # Move to In Progress
 acli jira workitem transition --key "{ISSUE_KEY}" --status "In Progress"
@@ -134,7 +134,7 @@ Post a comment explaining what you need, transition to **On Hold**, and stop.
 
 ```bash
 # List available transitions for an issue
-acli jira workitem transitions --key "{ISSUE_KEY}"
+acli jira workitem transition --key "{ISSUE_KEY}" --list
 
 # Transition to a status
 acli jira workitem transition --key "{ISSUE_KEY}" --status "In Progress"

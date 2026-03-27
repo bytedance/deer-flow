@@ -51,9 +51,10 @@ RUN if [ "$INSTALL_ACLI" = "true" ]; then \
 # Optional: Install GitHub CLI (gh) for PR creation and GitHub operations
 # Set INSTALL_GH=true to include gh in the image
 ARG INSTALL_GH=false
+ARG GH_VERSION=2.74.1
 RUN if [ "$INSTALL_GH" = "true" ]; then \
         ARCH=$(dpkg --print-architecture) \
-        && curl -fsSL "https://github.com/cli/cli/releases/latest/download/gh_$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | grep -oP '"tag_name":\s*"v\K[^"]+')_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz \
+        && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/gh.tar.gz \
         && tar -xzf /tmp/gh.tar.gz -C /tmp \
         && install -o root -g root -m 0755 /tmp/gh_*/bin/gh /usr/local/bin/gh \
         && rm -rf /tmp/gh.tar.gz /tmp/gh_*; \

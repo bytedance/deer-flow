@@ -185,6 +185,58 @@ class TestCommentEvent:
         bus.publish_inbound.assert_not_called()
 
 
+class TestCommentEventADF:
+    """Tests for ADF (Atlassian Document Format) comment bodies."""
+
+    @pytest.mark.anyio
+    async def test_adf_body_with_mention_publishes(self, channel: JiraChannel, bus: MessageBus) -> None:
+        bus.publish_inbound = AsyncMock()
+        payload = _make_comment_payload()
+        # Replace string body with ADF object containing a mention node
+        payload["comment"]["body"] = {
+            "version": 1,
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "mention", "attrs": {"id": "abc123", "text": "@Bot"}},
+                        {"type": "text", "text": " please take a look"},
+                    ],
+                }
+            ],
+        }
+
+        channel._handle_comment_event(payload)
+        await asyncio.sleep(0)
+
+        bus.publish_inbound.assert_called_once()
+        msg = bus.publish_inbound.call_args[0][0]
+        assert "please take a look" in msg.text
+
+    @pytest.mark.anyio
+    async def test_adf_body_without_mention_skipped(self, channel: JiraChannel, bus: MessageBus) -> None:
+        bus.publish_inbound = AsyncMock()
+        payload = _make_comment_payload()
+        payload["comment"]["body"] = {
+            "version": 1,
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "text", "text": "Just a regular comment"},
+                    ],
+                }
+            ],
+        }
+
+        channel._handle_comment_event(payload)
+        await asyncio.sleep(0)
+
+        bus.publish_inbound.assert_not_called()
+
+
 class TestIssueEvent:
     @pytest.mark.anyio
     async def test_matching_issue_publishes(self, channel: JiraChannel, bus: MessageBus) -> None:
@@ -233,6 +285,28 @@ class TestIssueEvent:
         await asyncio.sleep(0)
 
         bus.publish_inbound.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_not_assigned_to_bot_skipped(self, channel: JiraChannel, bus: MessageBus) -> None:
+        bus.publish_inbound = AsyncMock()
+        payload = _make_issue_payload()
+        payload["issue"]["fields"]["assignee"] = {"accountId": "someone-else", "displayName": "Human"}
+
+        channel._handle_issue_event(payload)
+        await asyncio.sleep(0)
+
+        bus.publish_inbound.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_unassigned_issue_skipped(self, channel: JiraChannel, bus: MessageBus) -> None:
+        bus.publish_inbound = AsyncMock()
+        payload = _make_issue_payload()
+        payload["issue"]["fields"]["assignee"] = None
+
+        channel._handle_issue_event(payload)
+        await asyncio.sleep(0)
+
+        bus.publish_inbound.assert_not_called()
 
     @pytest.mark.anyio
     async def test_non_open_status_skipped(self, channel: JiraChannel, bus: MessageBus) -> None:
