@@ -107,8 +107,8 @@ src/
 │   └── utils/              # Utility functions
 ├── hooks/                  # Custom React hooks
 ├── lib/                    # Shared libraries & utilities
-├── server/                 # Server-side code (Not available yet)
-│   └── better-auth/        # Authentication setup (Not available yet)
+├── server/                 # Server-side code
+│   └── better-auth/        # Authentication setup and session helpers
 └── styles/                 # Global styles
 ```
 
