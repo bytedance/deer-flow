@@ -177,10 +177,11 @@ def get_memory_queue() -> MemoryUpdateQueue:
         The memory update queue instance.
     """
     global _memory_queue
-    with _queue_lock:
-        if _memory_queue is None:
-            _memory_queue = MemoryUpdateQueue()
-        return _memory_queue
+    if _memory_queue is None:
+        with _queue_lock:
+            if _memory_queue is None:
+                _memory_queue = MemoryUpdateQueue()
+    return _memory_queue
 
 
 def reset_memory_queue() -> None:
