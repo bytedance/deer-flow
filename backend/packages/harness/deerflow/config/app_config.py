@@ -62,14 +62,24 @@ class AppConfig(BaseModel):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
         else:
-            # Check if the config.yaml is in the current directory
-            path = Path(os.getcwd()) / "config.yaml"
-            if not path.exists():
-                # Check if the config.yaml is in the parent directory of CWD
-                path = Path(os.getcwd()).parent / "config.yaml"
-                if not path.exists():
-                    raise FileNotFoundError("`config.yaml` file not found at the current directory nor its parent directory")
-            return path
+            # Walk up the directory tree from CWD looking for config.yaml
+            searched: list[Path] = []
+            current = Path(os.getcwd())
+            while True:
+                candidate = current / "config.yaml"
+                searched.append(candidate)
+                if candidate.exists():
+                    return candidate
+                parent = current.parent
+                if parent == current:
+                    # Reached filesystem root without finding config.yaml
+                    break
+                current = parent
+            raise FileNotFoundError(
+                "`config.yaml` not found. Searched: "
+                + ", ".join(str(p) for p in searched)
+                + ". Set the DEER_FLOW_CONFIG_PATH environment variable or run from the project root."
+            )
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:
@@ -273,7 +283,14 @@ def get_app_config() -> AppConfig:
     if _app_config is not None and _app_config_is_custom:
         return _app_config
 
-    resolved_path = AppConfig.resolve_config_path()
+    try:
+        resolved_path = AppConfig.resolve_config_path()
+    except FileNotFoundError:
+        if _app_config is not None and _app_config_path is not None:
+            logger.warning("config.yaml no longer resolvable; using previously loaded config from %s", _app_config_path)
+            return _app_config
+        raise
+
     current_mtime = _get_config_mtime(resolved_path)
 
     should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_mtime != current_mtime
