@@ -8,6 +8,7 @@ from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.summarization_config import SummarizationConfig
 
 
 def _make_app_config(models: list[ModelConfig]) -> AppConfig:
@@ -135,3 +136,29 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     )
 
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
+
+
+def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):
+    monkeypatch.setattr(
+        lead_agent_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(enabled=True, model_name="model-masswork"),
+    )
+
+    captured: dict[str, object] = {}
+    fake_model = object()
+
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None):
+        captured["name"] = name
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        return fake_model
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "SummarizationMiddleware", lambda **kwargs: kwargs)
+
+    middleware = lead_agent_module._create_summarization_middleware()
+
+    assert captured["name"] == "model-masswork"
+    assert captured["thinking_enabled"] is False
+    assert middleware["model"] is fake_model

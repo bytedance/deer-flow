@@ -13,7 +13,7 @@ def _get_infoquest_client() -> InfoQuestClient:
     search_time_range = -1
     if search_config is not None and "search_time_range" in search_config.model_extra:
         search_time_range = search_config.model_extra.get("search_time_range")
-        
+
     fetch_config = get_app_config().get_tool_config("web_fetch")
     fetch_time = -1
     if fetch_config is not None and "fetch_time" in fetch_config.model_extra:
@@ -24,7 +24,7 @@ def _get_infoquest_client() -> InfoQuestClient:
     navigation_timeout = -1
     if fetch_config is not None and "navigation_timeout" in fetch_config.model_extra:
         navigation_timeout = fetch_config.model_extra.get("navigation_timeout")
-        
+
     image_search_config = get_app_config().get_tool_config("image_search")
     image_search_time_range = -1
     if image_search_config is not None and "image_search_time_range" in image_search_config.model_extra:
@@ -32,8 +32,6 @@ def _get_infoquest_client() -> InfoQuestClient:
     image_size = "i"
     if image_search_config is not None and "image_size" in image_search_config.model_extra:
         image_size = image_search_config.model_extra.get("image_size")
-    
-    
 
     return InfoQuestClient(
         search_time_range=search_time_range,
