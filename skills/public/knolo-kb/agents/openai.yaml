@@ -1,0 +1,3 @@
+interface:
+  display_name: "Knolo KB"
+  short_description: "Use @knolo/core to build, mount, and query deterministic .knolo packs"

@@ -13,7 +13,9 @@
 #
 # Access: http://localhost:2026
 
+
 services:
+
   # ── Sandbox Provisioner ────────────────────────────────────────────────
   # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
   # cluster via the K8s API.
