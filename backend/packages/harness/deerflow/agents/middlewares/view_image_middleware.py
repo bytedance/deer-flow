@@ -102,7 +102,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         """
         viewed_images = state.get("viewed_images", {})
         if not viewed_images:
-            return ["No images have been viewed."]
+            # Return a properly formatted text block, not a plain string array
+            return [{"type": "text", "text": "No images have been viewed."}]
 
         # Build the message with image information
         content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
