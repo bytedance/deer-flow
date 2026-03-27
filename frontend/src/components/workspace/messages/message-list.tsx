@@ -41,7 +41,7 @@ export function MessageList({
   paddingBottom?: number;
 }) {
   const { t } = useI18n();
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(!thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const messages = thread.messages;
   if (thread.isThreadLoading && messages.length === 0) {
@@ -64,6 +64,19 @@ export function MessageList({
               );
             });
           } else if (group.type === "assistant:clarification") {
+            const message = group.messages[0];
+            if (message && hasContent(message)) {
+              return (
+                <MarkdownContent
+                  key={group.id}
+                  content={extractContentFromMessage(message)}
+                  isLoading={thread.isLoading}
+                  rehypePlugins={rehypePlugins}
+                />
+              );
+            }
+            return null;
+          } else if (group.type === "assistant:tool") {
             const message = group.messages[0];
             if (message && hasContent(message)) {
               return (

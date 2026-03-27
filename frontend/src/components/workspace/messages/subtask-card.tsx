@@ -40,7 +40,7 @@ export function SubtaskCard({
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(!isLoading);
   const task = useSubtask(taskId)!;
   const icon = useMemo(() => {
     if (task.status === "completed") {
