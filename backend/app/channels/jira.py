@@ -1,4 +1,14 @@
-"""Jira channel — listens to a Jira webhook SSE endpoint for @mentions and task assignments."""
+"""Jira channel — listens to an SSE bridge for Jira webhook events (@mentions and task assignments).
+
+Jira webhooks are standard HTTP POST callbacks (see https://developer.atlassian.com/cloud/jira/platform/webhooks/).
+They do NOT natively provide an SSE stream. This channel expects a **webhook-to-SSE bridge service** that:
+
+1. Receives Jira webhook HTTP POST payloads.
+2. Re-publishes them as Server-Sent Events on an SSE endpoint.
+
+You must deploy such a bridge yourself and point ``sse_url`` to it. Any implementation that
+emits ``event: jira`` with the original webhook JSON as ``data:`` will work.
+"""
 
 from __future__ import annotations
 
@@ -42,10 +52,14 @@ def _adf_has_mention(node: dict[str, Any], account_id: str) -> bool:
 
 
 class JiraChannel(Channel):
-    """Jira IM channel that listens for webhook events via SSE.
+    """Jira IM channel that listens for webhook events via a webhook-to-SSE bridge.
+
+    Jira webhooks deliver events as HTTP POST requests. This channel does **not** receive
+    those POSTs directly — instead it connects to a user-provided SSE bridge that converts
+    webhook POSTs into a Server-Sent Events stream.
 
     Configuration keys (in ``config.yaml`` under ``channels.jira``):
-        - ``sse_url``: URL of the Jira webhook SSE endpoint.
+        - ``sse_url``: URL of the SSE bridge endpoint (not a Jira URL).
         - ``bot_account_id``: Jira account ID to watch for @mentions.
         - ``allowed_labels``: (optional) Labels to match for task assignment events (default: ``[]`` — no label filter).
     """

@@ -13,6 +13,7 @@ This skill defines workflows for handling Jira issue events: **comment mentions*
 
 - `acli` installed and authenticated (see [acli skill](../acli/SKILL.md))
 - `gh` CLI available if code workflows involve GitHub PRs
+- **Webhook-to-SSE bridge** — Jira webhooks are standard HTTP POST callbacks ([docs](https://developer.atlassian.com/cloud/jira/platform/webhooks/)), not SSE streams. You must deploy a bridge service that receives Jira webhook POSTs and re-publishes them as Server-Sent Events. The Jira channel connects to this bridge via the `sse_url` config. Any service that emits `event: jira` with the original webhook JSON payload as `data:` will work.
 
 ## Handling Comment Mentions
 

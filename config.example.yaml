@@ -695,7 +695,11 @@ checkpointer:
 #
 #   jira:
 #     enabled: false
-#     sse_url: $JIRA_WEBHOOK_SSE_URL       # SSE endpoint for Jira webhook events
+#     # Jira webhooks are HTTP POST callbacks — they do NOT provide an SSE stream natively.
+#     # You need to deploy a webhook-to-SSE bridge service that receives Jira webhook POSTs
+#     # and re-publishes them as Server-Sent Events (event: jira, data: <webhook JSON>).
+#     # Point sse_url to that bridge's SSE endpoint.
+#     sse_url: $JIRA_WEBHOOK_SSE_URL       # SSE bridge endpoint (NOT a Jira URL directly)
 #     bot_account_id: "your-jira-bot-account-id"   # Jira account ID to watch for @mentions
 #     allowed_labels: []                    # Labels to match for task assignment events (empty = match all)
 #
