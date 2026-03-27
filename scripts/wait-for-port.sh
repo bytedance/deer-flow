@@ -16,6 +16,7 @@
 PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
+WATCH_PID="${WAIT_FOR_PORT_PID:-}"
 
 elapsed=0
 interval=1
@@ -47,7 +48,22 @@ is_port_listening() {
     return 1
 }
 
+ensure_watched_pid_is_alive() {
+    if [ -z "$WATCH_PID" ]; then
+        return 0
+    fi
+
+    if kill -0 "$WATCH_PID" 2>/dev/null; then
+        return 0
+    fi
+
+    echo ""
+    echo "✗ $SERVICE exited before startup completed on port $PORT"
+    exit 1
+}
+
 while ! is_port_listening; do
+    ensure_watched_pid_is_alive
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"
@@ -57,5 +73,7 @@ while ! is_port_listening; do
     sleep "$interval"
     elapsed=$((elapsed + interval))
 done
+
+ensure_watched_pid_is_alive
 
 printf "\r  %-60s\r" ""   # clear the waiting line
