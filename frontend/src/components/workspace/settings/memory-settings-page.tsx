@@ -30,15 +30,7 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 import { SettingsSection } from "./settings-section";
 
 type MemoryViewFilter = "all" | "facts" | "summaries";
-
-interface MemoryFact {
-  id: string;
-  content: string;
-  category: string;
-  confidence: number;
-  createdAt: string;
-  source: string;
-}
+type MemoryFact = UserMemory["facts"][number];
 
 type MemorySection = {
   title: string;
@@ -183,7 +175,7 @@ function truncateFactPreview(content: string, maxLength = 140) {
   if (normalized.length <= maxLength) {
     return normalized;
   }
-  return `${normalized.slice(0, maxLength - 1)}…`;
+  return `${normalized.slice(0, maxLength - 1)}...`;
 }
 
 function upperFirst(str: string) {
@@ -427,6 +419,7 @@ export function MemorySettingsPage() {
                             onClick={() => setFactToDelete(fact)}
                             disabled={deleteMemoryFact.isPending}
                             title={t.common.delete}
+                            aria-label={t.common.delete}
                           >
                             <Trash2Icon className="h-4 w-4" />
                           </Button>
