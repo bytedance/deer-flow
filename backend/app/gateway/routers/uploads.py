@@ -43,8 +43,16 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
     world-writable access here prevents permission mismatches between the
     gateway user and the sandbox runtime user.
     """
-    current_mode = stat.S_IMODE(os.stat(file_path).st_mode)
-    os.chmod(file_path, current_mode | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    file_stat = os.lstat(file_path)
+    if stat.S_ISLNK(file_stat.st_mode):
+        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
+        return
+
+    writable_mode = (
+        stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    )
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, writable_mode, **chmod_kwargs)
 
 
 @router.post("", response_model=UploadResponse)
