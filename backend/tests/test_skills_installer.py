@@ -25,6 +25,10 @@ class TestIsUnsafeZipMember:
         info = zipfile.ZipInfo("/etc/passwd")
         assert is_unsafe_zip_member(info) is True
 
+    def test_windows_absolute_path(self):
+        info = zipfile.ZipInfo("C:\\Windows\\system32\\drivers\\etc\\hosts")
+        assert is_unsafe_zip_member(info) is True
+
     def test_dotdot_traversal(self):
         info = zipfile.ZipInfo("foo/../../../etc/passwd")
         assert is_unsafe_zip_member(info) is True
@@ -144,10 +148,13 @@ class TestSafeExtract:
         assert not (dest / "link.txt").exists()
 
     def test_normal_archive(self, tmp_path):
-        zip_path = self._make_zip(tmp_path, {
-            "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
-            "my-skill/README.md": "readme",
-        })
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/README.md": "readme",
+            },
+        )
         dest = tmp_path / "out"
         dest.mkdir()
         with zipfile.ZipFile(zip_path) as zf:

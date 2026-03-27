@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md)
+[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -36,6 +36,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [官网](#官网)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
+  - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
   - [快速开始](#快速开始)
     - [配置](#配置)
     - [运行应用](#运行应用)
@@ -45,6 +46,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
       - [Sandbox 模式](#sandbox-模式)
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
+      - [LangSmith 链路追踪](#langsmith-链路追踪)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
@@ -56,11 +58,22 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
   - [文档](#文档)
+  - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
   - [许可证](#许可证)
   - [致谢](#致谢)
     - [核心贡献者](#核心贡献者)
   - [Star History](#star-history)
+
+## 一句话交给 Coding Agent 安装
+
+如果你在用 Claude Code、Codex、Cursor、Windsurf 或其他 coding agent，可以直接把下面这句话发给它：
+
+```text
+如果还没 clone DeerFlow，就先 clone，然后按照 https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md 把它的本地开发环境初始化好
+```
+
+这条提示词是给 coding agent 用的。它会在需要时先 clone 仓库，优先选择 Docker，完成初始化，并在结束时告诉你下一条启动命令，以及还缺哪些配置需要你补充。
 
 ## 快速开始
 
@@ -318,6 +331,21 @@ FEISHU_APP_SECRET=your_app_secret
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
 
+#### LangSmith 链路追踪
+
+DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
+
+在 `.env` 文件中添加以下配置：
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
+
 ## 从 Deep Research 到 Super Agent Harness
 
 DeerFlow 最初是一个 Deep Research 框架，后来社区把它一路推到了更远的地方。上线之后，开发者拿它去做的事情早就不止研究：搭数据流水线、生成演示文稿、快速起 dashboard、自动化内容流程，很多方向一开始连我们自己都没想到。
@@ -465,6 +493,24 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 - [配置指南](backend/docs/CONFIGURATION.md) - 安装与配置说明
 - [架构概览](backend/CLAUDE.md) - 技术架构说明
 - [后端架构](backend/README.md) - 后端架构与 API 参考
+
+## ⚠️ 安全使用
+
+### 不恰当的部署可能导致安全风险
+
+DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关键高权限能力，默认设计为**部署在本地可信环境（仅本机 127.0.0.1 回环访问）**。若您将 agent 部署至不可信局域网、公网云服务器等可被多终端访问的网络环境，且未采取严格的安全防护措施，可能导致安全风险，例如：
+
+- **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
+- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+
+### 安全使用建议
+
+**注意：建议您将 DeerFlow 部署在本地可信的网络环境下。**若您有跨设备、跨网络的部署需求，必须加入严格的安全措施。例如，采取如下手段：
+
+- **设置访问 IP 白名单**：使用 `iptables`，或部署硬件防火墙 / 带访问控制（ACL）功能的交换机等，**配置规则设置 IP 白名单**，拒绝其他所有 IP 进行访问。
+- **前置身份验证**：配置反向代理（nginx 等），并**开启高强度的前置身份验证功能**，禁止无任何身份验证的访问。
+- **网络隔离**：若有可能，建议将 agent 和可信设备划分到**同一个专用 VLAN**，与其他网络设备做隔离。
+- **持续关注项目更新**：请持续关注 DeerFlow 项目的安全功能更新。
 
 ## 参与贡献
 
