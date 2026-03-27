@@ -34,6 +34,20 @@ token_usage:
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: DeepSeek model with thinking support (enables Pro and Ultra modes)
+  # - name: deepseek-chat
+  #   display_name: DeepSeek Chat
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-chat
+  #   api_key: $DEEPSEEK_API_KEY
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
