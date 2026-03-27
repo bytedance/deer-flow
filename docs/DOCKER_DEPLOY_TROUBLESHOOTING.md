@@ -321,3 +321,106 @@ cd d:\hical\deer-flow\docker
 docker compose -p deer-flow down
 ```
 
+---
+
+## 附：502 Bad Gateway — gateway 启动失败排查
+
+### 现象
+
+服务启动后访问 `http://localhost:2026` 下载报告等页面时显示：
+
+```
+502 Bad Gateway
+nginx/1.29.7
+```
+
+所有容器状态均为 `Up`，但功能不可用。
+
+### 排查过程
+
+**Step 1：确认容器状态**
+
+```powershell
+docker compose -p deer-flow ps
+```
+
+4 个容器均 `Up`，排除容器崩溃。
+
+**Step 2：查看 gateway 启动日志**
+
+```powershell
+docker logs deer-flow-gateway --tail 30
+```
+
+发现关键报错：
+
+```
+RuntimeError: Failed to load configuration during gateway startup:
+Config file specified by environment variable `DEER_FLOW_CONFIG_PATH`
+not found at D:\hical\deer-flow\config.yaml
+```
+
+**Step 3：定位根本原因**
+
+检查 `.env` 文件：
+
+```env
+DEER_FLOW_CONFIG_PATH=D:\hical\deer-flow\config.yaml
+DEER_FLOW_EXTENSIONS_CONFIG_PATH=D:\hical\deer-flow\extensions_config.json
+```
+
+`docker-compose.yaml` 通过 `env_file: ../.env` 将 `.env` 所有变量注入容器。容器是 Linux 环境，无法识别 Windows 路径 `D:\...`，导致 gateway 进程启动失败，nginx 因上游无响应返回 502。
+
+### 根本原因
+
+`.env` 里的路径变量同时承担两个角色：
+- **volume mount 的宿主机路径**（由 Docker Desktop 解析，支持 `D:/...` 格式）
+- **容器内环境变量**（由容器内 Linux 进程读取，不支持 Windows 路径）
+
+`docker-compose.yaml` 的 `env_file` 会将所有 `.env` 变量透传进容器，但 gateway 服务的 `environment` 块没有用容器内路径覆盖这两个变量，导致 Windows 路径泄露进容器。
+
+### 解决方案
+
+在 `docker/docker-compose.yaml` 的 gateway `environment` 块中显式覆盖为容器内路径（`environment` 优先级高于 `env_file`）：
+
+```yaml
+# gateway 服务的 environment 块
+environment:
+  - CI=true
+  - DEER_FLOW_HOME=/app/backend/.deer-flow
+  - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml            # 覆盖 .env 中的 Windows 路径
+  - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json  # 覆盖 .env 中的 Windows 路径
+  - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+  - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+  - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+env_file:
+  - ../.env
+```
+
+> langgraph 服务原本已有 `DEER_FLOW_CONFIG_PATH=/app/config.yaml` 和 `DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json` 覆盖，无需修改。
+
+修改后重启容器：
+
+```powershell
+cd d:\hical\deer-flow\docker
+docker compose -p deer-flow --env-file ../.env up -d --pull never
+```
+
+验证 gateway 正常启动：
+
+```powershell
+docker logs deer-flow-gateway --tail 5
+# 期望看到：INFO: Application startup complete.
+
+curl http://localhost:2026/health
+# 期望返回：{"status":"healthy","service":"deer-flow-gateway"}
+```
+
+### 关键结论
+
+| 知识点 | 说明 |
+|-------|------|
+| `env_file` 透传所有变量 | `.env` 里的 Windows 路径会原样注入容器，Linux 进程无法识别 |
+| `environment` 优先级更高 | 在 compose 的 `environment` 块中覆盖同名变量，可防止 `env_file` 的值污染容器 |
+| volume mount 路径 vs 容器内路径 | 宿主机路径用于 `volumes` 挂载（Docker Desktop 自动转换），容器内路径用于程序运行时读取 |
+
