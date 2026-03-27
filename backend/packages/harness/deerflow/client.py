@@ -160,6 +160,11 @@ class DeerFlowClient:
         self._agent = None
         self._agent_config_key = None
 
+    def _refresh_app_config(self):
+        """Reload the latest cached app config reference."""
+        self._app_config = get_app_config()
+        return self._app_config
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -199,7 +204,9 @@ class DeerFlowClient:
     def _ensure_agent(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = config.get("configurable", {})
+        app_config = self._refresh_app_config()
         key = (
+            id(app_config),
             cfg.get("model_name"),
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
@@ -454,6 +461,7 @@ class DeerFlowClient:
             Dict with "models" key containing list of model info dicts,
             matching the Gateway API ``ModelsListResponse`` schema.
         """
+        app_config = self._refresh_app_config()
         return {
             "models": [
                 {
@@ -461,10 +469,14 @@ class DeerFlowClient:
                     "model": getattr(model, "model", None),
                     "display_name": getattr(model, "display_name", None),
                     "description": getattr(model, "description", None),
+                    "provider": getattr(model, "provider", None),
+                    "provider_label": getattr(model, "provider_label", None),
+                    "provider_url": getattr(model, "provider_url", None),
+                    "modalities": getattr(model, "modalities", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
                 }
-                for model in self._app_config.models
+                for model in app_config.models
             ]
         }
 
@@ -513,7 +525,7 @@ class DeerFlowClient:
             Model info dict matching the Gateway API ``ModelResponse``
             schema, or None if not found.
         """
-        model = self._app_config.get_model_config(name)
+        model = self._refresh_app_config().get_model_config(name)
         if model is None:
             return None
         return {
@@ -521,6 +533,10 @@ class DeerFlowClient:
             "model": getattr(model, "model", None),
             "display_name": getattr(model, "display_name", None),
             "description": getattr(model, "description", None),
+            "provider": getattr(model, "provider", None),
+            "provider_label": getattr(model, "provider_label", None),
+            "provider_url": getattr(model, "provider_url", None),
+            "modalities": getattr(model, "modalities", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
         }

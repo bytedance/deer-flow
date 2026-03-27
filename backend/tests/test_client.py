@@ -44,7 +44,7 @@ def mock_app_config():
 def client(mock_app_config):
     """Create a DeerFlowClient with mocked config loading."""
     with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-        return DeerFlowClient()
+        yield DeerFlowClient()
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,29 @@ class TestConfigQueries:
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
 
+    def test_list_models_refreshes_latest_config(self, mock_app_config):
+        latest_model = MagicMock()
+        latest_model.name = "fresh-model"
+        latest_model.model = "fresh-model"
+        latest_model.display_name = "Fresh Model"
+        latest_model.description = "Latest config"
+        latest_model.provider = "openai"
+        latest_model.provider_label = "OpenAI"
+        latest_model.provider_url = "https://platform.openai.com"
+        latest_model.modalities = ["text"]
+        latest_model.supports_thinking = True
+        latest_model.supports_reasoning_effort = True
+
+        latest_config = MagicMock()
+        latest_config.models = [latest_model]
+
+        with patch("deerflow.client.get_app_config", side_effect=[mock_app_config, latest_config]):
+            refreshed_client = DeerFlowClient()
+            result = refreshed_client.list_models()
+
+        assert result["models"][0]["name"] == "fresh-model"
+        assert result["models"][0]["provider_label"] == "OpenAI"
+
     def test_list_skills(self, client):
         skill = MagicMock()
         skill.name = "web-search"
@@ -142,6 +165,31 @@ class TestConfigQueries:
             result = client.get_memory()
             mock_mem.assert_called_once()
         assert result == memory
+
+    def test_get_model_refreshes_latest_config(self, mock_app_config):
+        latest_model = MagicMock()
+        latest_model.name = "fresh-model"
+        latest_model.model = "fresh-model"
+        latest_model.display_name = "Fresh Model"
+        latest_model.description = "Latest config"
+        latest_model.provider = "openai"
+        latest_model.provider_label = "OpenAI"
+        latest_model.provider_url = "https://platform.openai.com"
+        latest_model.modalities = ["text"]
+        latest_model.supports_thinking = True
+        latest_model.supports_reasoning_effort = True
+
+        latest_config = MagicMock()
+        latest_config.get_model_config.return_value = latest_model
+
+        with patch("deerflow.client.get_app_config", side_effect=[mock_app_config, latest_config]):
+            refreshed_client = DeerFlowClient()
+            result = refreshed_client.get_model("fresh-model")
+
+        latest_config.get_model_config.assert_called_once_with("fresh-model")
+        assert result is not None
+        assert result["name"] == "fresh-model"
+        assert result["provider"] == "openai"
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +481,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False)
+        client._agent_config_key = (id(client._app_config), None, True, False, False)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -454,6 +502,10 @@ class TestGetModel:
         model_cfg.model = "test-model"
         model_cfg.display_name = "Test Model"
         model_cfg.description = "A test model"
+        model_cfg.provider = "openai"
+        model_cfg.provider_label = "OpenAI"
+        model_cfg.provider_url = "https://platform.openai.com"
+        model_cfg.modalities = ["text", "image", "audio"]
         model_cfg.supports_thinking = True
         model_cfg.supports_reasoning_effort = True
         client._app_config.get_model_config.return_value = model_cfg
@@ -464,6 +516,10 @@ class TestGetModel:
             "model": "test-model",
             "display_name": "Test Model",
             "description": "A test model",
+            "provider": "openai",
+            "provider_label": "OpenAI",
+            "provider_url": "https://platform.openai.com",
+            "modalities": ["text", "image", "audio"],
             "supports_thinking": True,
             "supports_reasoning_effort": True,
         }
@@ -1520,17 +1576,21 @@ class TestGatewayConformance:
         model.model = "gpt-test"
         model.display_name = "Test Model"
         model.description = "A test model"
+        model.provider = "openai"
+        model.provider_label = "OpenAI"
+        model.provider_url = "https://platform.openai.com"
+        model.modalities = ["text"]
         model.supports_thinking = False
+        model.supports_reasoning_effort = False
         mock_app_config.models = [model]
 
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             client = DeerFlowClient()
-
-        result = client.list_models()
-        parsed = ModelsListResponse(**result)
-        assert len(parsed.models) == 1
-        assert parsed.models[0].name == "test-model"
-        assert parsed.models[0].model == "gpt-test"
+            result = client.list_models()
+            parsed = ModelsListResponse(**result)
+            assert len(parsed.models) == 1
+            assert parsed.models[0].name == "test-model"
+            assert parsed.models[0].model == "gpt-test"
 
     def test_get_model(self, mock_app_config):
         model = MagicMock()
@@ -1538,18 +1598,22 @@ class TestGatewayConformance:
         model.model = "gpt-test"
         model.display_name = "Test Model"
         model.description = "A test model"
+        model.provider = "openai"
+        model.provider_label = "OpenAI"
+        model.provider_url = "https://platform.openai.com"
+        model.modalities = ["text"]
         model.supports_thinking = True
+        model.supports_reasoning_effort = True
         mock_app_config.models = [model]
         mock_app_config.get_model_config.return_value = model
 
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             client = DeerFlowClient()
-
-        result = client.get_model("test-model")
-        assert result is not None
-        parsed = ModelResponse(**result)
-        assert parsed.name == "test-model"
-        assert parsed.model == "gpt-test"
+            result = client.get_model("test-model")
+            assert result is not None
+            parsed = ModelResponse(**result)
+            assert parsed.name == "test-model"
+            assert parsed.model == "gpt-test"
 
     def test_list_skills(self, client):
         skill = MagicMock()

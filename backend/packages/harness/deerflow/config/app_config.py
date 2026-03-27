@@ -13,6 +13,11 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import load_guardrails_config_from_dict
 from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.model_services_config import (
+    ModelServicesConfig,
+    get_model_services_config,
+    model_services_to_runtime_models,
+)
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import load_subagents_config_from_dict
@@ -33,6 +38,7 @@ class AppConfig(BaseModel):
     log_level: str = Field(default="info", description="Logging level for deerflow modules (debug/info/warning/error)")
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
+    model_services: ModelServicesConfig = Field(default_factory=ModelServicesConfig, description="Provider-first model services configuration")
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
@@ -126,6 +132,12 @@ class AppConfig(BaseModel):
         # Load extensions config separately (it's in a different file)
         extensions_config = ExtensionsConfig.from_file()
         config_data["extensions"] = extensions_config.model_dump()
+        model_services_config = get_model_services_config()
+        config_data["model_services"] = model_services_config.model_dump()
+        config_data["models"] = [model.model_dump(exclude_none=True) for model in model_services_to_runtime_models(
+            [ModelConfig.model_validate(model) for model in config_data.get("models", [])],
+            model_services_config,
+        )]
 
         result = cls.model_validate(config_data)
         return result
@@ -238,6 +250,7 @@ _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
 _app_config_is_custom = False
+_model_services_mtime: float | None = None
 
 
 def _get_config_mtime(config_path: Path) -> float | None:
@@ -250,12 +263,14 @@ def _get_config_mtime(config_path: Path) -> float | None:
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
     """Load config from disk and refresh cache metadata."""
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom, _model_services_mtime
 
     resolved_path = AppConfig.resolve_config_path(config_path)
     _app_config = AppConfig.from_file(str(resolved_path))
     _app_config_path = resolved_path
     _app_config_mtime = _get_config_mtime(resolved_path)
+    model_services_path = ModelServicesConfig.resolve_config_path()
+    _model_services_mtime = _get_config_mtime(model_services_path)
     _app_config_is_custom = False
     return _app_config
 
@@ -268,15 +283,22 @@ def get_app_config() -> AppConfig:
     `reload_app_config()` to force a reload, or `reset_app_config()` to clear
     the cache.
     """
-    global _app_config, _app_config_path, _app_config_mtime
+    global _app_config, _app_config_path, _app_config_mtime, _model_services_mtime
 
     if _app_config is not None and _app_config_is_custom:
         return _app_config
 
     resolved_path = AppConfig.resolve_config_path()
     current_mtime = _get_config_mtime(resolved_path)
+    model_services_path = ModelServicesConfig.resolve_config_path()
+    current_model_services_mtime = _get_config_mtime(model_services_path)
 
-    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_mtime != current_mtime
+    should_reload = (
+        _app_config is None
+        or _app_config_path != resolved_path
+        or _app_config_mtime != current_mtime
+        or _model_services_mtime != current_model_services_mtime
+    )
     if should_reload:
         if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None and _app_config_mtime != current_mtime:
             logger.info(
@@ -311,11 +333,12 @@ def reset_app_config() -> None:
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom, _model_services_mtime
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
     _app_config_is_custom = False
+    _model_services_mtime = None
 
 
 def set_app_config(config: AppConfig) -> None:
@@ -326,8 +349,9 @@ def set_app_config(config: AppConfig) -> None:
     Args:
         config: The AppConfig instance to use.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_is_custom, _model_services_mtime
     _app_config = config
     _app_config_path = None
     _app_config_mtime = None
     _app_config_is_custom = True
+    _model_services_mtime = None

@@ -13,6 +13,10 @@ class ModelResponse(BaseModel):
     model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
+    provider: str | None = Field(None, description="Provider identifier used for provider-first grouping")
+    provider_label: str | None = Field(None, description="Human-readable provider name")
+    provider_url: str | None = Field(None, description="Provider homepage or console URL")
+    modalities: list[str] | None = Field(None, description="Supported modalities such as text/image/video/audio")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
 
@@ -65,6 +69,10 @@ async def list_models() -> ModelsListResponse:
             model=model.model,
             display_name=model.display_name,
             description=model.description,
+            provider=getattr(model, "provider", None),
+            provider_label=getattr(model, "provider_label", None),
+            provider_url=getattr(model, "provider_url", None),
+            modalities=getattr(model, "modalities", None),
             supports_thinking=model.supports_thinking,
             supports_reasoning_effort=model.supports_reasoning_effort,
         )
@@ -111,6 +119,10 @@ async def get_model(model_name: str) -> ModelResponse:
         model=model.model,
         display_name=model.display_name,
         description=model.description,
+        provider=getattr(model, "provider", None),
+        provider_label=getattr(model, "provider_label", None),
+        provider_url=getattr(model, "provider_url", None),
+        modalities=getattr(model, "modalities", None),
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
     )

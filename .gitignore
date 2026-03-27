@@ -25,6 +25,8 @@ venv/
 
 # Configuration files
 config.yaml
+model_services.json
+model_services.json.bak
 mcp_config.json
 extensions_config.json
 

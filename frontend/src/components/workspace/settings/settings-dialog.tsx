@@ -2,6 +2,7 @@
 
 import {
   BellIcon,
+  BoxesIcon,
   InfoIcon,
   BrainIcon,
   PaletteIcon,
@@ -20,6 +21,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
+import { ModelServicesSettingsPage } from "@/components/workspace/settings/model-services-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
@@ -27,6 +29,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 type SettingsSection =
+  | "modelServices"
   | "appearance"
   | "memory"
   | "tools"
@@ -55,6 +58,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const sections = useMemo(
     () => [
       {
+        id: "modelServices",
+        label: t.settings.sections.modelServices,
+        icon: BoxesIcon,
+      },
+      {
         id: "appearance",
         label: t.settings.sections.appearance,
         icon: PaletteIcon,
@@ -74,6 +82,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      t.settings.sections.modelServices,
       t.settings.sections.appearance,
       t.settings.sections.memory,
       t.settings.sections.tools,
@@ -124,6 +133,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
+              {activeSection === "modelServices" && (
+                <ModelServicesSettingsPage />
+              )}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}

@@ -34,6 +34,52 @@ token_usage:
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: Shared relay / OpenAI-compatible gateway with a multi-provider catalog
+  # This pattern is useful when a single gateway account exposes models from
+  # multiple vendors (OpenAI, Anthropic, Gemini, DeepSeek, Qwen, etc.).
+  # - name: relay-chat
+  #   display_name: GPT-4o Mini (Relay)
+  #   provider: relay
+  #   provider_label: Relay Gateway
+  #   use: langchain_openai:ChatOpenAI
+  #   model: $RELAY_MODEL
+  #   api_key: $RELAY_API_KEY
+  #   base_url: $RELAY_BASE_URL
+  #   modalities: [text]
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: true
+  #
+  # - name: openai-gpt-5.4
+  #   display_name: GPT-5.4 (OpenAI via Relay)
+  #   provider: openai
+  #   provider_label: OpenAI
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gpt-5.4
+  #   api_key: $RELAY_API_KEY
+  #   base_url: $RELAY_BASE_URL
+  #   modalities: [text, image, audio, video]
+  #
+  # - name: anthropic-claude-sonnet-4.6
+  #   display_name: Claude Sonnet 4.6 (Anthropic via Relay)
+  #   provider: anthropic
+  #   provider_label: Anthropic
+  #   use: langchain_openai:ChatOpenAI
+  #   model: claude-sonnet-4-6
+  #   api_key: $RELAY_API_KEY
+  #   base_url: $RELAY_BASE_URL
+  #   modalities: [text, image, audio]
+  #
+  # - name: google-gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro Preview (Google via Relay)
+  #   provider: google
+  #   provider_label: Google
+  #   use: langchain_openai:ChatOpenAI
+  #   model: gemini-3.1-pro-preview
+  #   api_key: $RELAY_API_KEY
+  #   base_url: $RELAY_BASE_URL
+  #   modalities: [text, image, audio, video]
+
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8

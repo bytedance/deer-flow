@@ -21,6 +21,22 @@ class ModelConfig(BaseModel):
         default=None,
         description="Structured output version for OpenAI responses content, e.g. responses/v1",
     )
+    provider: str | None = Field(
+        default=None,
+        description="Provider identifier for provider-first settings UIs, e.g. openai / anthropic / google",
+    )
+    provider_label: str | None = Field(
+        default=None,
+        description="Human-readable provider label shown in the UI",
+    )
+    provider_url: str | None = Field(
+        default=None,
+        description="Provider homepage or console URL",
+    )
+    modalities: list[str] | None = Field(
+        default=None,
+        description="Modalities available for this model/provider, e.g. text/image/video/audio",
+    )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
     when_thinking_enabled: dict | None = Field(

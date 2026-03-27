@@ -58,6 +58,7 @@ import {
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { groupModelsByProvider } from "@/core/models/provider-catalog";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
@@ -65,10 +66,12 @@ import { cn } from "@/lib/utils";
 import {
   ModelSelector,
   ModelSelectorContent,
+  ModelSelectorGroup,
   ModelSelectorInput,
   ModelSelectorItem,
   ModelSelectorList,
   ModelSelectorName,
+  ModelSelectorSeparator,
   ModelSelectorTrigger,
 } from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
@@ -185,6 +188,11 @@ export function InputBox({
     }
     return models.find((m) => m.name === context.model_name) ?? models[0];
   }, [context.model_name, models]);
+
+  const groupedModels = useMemo(
+    () => groupModelsByProvider(models),
+    [models],
+  );
 
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
@@ -729,24 +737,31 @@ export function InputBox({
               <ModelSelectorContent>
                 <ModelSelectorInput placeholder={t.inputBox.searchModels} />
                 <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
+                  {groupedModels.map((group, index) => (
+                    <div key={group.key}>
+                      {index > 0 ? <ModelSelectorSeparator /> : null}
+                      <ModelSelectorGroup heading={group.label}>
+                        {group.models.map((m) => (
+                          <ModelSelectorItem
+                            key={m.name}
+                            value={`${group.label} ${m.display_name} ${m.model}`}
+                            onSelect={() => handleModelSelect(m.name)}
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <ModelSelectorName>{m.display_name}</ModelSelectorName>
+                              <span className="text-muted-foreground truncate text-[10px]">
+                                {m.model}
+                              </span>
+                            </div>
+                            {m.name === context.model_name ? (
+                              <CheckIcon className="ml-auto size-4" />
+                            ) : (
+                              <div className="ml-auto size-4" />
+                            )}
+                          </ModelSelectorItem>
+                        ))}
+                      </ModelSelectorGroup>
+                    </div>
                   ))}
                 </ModelSelectorList>
               </ModelSelectorContent>

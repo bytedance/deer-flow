@@ -10,6 +10,7 @@ from app.gateway.routers import (
     artifacts,
     channels,
     mcp,
+    model_services,
     memory,
     models,
     skills,
@@ -109,6 +110,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Operations for querying available AI models and their configurations",
             },
             {
+                "name": "model-services",
+                "description": "Manage provider-first model services configuration and connection testing",
+            },
+            {
                 "name": "mcp",
                 "description": "Manage Model Context Protocol (MCP) server configurations",
             },
@@ -156,6 +161,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+
+    # Model services API is mounted at /api/model-services
+    app.include_router(model_services.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
