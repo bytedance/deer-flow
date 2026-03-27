@@ -304,6 +304,22 @@ def test_validate_local_bash_command_paths_still_blocks_other_paths() -> None:
             validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
 
 
+def test_validate_local_bash_command_paths_allows_urls_in_arguments() -> None:
+    """URLs containing :// should not be treated as absolute file paths."""
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        # Typical skill invocation with a URL inside a JSON argument
+        validate_local_bash_command_paths(
+            "node /mnt/skills/public/my-skill/scripts/index.js 123 \"query\" "
+            "'{\"domainUrl\":\"https://music.youdata.netease.com\"}'",
+            _THREAD_DATA,
+        )
+        # Plain URL in a curl command
+        validate_local_bash_command_paths(
+            "curl https://example.com/api/v1/data",
+            _THREAD_DATA,
+        )
+
+
 def test_validate_local_tool_path_skills_custom_container_path() -> None:
     """Skills with a custom container_path in config should also work."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/custom/skills"):
