@@ -16,8 +16,8 @@
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #
-# LangSmith tracing is disabled by default (LANGCHAIN_TRACING_V2=false).
-# Set LANGCHAIN_TRACING_V2=true and LANGSMITH_API_KEY in .env to enable it.
+# LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
+# Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
 #
 # Access: http://localhost:${PORT:-2026}
 
@@ -144,8 +144,8 @@ services:
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Disable LangSmith tracing — LANGSMITH_API_KEY is not required.
-      # Set LANGCHAIN_TRACING_V2=true and LANGSMITH_API_KEY in .env to enable.
-      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
     env_file:
       - ../.env
     extra_hosts:
