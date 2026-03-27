@@ -189,6 +189,8 @@ function shouldOverrideThreadValues(
     current.artifacts !== next.artifacts ||
     current.todos !== next.todos
   );
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
