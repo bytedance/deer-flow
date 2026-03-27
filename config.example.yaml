@@ -547,6 +547,9 @@ checkpointer:
 
 # channels:
 #   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   # For Docker deployments, use the Docker service name instead of localhost:
+#   #   langgraph_url: http://langgraph:2024
+#   #   gateway_url: http://gateway:8001
 #   langgraph_url: http://localhost:2024
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
