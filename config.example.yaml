@@ -406,6 +406,8 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
 #   codex:
 #     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
@@ -415,6 +417,8 @@ sandbox:
 #     description: Codex CLI for repository tasks and code generation
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
 
 # ============================================================================
 # Skills Configuration
