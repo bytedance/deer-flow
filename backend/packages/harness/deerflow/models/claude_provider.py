@@ -5,7 +5,7 @@ Supports two authentication modes:
   2. Claude Code OAuth token (Authorization: Bearer header)
      - Detected by sk-ant-oat prefix
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
-     - Requires billing header in system prompt for non-Haiku models
+     - Requires billing header in system prompt for all OAuth requests
 
 Auto-loads credentials from explicit runtime handoff:
   - $ANTHROPIC_API_KEY environment variable
@@ -15,7 +15,11 @@ Auto-loads credentials from explicit runtime handoff:
   - ~/.claude/.credentials.json
 """
 
+import hashlib
+import json
 import logging
+import os
+import socket
 import time
 import uuid
 from typing import Any
@@ -29,9 +33,11 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
 
-# Billing header required by Anthropic API for OAuth token access to non-Haiku models.
+# Billing header required by Anthropic API for OAuth token access.
 # Must be the first system prompt block. Format mirrors Claude Code CLI.
-OAUTH_BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.85.351; cc_entrypoint=cli; cch=6c6d5;"
+# Override with ANTHROPIC_BILLING_HEADER env var if the hardcoded version drifts.
+_DEFAULT_BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.85.351; cc_entrypoint=cli; cch=6c6d5;"
+OAUTH_BILLING_HEADER = os.environ.get("ANTHROPIC_BILLING_HEADER", _DEFAULT_BILLING_HEADER)
 
 
 class ClaudeChatModel(ChatAnthropic):
@@ -146,30 +152,35 @@ class ClaudeChatModel(ChatAnthropic):
         return payload
 
     def _apply_oauth_billing(self, payload: dict) -> None:
-        """Inject the billing header block required for OAuth access to non-Haiku models."""
+        """Inject the billing header block required for all OAuth requests.
+
+        The billing block is always placed first in the system list, removing any
+        existing occurrence to avoid duplication or out-of-order positioning.
+        """
         billing_block = {"type": "text", "text": OAUTH_BILLING_HEADER}
 
         system = payload.get("system")
         if isinstance(system, list):
-            # Prepend billing block if not already present
-            if not any(OAUTH_BILLING_HEADER in (b.get("text", "") if isinstance(b, dict) else "") for b in system):
-                payload["system"] = [billing_block] + system
+            # Remove any existing billing blocks, then insert a single one at index 0.
+            filtered = [
+                b for b in system
+                if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))
+            ]
+            payload["system"] = [billing_block] + filtered
         elif isinstance(system, str):
-            if OAUTH_BILLING_HEADER not in system:
+            if OAUTH_BILLING_HEADER in system:
+                payload["system"] = [billing_block]
+            else:
                 payload["system"] = [billing_block, {"type": "text", "text": system}]
         else:
             payload["system"] = [billing_block]
 
         # Add metadata.user_id required by the API for OAuth billing validation
-        if "metadata" not in payload:
+        if not isinstance(payload.get("metadata"), dict):
             payload["metadata"] = {}
         if "user_id" not in payload["metadata"]:
-            import json
-            import hashlib
-            import os
-
             # Generate a stable device_id from the machine's hostname
-            hostname = os.uname().nodename
+            hostname = socket.gethostname()
             device_id = hashlib.sha256(f"deerflow-{hostname}".encode()).hexdigest()
             session_id = str(uuid.uuid4())
             payload["metadata"]["user_id"] = json.dumps({
