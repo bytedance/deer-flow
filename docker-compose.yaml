@@ -1,0 +1,100 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: deer-flow-nginx
+    ports:
+      - "2026:2026"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - frontend
+      - gateway
+      - langgraph
+    restart: unless-stopped
+    networks:
+      - deer-flow
+
+  frontend:
+    image: deer-flow-frontend:latest
+    container_name: deer-flow-frontend
+    environment:
+      NEXT_PUBLIC_BACKEND_BASE_URL: http://localhost:2026
+      NEXT_PUBLIC_LANGGRAPH_BASE_URL: http://localhost:2026
+      BETTER_AUTH_SECRET: beb29ca8323962baff108d97305f0456a9fefadbbb1d2ae08ad71cebb45df216
+      NODE_ENV: production
+    restart: unless-stopped
+    networks:
+      - deer-flow
+
+  gateway:
+    image: deer-flow-backend:latest
+    container_name: deer-flow-gateway
+    command: >
+      sh -c "cd /app/backend &&
+      PYTHONPATH=. uv run uvicorn app.gateway.app:app
+      --host 0.0.0.0
+      --port 8001
+      --workers 1"
+    working_dir: /app
+    volumes:
+      - ./config.yaml:/app/backend/config.yaml
+      - ./extensions_config.json:/app/backend/extensions_config.json
+      - ./skills:/app/skills
+      - ./backend/.deer-flow:/app/backend/.deer-flow
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.claude:/root/.claude
+      - /root/.codex:/root/.codex
+    environment:
+      CI: "true"
+      DEER_FLOW_HOME: /app/backend/.deer-flow
+      DEER_FLOW_HOST_BASE_DIR: /app/backend/.deer-flow
+      DEER_FLOW_HOST_SKILLS_PATH: /app/skills
+      DEER_FLOW_SANDBOX_HOST: host.docker.internal
+    env_file:
+      - ./.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - deer-flow
+
+  langgraph:
+    image: deer-flow-backend:latest
+    container_name: deer-flow-langgraph
+    command: >
+      sh -c "cd /app/backend &&
+      uv run langgraph dev
+      --no-browser
+      --allow-blocking
+      --no-reload
+      --host 0.0.0.0
+      --port 2024"
+    working_dir: /app
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./extensions_config.json:/app/extensions_config.json
+      - ./backend/.deer-flow:/app/backend/.deer-flow
+      - ./backend/.langgraph_api:/app/backend/.langgraph_api
+      - ./skills:/app/skills
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.claude:/root/.claude
+      - /root/.codex:/root/.codex
+    environment:
+      CI: "true"
+      DEER_FLOW_HOME: /app/backend/.deer-flow
+      DEER_FLOW_CONFIG_PATH: /app/config.yaml
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: /app/extensions_config.json
+      DEER_FLOW_HOST_BASE_DIR: /app/backend/.deer-flow
+      DEER_FLOW_HOST_SKILLS_PATH: /app/skills
+      DEER_FLOW_SANDBOX_HOST: host.docker.internal
+    env_file:
+      - ./.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - deer-flow
+
+networks:
+  deer-flow:
+    driver: bridge
