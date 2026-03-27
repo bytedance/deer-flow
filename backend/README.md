@@ -187,6 +187,8 @@ Set your API keys:
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
+If you are routing Responses API traffic through an OpenAI-compatible gateway that does not persist response items when `store=false`, switch `use` to `deerflow.models.patched_openai:PatchedChatOpenAI`. The patched adapter preserves Gemini `thought_signature` fields and strips transient Responses items such as `reasoning` blocks that cannot be replayed safely in the next turn.
+
 ### Running
 
 **Full Application** (from project root):

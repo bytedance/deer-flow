@@ -1,16 +1,10 @@
-"""Tests for deerflow.models.patched_openai.PatchedChatOpenAI.
-
-These tests verify that _restore_tool_call_signatures correctly re-injects
-``thought_signature`` onto tool-call objects stored in
-``additional_kwargs["tool_calls"]``, covering id-based matching, positional
-fallback, camelCase keys, and several edge-cases.
-"""
+"""Tests for deerflow.models.patched_openai.PatchedChatOpenAI."""
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import PatchedChatOpenAI, _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,3 +168,67 @@ def test_tool_call_multiple_sequential_signatures():
 
 # Integration behavior for PatchedChatOpenAI is validated indirectly via
 # _restore_tool_call_signatures unit coverage above.
+
+
+def test_responses_payload_strips_reasoning_items_when_store_is_not_enabled():
+    """Transient reasoning items must not be replayed into a later Responses API call."""
+    model = PatchedChatOpenAI(
+        model="gpt-5.4",
+        api_key="test-key",
+        base_url="http://example.invalid/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+    )
+    messages = [
+        HumanMessage(content="Deploy the application"),
+        AIMessage(
+            content=[
+                {"type": "reasoning", "id": "rs_123", "summary": [], "index": 0},
+                {
+                    "type": "function_call",
+                    "name": "ask_clarification",
+                    "arguments": '{"question":"Where should I deploy it?"}',
+                    "call_id": "call_123",
+                    "id": "fc_123",
+                    "index": 1,
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "ask_clarification",
+                    "args": {"question": "Where should I deploy it?"},
+                    "id": "call_123",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="Where should I deploy it?", tool_call_id="call_123", name="ask_clarification"),
+        HumanMessage(content="Vercel preview"),
+    ]
+
+    payload = model._get_request_payload(messages)
+
+    assert all(item.get("type") != "reasoning" for item in payload["input"] if isinstance(item, dict))
+    assert any(item.get("type") == "function_call" and item.get("call_id") == "call_123" for item in payload["input"])
+    assert any(item.get("type") == "function_call_output" and item.get("call_id") == "call_123" for item in payload["input"])
+
+
+def test_responses_payload_keeps_reasoning_items_when_store_is_enabled():
+    """Explicitly stored responses can safely replay their opaque response items."""
+    model = PatchedChatOpenAI(
+        model="gpt-5.4",
+        api_key="test-key",
+        base_url="http://example.invalid/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+        store=True,
+    )
+    messages = [
+        HumanMessage(content="Hello"),
+        AIMessage(content=[{"type": "reasoning", "id": "rs_123", "summary": [], "index": 0}]),
+        HumanMessage(content="Next"),
+    ]
+
+    payload = model._get_request_payload(messages)
+
+    assert any(item.get("type") == "reasoning" and item.get("id") == "rs_123" for item in payload["input"])

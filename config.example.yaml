@@ -68,6 +68,9 @@ models:
   #   use_responses_api: true
   #   output_version: responses/v1
   #   supports_vision: true
+  # For OpenAI-compatible gateways that do not persist response items when
+  # `store=false`, change `use` to:
+  #   deerflow.models.patched_openai:PatchedChatOpenAI
 
   # Example: Anthropic Claude model
   # - name: claude-3-5-sonnet

@@ -78,6 +78,8 @@ models:
     output_version: responses/v1
 ```
 
+If you are routing Responses API traffic through an OpenAI-compatible gateway that does not persist response items when `store=false`, switch `use` to `deerflow.models.patched_openai:PatchedChatOpenAI`. The patched adapter preserves Gemini `thought_signature` fields and strips transient Responses items such as `reasoning` blocks that cannot be replayed safely in the next turn.
+
 For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
 
 ```yaml
