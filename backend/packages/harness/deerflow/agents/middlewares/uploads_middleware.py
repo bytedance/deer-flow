@@ -8,8 +8,33 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
+from langgraph.config import get_config
+from langgraph._internal._constants import CONF, CONFIG_KEY_THREAD_ID
 
 from deerflow.config.paths import Paths, get_paths
+
+
+def _get_context_value(runtime, key, default=None):
+    """Safe getter for runtime.context values."""
+    if runtime.context is None:
+        return default
+    return runtime.context.get(key, default)
+
+
+def _get_thread_id(runtime) -> str | None:
+    """Get thread_id from runtime.context or config.configurable."""
+    # 优先从 runtime.context 获取
+    thread_id = _get_context_value(runtime, "thread_id")
+    if thread_id is not None:
+        return thread_id
+    
+    # Fallback: 从 config.configurable 获取
+    try:
+        config = get_config()
+        return config.get(CONF, {}).get(CONFIG_KEY_THREAD_ID)
+    except RuntimeError:
+        return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +171,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             return None
 
         # Resolve uploads directory for existence checks
-        thread_id = runtime.context.get("thread_id")
+        thread_id = _get_thread_id(runtime)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files

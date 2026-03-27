@@ -3,6 +3,8 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+from langgraph.config import get_config
+from langgraph._internal._constants import CONF, CONFIG_KEY_THREAD_ID
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
@@ -71,9 +73,22 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        # 优先从 runtime.context 获取 thread_id
+        thread_id = None
+        if runtime.context is not None:
+            thread_id = runtime.context.get("thread_id")
+        
+        # 如果 runtime.context 为 None，从 config.configurable 获取
         if thread_id is None:
-            raise ValueError("Thread ID is required in the context")
+            try:
+                config = get_config()
+                thread_id = config.get(CONF, {}).get(CONFIG_KEY_THREAD_ID)
+            except RuntimeError:
+                # 不在 runnable context 中
+                pass
+        
+        if thread_id is None:
+            raise ValueError("Thread ID is required but not found in runtime.context or config.configurable")
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
