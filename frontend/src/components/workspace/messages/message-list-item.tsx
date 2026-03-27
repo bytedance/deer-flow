@@ -80,13 +80,19 @@ export function MessageListItem({
 /**
  * Custom image component that handles artifact URLs
  */
+type MarkdownImageProps = React.ImgHTMLAttributes<HTMLImageElement> & {
+  node?: unknown;
+};
+
 function MessageImage({
   src,
   alt,
   threadId,
   maxWidth = "90%",
+  node: _node,
+  onClick,
   ...props
-}: React.ImgHTMLAttributes<HTMLImageElement> & {
+}: MarkdownImageProps & {
   threadId: string;
   maxWidth?: string;
 }) {
@@ -95,15 +101,34 @@ function MessageImage({
   const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
 
   if (typeof src !== "string") {
-    return <img className={imgClassName} src={src} alt={alt} {...props} />;
+    return (
+      <img
+        className={imgClassName}
+        src={src}
+        alt={alt}
+        onClick={onClick}
+        {...props}
+      />
+    );
   }
 
   const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
 
   return (
-    <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
-    </a>
+    <img
+      {...props}
+      alt={alt}
+      className={cn(imgClassName, "cursor-pointer", props.className)}
+      onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented) return;
+        if (event.currentTarget.closest("a")) return;
+        if (typeof window !== "undefined") {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+      }}
+      src={url}
+    />
   );
 }
 
