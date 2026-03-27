@@ -231,12 +231,18 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
-  # Web search tool (requires Tavily API key)
+  # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
-    use: deerflow.community.tavily.tools:web_search_tool
+    use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
-    # api_key: $TAVILY_API_KEY  # Set if needed
+
+  # Web search tool (requires Tavily API key)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tavily.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
   # - name: web_search
