@@ -1,0 +1,55 @@
+name: 构建镜像
+
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+
+env:
+  PACKAGE_VERSION: latest
+  NODE_ENV: production
+  
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4.2.0
+      - name: 登录到私有仓库
+        uses: docker/login-action@v3
+        with:
+          registry: docker.cnb.cool # 声明镜像源
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      # 设置环境变量 version 为最后一次提交commit
+      - name: 设置环境变量
+        run: echo "PACKAGE_VERSION=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      - name: 设置环境变量
+        # run: BETTER_AUTH_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+        run: echo "BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> $GITHUB_ENV
+          
+
+      # 使用npm安装依赖
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: './frontend/pnpm-lock.yaml'
+      - run: cd frontend && pnpm install && pnpm run build
+
+      - name: 构建并推送前端镜像到 GHCR
+        run: |
+          FRONTENDIMAGE=docker.cnb.cool/xu756/xm/deer-flow-frontend:${{ env.PACKAGE_VERSION }}
+          BACKENDIMAGE=docker.cnb.cool/xu756/xm/deer-flow-backend:${{ env.PACKAGE_VERSION }}
+          docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max . -f frontend/Dockerfile -t $FRONTENDIMAGE --push
+          docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max . -f backend/Dockerfile -t $BACKENDIMAGE --push

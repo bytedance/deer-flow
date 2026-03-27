@@ -1,10 +1,10 @@
 name: Lint Check
 
-on:
-  push:
-    branches: [ 'main' ]
-  pull_request:
-    branches: [ '*' ]
+# on:
+#   push:
+#     branches: [ 'main' ]
+#   pull_request:
+#     branches: [ '*' ]
 
 permissions:
   contents: read
