@@ -3,10 +3,10 @@ import path from "path";
 
 import { redirect } from "next/navigation";
 
-import { env } from "@/env";
+import { isStaticWebsiteOnly } from "@/core/config";
 
 export default function WorkspacePage() {
-  if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
+  if (isStaticWebsiteOnly()) {
     const firstThread = fs
       .readdirSync(path.resolve(process.cwd(), "public/demo/threads"), {
         withFileTypes: true,
