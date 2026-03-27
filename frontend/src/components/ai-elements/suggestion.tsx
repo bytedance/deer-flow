@@ -3,7 +3,6 @@
 import { Button } from "@/components/ui/button";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { Icon } from "@radix-ui/react-select";
 import type { LucideIcon } from "lucide-react";
 import { Children, type ComponentProps } from "react";
 

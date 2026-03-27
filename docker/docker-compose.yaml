@@ -16,8 +16,8 @@
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #
-# LangSmith tracing is disabled by default (LANGCHAIN_TRACING_V2=false).
-# Set LANGCHAIN_TRACING_V2=true and LANGSMITH_API_KEY in .env to enable it.
+# LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
+# Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
 #
 # Access: http://localhost:${PORT:-2026}
 
@@ -46,6 +46,7 @@ services:
       target: prod
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: deer-flow-frontend
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
@@ -60,6 +61,9 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
     container_name: deer-flow-gateway
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
     volumes:
@@ -105,6 +109,9 @@ services:
     build:
       context: ../
       dockerfile: backend/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
     container_name: deer-flow-langgraph
     command: sh -c "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
     volumes:
@@ -137,8 +144,8 @@ services:
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Disable LangSmith tracing — LANGSMITH_API_KEY is not required.
-      # Set LANGCHAIN_TRACING_V2=true and LANGSMITH_API_KEY in .env to enable.
-      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+      # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
     env_file:
       - ../.env
     extra_hosts:
@@ -154,6 +161,8 @@ services:
     build:
       context: ./provisioner
       dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
     container_name: deer-flow-provisioner
     volumes:
       - ~/.kube/config:/root/.kube/config:ro

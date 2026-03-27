@@ -58,7 +58,7 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
 
     # Prepare model parameter
     if config.model_name:
-        model = config.model_name
+        model = create_chat_model(name=config.model_name, thinking_enabled=False)
     else:
         # Use a lightweight model for summarization to save costs
         # Falls back to default model if not explicitly specified
