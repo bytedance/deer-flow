@@ -23,6 +23,10 @@ class MemoryConfig(BaseModel):
             "migrate existing data or use an absolute path to preserve the old location."
         ),
     )
+    storage_class: str = Field(
+        default="deerflow.agents.memory.storage.FileMemoryStorage",
+        description="The class path for memory storage provider",
+    )
     debounce_seconds: int = Field(
         default=30,
         ge=1,
