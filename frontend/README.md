@@ -41,6 +41,12 @@ pnpm dev
 # Type check
 pnpm typecheck
 
+# Check formatting
+pnpm format
+
+# Apply formatting
+pnpm format:write
+
 # Lint
 pnpm lint
 
@@ -113,6 +119,8 @@ src/
 | `pnpm dev` | Start development server with Turbopack |
 | `pnpm build` | Build for production |
 | `pnpm start` | Start production server |
+| `pnpm format` | Check formatting with Prettier |
+| `pnpm format:write` | Apply formatting with Prettier |
 | `pnpm lint` | Run ESLint |
 | `pnpm lint:fix` | Fix ESLint issues |
 | `pnpm typecheck` | Run TypeScript type checking |
