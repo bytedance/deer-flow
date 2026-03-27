@@ -127,7 +127,10 @@ export function groupMessages<T>(
 
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim();
+    return (
+      splitInlineReasoningFromAIMessage(message)?.content ??
+      message.content.trim()
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content
@@ -167,7 +170,10 @@ function splitInlineReasoningFromAIMessage(message: Message) {
 
 export function extractContentFromMessage(message: Message) {
   if (typeof message.content === "string") {
-    return splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim();
+    return (
+      splitInlineReasoningFromAIMessage(message)?.content ??
+      message.content.trim()
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content
@@ -233,8 +239,11 @@ export function extractURLFromImageURLContent(
 export function hasContent(message: Message) {
   if (typeof message.content === "string") {
     return (
-      splitInlineReasoningFromAIMessage(message)?.content ?? message.content.trim()
-    ).length > 0;
+      (
+        splitInlineReasoningFromAIMessage(message)?.content ??
+        message.content.trim()
+      ).length > 0
+    );
   }
   if (Array.isArray(message.content)) {
     return message.content.length > 0;
@@ -305,10 +314,7 @@ export function hasSubagent(message: AIMessage) {
 export function findToolCallResult(toolCallId: string, messages: Message[]) {
   for (const message of messages) {
     if (message.type === "tool" && message.tool_call_id === toolCallId) {
-      const content = extractTextFromMessage(message);
-      if (content) {
-        return content;
-      }
+      return extractTextFromMessage(message);
     }
   }
   return undefined;
