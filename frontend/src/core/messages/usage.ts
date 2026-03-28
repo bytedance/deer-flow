@@ -10,9 +10,7 @@ export interface TokenUsage {
  * Extract usage_metadata from an AI message if present.
  * The field is added by the backend (PR #1218) but not typed in the SDK.
  */
-function getUsageMetadata(
-  message: Message,
-): TokenUsage | null {
+function getUsageMetadata(message: Message): TokenUsage | null {
   if (message.type !== "ai") {
     return null;
   }

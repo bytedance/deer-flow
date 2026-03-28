@@ -17,9 +17,11 @@ from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
+
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data via storage provider."""
     return get_memory_storage().load(agent_name)
+
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Reload memory data via storage provider."""
