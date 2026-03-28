@@ -284,6 +284,14 @@ title:
   model_name: null  # Use first model in list
 ```
 
+### GitHub API Token (Optional for GitHub Deep Research Skill)
+
+The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.
+
+**Configuration Steps**:
+1. Uncomment the `GITHUB_TOKEN` line in the `.env` file and add your personal access token
+2. Restart the DeerFlow service to apply changes
+
 ## Environment Variables
 
 DeerFlow supports environment variable substitution using the `$` prefix:

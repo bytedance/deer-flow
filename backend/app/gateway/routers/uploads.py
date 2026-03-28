@@ -1,6 +1,8 @@
 """Upload router for handling file uploads."""
 
 import logging
+import os
+import stat
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -31,6 +33,26 @@ class UploadResponse(BaseModel):
     success: bool
     files: list[dict[str, str]]
     message: str
+
+
+def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
+    """Ensure uploaded files remain writable when mounted into non-local sandboxes.
+
+    In AIO sandbox mode, the gateway writes the authoritative host-side file
+    first, then the sandbox runtime may rewrite the same mounted path. Granting
+    world-writable access here prevents permission mismatches between the
+    gateway user and the sandbox runtime user.
+    """
+    file_stat = os.lstat(file_path)
+    if stat.S_ISLNK(file_stat.st_mode):
+        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
+        return
+
+    writable_mode = (
+        stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    )
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, writable_mode, **chmod_kwargs)
 
 
 @router.post("", response_model=UploadResponse)
@@ -71,6 +93,7 @@ async def upload_files(
             virtual_path = upload_virtual_path(safe_filename)
 
             if sandbox_id != "local":
+                _make_file_sandbox_writable(file_path)
                 sandbox.update_file(virtual_path, content)
 
             file_info = {
@@ -90,6 +113,7 @@ async def upload_files(
                     md_virtual_path = upload_virtual_path(md_path.name)
 
                     if sandbox_id != "local":
+                        _make_file_sandbox_writable(md_path)
                         sandbox.update_file(md_virtual_path, md_path.read_bytes())
 
                     file_info["markdown_file"] = md_path.name

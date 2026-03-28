@@ -88,5 +88,5 @@ chmod 600 ../config.yaml  # Protect sensitive configuration
 
 ## See Also
 
-- [Configuration Guide](docs/CONFIGURATION.md) - Detailed configuration options
-- [Architecture Overview](CLAUDE.md) - System architecture
+- [Configuration Guide](CONFIGURATION.md) - Detailed configuration options
+- [Architecture Overview](../CLAUDE.md) - System architecture
