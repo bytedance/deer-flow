@@ -406,6 +406,8 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
 #   codex:
 #     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
@@ -415,6 +417,8 @@ sandbox:
 #     description: Codex CLI for repository tasks and code generation
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
 
 # ============================================================================
 # Skills Configuration
@@ -547,6 +551,9 @@ checkpointer:
 
 # channels:
 #   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   # For Docker deployments, use the Docker service name instead of localhost:
+#   #   langgraph_url: http://langgraph:2024
+#   #   gateway_url: http://gateway:8001
 #   langgraph_url: http://localhost:2024
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
