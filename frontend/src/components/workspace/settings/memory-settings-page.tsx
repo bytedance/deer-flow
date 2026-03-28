@@ -1,6 +1,7 @@
 "use client";
 
 import { Trash2Icon } from "lucide-react";
+import Link from "next/link";
 import { useDeferredValue, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
@@ -175,7 +176,11 @@ function truncateFactPreview(content: string, maxLength = 140) {
   if (normalized.length <= maxLength) {
     return normalized;
   }
-  return `${normalized.slice(0, maxLength - 1)}...`;
+  const ellipsis = "...";
+  if (maxLength <= ellipsis.length) {
+    return normalized.slice(0, maxLength);
+  }
+  return `${normalized.slice(0, maxLength - ellipsis.length)}${ellipsis}`;
 }
 
 function upperFirst(str: string) {
@@ -404,12 +409,12 @@ export function MemorySettingsPage() {
                               </span>
                             </div>
                             <p className="break-words text-sm">{fact.content}</p>
-                            <a
+                            <Link
                               href={pathOfThread(fact.source)}
                               className="text-primary text-sm underline-offset-4 hover:underline"
                             >
                               {t.settings.memory.markdown.table.view}
-                            </a>
+                            </Link>
                           </div>
 
                           <Button

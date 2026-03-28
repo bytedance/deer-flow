@@ -4,7 +4,7 @@ function getBaseOrigin() {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-  return "http://localhost:3000";
+  return undefined;
 }
 
 export function getBackendBaseURL() {

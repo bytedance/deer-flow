@@ -320,17 +320,17 @@ export const enUS: Translations = {
       factDeleteConfirmDescription:
         "This fact will be removed from memory immediately. This action cannot be undone.",
       factDeleteSuccess: "Fact deleted",
-        noFacts: "No saved facts yet.",
-        summaryReadOnly:
-          "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
-        memoryFullyEmpty: "No memory saved yet.",
-        factPreviewLabel: "Fact to delete",
-        searchPlaceholder: "Search memory",
-        filterAll: "All",
-        filterFacts: "Facts",
-        filterSummaries: "Summaries",
-        noMatches: "No matching memory found.",
-        markdown: {
+      noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
+      searchPlaceholder: "Search memory",
+      filterAll: "All",
+      filterFacts: "Facts",
+      filterSummaries: "Summaries",
+      noMatches: "No matching memory found.",
+      markdown: {
         overview: "Overview",
         userContext: "User context",
         work: "Work",

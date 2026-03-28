@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Load the Memory Settings review sample into a local DeerFlow runtime."""
 
 from __future__ import annotations
