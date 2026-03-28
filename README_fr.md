@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -58,6 +58,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
       - [Mode Sandbox](#mode-sandbox)
       - [Serveur MCP](#serveur-mcp)
       - [Canaux de messagerie](#canaux-de-messagerie)
+      - [Traçage LangSmith](#traçage-langsmith)
   - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
   - [Fonctionnalités principales](#fonctionnalités-principales)
     - [Skills et outils](#skills-et-outils)
@@ -388,6 +389,21 @@ Une fois un canal connecté, vous pouvez interagir avec DeerFlow directement dep
 | `/help` | Afficher l'aide |
 
 > Les messages sans préfixe de commande sont traités comme du chat classique — DeerFlow crée un thread et répond de manière conversationnelle.
+
+#### Traçage LangSmith
+
+DeerFlow intègre nativement [LangSmith](https://smith.langchain.com) pour l'observabilité. Une fois activé, tous les appels LLM, les exécutions d'agents et les exécutions d'outils sont tracés et visibles dans le tableau de bord LangSmith.
+
+Ajoutez les lignes suivantes à votre fichier `.env` :
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
 
 ## Du Deep Research au Super Agent Harness
 

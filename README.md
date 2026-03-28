@@ -58,6 +58,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
+      - [LangSmith Tracing](#langsmith-tracing)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -377,6 +378,8 @@ FEISHU_APP_SECRET=your_app_secret
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
 
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://langgraph:2024` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+
 **Commands**
 
 Once a channel is connected, you can interact with DeerFlow directly from the chat:
@@ -390,6 +393,21 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
+#### LangSmith Tracing
+
+DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
+
+Add the following to your `.env` file:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 
 ## From Deep Research to Super Agent Harness
 
