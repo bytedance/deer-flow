@@ -1,7 +1,6 @@
 "use client";
 
-import { Trash2Icon } from "lucide-react";
-import Link from "next/link";
+import { PenLineIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useDeferredValue, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
@@ -16,14 +15,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useClearMemory,
+  useCreateMemoryFact,
   useDeleteMemoryFact,
   useMemory,
+  useUpdateMemoryFact,
 } from "@/core/memory/hooks";
-import type { UserMemory } from "@/core/memory/types";
+import type { MemoryFactInput, UserMemory } from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -42,6 +44,18 @@ type MemorySection = {
 type MemorySectionGroup = {
   title: string;
   sections: MemorySection[];
+};
+
+type FactFormState = {
+  content: string;
+  category: string;
+  confidence: string;
+};
+
+const DEFAULT_FACT_FORM_STATE: FactFormState = {
+  content: "",
+  category: "context",
+  confidence: "0.8",
 };
 
 function confidenceToLevelKey(confidence: unknown): {
@@ -191,9 +205,14 @@ export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
   const clearMemory = useClearMemory();
+  const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
+  const updateMemoryFact = useUpdateMemoryFact();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
+  const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
+  const [factEditorOpen, setFactEditorOpen] = useState(false);
+  const [factForm, setFactForm] = useState<FactFormState>(DEFAULT_FACT_FORM_STATE);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const deferredQuery = useDeferredValue(query);
@@ -214,6 +233,30 @@ export function MemorySettingsPage() {
     "This fact will be removed from memory immediately. This action cannot be undone.";
   const factDeleteSuccess =
     t.settings.memory.factDeleteSuccess ?? "Fact deleted";
+  const addFactLabel = t.settings.memory.addFact ?? "Add fact";
+  const addFactTitle = t.settings.memory.addFactTitle ?? "Add memory fact";
+  const editFactTitle = t.settings.memory.editFactTitle ?? "Edit memory fact";
+  const addFactSuccess = t.settings.memory.addFactSuccess ?? "Fact created";
+  const editFactSuccess = t.settings.memory.editFactSuccess ?? "Fact updated";
+  const factContentLabel = t.settings.memory.factContentLabel ?? "Content";
+  const factCategoryLabel = t.settings.memory.factCategoryLabel ?? "Category";
+  const factConfidenceLabel =
+    t.settings.memory.factConfidenceLabel ?? "Confidence";
+  const factContentPlaceholder =
+    t.settings.memory.factContentPlaceholder ??
+    "Describe the memory fact you want to save";
+  const factCategoryPlaceholder =
+    t.settings.memory.factCategoryPlaceholder ?? "context";
+  const factConfidenceHint =
+    t.settings.memory.factConfidenceHint ?? "Use a number between 0 and 1.";
+  const factSave = t.settings.memory.factSave ?? "Save fact";
+  const factValidationContent =
+    t.settings.memory.factValidationContent ??
+    "Fact content cannot be empty.";
+  const factValidationConfidence =
+    t.settings.memory.factValidationConfidence ??
+    "Confidence must be a number between 0 and 1.";
+  const manualFactSource = t.settings.memory.manualFactSource ?? "Manual";
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
   const summaryReadOnly =
     t.settings.memory.summaryReadOnly ??
@@ -287,6 +330,60 @@ export function MemorySettingsPage() {
     }
   }
 
+  function openCreateFactDialog() {
+    setFactToEdit(null);
+    setFactForm(DEFAULT_FACT_FORM_STATE);
+    setFactEditorOpen(true);
+  }
+
+  function openEditFactDialog(fact: MemoryFact) {
+    setFactToEdit(fact);
+    setFactForm({
+      content: fact.content,
+      category: fact.category,
+      confidence: String(fact.confidence),
+    });
+    setFactEditorOpen(true);
+  }
+
+  async function handleSaveFact() {
+    const trimmedContent = factForm.content.trim();
+    if (!trimmedContent) {
+      toast.error(factValidationContent);
+      return;
+    }
+
+    const confidence = Number(factForm.confidence);
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      toast.error(factValidationConfidence);
+      return;
+    }
+
+    const input: MemoryFactInput = {
+      content: trimmedContent,
+      category: factForm.category.trim() || "context",
+      confidence,
+    };
+
+    try {
+      if (factToEdit) {
+        await updateMemoryFact.mutateAsync({ factId: factToEdit.id, input });
+        toast.success(editFactSuccess);
+      } else {
+        await createMemoryFact.mutateAsync(input);
+        toast.success(addFactSuccess);
+      }
+      setFactEditorOpen(false);
+      setFactToEdit(null);
+      setFactForm(DEFAULT_FACT_FORM_STATE);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const isFactFormPending =
+    createMemoryFact.isPending || updateMemoryFact.isPending;
+
   return (
     <>
       <SettingsSection
@@ -332,16 +429,22 @@ export function MemorySettingsPage() {
                   <ToggleGroupItem value="summaries">
                     {filterSummaries}
                   </ToggleGroupItem>
-                </ToggleGroup>
+                  </ToggleGroup>
               </div>
 
-              <Button
-                variant="destructive"
-                onClick={() => setClearDialogOpen(true)}
-                disabled={clearMemory.isPending}
-              >
-                {clearMemory.isPending ? t.common.loading : clearAllLabel}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={openCreateFactDialog}>
+                  <PlusIcon className="mr-2 h-4 w-4" />
+                  {addFactLabel}
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => setClearDialogOpen(true)}
+                  disabled={clearMemory.isPending}
+                >
+                  {clearMemory.isPending ? t.common.loading : clearAllLabel}
+                </Button>
+              </div>
             </div>
 
             {!hasMatchingVisibleContent && normalizedQuery ? (
@@ -409,28 +512,48 @@ export function MemorySettingsPage() {
                                 {formatTimeAgo(fact.createdAt)}
                               </span>
                             </div>
-                            <p className="text-sm break-words">
-                              {fact.content}
-                            </p>
-                            <Link
-                              href={pathOfThread(fact.source)}
-                              className="text-primary text-sm underline-offset-4 hover:underline"
-                            >
-                              {t.settings.memory.markdown.table.view}
-                            </Link>
+<<<<<<< HEAD
+                            <p className="break-words text-sm">{fact.content}</p>
+                            {fact.source === "manual" ? (
+                              <span className="text-muted-foreground text-sm">
+                                {manualFactSource}
+                              </span>
+                            ) : (
+                              <a
+                                href={pathOfThread(fact.source)}
+                                className="text-primary text-sm underline-offset-4 hover:underline"
+                              >
+                                {t.settings.memory.markdown.table.view}
+                              </a>
+                            )}
                           </div>
 
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="text-destructive hover:text-destructive shrink-0"
-                            onClick={() => setFactToDelete(fact)}
-                            disabled={deleteMemoryFact.isPending}
-                            title={t.common.delete}
-                            aria-label={t.common.delete}
-                          >
-                            <Trash2Icon className="h-4 w-4" />
-                          </Button>
+                          <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="shrink-0"
+                              onClick={() => openEditFactDialog(fact)}
+                              disabled={deleteMemoryFact.isPending}
+                              title={t.common.edit}
+                              aria-label={t.common.edit}
+                            >
+                              <PenLineIcon className="h-4 w-4" />
+                            </Button>
+
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-destructive hover:text-destructive shrink-0"
+                              onClick={() => setFactToDelete(fact)}
+                              disabled={deleteMemoryFact.isPending}
+                              title={t.common.delete}
+                              aria-label={t.common.delete}
+                            >
+                              <Trash2Icon className="h-4 w-4" />
+                            </Button>
+                          </div>
+
                         </div>
                       );
                     })}
@@ -462,6 +585,91 @@ export function MemorySettingsPage() {
               disabled={clearMemory.isPending}
             >
               {clearMemory.isPending ? t.common.loading : clearAllLabel}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={factEditorOpen}
+        onOpenChange={(open) => {
+          setFactEditorOpen(open);
+          if (!open) {
+            setFactToEdit(null);
+            setFactForm(DEFAULT_FACT_FORM_STATE);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{factToEdit ? editFactTitle : addFactTitle}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-sm font-medium">{factContentLabel}</div>
+              <Textarea
+                value={factForm.content}
+                onChange={(event) =>
+                  setFactForm((current) => ({
+                    ...current,
+                    content: event.target.value,
+                  }))
+                }
+                placeholder={factContentPlaceholder}
+                rows={4}
+              />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-sm font-medium">{factCategoryLabel}</div>
+                <Input
+                  value={factForm.category}
+                  onChange={(event) =>
+                    setFactForm((current) => ({
+                      ...current,
+                      category: event.target.value,
+                    }))
+                  }
+                  placeholder={factCategoryPlaceholder}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-sm font-medium">{factConfidenceLabel}</div>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={factForm.confidence}
+                  onChange={(event) =>
+                    setFactForm((current) => ({
+                      ...current,
+                      confidence: event.target.value,
+                    }))
+                  }
+                />
+                <div className="text-muted-foreground text-xs">
+                  {factConfidenceHint}
+                </div>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setFactEditorOpen(false);
+                setFactToEdit(null);
+                setFactForm(DEFAULT_FACT_FORM_STATE);
+              }}
+              disabled={isFactFormPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button onClick={() => void handleSaveFact()} disabled={isFactFormPending}>
+              {isFactFormPending ? t.common.loading : factSave}
             </Button>
           </DialogFooter>
         </DialogContent>
