@@ -102,3 +102,11 @@
 | 日期 | 说明 |
 |------|------|
 | 2026-03-28 | 初版：基于当前 `huiclaw/dev` 与 `lead_agent/agent.py` 整理；Middleware 数量为「基链 + 条件追加」，非固定 9/11。 |
+| 2026-03-28 | Phase 0：`backend/tests/test_huiclaw_phase0.py` 验证 `huiclaw_*` 经 **MemorySaver** 异步/同步路径读回；`config.example.yaml` 含 `huiclaw.enabled`。 |
+
+---
+
+## 7. 测试锚点（HUIClaw）
+
+- **`backend/tests/test_huiclaw_phase0.py`**：`ThreadState` + LangGraph `MemorySaver` 的 checkpoint 往返；`AppConfig` 接受 `huiclaw:` 顶级键。  
+- **依赖快照**：`deps-snapshot.txt`（升级前可 diff）。

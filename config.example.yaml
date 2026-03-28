@@ -634,3 +634,12 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# HUIClaw (Fork extension)
+# ============================================================================
+# Top-level key preserved by AppConfig (extra="allow"). Add your persona/org
+# paths here without changing DeerFlow core models until explicitly modeled.
+
+huiclaw:
+  enabled: false

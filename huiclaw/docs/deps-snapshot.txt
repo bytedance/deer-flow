@@ -1,0 +1,23 @@
+# P0-4: backend/.venv — uv pip freeze (filtered: langchain|langgraph|langsmith|pydantic)
+# Regenerate: cd backend && uv pip freeze | grep -iE 'langchain|langgraph|langsmith|pydantic' | LC_ALL=C sort
+# Date: 2026-03-28
+
+langchain-anthropic==1.3.4
+langchain-core==1.2.17
+langchain-deepseek==1.0.1
+langchain-google-genai==4.2.1
+langchain-mcp-adapters==0.2.1
+langchain-openai==1.1.7
+langchain==1.2.3
+langgraph-api==0.7.65
+langgraph-checkpoint-sqlite==3.0.3
+langgraph-checkpoint==4.0.0
+langgraph-cli==0.4.14
+langgraph-prebuilt==1.0.8
+langgraph-runtime-inmem==0.26.0
+langgraph-sdk==0.3.9
+langgraph==1.0.9
+langsmith==0.6.4
+pydantic-core==2.41.5
+pydantic-settings==2.12.0
+pydantic==2.12.5
