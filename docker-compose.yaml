@@ -15,7 +15,7 @@ services:
       - deer-flow
 
   frontend:
-    image: deer-flow-frontend:latest
+    image: docker.cnb.cool/xu756/xm/deer-flow-frontend:a5d5241
     container_name: deer-flow-frontend
     environment:
       NEXT_PUBLIC_BACKEND_BASE_URL: http://localhost:2026
@@ -27,7 +27,7 @@ services:
       - deer-flow
 
   gateway:
-    image: deer-flow-backend:latest
+    image: docker.cnb.cool/xu756/xm/deer-flow-backend:a5d5241
     container_name: deer-flow-gateway
     command: >
       sh -c "cd /app/backend &&
@@ -59,7 +59,7 @@ services:
       - deer-flow
 
   langgraph:
-    image: deer-flow-backend:latest
+    image: docker.cnb.cool/xu756/xm/deer-flow-backend:a5d5241
     container_name: deer-flow-langgraph
     command: >
       sh -c "cd /app/backend &&
