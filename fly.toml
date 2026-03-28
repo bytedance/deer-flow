@@ -1,0 +1,39 @@
+app = "deer-flow"
+primary_region = "iad"
+
+[build]
+
+[deploy]
+  release_command = "/app/deploy.sh"
+
+[env]
+  PORT = "8080"
+  DEER_FLOW_HOME = "/persist/.deer-flow"
+
+[mounts]
+  source = "deerflow_data"
+  destination = "/persist"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[http_service.concurrency]
+  type = "connections"
+  hard_limit = 25
+  soft_limit = 20
+
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "15s"
+  method = "GET"
+  path = "/"
+  timeout = "5s"
