@@ -31,3 +31,45 @@ def test_write_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
     LocalSandbox("t").write_file(str(path), text)
 
     assert path.read_text(encoding="utf-8") == text
+
+
+def test_get_shell_prefers_posix_shell_from_path_before_windows_fallback(monkeypatch):
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", lambda candidates: r"C:\Program Files\Git\bin\sh.exe" if candidates == ("/bin/zsh", "/bin/bash", "/bin/sh", "sh") else None)
+
+    assert LocalSandbox._get_shell() == r"C:\Program Files\Git\bin\sh.exe"
+
+
+def test_get_shell_uses_powershell_fallback_on_windows(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_find(candidates: tuple[str, ...]) -> str | None:
+        calls.append(candidates)
+        if candidates == ("/bin/zsh", "/bin/bash", "/bin/sh", "sh"):
+            return None
+        return r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"SystemRoot": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", fake_find)
+
+    assert LocalSandbox._get_shell() == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    assert calls[1] == (
+        "powershell",
+        "powershell.exe",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "cmd.exe",
+    )
+
+
+def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
+    def fake_find(candidates: tuple[str, ...]) -> str | None:
+        if candidates == ("/bin/zsh", "/bin/bash", "/bin/sh", "sh"):
+            return None
+        return r"C:\Windows\System32\cmd.exe"
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"SystemRoot": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", fake_find)
+
+    assert LocalSandbox._get_shell() == r"C:\Windows\System32\cmd.exe"

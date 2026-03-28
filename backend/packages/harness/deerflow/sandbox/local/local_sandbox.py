@@ -8,6 +8,21 @@ from deerflow.sandbox.sandbox import Sandbox
 
 
 class LocalSandbox(Sandbox):
+    @staticmethod
+    def _find_first_available_shell(candidates: tuple[str, ...]) -> str | None:
+        """Return the first executable shell path or command found from candidates."""
+        for shell in candidates:
+            if os.path.isabs(shell):
+                if os.path.isfile(shell) and os.access(shell, os.X_OK):
+                    return shell
+                continue
+
+            shell_from_path = shutil.which(shell)
+            if shell_from_path is not None:
+                return shell_from_path
+
+        return None
+
     def __init__(self, id: str, path_mappings: dict[str, str] | None = None):
         """
         Initialize local sandbox with optional path mappings.
@@ -137,18 +152,29 @@ class LocalSandbox(Sandbox):
 
     @staticmethod
     def _get_shell() -> str:
-        """Detect available shell executable with fallback.
+        """Detect available shell executable with fallback."""
+        shell = LocalSandbox._find_first_available_shell(("/bin/zsh", "/bin/bash", "/bin/sh", "sh"))
+        if shell is not None:
+            return shell
 
-        Returns the first available shell in order of preference:
-        /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
-        Raises a RuntimeError if no suitable shell is found.
-        """
-        for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
-            if os.path.isfile(shell) and os.access(shell, os.X_OK):
+        if os.name == "nt":
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            shell = LocalSandbox._find_first_available_shell(
+                (
+                    "powershell",
+                    "powershell.exe",
+                    os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                    "cmd.exe",
+                )
+            )
+            if shell is not None:
                 return shell
-        shell_from_path = shutil.which("sh")
-        if shell_from_path is not None:
-            return shell_from_path
+
+            raise RuntimeError(
+                "No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, `sh` on PATH, "
+                "then PowerShell and cmd.exe fallbacks for Windows."
+            )
+
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
     def execute_command(self, command: str) -> str:
