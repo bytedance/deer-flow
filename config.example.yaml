@@ -597,6 +597,20 @@ checkpointer:
 #             subagent_enabled: true
 
 # ============================================================================
+# Authentication Configuration
+# ============================================================================
+# Configure authentication providers for the web UI.
+# When enabled, users must log in before accessing the workspace.
+
+# auth:
+#   feishu:
+#     enabled: false
+#     app_id: $FEISHU_APP_ID
+#     app_secret: $FEISHU_APP_SECRET
+#     lark_host: https://open.feishu.cn           # Default Feishu API host
+#     callback_url: http://localhost:2026/api/auth/feishu/callback  # OAuth callback URL
+
+# ============================================================================
 # Guardrails Configuration
 # ============================================================================
 # Optional pre-execution authorization for tool calls.

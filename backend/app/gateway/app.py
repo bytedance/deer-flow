@@ -8,6 +8,7 @@ from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
     artifacts,
+    auth,
     channels,
     mcp,
     memory,
@@ -105,6 +106,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         openapi_url="/openapi.json",
         openapi_tags=[
             {
+                "name": "auth",
+                "description": "Authentication endpoints for Feishu OAuth login",
+            },
+            {
                 "name": "models",
                 "description": "Operations for querying available AI models and their configurations",
             },
@@ -154,6 +159,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # CORS is handled by nginx - no need for FastAPI middleware
 
     # Include routers
+    # Auth API is mounted at /api/auth
+    app.include_router(auth.router)
+
     # Models API is mounted at /api/models
     app.include_router(models.router)
 

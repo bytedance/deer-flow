@@ -57,3 +57,6 @@ config.yaml.bak
 
 # superpowers
 .superpowers/
+
+# others
+eventbot.db

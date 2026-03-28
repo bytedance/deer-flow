@@ -260,6 +260,11 @@ App Secret:uTpogDDABYMW7DjhOLjkreRJn5W0lkIl
 3. 在调试模式下面时，所有页面加入
 <script src='https://lf-package-cn.feishucdn.com/obj/feishu-static/op/fe/devtools_frontend/remote-debug-0.0.1-alpha.6.js'></script>
 
+# 2026-03-28-01
+## 集成飞书的登录
+- 参考 /Users/edy/greatfeel/IDO/projects/temp/web_app_with_auth/python 的实现
+- 仍然用现在的 python 的 API 框架，不要用 flask
+
 # Archives(Just Ignore)
 ## 无法设计你的智能体，打开下面的页面报内部错误
 http://ido.modelturbo.com:2026/workspace/agents/new
