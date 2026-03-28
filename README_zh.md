@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md)
+[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -243,7 +243,7 @@ channels:
 
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
-    assistant_id: lead_agent
+    assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
     config:
       recursion_limit: 100
     context:
@@ -269,18 +269,22 @@ channels:
 
     # 可选：按渠道 / 按用户单独覆盖 session 配置
     session:
-      assistant_id: mobile_agent
+      assistant_id: mobile-agent  # 这里同样支持自定义 agent 名
       context:
         thinking_enabled: false
       users:
         "123456789":
-          assistant_id: vip_agent
+          assistant_id: vip-agent
           config:
             recursion_limit: 150
           context:
             thinking_enabled: true
             subagent_enabled: true
 ```
+
+说明：
+- `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。
+- 如果 `assistant_id` 填的是自定义 agent 名，DeerFlow 仍然会走 `lead_agent`，同时把该值注入为 `agent_name`，这样 IM 渠道也会生效对应 agent 的 SOUL 和配置。
 
 在 `.env` 里设置对应的 API key：
 

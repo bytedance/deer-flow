@@ -1,14 +1,18 @@
 """Middleware for memory mechanism."""
 
+import logging
 import re
 from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.config.memory_config import get_memory_config
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryMiddlewareState(AgentState):
@@ -119,16 +123,19 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if not config.enabled:
             return None
 
-        # Get thread ID from runtime context
+        # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
         thread_id = runtime.context.get("thread_id") if runtime.context else None
+        if thread_id is None:
+            config_data = get_config()
+            thread_id = config_data.get("configurable", {}).get("thread_id")
         if not thread_id:
-            print("MemoryMiddleware: No thread_id in context, skipping memory update")
+            logger.debug("No thread_id in context, skipping memory update")
             return None
 
         # Get messages from state
         messages = state.get("messages", [])
         if not messages:
-            print("MemoryMiddleware: No messages in state, skipping memory update")
+            logger.debug("No messages in state, skipping memory update")
             return None
 
         # Filter to only keep user inputs and final assistant responses
