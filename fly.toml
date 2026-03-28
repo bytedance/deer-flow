@@ -1,39 +1,23 @@
-app = "deer-flow"
-primary_region = "iad"
+# fly.toml app configuration file generated for deer-flow-x6hknq on 2026-03-28T00:35:06Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'deer-flow-x6hknq'
+primary_region = 'iad'
 
 [build]
-
-[deploy]
-  release_command = "/app/deploy.sh"
-
-[env]
-  PORT = "8080"
-  DEER_FLOW_HOME = "/persist/.deer-flow"
-
-[mounts]
-  source = "deerflow_data"
-  destination = "/persist"
-
-[[vm]]
-  memory = "2gb"
-  cpu_kind = "shared"
-  cpus = 2
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
+  processes = ['app']
 
-[http_service.concurrency]
-  type = "connections"
-  hard_limit = 25
-  soft_limit = 20
-
-[[http_service.checks]]
-  grace_period = "30s"
-  interval = "15s"
-  method = "GET"
-  path = "/"
-  timeout = "5s"
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
