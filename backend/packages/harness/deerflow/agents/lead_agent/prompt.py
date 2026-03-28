@@ -1,7 +1,10 @@
+import logging
 from datetime import datetime
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+
+logger = logging.getLogger(__name__)
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -364,7 +367,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
 </memory>
 """
     except Exception as e:
-        print(f"Failed to load memory context: {e}")
+        logger.error("Failed to load memory context: %s", e)
         return ""
 
 
