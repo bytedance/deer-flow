@@ -22,6 +22,7 @@ export const enUS: Translations = {
     home: "Home",
     settings: "Settings",
     delete: "Delete",
+    edit: "Edit",
     rename: "Rename",
     share: "Share",
     openInNewWindow: "Open in new window",
@@ -337,7 +338,7 @@ export const enUS: Translations = {
       manualFactSource: "Manual",
       noFacts: "No saved facts yet.",
       summaryReadOnly:
-        "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
+        "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
       memoryFullyEmpty: "No memory saved yet.",
       factPreviewLabel: "Fact to delete",
       searchPlaceholder: "Search memory",
