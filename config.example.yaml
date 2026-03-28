@@ -573,6 +573,12 @@ checkpointer:
 #     app_id: $FEISHU_APP_ID
 #     app_secret: $FEISHU_APP_SECRET
 #
+#   dingtalk:
+#     enabled: false
+#     app_key: $DINGTALK_APP_KEY       # AppKey from DingTalk Open Platform
+#     app_secret: $DINGTALK_APP_SECRET # AppSecret from DingTalk Open Platform
+#     allowed_users: []                # empty = allow all
+#
 #   slack:
 #     enabled: false
 #     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
