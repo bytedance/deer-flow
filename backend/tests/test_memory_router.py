@@ -36,6 +36,37 @@ def test_clear_memory_route_returns_cleared_memory() -> None:
     assert response.json()["facts"] == []
 
 
+def test_create_memory_fact_route_returns_updated_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    updated_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_new",
+                "content": "User prefers concise code reviews.",
+                "category": "preference",
+                "confidence": 0.88,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.create_memory_fact", return_value=updated_memory):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/memory/facts",
+                json={
+                    "content": "User prefers concise code reviews.",
+                    "category": "preference",
+                    "confidence": 0.88,
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["facts"] == updated_memory["facts"]
+
+
 def test_delete_memory_fact_route_returns_updated_memory() -> None:
     app = FastAPI()
     app.include_router(memory.router)
@@ -67,6 +98,56 @@ def test_delete_memory_fact_route_returns_404_for_missing_fact() -> None:
     with patch("app.gateway.routers.memory.delete_memory_fact", side_effect=KeyError("fact_missing")):
         with TestClient(app) as client:
             response = client.delete("/api/memory/facts/fact_missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Memory fact 'fact_missing' not found."
+
+
+def test_update_memory_fact_route_returns_updated_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    updated_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers spaces",
+                "category": "workflow",
+                "confidence": 0.91,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory):
+        with TestClient(app) as client:
+            response = client.put(
+                "/api/memory/facts/fact_edit",
+                json={
+                    "content": "User prefers spaces",
+                    "category": "workflow",
+                    "confidence": 0.91,
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["facts"] == updated_memory["facts"]
+
+
+def test_update_memory_fact_route_returns_404_for_missing_fact() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    with patch("app.gateway.routers.memory.update_memory_fact", side_effect=KeyError("fact_missing")):
+        with TestClient(app) as client:
+            response = client.put(
+                "/api/memory/facts/fact_missing",
+                json={
+                    "content": "User prefers spaces",
+                    "category": "workflow",
+                    "confidence": 0.91,
+                },
+            )
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Memory fact 'fact_missing' not found."
