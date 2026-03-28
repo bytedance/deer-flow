@@ -25,9 +25,5 @@ dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
 [tool.uv.workspace]
 members = ["packages/harness"]
 
-[[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
-
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
