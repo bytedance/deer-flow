@@ -53,3 +53,7 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    # HUIClaw: optional checkpoint fields (default unset / None-compatible for older threads)
+    huiclaw_persona: NotRequired[dict | None]
+    huiclaw_lifecycle_state: NotRequired[str | None]
+    huiclaw_persona_version: NotRequired[str | None]
