@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
@@ -183,6 +184,13 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_gateway_config().cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

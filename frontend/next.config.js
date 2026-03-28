@@ -7,6 +7,14 @@ import "./src/env.js";
 /** @type {import("next").NextConfig} */
 const config = {
   devIndicators: false,
+  async rewrites() {
+    return [
+      {
+        source: '/api/langgraph/:path*',
+        destination: `${process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL}/:path*`,
+      },
+    ]
+  }
 };
 
 export default config;
