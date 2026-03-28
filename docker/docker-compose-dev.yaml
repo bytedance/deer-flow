@@ -116,6 +116,7 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
     container_name: deer-flow-gateway
+    pid: host
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload --reload-include='*.yaml .env' > /app/logs/gateway.log 2>&1"
     volumes:
       - ../backend/:/app/backend/
@@ -126,6 +127,17 @@ services:
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
       - ../logs:/app/logs
+      - type: bind
+        source: ${DEERFLOW_HOST_HOME_ROOT}
+        target: ${DEERFLOW_HOST_HOME_ROOT}
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${DEERFLOW_HOST_TMUX_SOCKET_DIR}
+        target: ${DEERFLOW_HOST_TMUX_SOCKET_DIR}
+        bind:
+          create_host_path: true
       # Mount uv cache for faster dependency installation
       - ~/.cache/uv:/root/.cache/uv
       # DooD: same as gateway — AioSandboxProvider runs inside LangGraph process.
@@ -149,6 +161,8 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - DEERFLOW_HOST_PROCESS_USER=${DEERFLOW_HOST_PROCESS_USER}
+      - DEERFLOW_HOST_TMUX_SOCKET=${DEERFLOW_HOST_TMUX_SOCKET}
     env_file:
       - ../.env
     extra_hosts:

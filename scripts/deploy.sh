@@ -38,6 +38,24 @@ mkdir -p "$DEER_FLOW_HOME"
 
 export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
 
+# ── host process bridge defaults ─────────────────────────────────────────────
+
+if [ -z "$DEERFLOW_HOST_HOME_ROOT" ]; then
+    export DEERFLOW_HOST_HOME_ROOT="$HOME"
+fi
+
+if [ -z "$DEERFLOW_HOST_PROCESS_USER" ]; then
+    export DEERFLOW_HOST_PROCESS_USER="$(id -un)"
+fi
+
+if [ -z "$DEERFLOW_HOST_TMUX_SOCKET_DIR" ]; then
+    export DEERFLOW_HOST_TMUX_SOCKET_DIR="/tmp/tmux-$(id -u)"
+fi
+
+if [ -z "$DEERFLOW_HOST_TMUX_SOCKET" ]; then
+    export DEERFLOW_HOST_TMUX_SOCKET="$DEERFLOW_HOST_TMUX_SOCKET_DIR/default"
+fi
+
 # ── config.yaml ───────────────────────────────────────────────────────────────
 
 if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then

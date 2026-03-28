@@ -84,6 +84,26 @@ docker_available() {
     return 0
 }
 
+configure_host_process_bridge() {
+    if [ -z "$DEERFLOW_HOST_HOME_ROOT" ]; then
+        export DEERFLOW_HOST_HOME_ROOT="$HOME"
+    fi
+
+    if [ -z "$DEERFLOW_HOST_PROCESS_USER" ]; then
+        export DEERFLOW_HOST_PROCESS_USER="$(id -un)"
+    fi
+
+    local tmux_socket_dir_default
+    tmux_socket_dir_default="/tmp/tmux-$(id -u)"
+    if [ -z "$DEERFLOW_HOST_TMUX_SOCKET_DIR" ]; then
+        export DEERFLOW_HOST_TMUX_SOCKET_DIR="$tmux_socket_dir_default"
+    fi
+
+    if [ -z "$DEERFLOW_HOST_TMUX_SOCKET" ]; then
+        export DEERFLOW_HOST_TMUX_SOCKET="$DEERFLOW_HOST_TMUX_SOCKET_DIR/default"
+    fi
+}
+
 # Initialize: pre-pull the sandbox image so first Pod startup is fast
 init() {
     echo "=========================================="
@@ -179,6 +199,8 @@ start() {
         echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
         echo ""
     fi
+
+    configure_host_process_bridge
     
     # Ensure config.yaml exists before starting.
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then

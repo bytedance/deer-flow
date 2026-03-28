@@ -65,12 +65,24 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
     container_name: deer-flow-gateway
+    pid: host
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
       - ../skills:/app/skills:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
+      - type: bind
+        source: ${DEERFLOW_HOST_HOME_ROOT}
+        target: ${DEERFLOW_HOST_HOME_ROOT}
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${DEERFLOW_HOST_TMUX_SOCKET_DIR}
+        target: ${DEERFLOW_HOST_TMUX_SOCKET_DIR}
+        bind:
+          create_host_path: true
       # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -94,6 +106,8 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - DEERFLOW_HOST_PROCESS_USER=${DEERFLOW_HOST_PROCESS_USER}
+      - DEERFLOW_HOST_TMUX_SOCKET=${DEERFLOW_HOST_TMUX_SOCKET}
     env_file:
       - ../.env
     extra_hosts:

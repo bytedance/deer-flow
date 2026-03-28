@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import os
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
@@ -31,6 +33,14 @@ CHANNEL_CAPABILITIES = {
     "slack": {"supports_streaming": False},
     "telegram": {"supports_streaming": False},
 }
+LOCAL_PROCESS_COMMANDS = {"jobs", "ps", "tmux", "history", "log", "stop", "kill"}
+PROCESS_CONTROL_SCRIPT = Path("/app/skills/public/process-supervisor/scripts/process_control.py")
+PROCESS_CONTROL_USER = os.getenv("DEERFLOW_HOST_PROCESS_USER", "")
+PROCESS_CONTROL_TMUX_SOCKET = os.getenv("DEERFLOW_HOST_TMUX_SOCKET", "")
+PROCESS_CONTROL_PROTECT_PATTERNS = [
+    "app.gateway.app:app",
+    "langgraph dev",
+]
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -43,6 +53,22 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
         if isinstance(layer, Mapping):
             merged.update(layer)
     return merged
+
+
+def _parse_local_process_command(text: str) -> tuple[str, str] | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("/"):
+        stripped = stripped[1:].strip()
+    if not stripped:
+        return None
+    parts = stripped.split(maxsplit=1)
+    command = parts[0].lower()
+    if command not in LOCAL_PROCESS_COMMANDS:
+        return None
+    argument = parts[1] if len(parts) > 1 else ""
+    return command, argument
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -448,6 +474,8 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         async with self._semaphore:
             try:
+                if await self._maybe_handle_local_process_command(msg):
+                    return
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
@@ -459,6 +487,54 @@ class ChannelManager:
                     msg.chat_id,
                 )
                 await self._send_error(msg, "An internal error occurred. Please try again.")
+
+    async def _maybe_handle_local_process_command(self, msg: InboundMessage) -> bool:
+        parsed = _parse_local_process_command(msg.text)
+        if parsed is None:
+            return False
+
+        command, argument = parsed
+        if not PROCESS_CONTROL_SCRIPT.exists():
+            await self._send_error(msg, f"本地命令脚本不存在：{PROCESS_CONTROL_SCRIPT}")
+            return True
+
+        cli_args = [
+            "python3",
+            str(PROCESS_CONTROL_SCRIPT),
+        ]
+        if PROCESS_CONTROL_USER:
+            cli_args.extend(["--user", PROCESS_CONTROL_USER])
+        if PROCESS_CONTROL_TMUX_SOCKET:
+            cli_args.extend(["--tmux-socket", PROCESS_CONTROL_TMUX_SOCKET])
+        for pattern in PROCESS_CONTROL_PROTECT_PATTERNS:
+            cli_args.extend(["--protect-pattern", pattern])
+        cli_args.append(command)
+        if argument:
+            cli_args.append(argument)
+
+        process = await asyncio.create_subprocess_exec(
+            *cli_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_bytes, stderr_bytes = await process.communicate()
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+
+        if process.returncode == 0:
+            reply = stdout_text or "(空输出)"
+        else:
+            reply = stderr_text or stdout_text or f"命令执行失败：{command}"
+
+        outbound = OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            text=reply,
+            thread_ts=msg.thread_ts,
+        )
+        await self.bus.publish_outbound(outbound)
+        return True
 
     # -- chat handling -----------------------------------------------------
 
@@ -683,7 +759,16 @@ class ChannelManager:
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
-                "/help — Show this help"
+                "/help — Show this help\n"
+                "\n"
+                "Local process commands (also work without '/'): \n"
+                "jobs [keyword]\n"
+                "ps <keyword>\n"
+                "tmux [session]\n"
+                "history <pid|tmux:session>\n"
+                "log <pid|keyword|tmux:session>\n"
+                "stop <pid|keyword|tmux:session>\n"
+                "kill <pid|keyword|tmux:session>"
             )
         else:
             reply = f"Unknown command: /{command}. Type /help for available commands."
