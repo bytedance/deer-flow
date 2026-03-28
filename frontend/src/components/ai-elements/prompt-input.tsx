@@ -1129,10 +1129,7 @@ export const PromptInputSpeechButton = ({
   );
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const callbacksRef = useRef({ textareaRef, onTranscriptionChange });
-
-  useEffect(() => {
-    callbacksRef.current = { textareaRef, onTranscriptionChange };
-  });
+  callbacksRef.current = { textareaRef, onTranscriptionChange };
 
   useEffect(() => {
     if (
