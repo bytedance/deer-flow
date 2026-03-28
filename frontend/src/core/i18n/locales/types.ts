@@ -248,11 +248,11 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
-      addFact?: string;
-      addFactTitle?: string;
-      editFactTitle?: string;
-      addFactSuccess?: string;
-      editFactSuccess?: string;
+      addFact: string;
+      addFactTitle: string;
+      editFactTitle: string;
+      addFactSuccess: string;
+      editFactSuccess: string;
       clearAll: string;
       clearAllConfirmTitle: string;
       clearAllConfirmDescription: string;

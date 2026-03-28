@@ -233,34 +233,23 @@ export function MemorySettingsPage() {
     "This fact will be removed from memory immediately. This action cannot be undone.";
   const factDeleteSuccess =
     t.settings.memory.factDeleteSuccess ?? "Fact deleted";
-  const addFactLabel = t.settings.memory.addFact ?? "Add fact";
-  const addFactTitle = t.settings.memory.addFactTitle ?? "Add memory fact";
-  const editFactTitle = t.settings.memory.editFactTitle ?? "Edit memory fact";
-  const addFactSuccess = t.settings.memory.addFactSuccess ?? "Fact created";
-  const editFactSuccess = t.settings.memory.editFactSuccess ?? "Fact updated";
-  const factContentLabel = t.settings.memory.factContentLabel ?? "Content";
-  const factCategoryLabel = t.settings.memory.factCategoryLabel ?? "Category";
-  const factConfidenceLabel =
-    t.settings.memory.factConfidenceLabel ?? "Confidence";
-  const factContentPlaceholder =
-    t.settings.memory.factContentPlaceholder ??
-    "Describe the memory fact you want to save";
-  const factCategoryPlaceholder =
-    t.settings.memory.factCategoryPlaceholder ?? "context";
-  const factConfidenceHint =
-    t.settings.memory.factConfidenceHint ?? "Use a number between 0 and 1.";
-  const factSave = t.settings.memory.factSave ?? "Save fact";
-  const factValidationContent =
-    t.settings.memory.factValidationContent ??
-    "Fact content cannot be empty.";
-  const factValidationConfidence =
-    t.settings.memory.factValidationConfidence ??
-    "Confidence must be a number between 0 and 1.";
-  const manualFactSource = t.settings.memory.manualFactSource ?? "Manual";
+  const addFactLabel = t.settings.memory.addFact;
+  const addFactTitle = t.settings.memory.addFactTitle;
+  const editFactTitle = t.settings.memory.editFactTitle;
+  const addFactSuccess = t.settings.memory.addFactSuccess;
+  const editFactSuccess = t.settings.memory.editFactSuccess;
+  const factContentLabel = t.settings.memory.factContentLabel;
+  const factCategoryLabel = t.settings.memory.factCategoryLabel;
+  const factConfidenceLabel = t.settings.memory.factConfidenceLabel;
+  const factContentPlaceholder = t.settings.memory.factContentPlaceholder;
+  const factCategoryPlaceholder = t.settings.memory.factCategoryPlaceholder;
+  const factConfidenceHint = t.settings.memory.factConfidenceHint;
+  const factSave = t.settings.memory.factSave;
+  const factValidationContent = t.settings.memory.factValidationContent;
+  const factValidationConfidence = t.settings.memory.factValidationConfidence;
+  const manualFactSource = t.settings.memory.manualFactSource;
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
-  const summaryReadOnly =
-    t.settings.memory.summaryReadOnly ??
-    "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.";
+  const summaryReadOnly = t.settings.memory.summaryReadOnly;
   const memoryFullyEmpty =
     t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
