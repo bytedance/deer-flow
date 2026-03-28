@@ -1,7 +1,11 @@
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
-from deerflow.agents.memory.updater import MemoryUpdater, _extract_text
+from deerflow.agents.memory.updater import (
+    MemoryUpdater,
+    _extract_text,
+    import_memory_data,
+)
 from deerflow.config.memory_config import MemoryConfig
 
 
@@ -286,3 +290,28 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+
+
+def test_import_memory_data_saves_and_returns_imported_memory() -> None:
+    imported_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_import",
+                "content": "User works on DeerFlow.",
+                "category": "context",
+                "confidence": 0.87,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    mock_storage = MagicMock()
+    mock_storage.save.return_value = True
+    mock_storage.load.return_value = imported_memory
+
+    with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
+        result = import_memory_data(imported_memory)
+
+    mock_storage.save.assert_called_once_with(imported_memory, None)
+    mock_storage.load.assert_called_once_with(None)
+    assert result == imported_memory

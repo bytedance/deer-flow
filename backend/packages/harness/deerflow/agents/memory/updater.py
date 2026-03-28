@@ -26,6 +26,26 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     return get_memory_storage().reload(agent_name)
 
 
+def import_memory_data(
+    memory_data: dict[str, Any], agent_name: str | None = None
+) -> dict[str, Any]:
+    """Persist imported memory data via storage provider.
+
+    Args:
+        memory_data: Full memory payload to persist.
+        agent_name: If provided, imports into per-agent memory.
+
+    Returns:
+        The saved memory data after storage normalization.
+
+    Raises:
+        OSError: If persisting the imported memory fails.
+    """
+    if not get_memory_storage().save(memory_data, agent_name):
+        raise OSError("Failed to save imported memory data")
+    return get_memory_storage().load(agent_name)
+
+
 def _extract_text(content: Any) -> str:
     """Extract plain text from LLM response content (str or list of content blocks).
 

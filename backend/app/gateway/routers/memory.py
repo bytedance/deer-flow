@@ -1,9 +1,13 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.updater import get_memory_data, reload_memory_data
+from deerflow.agents.memory.updater import (
+    get_memory_data,
+    import_memory_data,
+    reload_memory_data,
+)
 from deerflow.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
@@ -132,6 +136,34 @@ async def reload_memory() -> MemoryResponse:
         The reloaded memory data.
     """
     memory_data = reload_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.get(
+    "/memory/export",
+    response_model=MemoryResponse,
+    summary="Export Memory Data",
+    description="Export the current global memory data as JSON for backup or transfer.",
+)
+async def export_memory() -> MemoryResponse:
+    """Export the current memory data."""
+    memory_data = get_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.post(
+    "/memory/import",
+    response_model=MemoryResponse,
+    summary="Import Memory Data",
+    description="Import and overwrite the current global memory data from a JSON payload.",
+)
+async def import_memory(request: MemoryResponse) -> MemoryResponse:
+    """Import and persist memory data."""
+    try:
+        memory_data = import_memory_data(request.model_dump())
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
+
     return MemoryResponse(**memory_data)
 
 

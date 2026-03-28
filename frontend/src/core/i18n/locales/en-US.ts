@@ -43,6 +43,7 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    import: "Import",
     export: "Export",
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
@@ -311,6 +312,17 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      exportButton: "Export memory",
+      exportSuccess: "Memory exported",
+      importButton: "Import memory",
+      importConfirmTitle: "Import memory?",
+      importConfirmDescription:
+        "This will overwrite your current memory with the selected JSON backup.",
+      importFileLabel: "Selected file",
+      importInvalidFile:
+        "Failed to read the selected memory file. Please choose a valid JSON export.",
+      importSuccess: "Memory imported",
+      manualFactSource: "Manual",
       markdown: {
         overview: "Overview",
         userContext: "User context",

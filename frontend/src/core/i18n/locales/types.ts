@@ -32,6 +32,7 @@ export interface Translations {
     save: string;
     install: string;
     create: string;
+    import: string;
     export: string;
     exportAsMarkdown: string;
     exportAsJSON: string;
@@ -247,6 +248,15 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      exportButton: string;
+      exportSuccess: string;
+      importButton: string;
+      importConfirmTitle: string;
+      importConfirmDescription: string;
+      importFileLabel: string;
+      importInvalidFile: string;
+      importSuccess: string;
+      manualFactSource: string;
       markdown: {
         overview: string;
         userContext: string;
