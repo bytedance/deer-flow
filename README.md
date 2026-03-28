@@ -258,7 +258,7 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
    make setup-sandbox
    ```
 
-4. **(Optional) Load the Memory Settings review sample**:
+4. **(Optional) Load sample memory data for local review**:
    ```bash
    python scripts/load_memory_sample.py
    ```
