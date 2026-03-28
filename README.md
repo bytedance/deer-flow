@@ -292,6 +292,7 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 | Telegram | Bot API (long-polling) | Easy |
 | Slack | Socket Mode | Moderate |
 | Feishu / Lark | WebSocket | Moderate |
+| DingTalk | Stream Push (WebSocket) | Moderate |
 
 **Configuration in `config.yaml`:**
 
@@ -316,6 +317,12 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+
+  dingtalk:
+    enabled: true
+    app_key: $DINGTALK_APP_KEY       # AppKey from DingTalk Open Platform
+    app_secret: $DINGTALK_APP_SECRET # AppSecret from DingTalk Open Platform
+    allowed_users: []                # empty = allow all
 
   slack:
     enabled: true
@@ -356,6 +363,10 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# DingTalk
+DINGTALK_APP_KEY=your_app_key
+DINGTALK_APP_SECRET=your_app_secret
 ```
 
 **Telegram Setup**
@@ -377,6 +388,14 @@ FEISHU_APP_SECRET=your_app_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+
+**DingTalk Setup**
+
+1. Create an app on [DingTalk Open Platform](https://open.dingtalk.com/) → enable **Robot** capability.
+2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:chat:readonly`.
+3. Enable **Stream Push** mode for receiving messages (no public IP required).
+4. Subscribe to message events: `im.message.receive_v1`.
+5. Copy the AppKey and AppSecret. Set `DINGTALK_APP_KEY` and `DINGTALK_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
 
 **Commands**
 
