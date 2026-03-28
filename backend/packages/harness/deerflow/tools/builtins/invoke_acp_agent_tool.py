@@ -1,6 +1,7 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
 import logging
+import os
 import shutil
 from typing import Annotated, Any
 
@@ -173,11 +174,14 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         args = agent_config.args or []
         physical_cwd = _get_work_dir(thread_id)
         mcp_servers = _build_mcp_servers()
+        agent_env: dict[str, str] | None = None
+        if agent_config.env:
+            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
 
         try:
             from acp import spawn_agent_process
 
-            async with spawn_agent_process(client, cmd, *args, cwd=physical_cwd) as (conn, proc):
+            async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
                 await conn.initialize(
                     protocol_version=PROTOCOL_VERSION,

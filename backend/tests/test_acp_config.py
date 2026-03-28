@@ -64,8 +64,34 @@ def test_load_acp_config_none_clears_agents():
 def test_acp_agent_config_defaults():
     cfg = ACPAgentConfig(command="my-agent", description="My agent")
     assert cfg.args == []
+    assert cfg.env == {}
     assert cfg.model is None
     assert cfg.auto_approve_permissions is False
+
+
+def test_acp_agent_config_env_literal():
+    cfg = ACPAgentConfig(command="my-agent", description="desc", env={"OPENAI_API_KEY": "sk-test"})
+    assert cfg.env == {"OPENAI_API_KEY": "sk-test"}
+
+
+def test_acp_agent_config_env_default_is_empty():
+    cfg = ACPAgentConfig(command="my-agent", description="desc")
+    assert cfg.env == {}
+
+
+def test_load_acp_config_preserves_env():
+    load_acp_config_from_dict(
+        {
+            "codex": {
+                "command": "codex-acp",
+                "args": [],
+                "description": "Codex CLI",
+                "env": {"OPENAI_API_KEY": "$OPENAI_API_KEY", "FOO": "bar"},
+            }
+        }
+    )
+    cfg = get_acp_agents()["codex"]
+    assert cfg.env == {"OPENAI_API_KEY": "$OPENAI_API_KEY", "FOO": "bar"}
 
 
 def test_acp_agent_config_with_model():
