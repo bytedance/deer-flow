@@ -11,11 +11,21 @@ from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import get_memory_storage
+from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+
+def _create_empty_memory() -> dict[str, Any]:
+    """Compatibility wrapper for creating an empty memory structure."""
+    return create_empty_memory()
+
+
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    """Compatibility wrapper for persisting memory through the active storage backend."""
+    return get_memory_storage().save(memory_data, agent_name)
 
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data via storage provider."""
