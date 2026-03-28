@@ -126,7 +126,10 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             config_data = get_config()
             thread_id = config_data.get("configurable", {}).get("thread_id")
         if not thread_id:
-            print("MemoryMiddleware: No thread_id in context, skipping memory update")
+            print(
+                "MemoryMiddleware: No thread_id found in runtime context or config.configurable, "
+                "skipping memory update"
+            )
             return None
 
         # Get messages from state
