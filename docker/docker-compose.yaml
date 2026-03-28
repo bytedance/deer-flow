@@ -90,6 +90,8 @@ services:
     environment:
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://langgraph:2024}
+      - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
