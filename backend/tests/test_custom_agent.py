@@ -304,39 +304,42 @@ class TestListCustomAgents:
 class TestMemoryFilePath:
     def test_global_memory_path(self, tmp_path):
         """None agent_name should return global memory file."""
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path = updater_mod._get_memory_file_path(None)
+            storage = FileMemoryStorage()
+            path = storage._get_memory_file_path(None)
         assert path == tmp_path / "memory.json"
 
     def test_agent_memory_path(self, tmp_path):
         """Providing agent_name should return per-agent memory file."""
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path = updater_mod._get_memory_file_path("code-reviewer")
+            storage = FileMemoryStorage()
+            path = storage._get_memory_file_path("code-reviewer")
         assert path == tmp_path / "agents" / "code-reviewer" / "memory.json"
 
     def test_different_paths_for_different_agents(self, tmp_path):
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path_global = updater_mod._get_memory_file_path(None)
-            path_a = updater_mod._get_memory_file_path("agent-a")
-            path_b = updater_mod._get_memory_file_path("agent-b")
+            storage = FileMemoryStorage()
+            path_global = storage._get_memory_file_path(None)
+            path_a = storage._get_memory_file_path("agent-a")
+            path_b = storage._get_memory_file_path("agent-b")
 
         assert path_global != path_a
         assert path_global != path_b

@@ -81,14 +81,33 @@ models:
   #     thinking:
   #       type: enabled
 
-  # Example: Google Gemini model
+  # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
   #   display_name: Gemini 2.5 Pro
   #   use: langchain_google_genai:ChatGoogleGenerativeAI
   #   model: gemini-2.5-pro
-  #   google_api_key: $GOOGLE_API_KEY
+  #   gemini_api_key: $GEMINI_API_KEY
   #   max_tokens: 8192
   #   supports_vision: true
+
+  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
+  # are preserved across multi-turn tool-call conversations — required by the
+  # Gemini API when thinking is enabled. See:
+  # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+  # - name: gemini-2.5-pro-thinking
+  #   display_name: Gemini 2.5 Pro (Thinking)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   api_key: $GEMINI_API_KEY
+  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   max_tokens: 16384
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
 
   # Example: DeepSeek model (with thinking support)
   # - name: deepseek-v3
@@ -96,7 +115,7 @@ models:
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
   #   model: deepseek-reasoner
   #   api_key: $DEEPSEEK_API_KEY
-  #   max_tokens: 16384
+  #   max_tokens: 8192
   #   supports_thinking: true
   #   supports_vision: false  # DeepSeek V3 does not support vision
   #   when_thinking_enabled:
@@ -137,7 +156,7 @@ models:
   #       thinking:
   #         type: enabled
 
-  # Example: MiniMax (OpenAI-compatible)
+  # Example: MiniMax (OpenAI-compatible) - International Edition
   # MiniMax provides high-performance models with 204K context window
   # Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
   # - name: minimax-m2.5
@@ -159,6 +178,30 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+
+  # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
+  # MiniMax provides high-performance models with 204K context window
+  # Docs: https://platform.minimaxi.com/docs/api-reference/text-openai-api
+  # - name: minimax-m2.7
+  #   display_name: MiniMax M2.7
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.7
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+
+  # - name: minimax-m2.5-highspeed
+  #   display_name: MiniMax M2.5 Highspeed
+  #   use: langchain_openai:ChatOpenAI
+  #   model: MiniMax-M2.5-highspeed
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+
   
   # Example: OpenRouter (OpenAI-compatible)
   # OpenRouter models use the same ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
@@ -188,12 +231,18 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
-  # Web search tool (requires Tavily API key)
+  # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
-    use: deerflow.community.tavily.tools:web_search_tool
+    use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
-    # api_key: $TAVILY_API_KEY  # Set if needed
+
+  # Web search tool (requires Tavily API key)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tavily.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
   # - name: web_search
@@ -344,6 +393,34 @@ sandbox:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 
 # ============================================================================
+# ACP Agents Configuration
+# ============================================================================
+# Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
+
+# acp_agents:
+#   claude_code:
+#     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
+#     # speak ACP directly. Install `claude-agent-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/claude-agent-acp"]
+#     description: Claude Code for implementation, refactoring, and debugging
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
+#
+#   codex:
+#     # DeerFlow expects an ACP adapter here. The standard `codex` CLI does not
+#     # speak ACP directly. Install `codex-acp` separately or use:
+#     command: npx
+#     args: ["-y", "@zed-industries/codex-acp"]
+#     description: Codex CLI for repository tasks and code generation
+#     model: null
+#     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # env:                             # Optional: inject environment variables into the agent subprocess
+#     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+
+# ============================================================================
 # Skills Configuration
 # ============================================================================
 # Configure skills directory for specialized agent workflows
@@ -474,6 +551,9 @@ checkpointer:
 
 # channels:
 #   # LangGraph Server URL for thread/message management (default: http://localhost:2024)
+#   # For Docker deployments, use the Docker service name instead of localhost:
+#   #   langgraph_url: http://langgraph:2024
+#   #   gateway_url: http://gateway:8001
 #   langgraph_url: http://localhost:2024
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001

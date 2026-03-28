@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -48,6 +48,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Site officiel](#site-officiel)
   - [InfoQuest](#infoquest)
   - [Table des matières](#table-des-matières)
+  - [Installation en une phrase pour un coding agent](#installation-en-une-phrase-pour-un-coding-agent)
   - [Démarrage rapide](#démarrage-rapide)
     - [Configuration](#configuration)
     - [Lancer l'application](#lancer-lapplication)
@@ -57,6 +58,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
       - [Mode Sandbox](#mode-sandbox)
       - [Serveur MCP](#serveur-mcp)
       - [Canaux de messagerie](#canaux-de-messagerie)
+      - [Traçage LangSmith](#traçage-langsmith)
   - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
   - [Fonctionnalités principales](#fonctionnalités-principales)
     - [Skills et outils](#skills-et-outils)
@@ -68,11 +70,22 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Modèles recommandés](#modèles-recommandés)
   - [Client Python intégré](#client-python-intégré)
   - [Documentation](#documentation)
+  - [⚠️ Avertissement de sécurité](#️-avertissement-de-sécurité)
   - [Contribuer](#contribuer)
   - [Licence](#licence)
   - [Remerciements](#remerciements)
     - [Contributeurs principaux](#contributeurs-principaux)
   - [Star History](#star-history)
+
+## Installation en une phrase pour un coding agent
+
+Si vous utilisez Claude Code, Codex, Cursor, Windsurf ou un autre coding agent, vous pouvez simplement lui envoyer cette phrase :
+
+```text
+Aide-moi à cloner DeerFlow si nécessaire, puis à initialiser son environnement de développement local en suivant https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md
+```
+
+Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt si nécessaire, de privilégier Docker quand il est disponible, puis de s'arrêter avec la commande exacte pour lancer DeerFlow et la liste des configurations encore manquantes.
 
 ## Démarrage rapide
 
@@ -377,6 +390,21 @@ Une fois un canal connecté, vous pouvez interagir avec DeerFlow directement dep
 
 > Les messages sans préfixe de commande sont traités comme du chat classique — DeerFlow crée un thread et répond de manière conversationnelle.
 
+#### Traçage LangSmith
+
+DeerFlow intègre nativement [LangSmith](https://smith.langchain.com) pour l'observabilité. Une fois activé, tous les appels LLM, les exécutions d'agents et les exécutions d'outils sont tracés et visibles dans le tableau de bord LangSmith.
+
+Ajoutez les lignes suivantes à votre fichier `.env` :
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
+
 ## Du Deep Research au Super Agent Harness
 
 DeerFlow a démarré comme un framework de Deep Research — et la communauté s'en est emparée. Depuis le lancement, les développeurs l'ont poussé bien au-delà de la recherche : construction de pipelines de données, génération de présentations, mise en place de dashboards, automatisation de workflows de contenu. Des usages qu'on n'avait jamais anticipés.
@@ -526,6 +554,24 @@ Toutes les méthodes retournant des dicts sont validées en CI contre les modèl
 - [Guide de configuration](backend/docs/CONFIGURATION.md) - Instructions d'installation et de configuration
 - [Vue d'ensemble de l'architecture](backend/CLAUDE.md) - Détails de l'architecture technique
 - [Architecture backend](backend/README.md) - Architecture backend et référence API
+
+## ⚠️ Avertissement de sécurité
+
+### Un déploiement inapproprié peut introduire des risques de sécurité
+
+DeerFlow dispose de capacités clés à hauts privilèges, notamment **l'exécution de commandes système, les opérations sur les ressources et l'invocation de logique métier**. Il est conçu par défaut pour être **déployé dans un environnement local de confiance (accessible uniquement via l'interface de loopback 127.0.0.1)**. Si vous déployez l'agent dans des environnements non fiables — tels que des réseaux LAN, des serveurs cloud publics ou d'autres environnements accessibles depuis plusieurs terminaux — sans mesures de sécurité strictes, cela peut introduire des risques, notamment :
+
+- **Invocation non autorisée** : les fonctionnalités de l'agent pourraient être découvertes par des tiers non autorisés ou des scanners malveillants, déclenchant des requêtes non autorisées en masse qui exécutent des opérations à haut risque (commandes système, lecture/écriture de fichiers), pouvant causer de graves conséquences.
+- **Risques juridiques et de conformité** : si l'agent est utilisé illégalement pour mener des cyberattaques, du vol de données ou d'autres activités illicites, cela peut entraîner des responsabilités juridiques et des risques de conformité.
+
+### Recommandations de sécurité
+
+**Note : nous recommandons fortement de déployer DeerFlow dans un environnement réseau local de confiance.** Si vous avez besoin d'un déploiement multi-appareils ou multi-réseaux, vous devez mettre en place des mesures de sécurité strictes, par exemple :
+
+- **Liste blanche d'IP** : utilisez `iptables`, ou déployez des pare-feux matériels / commutateurs avec ACL, pour **configurer des règles de liste blanche d'IP** et refuser l'accès à toutes les autres adresses IP.
+- **Passerelle d'authentification** : configurez un proxy inverse (ex. nginx) et **activez une authentification forte en amont**, bloquant tout accès non authentifié.
+- **Isolation réseau** : si possible, placez l'agent et les appareils de confiance dans le **même VLAN dédié**, isolé des autres équipements réseau.
+- **Restez informé** : continuez à suivre les mises à jour de sécurité du projet DeerFlow.
 
 ## Contribuer
 
