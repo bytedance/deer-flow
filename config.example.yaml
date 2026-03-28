@@ -567,7 +567,7 @@ checkpointer:
 #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
-#     assistant_id: lead_agent
+#     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
 #     config:
 #       recursion_limit: 100
 #     context:
@@ -593,14 +593,14 @@ checkpointer:
 #
 #     # Optional: channel-level session overrides
 #     session:
-#       assistant_id: mobile_agent
+#       assistant_id: mobile-agent  # custom agent names are supported here too
 #       context:
 #         thinking_enabled: false
 #
 #       # Optional: per-user overrides by user_id
 #       users:
 #         "123456789":
-#           assistant_id: vip_agent
+#           assistant_id: vip-agent
 #           config:
 #             recursion_limit: 150
 #           context:
