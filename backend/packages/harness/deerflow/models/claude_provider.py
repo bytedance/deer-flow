@@ -27,6 +27,7 @@ from typing import Any
 import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
+from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,8 @@ class ClaudeChatModel(ChatAnthropic):
     prompt_cache_size: int = 3
     auto_thinking_budget: bool = True
     retry_max_attempts: int = MAX_RETRIES
-    _is_oauth: bool = False
-    _oauth_access_token: str = ""
+    _is_oauth: bool = PrivateAttr(default=False)
+    _oauth_access_token: str = PrivateAttr(default="")
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -126,9 +127,14 @@ class ClaudeChatModel(ChatAnthropic):
 
     def _patch_client_oauth(self, client: Any) -> None:
         """Swap api_key → auth_token on an Anthropic SDK client for OAuth Bearer auth."""
-        if hasattr(client, "api_key") and hasattr(client, "auth_token"):
-            client.api_key = None
+        if client is None:
+            return
+        if hasattr(client, "auth_token"):
             client.auth_token = self._oauth_access_token
+        # Keep api_key as a non-empty dummy so _validate_headers passes;
+        # auth_token takes precedence in the SDK's header generation.
+        if hasattr(client, "api_key") and not client.api_key:
+            client.api_key = "sk-dummy-overridden-by-auth-token"
 
     def _get_request_payload(
         self,
@@ -142,14 +148,40 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self._is_oauth:
             self._apply_oauth_billing(payload)
-
-        if self.enable_prompt_caching:
+            # Strip any cache_control leaked from checkpointed messages —
+            # OAuth tokens have a 4-block cache_control limit.
+            self._strip_cache_control(payload)
+        elif self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
 
         if self.auto_thinking_budget:
             self._apply_thinking_budget(payload)
 
         return payload
+
+    @staticmethod
+    def _strip_cache_control(payload: dict) -> None:
+        """Remove all cache_control entries from the payload.
+
+        OAuth tokens have a limit of 4 cache_control blocks. Checkpointed
+        messages and tool definitions may carry stale cache_control from
+        prior turns, so we strip them unconditionally for OAuth requests.
+        """
+        for section in ("system", "messages"):
+            items = payload.get(section, [])
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    item.pop("cache_control", None)
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                block.pop("cache_control", None)
+        for tool in payload.get("tools", []):
+            if isinstance(tool, dict):
+                tool.pop("cache_control", None)
 
     def _apply_oauth_billing(self, payload: dict) -> None:
         """Inject the billing header block required for all OAuth requests.
