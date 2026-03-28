@@ -10,6 +10,7 @@ from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.utils import SLACK_MAX_LENGTH, split_message
 
 logger = logging.getLogger(__name__)
 
@@ -81,52 +82,61 @@ class SlackChannel(Channel):
         if not self._web_client:
             return
 
-        kwargs: dict[str, Any] = {
-            "channel": msg.chat_id,
-            "text": _slack_md_converter.convert(msg.text),
-        }
-        if msg.thread_ts:
-            kwargs["thread_ts"] = msg.thread_ts
+        # Split long messages to stay within Slack's character limit.
+        chunks = split_message(msg.text, max_length=SLACK_MAX_LENGTH)
+        if not chunks:
+            return
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
-                # Add a completion reaction to the thread root
+        for chunk in chunks:
+            kwargs: dict[str, Any] = {
+                "channel": msg.chat_id,
+                "text": _slack_md_converter.convert(chunk),
+            }
+            if msg.thread_ts:
+                kwargs["thread_ts"] = msg.thread_ts
+
+            last_exc: Exception | None = None
+            for attempt in range(_max_retries):
+                try:
+                    await asyncio.to_thread(self._web_client.chat_postMessage, **kwargs)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < _max_retries - 1:
+                        delay = 2**attempt  # 1s, 2s
+                        logger.warning(
+                            "[Slack] send failed (attempt %d/%d), retrying in %ds: %s",
+                            attempt + 1,
+                            _max_retries,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
+            else:
+                logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
                 if msg.thread_ts:
-                    await asyncio.to_thread(
-                        self._add_reaction,
-                        msg.chat_id,
-                        msg.thread_ts,
-                        "white_check_mark",
-                    )
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Slack] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+                    try:
+                        await asyncio.to_thread(
+                            self._add_reaction,
+                            msg.chat_id,
+                            msg.thread_ts,
+                            "x",
+                        )
+                    except Exception:
+                        pass
+                raise last_exc  # type: ignore[misc]
 
-        logger.error("[Slack] send failed after %d attempts: %s", _max_retries, last_exc)
-        # Add failure reaction on error
+        # Add completion reaction after all chunks sent
         if msg.thread_ts:
             try:
                 await asyncio.to_thread(
                     self._add_reaction,
                     msg.chat_id,
                     msg.thread_ts,
-                    "x",
+                    "white_check_mark",
                 )
             except Exception:
                 pass
-        raise last_exc  # type: ignore[misc]
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._web_client:
