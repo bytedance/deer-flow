@@ -1681,6 +1681,33 @@ class TestChannelService:
         assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
+    def test_service_urls_fall_back_to_env(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._langgraph_url == "http://langgraph:2024"
+        assert service.manager._gateway_url == "http://gateway:8001"
+
+    def test_config_service_urls_override_env(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://langgraph:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://gateway:8001")
+
+        service = ChannelService(
+            channels_config={
+                "langgraph_url": "http://custom-langgraph:2024",
+                "gateway_url": "http://custom-gateway:8001",
+            }
+        )
+
+        assert service.manager._langgraph_url == "http://custom-langgraph:2024"
+        assert service.manager._gateway_url == "http://custom-gateway:8001"
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
