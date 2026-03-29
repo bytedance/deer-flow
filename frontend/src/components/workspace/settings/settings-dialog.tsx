@@ -2,7 +2,6 @@
 
 import {
   BellIcon,
-  InfoIcon,
   BrainIcon,
   PaletteIcon,
   SparklesIcon,
@@ -17,7 +16,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
@@ -31,8 +29,7 @@ type SettingsSection =
   | "memory"
   | "tools"
   | "skills"
-  | "notification"
-  | "about";
+  | "notification";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -43,6 +40,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const { t } = useI18n();
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -71,7 +73,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
-      { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
       t.settings.sections.appearance,
@@ -79,9 +80,15 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
-      t.settings.sections.about,
     ],
   );
+
+  // Don't render the Dialog on server to avoid hydration mismatch
+  // Radix UI generates IDs that differ between server and client
+  if (!mounted) {
+    return null;
+  }
+
   return (
     <Dialog
       {...dialogProps}
@@ -133,7 +140,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 />
               )}
               {activeSection === "notification" && <NotificationSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

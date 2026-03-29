@@ -6,7 +6,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   CommandDialog,
@@ -35,6 +35,11 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const handleNewChat = useCallback(() => {
     router.push("/workspace/chats/new");
@@ -67,6 +72,12 @@ export function CommandPalette() {
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");
   const metaKey = isMac ? "⌘" : "Ctrl+";
   const shiftKey = isMac ? "⇧" : "Shift+";
+
+  // Don't render Dialog components on server to avoid hydration mismatch
+  // Radix UI generates IDs that differ between server and client
+  if (!mounted) {
+    return null;
+  }
 
   return (
     <>

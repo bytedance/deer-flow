@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  styles.xml — The complete style system for this workbook.
+
+  Style index (cellXfs) lookup table:
+  ┌───────┬─────────────────────────────────┬────────────────┬───────────────────┐
+  │ Index │ Semantic Role                   │ Font Color     │ Number Format     │
+  ├───────┼─────────────────────────────────┼────────────────┼───────────────────┤
+  │   0   │ Default                         │ Theme (black)  │ General           │
+  │   1   │ Input / Assumption              │ Blue 000000FF  │ General           │
+  │   2   │ Formula / Computed result       │ Black 00000000 │ General           │
+  │   3   │ Cross-sheet reference           │ Green 00008000 │ General           │
+  │   4   │ Header (bold)                   │ Black bold     │ General           │
+  │   5   │ Currency input                  │ Blue 000000FF  │ $#,##0 (id=164)   │
+  │   6   │ Currency formula                │ Black          │ $#,##0 (id=164)   │
+  │   7   │ Percentage input                │ Blue 000000FF  │ 0.0% (id=165)     │
+  │   8   │ Percentage formula              │ Black          │ 0.0% (id=165)     │
+  │   9   │ Integer with commas input       │ Blue 000000FF  │ #,##0 (id=167)    │
+  │  10   │ Integer with commas formula     │ Black          │ #,##0 (id=167)    │
+  │  11   │ Year (no comma) — input         │ Blue 000000FF  │ 0 (id=1)          │
+  │  12   │ Key assumption (yellow bg)      │ Blue 000000FF  │ General + yellow  │
+  └───────┴─────────────────────────────────┴────────────────┴───────────────────┘
+
+  To add a new style:
+  1. If needed, add a <numFmt> to <numFmts> with a new numFmtId >= 164 (increment max)
+  2. If needed, add a <font> to <fonts>
+  3. If needed, add a <fill> to <fills>
+  4. Append a new <xf> to <cellXfs>, combining fontId + fillId + numFmtId
+  5. Update the count attributes on <numFmts>, <fonts>, <fills>, <cellXfs>
+  6. The new xf's index = (old cellXfs count) — use this as the s attribute on cells
+
+  CRITICAL RULES:
+  - fills[0] and fills[1] are REQUIRED BY SPEC — never remove them
+  - Do NOT modify existing <xf> entries — only append new ones
+  - AARRGGBB color format: first 2 hex digits = Alpha (00 = opaque)
+-->
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+
+  <!-- ── Number Formats ─────────────────────────────────────────────────── -->
+  <!-- Built-in IDs 0-163 need NOT be declared here. Custom formats: 164+  -->
+  <numFmts count="4">
+    <!-- 164: Standard currency — positive $1,234 / negative ($1,234) / zero - -->
+    <numFmt numFmtId="164" formatCode="$#,##0;($#,##0);&quot;-&quot;"/>
+    <!-- 165: Percentage with 1 decimal place -->
+    <numFmt numFmtId="165" formatCode="0.0%"/>
+    <!-- 166: Multiplier / ratio (e.g. 8.5x for EV/EBITDA) -->
+    <numFmt numFmtId="166" formatCode="0.0x"/>
+    <!-- 167: Integer with thousands separator, no decimals -->
+    <numFmt numFmtId="167" formatCode="#,##0"/>
+  </numFmts>
+
+  <!-- ── Fonts ──────────────────────────────────────────────────────────── -->
+  <fonts count="5">
+    <!-- 0: Default (theme color, no explicit color) -->
+    <font>
+      <sz val="11"/>
+      <name val="Calibri"/>
+    </font>
+    <!-- 1: Input / Assumption — Blue -->
+    <font>
+      <sz val="11"/>
+      <name val="Calibri"/>
+      <color rgb="000000FF"/>
+    </font>
+    <!-- 2: Formula / Computed result — Black (explicit) -->
+    <font>
+      <sz val="11"/>
+      <name val="Calibri"/>
+      <color rgb="00000000"/>
+    </font>
+    <!-- 3: Cross-sheet reference — Green -->
+    <font>
+      <sz val="11"/>
+      <name val="Calibri"/>
+      <color rgb="00008000"/>
+    </font>
+    <!-- 4: Header — Bold Black -->
+    <font>
+      <b/>
+      <sz val="11"/>
+      <name val="Calibri"/>
+      <color rgb="00000000"/>
+    </font>
+  </fonts>
+
+  <!-- ── Fills ──────────────────────────────────────────────────────────── -->
+  <!-- fills[0] and fills[1] are REQUIRED by OOXML spec — DO NOT REMOVE -->
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <!-- 2: Yellow highlight for key assumptions requiring review -->
+    <fill>
+      <patternFill patternType="solid">
+        <fgColor rgb="00FFFF00"/>
+        <bgColor indexed="64"/>
+      </patternFill>
+    </fill>
+  </fills>
+
+  <!-- ── Borders ────────────────────────────────────────────────────────── -->
+  <borders count="1">
+    <!-- 0: No borders (default) -->
+    <border>
+      <left/>
+      <right/>
+      <top/>
+      <bottom/>
+      <diagonal/>
+    </border>
+  </borders>
+
+  <!-- ── Cell Style Xfs (base styles) ──────────────────────────────────── -->
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+
+  <!-- ── Cell Xfs (the actual style slots referenced by <c s="N">) ──────── -->
+  <cellXfs count="13">
+    <!--  0: Default -->
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <!--  1: Input / Assumption (blue, general format) -->
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  2: Formula / Computed (black, general format) -->
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  3: Cross-sheet reference (green, general format) -->
+    <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  4: Header (bold black) -->
+    <xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  5: Currency input (blue + $#,##0) -->
+    <xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!--  6: Currency formula (black + $#,##0) -->
+    <xf numFmtId="164" fontId="2" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!--  7: Percentage input (blue + 0.0%) -->
+    <xf numFmtId="165" fontId="1" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!--  8: Percentage formula (black + 0.0%) -->
+    <xf numFmtId="165" fontId="2" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!--  9: Integer-with-commas input (blue + #,##0) -->
+    <xf numFmtId="167" fontId="1" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!-- 10: Integer-with-commas formula (black + #,##0) -->
+    <xf numFmtId="167" fontId="2" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!-- 11: Year column input (blue + plain integer "0", no comma) -->
+    <xf numFmtId="1" fontId="1" fillId="0" borderId="0" xfId="0"
+        applyFont="1" applyNumberFormat="1"/>
+    <!-- 12: Key assumption highlight (blue on yellow — needs human review) -->
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0"
+        applyFont="1" applyFill="1"/>
+  </cellXfs>
+
+  <!-- ── Named Cell Styles ─────────────────────────────────────────────── -->
+  <cellStyles count="1">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+  </cellStyles>
+
+</styleSheet>

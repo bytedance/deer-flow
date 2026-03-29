@@ -6,9 +6,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
-from deerflow.skills import Skill, load_skills
-from deerflow.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
+from sim_data_agent.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from sim_data_agent.skills import Skill, load_skills
+from sim_data_agent.skills.installer import SkillAlreadyExistsError, install_skill_from_archive
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ class SkillResponse(BaseModel):
     license: str | None = Field(None, description="License information")
     category: str = Field(..., description="Category of the skill (public or custom)")
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
+    name_zh: str | None = Field(None, description="Chinese name of the skill")
+    description_zh: str | None = Field(None, description="Chinese description of the skill")
 
 
 class SkillsListResponse(BaseModel):
@@ -60,6 +62,8 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
         license=skill.license,
         category=skill.category,
         enabled=skill.enabled,
+        name_zh=skill.name_zh,
+        description_zh=skill.description_zh,
     )
 
 

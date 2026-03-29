@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  workbook.xml — Defines the list of sheets.
+
+  To add a new sheet:
+    1. Add a <sheet> element below with a unique sheetId and r:id
+    2. Add a matching <Relationship> in xl/_rels/workbook.xml.rels
+    3. Add an <Override> in [Content_Types].xml
+    4. Create the xl/worksheets/sheetN.xml file
+
+  Sheet name rules:
+    - Max 31 characters
+    - Cannot contain: / \ ? * [ ] :
+    - Ampersand must be escaped as &amp; in XML
+-->
+<workbook
+  xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <fileVersion appName="xl" lastEdited="7" lowestEdited="7"/>
+  <workbookPr defaultThemeVersion="166925"/>
+  <bookViews>
+    <workbookView xWindow="0" yWindow="0" windowWidth="20140" windowHeight="10960"/>
+  </bookViews>
+  <sheets>
+    <!-- Add more <sheet> elements here for multi-sheet workbooks -->
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+  <!-- calcId ensures Excel recalculates formulas on open -->
+  <calcPr calcId="191029"/>
+</workbook>

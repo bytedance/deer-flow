@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  workbook.xml.rels — Maps each sheet r:id to its worksheet XML file.
+
+  When adding a new sheet:
+    - Add: <Relationship Id="rId2" Type="...worksheet" Target="worksheets/sheet2.xml"/>
+    - The Id must match the r:id in workbook.xml <sheet> element
+-->
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+    Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
+    Target="styles.xml"/>
+  <Relationship Id="rId3"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+    Target="sharedStrings.xml"/>
+</Relationships>

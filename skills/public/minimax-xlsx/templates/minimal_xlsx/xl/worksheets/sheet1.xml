@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  sheet1.xml — Worksheet data.
+
+  Cell anatomy:
+    <c r="A1" t="s" s="4"><v>0</v></c>
+          ↑      ↑   ↑    ↑
+      address  type  style  value (sharedStrings index for t="s")
+
+  Type values (t attribute):
+    s          = shared string (text) — <v> contains index into sharedStrings.xml
+    inlineStr  = inline string — use <is><t>text</t></is> instead of <v>
+    n (or omit)= number — <v> contains the raw number
+    b          = boolean — <v> is 1 (TRUE) or 0 (FALSE)
+    e          = error — <v> contains error string like #REF!
+    (no t)     = formula cell — <f> contains formula (NO leading =), <v> is cache
+
+  Formula cells:
+    <c r="B5" s="2"><f>SUM(B2:B4)</f><v></v></c>
+    Cross-sheet: <c r="C1" s="3"><f>Assumptions!B2</f><v></v></c>
+    With spaces:  <c r="C1" s="3"><f>'Q1 Data'!B2</f><v></v></c>
+
+  Style index (s attribute) — pre-built in styles.xml:
+    0 = default
+    1 = input/assumption (blue font)
+    2 = formula/computed (black font)
+    3 = cross-sheet reference (green font)
+    4 = header bold
+    5 = currency input (blue + $#,##0 format)
+    See styles.xml for the full list and how to add more.
+
+  Row r attribute must be 1-based integer.
+  Column letters: A=1, Z=26, AA=27, AZ=52, BA=53, BZ=78, etc.
+-->
+<worksheet
+  xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews>
+    <sheetView tabSelected="1" workbookViewId="0">
+      <!-- Freeze top row as header: -->
+      <!-- <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/> -->
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="15" x14ac:dyDescent="0.25"
+    xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"/>
+  <!-- Column widths — uncomment and adjust as needed:
+  <cols>
+    <col min="1" max="1" width="24" customWidth="1"/>
+    <col min="2" max="10" width="14" customWidth="1"/>
+  </cols>
+  -->
+  <sheetData>
+    <!-- Replace this placeholder with actual data rows.
+         Example:
+    <row r="1">
+      <c r="A1" t="s" s="4"><v>0</v></c>
+      <c r="B1" t="s" s="4"><v>1</v></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="s" s="1"><v>2</v></c>
+      <c r="B2" s="1"><v>1000</v></c>
+    </row>
+    <row r="3">
+      <c r="A3" t="s" s="2"><v>3</v></c>
+      <c r="B3" s="2"><f>B2*1.1</f><v></v></c>
+    </row>
+    -->
+  </sheetData>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>

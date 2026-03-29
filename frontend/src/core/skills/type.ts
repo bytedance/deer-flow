@@ -4,4 +4,6 @@ export interface Skill {
   category: string;
   license: string;
   enabled: boolean;
+  name_zh?: string;
+  description_zh?: string;
 }

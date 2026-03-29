@@ -7,9 +7,9 @@ import stat
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from deerflow.config.paths import get_paths
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import (
+from sim_data_agent.config.paths import get_paths
+from sim_data_agent.sandbox.sandbox_provider import get_sandbox_provider
+from sim_data_agent.uploads.manager import (
     PathTraversalError,
     delete_file_safe,
     enrich_file_listing,
@@ -20,7 +20,7 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
-from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from sim_data_agent.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
 

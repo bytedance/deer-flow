@@ -6,16 +6,21 @@ English | [中文](./README_zh.md)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-> **Forked from [bytedance/deer-flow](https://github.com/bytedance/deer-flow)**
+SIM-DATA-AGENT 是一个基于 AI 的智能数据分析代理平台，具备数据分析、自动化报表生成、多源数据查询等能力。
 
-SIM-DATA-AGENT is an AI-powered intelligent data analysis agent platform, built on top of DeerFlow with custom data analysis toolchain.
+> [!IMPORTANT]
+> **本项目基于 [bytedance/deer-flow](https://github.com/bytedance/deer-flow) 二次开发。** 保留了上游的 `deerflow` 核心框架，同时新增了 `sim_data_agent` 自定义包，增加了专用的数据分析工具链。
 
-## Upstream Relationship
+## Project Origin & Upstream Relationship
 
-| | URL | Role |
-|---|---|---|
-| Upstream | https://github.com/bytedance/deer-flow | Official DeerFlow (sync via `git merge upstream/main`) |
-| This repo | https://github.com/meliwanx/data-agent-flow | Private fork with custom additions |
+```
+上游 (Upstream):  https://github.com/bytedance/deer-flow   (官方原版)
+本仓库 (Origin):  https://github.com/meliwanx/data-agent-flow   (私有，二次开发)
+```
+
+- 本仓库不是 GitHub Fork，而是从上游克隆后独立初始化的私有仓库
+- Git remote `upstream` 指向 `bytedance/deer-flow`，可通过 `git fetch upstream && git merge upstream/main` 同步上游更新
+- 本仓库的 Git 历史已与上游建立关联（共享提交历史），后续合并不会有 unrelated-histories 问题
 
 ### Sync Upstream Updates
 
@@ -24,12 +29,12 @@ git fetch upstream
 git merge upstream/main
 ```
 
-### Custom Additions (vs Upstream DeerFlow)
+### Custom Additions (vs Upstream)
 
 | Module | Path | Description |
 |--------|------|-------------|
 | Custom Agent Package | `backend/packages/harness/sim_data_agent/` | Data analysis agent, independent from upstream `deerflow` |
-| Tools Router | `backend/app/gateway/routers/tools.py` | Custom API route for tools |
+| Tools Router | `backend/app/gateway/routers/tools.py` | New API route |
 | PostgreSQL Query Tool | `backend/packages/harness/sim_data_agent/tools/builtins/pgsql_query_tool.py` | Database query tool |
 | Python Exec Tool | `backend/packages/harness/sim_data_agent/tools/builtins/python_exec_tool.py` | Code execution tool |
 | MCP Servers | `scripts/mcp-servers/postgres_server.py`, `python_exec_server.py` | MCP protocol services |
@@ -37,7 +42,7 @@ git merge upstream/main
 
 ---
 
-## DeerFlow Original README
+## DeerFlow Original README## Official Website
 
 > On February 28th, 2026, DeerFlow claimed the #1 spot on GitHub Trending following the launch of version 2.
 

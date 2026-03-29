@@ -1,8 +1,9 @@
 ---
 name: video-generation
 description: Use this skill when the user requests to generate, create, or imagine videos. Supports structured prompts and reference image for guided generation.
+name_zh: 视频生成
+description_zh: 当用户请求生成、创建或想象视频时使用此技能。支持结构化提示和参考图像以进行引导生成。
 ---
-
 # Video Generation Skill
 
 ## Overview

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config import get_app_config
+from sim_data_agent.config import get_app_config
 
 router = APIRouter(prefix="/api", tags=["models"])
 

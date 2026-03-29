@@ -8,8 +8,8 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
-from deerflow.config.paths import get_paths
+from sim_data_agent.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from sim_data_agent.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])

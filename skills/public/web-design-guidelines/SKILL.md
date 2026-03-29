@@ -5,8 +5,9 @@ metadata:
   author: vercel
   version: "1.0.0"
   argument-hint: <file-or-pattern>
+name_zh: Web设计指南
+description_zh: 审查 UI 代码的 Web 界面指南合规性。当被要求'审查我的 UI'、'检查可访问性'、'审计设计'、'审查 UX'或'根据最佳实践检查我的网站'时使用。
 ---
-
 # Web Interface Guidelines
 
 Review files for compliance with Web Interface Guidelines.

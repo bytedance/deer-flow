@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from deerflow.config.paths import Paths, get_paths
+from sim_data_agent.config.paths import Paths, get_paths
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])

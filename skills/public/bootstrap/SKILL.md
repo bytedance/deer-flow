@@ -1,8 +1,9 @@
 ---
 name: bootstrap
 description: Generate a personalized SOUL.md through a warm, adaptive onboarding conversation. Trigger when the user wants to create, set up, or initialize their AI partner's identity — e.g., "create my SOUL.md", "bootstrap my agent", "set up my AI partner", "define who you are", "let's do onboarding", "personalize this AI", "make you mine", or when a SOUL.md is missing. Also trigger for updates: "update my SOUL.md", "change my AI's personality", "tweak the soul".
+name_zh: 引导设置
+description_zh: 通过温暖的、自适应的引导对话生成个性化的 SOUL.md。当用户想要创建、设置或初始化其 AI 伙伴的身份时触发，例如'创建我的 SOUL.md'、'引导我的代理'、'设置我的 AI 伙伴'、'定义你是谁'、'让我们做引导'、'个性化这个 AI'、'让你成为我的'，或当 SOUL.md 缺失时。也可在更新时触发：'更新我的 SOUL.md'、'更改我的 AI 个性'、'调整灵魂'。
 ---
-
 # Bootstrap Soul
 
 A conversational onboarding skill. Through 5–8 adaptive rounds, extract who the user is and what they need, then generate a tight `SOUL.md` that defines their AI partner.

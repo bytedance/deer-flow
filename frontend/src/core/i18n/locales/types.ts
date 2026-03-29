@@ -307,6 +307,8 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      builtInTools: string;
+      mcpServers: string;
     };
     skills: {
       title: string;

@@ -52,6 +52,10 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
 
         license_text = metadata.get("license")
 
+        # Extract optional Chinese fields
+        name_zh = metadata.get("name_zh")
+        description_zh = metadata.get("description_zh")
+
         return Skill(
             name=name,
             description=description,
@@ -61,6 +65,8 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
             enabled=True,  # Default to enabled, actual state comes from config file
+            name_zh=name_zh,
+            description_zh=description_zh,
         )
 
     except Exception as e:

@@ -1,8 +1,9 @@
 ---
 name: image-generation
 description: Use this skill when the user requests to generate, create, imagine, or visualize images including characters, scenes, products, or any visual content. Supports structured prompts and reference images for guided generation.
+name_zh: 图片生成
+description_zh: 当用户请求生成、创建、想象或可视化图像（包括角色、场景、产品或任何视觉内容）时使用此技能。支持结构化提示和参考图像以进行引导生成。
 ---
-
 # Image Generation Skill
 
 ## Overview

@@ -1,8 +1,9 @@
 ---
 name: deep-research
 description: Use this skill instead of WebSearch for ANY question requiring web research. Trigger on queries like "what is X", "explain X", "compare X and Y", "research X", or before content generation tasks. Provides systematic multi-angle research methodology instead of single superficial searches. Use this proactively when the user's question needs online information.
+name_zh: 深度研究
+description_zh: 对于任何需要网络研究的问题，使用此技能而不是 WebSearch。在查询如'什么是 X'、'解释 X'、'比较 X 和 Y'、'研究 X'时触发，或在内容生成任务之前触发。提供系统的多角度研究方法论，而不是单一肤浅的搜索。当用户的问题需要在线信息时主动使用此技能。
 ---
-
 # Deep Research Skill
 
 ## Overview

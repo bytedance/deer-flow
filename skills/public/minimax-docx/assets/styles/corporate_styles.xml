@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+
+  <!-- Document Defaults -->
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Microsoft YaHei" w:cs="Arial" />
+        <w:color w:val="333333" />
+        <w:sz w:val="22" />
+        <w:szCs w:val="22" />
+        <w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA" />
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="160" w:line="259" w:lineRule="auto" />
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
+
+  <w:latentStyles w:defLockedState="0" w:defUIPriority="99" w:defSemiHidden="0" w:defUnhideWhenUsed="0" w:defQFormat="0" w:count="376" />
+
+  <!-- Normal -->
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal" />
+    <w:qFormat />
+    <w:pPr>
+      <w:spacing w:after="160" w:line="240" w:lineRule="auto" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" />
+      <w:color w:val="333333" />
+      <w:sz w:val="22" />
+      <w:szCs w:val="22" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Default Paragraph Font -->
+  <w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">
+    <w:name w:val="Default Paragraph Font" />
+    <w:uiPriority w:val="1" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+  </w:style>
+
+  <!-- Heading 1 — Dark Blue -->
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="480" w:after="240" w:line="240" w:lineRule="auto" />
+      <w:outlineLvl w:val="0" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" />
+      <w:b />
+      <w:color w:val="1F3864" />
+      <w:sz w:val="56" />
+      <w:szCs w:val="56" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Heading 2 -->
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="360" w:after="120" w:line="240" w:lineRule="auto" />
+      <w:outlineLvl w:val="1" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" />
+      <w:b />
+      <w:color w:val="1F3864" />
+      <w:sz w:val="48" />
+      <w:szCs w:val="48" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Heading 3 -->
+  <w:style w:type="paragraph" w:styleId="Heading3">
+    <w:name w:val="heading 3" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="240" w:after="80" w:line="240" w:lineRule="auto" />
+      <w:outlineLvl w:val="2" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" />
+      <w:b />
+      <w:color w:val="1F3864" />
+      <w:sz w:val="36" />
+      <w:szCs w:val="36" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Heading 4 -->
+  <w:style w:type="paragraph" w:styleId="Heading4">
+    <w:name w:val="heading 4" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="160" w:after="80" w:line="240" w:lineRule="auto" />
+      <w:outlineLvl w:val="3" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" />
+      <w:b />
+      <w:i />
+      <w:color w:val="1F3864" />
+      <w:sz w:val="28" />
+      <w:szCs w:val="28" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Title -->
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="10" />
+    <w:pPr>
+      <w:spacing w:after="240" w:line="240" w:lineRule="auto" />
+      <w:jc w:val="center" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" />
+      <w:color w:val="1F3864" />
+      <w:sz w:val="72" />
+      <w:szCs w:val="72" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Subtitle -->
+  <w:style w:type="paragraph" w:styleId="Subtitle">
+    <w:name w:val="Subtitle" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="11" />
+    <w:pPr>
+      <w:spacing w:after="360" w:line="240" w:lineRule="auto" />
+      <w:jc w:val="center" />
+    </w:pPr>
+    <w:rPr>
+      <w:i />
+      <w:color w:val="595959" />
+      <w:sz w:val="32" />
+      <w:szCs w:val="32" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Table Grid — Corporate with blue header -->
+  <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+    <w:name w:val="Normal Table" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:tblPr>
+      <w:tblInd w:w="0" w:type="dxa" />
+      <w:tblCellMar>
+        <w:top w:w="0" w:type="dxa" />
+        <w:left w:w="108" w:type="dxa" />
+        <w:bottom w:w="0" w:type="dxa" />
+        <w:right w:w="108" w:type="dxa" />
+      </w:tblCellMar>
+    </w:tblPr>
+  </w:style>
+
+  <w:style w:type="table" w:styleId="TableGrid">
+    <w:name w:val="Table Grid" />
+    <w:basedOn w:val="TableNormal" />
+    <w:uiPriority w:val="39" />
+    <w:tblPr>
+      <w:tblBorders>
+        <w:top w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+        <w:left w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+        <w:bottom w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+        <w:right w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+        <w:insideH w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+        <w:insideV w:val="single" w:sz="4" w:space="0" w:color="BFBFBF" />
+      </w:tblBorders>
+    </w:tblPr>
+    <w:tblStylePr w:type="firstRow">
+      <w:rPr>
+        <w:b />
+        <w:color w:val="FFFFFF" />
+      </w:rPr>
+      <w:tcPr>
+        <w:shd w:val="clear" w:color="auto" w:fill="2F5496" />
+        <w:tcBorders>
+          <w:top w:val="single" w:sz="4" w:space="0" w:color="2F5496" />
+          <w:left w:val="single" w:sz="4" w:space="0" w:color="2F5496" />
+          <w:bottom w:val="single" w:sz="4" w:space="0" w:color="2F5496" />
+          <w:right w:val="single" w:sz="4" w:space="0" w:color="2F5496" />
+          <w:insideH w:val="single" w:sz="4" w:space="0" w:color="3A6BC5" />
+          <w:insideV w:val="single" w:sz="4" w:space="0" w:color="3A6BC5" />
+        </w:tcBorders>
+      </w:tcPr>
+    </w:tblStylePr>
+    <w:tblStylePr w:type="band1Horz">
+      <w:tcPr>
+        <w:shd w:val="clear" w:color="auto" w:fill="D9E2F3" />
+      </w:tcPr>
+    </w:tblStylePr>
+  </w:style>
+
+  <!-- Header -->
+  <w:style w:type="paragraph" w:styleId="Header">
+    <w:name w:val="header" />
+    <w:basedOn w:val="Normal" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:pPr>
+      <w:tabs>
+        <w:tab w:val="center" w:pos="4680" />
+        <w:tab w:val="right" w:pos="9360" />
+      </w:tabs>
+      <w:spacing w:after="0" w:line="240" w:lineRule="auto" />
+    </w:pPr>
+    <w:rPr>
+      <w:sz w:val="18" />
+      <w:szCs w:val="18" />
+      <w:color w:val="808080" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Footer -->
+  <w:style w:type="paragraph" w:styleId="Footer">
+    <w:name w:val="footer" />
+    <w:basedOn w:val="Normal" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:pPr>
+      <w:tabs>
+        <w:tab w:val="center" w:pos="4680" />
+        <w:tab w:val="right" w:pos="9360" />
+      </w:tabs>
+      <w:spacing w:after="0" w:line="240" w:lineRule="auto" />
+    </w:pPr>
+    <w:rPr>
+      <w:sz w:val="18" />
+      <w:szCs w:val="18" />
+      <w:color w:val="808080" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Hyperlink -->
+  <w:style w:type="character" w:styleId="Hyperlink">
+    <w:name w:val="Hyperlink" />
+    <w:uiPriority w:val="99" />
+    <w:unhideWhenUsed />
+    <w:rPr>
+      <w:color w:val="0563C1" />
+      <w:u w:val="single" />
+    </w:rPr>
+  </w:style>
+
+</w:styles>

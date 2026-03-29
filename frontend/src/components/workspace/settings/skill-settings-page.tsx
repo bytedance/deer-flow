@@ -29,6 +29,14 @@ import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
 
+function getSkillDisplayName(skill: Skill, locale: string): string {
+  return locale === "zh-CN" && skill.name_zh ? skill.name_zh : skill.name;
+}
+
+function getSkillDisplayDescription(skill: Skill, locale: string): string {
+  return locale === "zh-CN" && skill.description_zh ? skill.description_zh : skill.description;
+}
+
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
@@ -55,7 +63,7 @@ function SkillSettingsList({
   skills: Skill[];
   onClose?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const router = useRouter();
   const [filter, setFilter] = useState<string>("public");
   const { mutate: enableSkill } = useEnableSkill();
@@ -93,10 +101,10 @@ function SkillSettingsList({
           <Item className="w-full" variant="outline" key={skill.name}>
             <ItemContent>
               <ItemTitle>
-                <div className="flex items-center gap-2">{skill.name}</div>
+                <div className="flex items-center gap-2">{getSkillDisplayName(skill, locale)}</div>
               </ItemTitle>
               <ItemDescription className="line-clamp-4">
-                {skill.description}
+                {getSkillDisplayDescription(skill, locale)}
               </ItemDescription>
             </ItemContent>
             <ItemActions>

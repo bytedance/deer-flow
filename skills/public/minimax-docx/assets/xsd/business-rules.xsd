@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Business Rules Gate-Check Schema for minimax-docx -->
+<!-- Used in Scenario C (template application) as hard gate -->
+<!-- Validates business compliance beyond XML correctness -->
+<!-- MIT License - minimax-docx project -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           targetNamespace="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           elementFormDefault="qualified">
+
+  <!-- ============================================================ -->
+  <!-- Page margins: constrained to reasonable bounds                -->
+  <!-- Minimum 360 DXA (0.25 inch), maximum 4320 DXA (3 inches)     -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_MarginMeasure">
+    <xs:restriction base="xs:integer">
+      <xs:minInclusive value="360"/>
+      <xs:maxInclusive value="4320"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Signed margin (top/bottom can be negative for overlap) -->
+  <xs:simpleType name="ST_SignedMarginMeasure">
+    <xs:restriction base="xs:integer">
+      <xs:minInclusive value="-4320"/>
+      <xs:maxInclusive value="4320"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- Font size constraints                                         -->
+  <!-- Body text: 16-144 half-points (8-72pt)                        -->
+  <!-- Heading text: 20-192 half-points (10-96pt)                    -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_BodyFontSize">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="16"/>
+      <xs:maxInclusive value="144"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ST_HeadingFontSize">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="20"/>
+      <xs:maxInclusive value="192"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- Valid standard page sizes (width x height in DXA)             -->
+  <!-- ============================================================ -->
+  <!-- Letter: 12240 x 15840 -->
+  <!-- A4:     11906 x 16838 -->
+  <!-- Legal:  12240 x 20160 -->
+  <!-- A3:     16838 x 23811 -->
+  <!-- A5:      8391 x 11906 -->
+
+  <xs:simpleType name="ST_PageWidth">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="5040"/>
+      <xs:maxInclusive value="31680"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="ST_PageHeight">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="5040"/>
+      <xs:maxInclusive value="31680"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- Constrained section properties for gate-check                 -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_GateCheckSectPr">
+    <xs:all>
+      <xs:element name="pgSz" minOccurs="1">
+        <xs:complexType>
+          <xs:attribute name="w" type="w:ST_PageWidth" use="required"/>
+          <xs:attribute name="h" type="w:ST_PageHeight" use="required"/>
+          <xs:attribute name="orient" use="optional">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:enumeration value="portrait"/>
+                <xs:enumeration value="landscape"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="pgMar" minOccurs="1">
+        <xs:complexType>
+          <xs:attribute name="top" type="w:ST_SignedMarginMeasure" use="required"/>
+          <xs:attribute name="bottom" type="w:ST_SignedMarginMeasure" use="required"/>
+          <xs:attribute name="left" type="w:ST_MarginMeasure" use="required"/>
+          <xs:attribute name="right" type="w:ST_MarginMeasure" use="required"/>
+          <xs:attribute name="header" type="xs:nonNegativeInteger" use="optional"/>
+          <xs:attribute name="footer" type="xs:nonNegativeInteger" use="optional"/>
+          <xs:attribute name="gutter" type="xs:nonNegativeInteger" use="optional"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:all>
+  </xs:complexType>
+
+  <!-- ============================================================ -->
+  <!-- Required styles: at minimum Normal and Heading1 must exist    -->
+  <!-- This is enforced programmatically by GateCheckValidator       -->
+  <!-- rather than via XSD, since XSD cannot validate style presence -->
+  <!-- across separate XML parts.                                    -->
+  <!-- ============================================================ -->
+
+  <!-- ============================================================ -->
+  <!-- Constrained run properties for font size validation           -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_GateCheckRPr">
+    <xs:all>
+      <xs:element name="sz" minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="val" type="w:ST_BodyFontSize" use="required"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="szCs" minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="val" type="w:ST_BodyFontSize" use="required"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:all>
+  </xs:complexType>
+
+</xs:schema>

@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+
+  <!-- Document Defaults -->
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="SimSun" w:cs="Times New Roman" />
+        <w:sz w:val="24" />
+        <w:szCs w:val="24" />
+        <w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA" />
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="0" w:line="480" w:lineRule="auto" />
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
+
+  <w:latentStyles w:defLockedState="0" w:defUIPriority="99" w:defSemiHidden="0" w:defUnhideWhenUsed="0" w:defQFormat="0" w:count="376" />
+
+  <!-- Normal — Times New Roman 12pt, double spaced, first line indent -->
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal" />
+    <w:qFormat />
+    <w:pPr>
+      <w:spacing w:after="0" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="720" />
+    </w:pPr>
+    <w:rPr>
+      <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" />
+      <w:sz w:val="24" />
+      <w:szCs w:val="24" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Default Paragraph Font -->
+  <w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">
+    <w:name w:val="Default Paragraph Font" />
+    <w:uiPriority w:val="1" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+  </w:style>
+
+  <!-- Heading 1 — Bold, 14pt, no color, no indent -->
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="480" w:after="240" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:jc w:val="center" />
+      <w:outlineLvl w:val="0" />
+    </w:pPr>
+    <w:rPr>
+      <w:b />
+      <w:sz w:val="28" />
+      <w:szCs w:val="28" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Heading 2 — Bold, 13pt -->
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="360" w:after="120" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:outlineLvl w:val="1" />
+    </w:pPr>
+    <w:rPr>
+      <w:b />
+      <w:sz w:val="26" />
+      <w:szCs w:val="26" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Heading 3 — Bold, 12pt -->
+  <w:style w:type="paragraph" w:styleId="Heading3">
+    <w:name w:val="heading 3" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="9" />
+    <w:pPr>
+      <w:keepNext />
+      <w:keepLines />
+      <w:spacing w:before="240" w:after="80" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:outlineLvl w:val="2" />
+    </w:pPr>
+    <w:rPr>
+      <w:b />
+      <w:sz w:val="24" />
+      <w:szCs w:val="24" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Title — Centered, bold, 14pt (academic title page) -->
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="10" />
+    <w:pPr>
+      <w:spacing w:after="480" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:jc w:val="center" />
+    </w:pPr>
+    <w:rPr>
+      <w:b />
+      <w:sz w:val="28" />
+      <w:szCs w:val="28" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Subtitle -->
+  <w:style w:type="paragraph" w:styleId="Subtitle">
+    <w:name w:val="Subtitle" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="11" />
+    <w:pPr>
+      <w:spacing w:after="240" w:line="480" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:jc w:val="center" />
+    </w:pPr>
+    <w:rPr>
+      <w:sz w:val="24" />
+      <w:szCs w:val="24" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Quote — Block quote, indented 0.5 inch on both sides -->
+  <w:style w:type="paragraph" w:styleId="Quote">
+    <w:name w:val="Quote" />
+    <w:basedOn w:val="Normal" />
+    <w:next w:val="Normal" />
+    <w:qFormat />
+    <w:uiPriority w:val="29" />
+    <w:pPr>
+      <w:spacing w:before="240" w:after="240" w:line="480" w:lineRule="auto" />
+      <w:ind w:left="720" w:right="720" w:firstLine="0" />
+    </w:pPr>
+  </w:style>
+
+  <!-- Table Normal -->
+  <w:style w:type="table" w:default="1" w:styleId="TableNormal">
+    <w:name w:val="Normal Table" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:tblPr>
+      <w:tblInd w:w="0" w:type="dxa" />
+      <w:tblCellMar>
+        <w:top w:w="0" w:type="dxa" />
+        <w:left w:w="108" w:type="dxa" />
+        <w:bottom w:w="0" w:type="dxa" />
+        <w:right w:w="108" w:type="dxa" />
+      </w:tblCellMar>
+    </w:tblPr>
+  </w:style>
+
+  <!-- Table Grid — Simple borders, no color -->
+  <w:style w:type="table" w:styleId="TableGrid">
+    <w:name w:val="Table Grid" />
+    <w:basedOn w:val="TableNormal" />
+    <w:uiPriority w:val="39" />
+    <w:tblPr>
+      <w:tblBorders>
+        <w:top w:val="single" w:sz="4" w:space="0" w:color="auto" />
+        <w:left w:val="single" w:sz="4" w:space="0" w:color="auto" />
+        <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto" />
+        <w:right w:val="single" w:sz="4" w:space="0" w:color="auto" />
+        <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto" />
+        <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto" />
+      </w:tblBorders>
+    </w:tblPr>
+  </w:style>
+
+  <!-- Header -->
+  <w:style w:type="paragraph" w:styleId="Header">
+    <w:name w:val="header" />
+    <w:basedOn w:val="Normal" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:pPr>
+      <w:tabs>
+        <w:tab w:val="center" w:pos="4680" />
+        <w:tab w:val="right" w:pos="9360" />
+      </w:tabs>
+      <w:spacing w:after="0" w:line="240" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+    </w:pPr>
+    <w:rPr>
+      <w:sz w:val="24" />
+      <w:szCs w:val="24" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Footer -->
+  <w:style w:type="paragraph" w:styleId="Footer">
+    <w:name w:val="footer" />
+    <w:basedOn w:val="Normal" />
+    <w:uiPriority w:val="99" />
+    <w:semiHidden />
+    <w:unhideWhenUsed />
+    <w:pPr>
+      <w:tabs>
+        <w:tab w:val="center" w:pos="4680" />
+        <w:tab w:val="right" w:pos="9360" />
+      </w:tabs>
+      <w:spacing w:after="0" w:line="240" w:lineRule="auto" />
+      <w:ind w:firstLine="0" />
+      <w:jc w:val="center" />
+    </w:pPr>
+    <w:rPr>
+      <w:sz w:val="24" />
+      <w:szCs w:val="24" />
+    </w:rPr>
+  </w:style>
+
+  <!-- Hyperlink -->
+  <w:style w:type="character" w:styleId="Hyperlink">
+    <w:name w:val="Hyperlink" />
+    <w:uiPriority w:val="99" />
+    <w:unhideWhenUsed />
+    <w:rPr>
+      <w:color w:val="0563C1" />
+      <w:u w:val="single" />
+    </w:rPr>
+  </w:style>
+
+</w:styles>

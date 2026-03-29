@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  sharedStrings.xml — The shared string table.
+
+  All text values in cells use this table. Instead of storing text directly
+  in the cell, each text string is stored here once, and cells reference it
+  by 0-based index:
+
+      <c r="A1" t="s"><v>0</v></c>  →  first string in this table
+
+  To add strings:
+  1. Append a new <si><t>Your Text</t></si> element
+  2. Increment both `count` and `uniqueCount` attributes
+  3. Use the new string's 0-based index in the cell's <v> element
+
+  Special characters in text:
+  - & → &amp;
+  - < → &lt;
+  - > → &gt;
+  - Leading/trailing spaces → use xml:space="preserve": <t xml:space="preserve"> text </t>
+
+  count         = total number of string references across the workbook
+  uniqueCount   = number of unique strings in this table
+  (They may differ if some strings are used in multiple cells)
+-->
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+     count="0" uniqueCount="0">
+  <!-- Strings will be added here. Example:
+  <si><t>Revenue</t></si>
+  <si><t>Cost of Goods Sold</t></si>
+  <si><t>Gross Profit</t></si>
+  -->
+</sst>

@@ -3,13 +3,13 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.updater import (
+from sim_data_agent.agents.memory.updater import (
     clear_memory_data,
     delete_memory_fact,
     get_memory_data,
     reload_memory_data,
 )
-from deerflow.config.memory_config import get_memory_config
+from sim_data_agent.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
 

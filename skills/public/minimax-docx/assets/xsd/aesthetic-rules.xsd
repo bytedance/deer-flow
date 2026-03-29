@@ -1,0 +1,470 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================================ -->
+<!-- Aesthetic Rules Schema for minimax-docx                                      -->
+<!-- ============================================================================ -->
+<!-- Purpose: Validates whether a document follows basic aesthetic rules that      -->
+<!-- produce visually harmonious results. This is a "taste checker" that flags     -->
+<!-- common ugly patterns.                                                        -->
+<!--                                                                              -->
+<!-- IMPORTANT: XSD validates STRUCTURE and VALUE RANGES, not SEMANTICS.           -->
+<!-- Many aesthetic rules require cross-element comparison (e.g., "H1 must be     -->
+<!-- larger than H2") which XSD cannot express. These rules are documented in      -->
+<!-- comments and must be enforced by a programmatic validator.                    -->
+<!--                                                                              -->
+<!-- Rules that CAN be expressed in XSD:                                           -->
+<!--   - Font size ranges (body 10-14pt, headings 10-26pt)                        -->
+<!--   - Line spacing ranges (1.0x to 2.33x)                                     -->
+<!--   - Margin minimums (at least 0.5in on all sides)                            -->
+<!--   - Table cell padding minimums                                              -->
+<!--                                                                              -->
+<!-- Rules that CANNOT be expressed in XSD (enforce programmatically):             -->
+<!--   - H1 sz > H2 sz > H3 sz > body sz (hierarchy)                             -->
+<!--   - Maximum 3 font families across all styles                                -->
+<!--   - Heading space-before >= space-after                                      -->
+<!--   - Color contrast ratio between text and background                         -->
+<!--   - Consistent font family within heading vs body groups                     -->
+<!--   - Line spacing and font size harmony (larger text needs tighter spacing)   -->
+<!--                                                                              -->
+<!-- MIT License - minimax-docx project                                           -->
+<!-- ============================================================================ -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           targetNamespace="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           elementFormDefault="qualified">
+
+  <!-- ============================================================ -->
+  <!-- RULE 1: Body Font Size Range                                  -->
+  <!-- ============================================================ -->
+  <!-- Body text must be 10-14pt (half-points: 20-28).               -->
+  <!-- WHY: Below 10pt is hard to read for most adults.              -->
+  <!--       Above 14pt body text looks childish or wasteful.        -->
+  <!--       The sweet spot is 10.5-12pt for most font families.     -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticBodyFontSize">
+    <xs:annotation>
+      <xs:documentation>
+        Body text font size in half-points.
+        Acceptable range: 20-28 (10pt-14pt).
+        - 10pt (20): minimum for comfortable reading
+        - 11pt (22): modern default (Calibri, Aptos)
+        - 12pt (24): traditional default (Times New Roman)
+        - 14pt (28): maximum before body text looks oversized
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="20"/>  <!-- 10pt minimum -->
+      <xs:maxInclusive value="28"/>  <!-- 14pt maximum -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 2: Heading Font Size Range                               -->
+  <!-- ============================================================ -->
+  <!-- Headings must be 12-26pt (half-points: 24-52).                -->
+  <!-- WHY: Below 12pt, a heading cannot be visually distinguished   -->
+  <!--       from body text by size alone.                           -->
+  <!--       Above 26pt is poster-sized and wastes vertical space.   -->
+  <!-- NOTE: Some academic styles use 12pt headings (same as body)   -->
+  <!--       and differentiate via bold/italic/centering instead.    -->
+  <!--       The lower bound of 24 (12pt) accommodates this.        -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticHeadingFontSize">
+    <xs:annotation>
+      <xs:documentation>
+        Heading font size in half-points.
+        Acceptable range: 24-52 (12pt-26pt).
+        - 12pt (24): APA-style (hierarchy via bold/italic, not size)
+        - 16pt (32): typical H2/H3
+        - 20pt (40): typical H1
+        - 26pt (52): maximum before headings dominate the page
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="24"/>  <!-- 12pt minimum -->
+      <xs:maxInclusive value="52"/>  <!-- 26pt maximum -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 3: Line Spacing Range                                    -->
+  <!-- ============================================================ -->
+  <!-- Line spacing (in auto mode) must be 240-560 (1.0x-2.33x).    -->
+  <!-- WHY: Below 1.0x, ascenders/descenders overlap — unreadable.   -->
+  <!--       Above 2.33x, lines appear disconnected.                 -->
+  <!--       Sweet spots: 1.15x (276) for sans, 1.5x (360) for      -->
+  <!--       generous layouts, 2.0x (480) for academic.              -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticLineSpacing">
+    <xs:annotation>
+      <xs:documentation>
+        Line spacing value for auto line-spacing rule.
+        In 240ths of single spacing: 240 = 1.0x, 480 = 2.0x.
+        Acceptable range: 240-560 (1.0x to 2.33x).
+        Common values:
+        - 240: single spacing (dense, technical)
+        - 259: Word's 1.08x default
+        - 276: 1.15x (modern corporate default)
+        - 336: 1.4x (executive/generous)
+        - 360: 1.5x (generous/minimal)
+        - 480: 2.0x (academic double spacing)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="240"/>  <!-- 1.0x single spacing -->
+      <xs:maxInclusive value="560"/>  <!-- ~2.33x — beyond double feels disconnected -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 3b: Fixed Line Spacing Range                             -->
+  <!-- ============================================================ -->
+  <!-- For lineRule="exact", line value is in DXA (twentieths of pt) -->
+  <!-- Range: 200-720 DXA (10pt-36pt fixed line height)              -->
+  <!-- Chinese government standard uses 560 DXA (28pt).              -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticFixedLineSpacing">
+    <xs:annotation>
+      <xs:documentation>
+        Fixed line spacing value (lineRule="exact") in DXA.
+        Acceptable range: 200-720 (10pt-36pt).
+        - 560: Chinese government standard (28pt, for 16pt body)
+        - 480: double-space equivalent for 12pt body
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="200"/>  <!-- 10pt minimum fixed height -->
+      <xs:maxInclusive value="720"/>  <!-- 36pt maximum fixed height -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 4: Margin Minimums                                       -->
+  <!-- ============================================================ -->
+  <!-- All margins must be at least 720 DXA (0.5 inch).              -->
+  <!-- WHY: Below 0.5in, most printers clip content.                 -->
+  <!--       Also, narrow margins create a cramped, unprofessional   -->
+  <!--       appearance. Even "full bleed" designs need internal      -->
+  <!--       text margins.                                           -->
+  <!-- Max set to 4320 DXA (3 inches) to prevent absurd margins.     -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticMargin">
+    <xs:annotation>
+      <xs:documentation>
+        Page margin in DXA. Minimum 720 (0.5 inch), maximum 4320 (3 inches).
+        Common values:
+        - 720:  0.5in (minimum printable)
+        - 1440: 1.0in (standard US)
+        - 1588: 28mm (Chinese government left margin)
+        - 1800: 1.25in (executive/premium)
+        - 2160: 1.5in (binding margin or narrow-column design)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="720"/>   <!-- 0.5in — minimum for print safety -->
+      <xs:maxInclusive value="4320"/>  <!-- 3in — beyond this is absurd -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Top/bottom margins: signed because negative values can create -->
+  <!-- overlap effects, but we still enforce a reasonable minimum.   -->
+  <xs:simpleType name="ST_AestheticVerticalMargin">
+    <xs:annotation>
+      <xs:documentation>
+        Vertical (top/bottom) page margin in DXA.
+        Range: 360 to 4320 (0.25in to 3in).
+        Slightly more permissive than horizontal margins because
+        header/footer areas may reduce effective vertical margin.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:integer">
+      <xs:minInclusive value="360"/>   <!-- 0.25in — tighter vertical is sometimes acceptable -->
+      <xs:maxInclusive value="4320"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 5: Paragraph Spacing Ranges                              -->
+  <!-- ============================================================ -->
+  <!-- Space before/after paragraphs should be 0-960 DXA (0-48pt).   -->
+  <!-- WHY: More than 48pt of space before/after creates awkward     -->
+  <!--       gaps that disrupt reading flow.                         -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticParaSpacing">
+    <xs:annotation>
+      <xs:documentation>
+        Paragraph spacing (before/after) in DXA.
+        Range: 0-960 (0pt-48pt).
+        Common values:
+        - 0:   academic style (uses first-line indent instead)
+        - 80:  4pt (tight, used after H2/H3)
+        - 120: 6pt (moderate)
+        - 160: 8pt (standard modern spacing)
+        - 200: 10pt (generous/executive)
+        - 240: 12pt (very generous/minimal)
+        - 480: 24pt (heading before — creates section break)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="960"/>  <!-- 48pt max — beyond this is a page break, not spacing -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 6: Table Cell Padding Minimum                            -->
+  <!-- ============================================================ -->
+  <!-- Table cells need at least 28 DXA (~1.4pt) padding.            -->
+  <!-- WHY: Without padding, text touches cell borders — visually    -->
+  <!--       cramped and hard to read. Even borderless tables need   -->
+  <!--       padding for column separation.                          -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticCellPadding">
+    <xs:annotation>
+      <xs:documentation>
+        Table cell padding in DXA. Minimum 28 DXA (~1.4pt).
+        Recommended: 57 DXA (~2.85pt) for comfortable spacing.
+        Maximum: 288 DXA (~14pt) — beyond this wastes space.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="28"/>   <!-- ~1.4pt minimum breathing room -->
+      <xs:maxInclusive value="288"/>  <!-- ~14pt — more than this is excessive -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 7: Border Size Range                                     -->
+  <!-- ============================================================ -->
+  <!-- Border size (in eighth-points) should be 2-24 (0.25pt-3pt).   -->
+  <!-- WHY: Below 0.25pt borders may not render or print.            -->
+  <!--       Above 3pt borders look heavy and distracting.           -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticBorderSize">
+    <xs:annotation>
+      <xs:documentation>
+        Border width in eighth-points.
+        Range: 2-24 (0.25pt to 3pt).
+        Common values:
+        - 4:  0.5pt (thin, standard)
+        - 6:  0.75pt (header separator in three-line tables)
+        - 8:  1.0pt (medium, good for framing borders)
+        - 12: 1.5pt (heavy, used for top/bottom in three-line tables)
+        - 24: 3.0pt (maximum before borders dominate)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="2"/>   <!-- 0.25pt minimum visible -->
+      <xs:maxInclusive value="24"/>  <!-- 3pt maximum tasteful -->
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 8: Color Value Format                                    -->
+  <!-- ============================================================ -->
+  <!-- Colors must be valid 6-digit hex (RRGGBB) or "auto".          -->
+  <!-- This is structural validation, not aesthetic validation.      -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticColor">
+    <xs:annotation>
+      <xs:documentation>
+        Color value: 6-digit hex (RRGGBB) or "auto".
+        Examples: "000000", "1F3864", "2C3E50", "auto".
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9A-Fa-f]{6}|auto"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- RULE 9: First-Line Indent Range                               -->
+  <!-- ============================================================ -->
+  <!-- If first-line indent is used, it should be 360-1440 DXA       -->
+  <!-- (0.25in - 1.0in).                                             -->
+  <!-- WHY: Below 0.25in the indent is barely visible.               -->
+  <!--       Above 1.0in the indent looks like a tab error.          -->
+  <!-- ============================================================ -->
+  <xs:simpleType name="ST_AestheticFirstLineIndent">
+    <xs:annotation>
+      <xs:documentation>
+        First-line indent in DXA. Range: 0-1440 (0in to 1.0in).
+        - 0:   no indent (modern style with space-after)
+        - 480: 0.33in (compact)
+        - 640: ~0.44in (2 Chinese characters at 16pt)
+        - 720: 0.5in (standard APA/academic)
+        - 1440: 1.0in (maximum before it looks wrong)
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:minInclusive value="0"/>
+      <xs:maxInclusive value="1440"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ============================================================ -->
+  <!-- COMPOSITE TYPE: Aesthetic Run Properties Check                 -->
+  <!-- ============================================================ -->
+  <!-- Validates run-level properties for aesthetic compliance.       -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_AestheticRPr">
+    <xs:annotation>
+      <xs:documentation>
+        Aesthetic run properties validator.
+        Checks font size and color format at the run level.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:all>
+      <xs:element name="sz" minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="val" type="w:ST_AestheticBodyFontSize" use="required"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="szCs" minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="val" type="w:ST_AestheticBodyFontSize" use="required"/>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="color" minOccurs="0">
+        <xs:complexType>
+          <xs:attribute name="val" type="w:ST_AestheticColor" use="required"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:all>
+  </xs:complexType>
+
+  <!-- ============================================================ -->
+  <!-- COMPOSITE TYPE: Aesthetic Spacing Check                       -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_AestheticSpacing">
+    <xs:annotation>
+      <xs:documentation>
+        Aesthetic spacing validator for paragraph spacing properties.
+        Validates line spacing and before/after spacing are in range.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="line" type="w:ST_AestheticLineSpacing" use="optional"/>
+    <xs:attribute name="before" type="w:ST_AestheticParaSpacing" use="optional"/>
+    <xs:attribute name="after" type="w:ST_AestheticParaSpacing" use="optional"/>
+    <xs:attribute name="lineRule" use="optional">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="auto"/>
+          <xs:enumeration value="exact"/>
+          <xs:enumeration value="atLeast"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <!-- ============================================================ -->
+  <!-- COMPOSITE TYPE: Aesthetic Page Margins Check                  -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_AestheticPageMargins">
+    <xs:annotation>
+      <xs:documentation>
+        Aesthetic page margin validator.
+        Ensures all margins meet minimum print-safe thresholds.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="top" type="w:ST_AestheticVerticalMargin" use="required"/>
+    <xs:attribute name="bottom" type="w:ST_AestheticVerticalMargin" use="required"/>
+    <xs:attribute name="left" type="w:ST_AestheticMargin" use="required"/>
+    <xs:attribute name="right" type="w:ST_AestheticMargin" use="required"/>
+    <xs:attribute name="header" type="xs:nonNegativeInteger" use="optional"/>
+    <xs:attribute name="footer" type="xs:nonNegativeInteger" use="optional"/>
+    <xs:attribute name="gutter" type="xs:nonNegativeInteger" use="optional"/>
+  </xs:complexType>
+
+  <!-- ============================================================ -->
+  <!-- COMPOSITE TYPE: Aesthetic Table Cell Margin Check              -->
+  <!-- ============================================================ -->
+  <xs:complexType name="CT_AestheticTableCellMargin">
+    <xs:annotation>
+      <xs:documentation>
+        Aesthetic table cell margin validator.
+        Ensures minimum padding for readability.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:attribute name="w" type="w:ST_AestheticCellPadding" use="required"/>
+    <xs:attribute name="type" use="required">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="dxa"/>
+          <xs:enumeration value="nil"/>
+          <xs:enumeration value="pct"/>
+          <xs:enumeration value="auto"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <!-- ============================================================ -->
+  <!-- PROGRAMMATIC RULES (cannot be expressed in XSD)               -->
+  <!-- ============================================================ -->
+  <!--                                                               -->
+  <!-- The following rules must be checked by a programmatic         -->
+  <!-- validator (e.g., AestheticRuleValidator.cs). They are         -->
+  <!-- documented here for completeness.                             -->
+  <!--                                                               -->
+  <!-- ── RULE P1: Heading Size Hierarchy ──                         -->
+  <!-- H1 sz >= H2 sz >= H3 sz >= body sz                            -->
+  <!-- Exception: APA-style where all headings = body size.          -->
+  <!-- Implementation: Collect sz from Heading1/2/3 styles and       -->
+  <!-- docDefaults. Verify monotonic decrease (or equality).         -->
+  <!--                                                               -->
+  <!-- ── RULE P2: Maximum 3 Font Families ──                        -->
+  <!-- Across docDefaults rPr + all style rPr, at most 3 distinct    -->
+  <!-- font families (by Ascii name) should be used.                 -->
+  <!-- WHY: More than 3 fonts creates visual chaos. Professional     -->
+  <!-- designs typically use 1-2 families.                           -->
+  <!-- Implementation: Collect all rFonts.ascii values from          -->
+  <!-- docDefaults and all styles. Count distinct. Warn if > 3.      -->
+  <!--                                                               -->
+  <!-- ── RULE P3: Heading Space-Before >= Space-After ──            -->
+  <!-- For heading styles, spaceBefore should be >= spaceAfter.      -->
+  <!-- WHY: Headings should be visually closer to the content they   -->
+  <!-- introduce than to the content above. This is the              -->
+  <!-- "proximity principle" of Gestalt design.                      -->
+  <!-- Implementation: For each Heading style, compare pPr spacing   -->
+  <!-- before vs after values.                                       -->
+  <!--                                                               -->
+  <!-- ── RULE P4: Spacing-Size Coherence ──                         -->
+  <!-- Paragraph after-spacing should be proportional to body size:  -->
+  <!--   after >= bodySize * 0.5 AND after <= bodySize * 1.5         -->
+  <!-- WHY: Too little spacing makes paragraphs run together.        -->
+  <!--       Too much spacing disconnects them.                      -->
+  <!-- Implementation: Get body sz from docDefaults, convert to DXA  -->
+  <!-- (multiply by 10), check after-spacing ratio.                  -->
+  <!--                                                               -->
+  <!-- ── RULE P5: Color Consistency ──                              -->
+  <!-- All heading styles should use the same color value.           -->
+  <!-- Body text color (if set) should be consistent across styles.  -->
+  <!-- WHY: Inconsistent colors look accidental, not designed.       -->
+  <!-- Exception: Caption and footnote styles may differ.            -->
+  <!-- Implementation: Collect color.val from heading styles.        -->
+  <!-- Verify all are identical.                                     -->
+  <!--                                                               -->
+  <!-- ── RULE P6: Indent/Spacing Mutual Exclusion ──               -->
+  <!-- If first-line indent > 0 in docDefaults, then after-spacing   -->
+  <!-- should be 0 (and vice versa). Using BOTH indent AND spacing   -->
+  <!-- is visually redundant — it signals uncertainty.               -->
+  <!-- Exception: Headings may override this.                        -->
+  <!-- Implementation: Check docDefaults pPr. If firstLine > 0 AND  -->
+  <!-- after > 0, emit a warning (not error).                        -->
+  <!--                                                               -->
+  <!-- ── RULE P7: Table Border Consistency ──                       -->
+  <!-- Within a single table, border styles should be internally     -->
+  <!-- consistent (all single, or all none — not a random mix).      -->
+  <!-- Implementation: Check tblBorders for consistent val values.   -->
+  <!--                                                               -->
+  <!-- ── RULE P8: Line Spacing vs Font Size Harmony ──             -->
+  <!-- For fixed line spacing (lineRule="exact"):                    -->
+  <!--   lineHeight >= fontSize * 1.2                                -->
+  <!-- WHY: Fixed line spacing less than 1.2x the font size causes   -->
+  <!--       ascender/descender clipping.                            -->
+  <!-- Implementation: When lineRule="exact", compare line value     -->
+  <!-- against the effective font size.                              -->
+  <!--                                                               -->
+  <!-- ============================================================ -->
+
+</xs:schema>

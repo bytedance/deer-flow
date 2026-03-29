@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Common type definitions for WordprocessingML subset schema -->
+<!-- MIT License - minimax-docx project -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+           elementFormDefault="qualified">
+
+  <!-- Measurement: non-negative twips (1/1440 inch) -->
+  <xs:simpleType name="ST_TwipsMeasure">
+    <xs:restriction base="xs:nonNegativeInteger"/>
+  </xs:simpleType>
+
+  <!-- Measurement: signed twips (for negative margins/indents) -->
+  <xs:simpleType name="ST_SignedTwipsMeasure">
+    <xs:restriction base="xs:integer"/>
+  </xs:simpleType>
+
+  <!-- Half-point measure for font sizes (1 = 0.5pt) -->
+  <xs:simpleType name="ST_HpsMeasure">
+    <xs:restriction base="xs:positiveInteger"/>
+  </xs:simpleType>
+
+  <!-- Hex color: 6 hex digits -->
+  <xs:simpleType name="ST_HexColor">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="auto|[0-9a-fA-F]{6}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- On/Off toggle -->
+  <xs:simpleType name="ST_OnOff">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="true"/>
+      <xs:enumeration value="false"/>
+      <xs:enumeration value="0"/>
+      <xs:enumeration value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Justification -->
+  <xs:simpleType name="ST_Jc">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="left"/>
+      <xs:enumeration value="center"/>
+      <xs:enumeration value="right"/>
+      <xs:enumeration value="both"/>
+      <xs:enumeration value="distribute"/>
+      <xs:enumeration value="start"/>
+      <xs:enumeration value="end"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Break type -->
+  <xs:simpleType name="ST_BrType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="page"/>
+      <xs:enumeration value="column"/>
+      <xs:enumeration value="textWrapping"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Underline patterns -->
+  <xs:simpleType name="ST_Underline">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="none"/>
+      <xs:enumeration value="single"/>
+      <xs:enumeration value="words"/>
+      <xs:enumeration value="double"/>
+      <xs:enumeration value="thick"/>
+      <xs:enumeration value="dotted"/>
+      <xs:enumeration value="dash"/>
+      <xs:enumeration value="dotDash"/>
+      <xs:enumeration value="dotDotDash"/>
+      <xs:enumeration value="wave"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Vertical alignment for subscript/superscript -->
+  <xs:simpleType name="ST_VerticalAlignRun">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="baseline"/>
+      <xs:enumeration value="superscript"/>
+      <xs:enumeration value="subscript"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Section break type -->
+  <xs:simpleType name="ST_SectionMark">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="nextPage"/>
+      <xs:enumeration value="nextColumn"/>
+      <xs:enumeration value="continuous"/>
+      <xs:enumeration value="evenPage"/>
+      <xs:enumeration value="oddPage"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Header/footer type -->
+  <xs:simpleType name="ST_HdrFtr">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="even"/>
+      <xs:enumeration value="default"/>
+      <xs:enumeration value="first"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Table width type -->
+  <xs:simpleType name="ST_TblWidth">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="auto"/>
+      <xs:enumeration value="dxa"/>
+      <xs:enumeration value="nil"/>
+      <xs:enumeration value="pct"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Vertical merge -->
+  <xs:simpleType name="ST_Merge">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="continue"/>
+      <xs:enumeration value="restart"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Highlight colors -->
+  <xs:simpleType name="ST_HighlightColor">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="black"/>
+      <xs:enumeration value="blue"/>
+      <xs:enumeration value="cyan"/>
+      <xs:enumeration value="darkBlue"/>
+      <xs:enumeration value="darkCyan"/>
+      <xs:enumeration value="darkGray"/>
+      <xs:enumeration value="darkGreen"/>
+      <xs:enumeration value="darkMagenta"/>
+      <xs:enumeration value="darkRed"/>
+      <xs:enumeration value="darkYellow"/>
+      <xs:enumeration value="green"/>
+      <xs:enumeration value="lightGray"/>
+      <xs:enumeration value="magenta"/>
+      <xs:enumeration value="none"/>
+      <xs:enumeration value="red"/>
+      <xs:enumeration value="white"/>
+      <xs:enumeration value="yellow"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Percentage (for table width pct, etc.) -->
+  <xs:simpleType name="ST_DecimalNumber">
+    <xs:restriction base="xs:integer"/>
+  </xs:simpleType>
+
+  <!-- Relationship ID reference -->
+  <xs:simpleType name="ST_RelationshipId">
+    <xs:restriction base="xs:string"/>
+  </xs:simpleType>
+
+</xs:schema>
