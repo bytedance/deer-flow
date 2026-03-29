@@ -1,7 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { clearMemory, deleteMemoryFact, loadMemory } from "./api";
-import type { UserMemory } from "./types";
+import {
+  clearMemory,
+  createMemoryFact,
+  deleteMemoryFact,
+  loadMemory,
+  updateMemoryFact,
+} from "./api";
+import type {
+  MemoryFactInput,
+  MemoryFactPatchInput,
+  UserMemory,
+} from "./types";
 
 export function useMemory() {
   const { data, isLoading, error } = useQuery({
@@ -27,6 +37,34 @@ export function useDeleteMemoryFact() {
 
   return useMutation({
     mutationFn: (factId: string) => deleteMemoryFact(factId),
+    onSuccess: (memory) => {
+      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    },
+  });
+}
+
+export function useCreateMemoryFact() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: MemoryFactInput) => createMemoryFact(input),
+    onSuccess: (memory) => {
+      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    },
+  });
+}
+
+export function useUpdateMemoryFact() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      factId,
+      input,
+    }: {
+      factId: string;
+      input: MemoryFactPatchInput;
+    }) => updateMemoryFact(factId, input),
     onSuccess: (memory) => {
       queryClient.setQueryData<UserMemory>(["memory"], memory);
     },
