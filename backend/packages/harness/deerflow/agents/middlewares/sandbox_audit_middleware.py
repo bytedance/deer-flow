@@ -24,15 +24,15 @@ logger = logging.getLogger(__name__)
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),  # rm -rf / /* ~ /home /root
-    re.compile(r"(curl|wget).+\|\s*(ba)?sh"),      # curl|sh, wget|sh
+    re.compile(r"(curl|wget).+\|\s*(ba)?sh"),  # curl|sh, wget|sh
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
-    re.compile(r">\s*/etc/"),                      # overwrite /etc/ files
+    re.compile(r">\s*/etc/"),  # overwrite /etc/ files
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"chmod\s+777"),                    # overly permissive, but reversible
+    re.compile(r"chmod\s+777"),  # overly permissive, but reversible
     re.compile(r"pip\s+install"),
     re.compile(r"pip3\s+install"),
     re.compile(r"apt(-get)?\s+install"),
@@ -69,6 +69,7 @@ def _classify_command(command: str) -> str:
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
+
 
 class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     """Bash command security auditing middleware.
