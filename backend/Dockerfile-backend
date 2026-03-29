@@ -10,18 +10,17 @@ FROM python:3.12-slim-bookworm
 
 
 
+# Install uv (source image overridable via UV_IMAGE build arg)
+COPY --from=uv-source /uv /uvx /usr/local/bin/
 
+ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_NO_PROGRESS=1
 # Set working directory
 WORKDIR /app
 
 # Copy backend source code
 COPY backend ./backend
-
-
-
-# Pre-build local workspace package first, so sync is less likely to fail on live build resolution
-RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd /app/backend/packages/harness && uv build --wheel"
 
 # Then sync project dependencies from pyproject.toml / uv.lock
 RUN --mount=type=cache,target=/root/.cache/uv \
