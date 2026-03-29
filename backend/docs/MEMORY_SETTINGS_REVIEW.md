@@ -4,11 +4,21 @@ Use this when reviewing the Memory Settings add/edit flow locally with the fewes
 
 ## Quick Review
 
-1. Start DeerFlow locally.
+1. Start DeerFlow locally using any working development setup you already use.
+
+   Examples:
 
    ```bash
    make dev
    ```
+
+   or
+
+   ```bash
+   make docker-start
+   ```
+
+   If you already have DeerFlow running locally, you can reuse that existing setup.
 
 2. Load the sample memory fixture.
 
