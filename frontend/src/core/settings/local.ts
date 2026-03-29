@@ -62,6 +62,23 @@ export function saveThreadModelName(
   localStorage.setItem(key, modelName);
 }
 
+function applyThreadModelOverride(
+  settings: LocalSettings,
+  threadId?: string,
+): LocalSettings {
+  const threadModelName = threadId ? getThreadModelName(threadId) : undefined;
+  if (!threadModelName) {
+    return settings;
+  }
+  return {
+    ...settings,
+    context: {
+      ...settings.context,
+      model_name: threadModelName,
+    },
+  };
+}
+
 export function getLocalSettings(threadId?: string): LocalSettings {
   if (typeof window === "undefined") {
     return DEFAULT_LOCAL_SETTINGS;
@@ -85,16 +102,10 @@ export function getLocalSettings(threadId?: string): LocalSettings {
           ...settings.notification,
         },
       };
-      const threadModelName = threadId
-        ? getThreadModelName(threadId)
-        : undefined;
-      if (threadModelName) {
-        mergedSettings.context.model_name = threadModelName;
-      }
-      return mergedSettings;
+      return applyThreadModelOverride(mergedSettings, threadId);
     }
   } catch {}
-  return DEFAULT_LOCAL_SETTINGS;
+  return applyThreadModelOverride(DEFAULT_LOCAL_SETTINGS, threadId);
 }
 
 export function saveLocalSettings(settings: LocalSettings, threadId?: string) {
