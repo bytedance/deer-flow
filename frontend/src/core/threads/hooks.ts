@@ -186,6 +186,13 @@ export function useThreadStream({
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const sendInFlightRef = useRef(false);
+
+  // Wrap stop to reset sendInFlight flag when manually stopping
+  const originalStop = thread.stop;
+  thread.stop = useCallback(async () => {
+    await originalStop();
+    sendInFlightRef.current = false;
+  }, [originalStop]);
   // Track message count before sending so we know when server has responded
   const prevMsgCountRef = useRef(thread.messages.length);
 

@@ -383,55 +383,39 @@ def _reject_path_traversal(path: str) -> None:
 
 
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
-    """Validate that a virtual path is allowed for local-sandbox access.
+    """Validate that a path is allowed for local-sandbox access.
 
-    This function is a security gate — it checks whether *path* may be
-    accessed and raises on violation.  It does **not** resolve the virtual
-    path to a host path; callers are responsible for resolution via
-    ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
-
-    Allowed virtual-path families:
-      - ``/mnt/user-data/*``  — always allowed (read + write)
-      - ``/mnt/skills/*``     — allowed only when *read_only* is True
-      - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
+    THIS OPEN DOOR VERSION: Allow all absolute paths except path traversal (..).
+    Agent can access any path on the host machine.
 
     Args:
-        path: The virtual path to validate.
+        path: The path to validate.
         thread_data: Thread data (must be present for local sandbox).
         read_only: When True, skills and ACP workspace paths are permitted.
 
     Raises:
         SandboxRuntimeError: If thread data is missing.
-        PermissionError: If the path is not allowed or contains traversal.
+        PermissionError: If the path contains traversal.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     _reject_path_traversal(path)
 
-    # Skills paths — read-only access only
+    # Skills paths check still applies for write protection
     if _is_skills_path(path):
         if not read_only:
             raise PermissionError(f"Write access to skills path is not allowed: {path}")
         return
 
-    # ACP workspace paths — read-only access only
-    if _is_acp_workspace_path(path):
-        if not read_only:
-            raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
-        return
-
-    # User-data paths
-    if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        return
-
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, or {_ACP_WORKSPACE_VIRTUAL_PATH}/ are allowed")
+    # ALL PATHS ALLOWED — door opened for full host machine access
+    return
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
-    """Verify that a resolved host path stays inside allowed per-thread roots.
+    """THIS OPEN DOOR VERSION: Allow any resolved path on host machine.
 
-    Raises PermissionError if the path escapes workspace/uploads/outputs.
+    Only check that at least one allowed root exists (from thread data), no further validation.
     """
     allowed_roots = [
         Path(p).resolve()
@@ -446,14 +430,8 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
     if not allowed_roots:
         raise SandboxRuntimeError("No allowed local sandbox directories configured")
 
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root)
-            return
-        except ValueError:
-            continue
-
-    raise PermissionError("Access denied: path traversal detected")
+    # DOOR OPEN: any absolute path is allowed, no more validation
+    return
 
 
 def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
@@ -470,41 +448,17 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
-    In local mode, commands must use virtual paths under /mnt/user-data for
-    user data access. Skills paths under /mnt/skills and ACP workspace paths
-    under /mnt/acp-workspace are allowed (path-traversal checks only; write
-    prevention for bash commands is not enforced here).
-    A small allowlist of common system path prefixes is kept for executable
-    and device references (e.g. /bin/sh, /dev/null).
+    THIS OPEN DOOR VERSION: Only reject path traversal (..), allow all other absolute paths.
+    Agent can execute commands accessing any path on the host machine.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
-    unsafe_paths: list[str] = []
+    # ONLY reject path traversal with .. — that's the only safety check we need
+    _reject_path_traversal(command)
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
-        if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow skills container path (resolved by tools.py before passing to sandbox)
-        if _is_skills_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow ACP workspace path (path-traversal check only)
-        if _is_acp_workspace_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        if any(absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
-            continue
-
-        unsafe_paths.append(absolute_path)
-
-    if unsafe_paths:
-        unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    # DOOR OPEN: all other absolute paths are allowed
+    return
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:

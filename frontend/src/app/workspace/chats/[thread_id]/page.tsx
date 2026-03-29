@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback } from "react";
+import { BotIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect } from "react";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
@@ -17,6 +19,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
+import { useAgent } from "@/core/agents/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings } from "@/core/settings";
@@ -28,11 +31,16 @@ import { cn } from "@/lib/utils";
 export default function ChatPage() {
   const { t } = useI18n();
   const [settings, setSettings] = useLocalSettings();
+  const router = useRouter();
 
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
+
+  // Get agent_name from context if it exists
+  const agentNameFromContext = settings.context.agent_name as string | undefined;
+  const { agent } = useAgent(agentNameFromContext);
 
   const [thread, sendMessage, isUploading] = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
@@ -61,6 +69,14 @@ export default function ChatPage() {
     },
   });
 
+  // Check if this thread has an associated agent_name and redirect to agent-specific URL
+  useEffect(() => {
+    if (!isNewThread && threadId && thread.values?.agent_name) {
+      const agentName = thread.values.agent_name;
+      router.replace(`/workspace/agents/${agentName}/chats/${threadId}`);
+    }
+  }, [isNewThread, threadId, thread.values, router]);
+
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
       void sendMessage(threadId, message);
@@ -77,12 +93,20 @@ export default function ChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
               isNewThread
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
+            {/* Agent badge */}
+            <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
+              <BotIcon className="text-primary h-3.5 w-3.5" />
+              <span className="text-xs font-medium">
+                {agentNameFromContext ? (agent?.name ?? agentNameFromContext) : "Default"}
+              </span>
+            </div>
+
             <div className="flex w-full items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>

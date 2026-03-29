@@ -16,6 +16,7 @@ class ThreadDataMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     thread_data: NotRequired[ThreadDataState | None]
+    agent_name: NotRequired[str | None]
 
 
 class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
@@ -92,8 +93,20 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             paths = self._create_thread_directories(thread_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
-        return {
+        updates = {
             "thread_data": {
                 **paths,
             }
         }
+
+        # Save agent_name to thread state if it's present in context and not already set
+        agent_name = context.get("agent_name")
+        if agent_name and "agent_name" not in state:
+            updates["agent_name"] = agent_name
+            print(f"[ThreadDataMiddleware] Saved agent_name={agent_name} to thread_id={thread_id}")
+        elif agent_name:
+            print(f"[ThreadDataMiddleware] agent_name={agent_name} already exists in state for thread_id={thread_id}")
+        else:
+            print(f"[ThreadDataMiddleware] No agent_name in context for thread_id={thread_id}")
+
+        return updates
