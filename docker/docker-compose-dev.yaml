@@ -69,6 +69,7 @@ services:
       - "2026:2026"
     volumes:
       - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
     depends_on:
       - frontend
       - gateway
