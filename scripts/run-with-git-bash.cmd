@@ -10,7 +10,7 @@ for /f "delims=" %%I in ('where git 2^>NUL') do (
     )
 )
 
-echo Git Bash not found next to git.exe. Please install Git for Windows or make bash.exe available through git.exe.
+echo Could not locate Git for Windows Bash ("..\bin\bash.exe" relative to git on PATH). Ensure Git for Windows is installed and that git and bash.exe are available on PATH.
 exit /b 1
 
 :found_bash
