@@ -10,6 +10,11 @@ export interface AgentThreadState extends Record<string, unknown> {
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {}
+export interface AgentThreadWithExtractedTitle extends AgentThread {
+  extracted?: {
+    title?: string;
+  };
+}
 
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;

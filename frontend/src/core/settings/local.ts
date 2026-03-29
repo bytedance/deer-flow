@@ -15,6 +15,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
 };
 
 const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
+const THREAD_CONTEXT_KEY_PREFIX = "deerflow.thread-context.";
 
 export interface LocalSettings {
   notification: {
@@ -32,20 +33,45 @@ export interface LocalSettings {
   };
 }
 
-export function getLocalSettings(): LocalSettings {
+function getThreadContextKey(threadId: string) {
+  return `${THREAD_CONTEXT_KEY_PREFIX}${threadId}`;
+}
+
+function mergeContext(
+  baseContext: LocalSettings["context"],
+  context: Partial<LocalSettings["context"]> | null | undefined,
+): LocalSettings["context"] {
+  return {
+    ...baseContext,
+    ...context,
+  };
+}
+
+function getStoredThreadContext(
+  threadId: string | null | undefined,
+): Partial<LocalSettings["context"]> | null {
+  if (!threadId) {
+    return null;
+  }
+  try {
+    const json = localStorage.getItem(getThreadContextKey(threadId));
+    return json ? (JSON.parse(json) as Partial<LocalSettings["context"]>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getLocalSettings(threadId?: string | null): LocalSettings {
   if (typeof window === "undefined") {
     return DEFAULT_LOCAL_SETTINGS;
   }
-  const json = localStorage.getItem(LOCAL_SETTINGS_KEY);
   try {
+    const json = localStorage.getItem(LOCAL_SETTINGS_KEY);
     if (json) {
       const settings = JSON.parse(json);
-      const mergedSettings = {
+      const mergedSettings: LocalSettings = {
         ...DEFAULT_LOCAL_SETTINGS,
-        context: {
-          ...DEFAULT_LOCAL_SETTINGS.context,
-          ...settings.context,
-        },
+        context: mergeContext(DEFAULT_LOCAL_SETTINGS.context, settings.context),
         layout: {
           ...DEFAULT_LOCAL_SETTINGS.layout,
           ...settings.layout,
@@ -55,12 +81,39 @@ export function getLocalSettings(): LocalSettings {
           ...settings.notification,
         },
       };
-      return mergedSettings;
+      return {
+        ...mergedSettings,
+        context: mergeContext(
+          mergedSettings.context,
+          getStoredThreadContext(threadId),
+        ),
+      };
     }
   } catch {}
-  return DEFAULT_LOCAL_SETTINGS;
+  return {
+    ...DEFAULT_LOCAL_SETTINGS,
+    context: mergeContext(
+      DEFAULT_LOCAL_SETTINGS.context,
+      getStoredThreadContext(threadId),
+    ),
+  };
 }
 
-export function saveLocalSettings(settings: LocalSettings) {
-  localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+export function saveLocalSettings(
+  settings: LocalSettings,
+  threadId?: string | null,
+) {
+  try {
+    const globalSettings: LocalSettings = {
+      ...settings,
+      context: threadId ? getLocalSettings().context : settings.context,
+    };
+    localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(globalSettings));
+    if (threadId) {
+      localStorage.setItem(
+        getThreadContextKey(threadId),
+        JSON.stringify(settings.context),
+      );
+    }
+  } catch {}
 }

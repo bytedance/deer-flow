@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import type { AgentThread } from "./types";
+import type { AgentThreadWithExtractedTitle } from "./types";
 
 export function pathOfThread(threadId: string) {
   return `/workspace/chats/${threadId}`;
@@ -19,6 +19,13 @@ export function textOfMessage(message: Message) {
   return null;
 }
 
-export function titleOfThread(thread: AgentThread) {
+export function titleOfThread(thread: AgentThreadWithExtractedTitle) {
+  if (
+    thread.extracted &&
+    typeof thread.extracted.title === "string" &&
+    thread.extracted.title.trim()
+  ) {
+    return thread.extracted.title;
+  }
   return thread.values?.title ?? "Untitled";
 }

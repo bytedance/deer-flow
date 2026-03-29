@@ -2,7 +2,7 @@ import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -32,6 +32,12 @@ export type ThreadStreamOptions = {
   onToolEnd?: (event: ToolEndEvent) => void;
 };
 
+type RunMetadataStorage = {
+  getItem(key: `lg:stream:${string}`): string | null;
+  setItem(key: `lg:stream:${string}`, value: string): void;
+  removeItem(key: `lg:stream:${string}`): void;
+};
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -53,6 +59,32 @@ function getStreamErrorMessage(error: unknown): string {
     }
   }
   return "Request failed.";
+}
+
+function createMemoryRunMetadataStorage(): RunMetadataStorage {
+  const store = new Map<`lg:stream:${string}`, string>();
+  return {
+    getItem(key) {
+      return store.get(key) ?? null;
+    },
+    setItem(key, value) {
+      store.set(key, value);
+    },
+    removeItem(key) {
+      store.delete(key);
+    },
+  };
+}
+
+function getResumableStorage(): RunMetadataStorage {
+  if (typeof window === "undefined") {
+    return createMemoryRunMetadataStorage();
+  }
+  try {
+    return window.sessionStorage;
+  } catch {
+    return createMemoryRunMetadataStorage();
+  }
 }
 
 export function useThreadStream({
@@ -109,12 +141,13 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const resumableStorage = useMemo(() => getResumableStorage(), []);
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: () => resumableStorage,
     fetchStateHistory: { limit: 1 },
     onCreated(meta) {
       handleStreamStart(meta.thread_id);
@@ -395,7 +428,13 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [thread, _handleOnStart, t.uploads.uploadingFiles, context, queryClient],
+    [
+      thread,
+      _handleOnStart,
+      t.uploads.uploadingFiles,
+      context,
+      queryClient,
+    ],
   );
 
   // Merge thread with optimistic messages for display
@@ -411,11 +450,18 @@ export function useThreadStream({
 }
 
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
+  params:
+    | (Parameters<ThreadsClient["search"]>[0] & {
+        extract?: Record<string, string>;
+      })
+    | undefined = {
     limit: 50,
     sortBy: "updated_at",
     sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values"],
+    select: ["thread_id", "updated_at"],
+    extract: {
+      title: "values.title",
+    },
   },
 ) {
   const apiClient = getAPIClient();
@@ -430,7 +476,9 @@ export function useThreads(
       // delegate to a single search call with the original parameters.
       if (maxResults !== undefined && maxResults <= 0) {
         const response =
-          await apiClient.threads.search<AgentThreadState>(params);
+          await apiClient.threads.search<AgentThreadState>(
+            params as Parameters<ThreadsClient["search"]>[0],
+          );
         return response as AgentThread[];
       }
 
@@ -460,7 +508,7 @@ export function useThreads(
           ...params,
           limit: currentLimit,
           offset,
-        })) as AgentThread[];
+        } as Parameters<ThreadsClient["search"]>[0])) as AgentThread[];
 
         threads.push(...response);
 
