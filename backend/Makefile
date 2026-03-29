@@ -12,6 +12,7 @@ test:
 
 lint:
 	uvx ruff check .
+	uvx ruff format --check .
 
 format:
 	uvx ruff check . --fix && uvx ruff format .

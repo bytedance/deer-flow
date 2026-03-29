@@ -84,9 +84,7 @@ class PatchedChatOpenAI(ChatOpenAI):
         else:
             # Fallback: match assistant-role entries positionally against AIMessages.
             ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
-            assistant_payloads = [
-                (i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"
-            ]
+            assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
             for (_, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
                 _restore_tool_call_signatures(payload_msg, ai_msg)
 

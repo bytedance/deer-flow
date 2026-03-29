@@ -452,3 +452,40 @@ def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
     result = _apply_cwd_prefix("echo hello", thread_data)
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
+    
+
+def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:
+    """Bash commands referencing MCP filesystem server paths should be allowed."""
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+
+    mock_config = ExtensionsConfig(
+        mcp_servers={
+            "filesystem": McpServerConfig(
+                enabled=True,
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
+            )
+        }
+    )
+    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=mock_config):
+        # Should not raise - MCP filesystem paths are allowed
+        validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+        validate_local_bash_command_paths("cat /mnt/d/workspace/subdir/file.txt", _THREAD_DATA)
+
+        # Path traversal should still be blocked
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths("cat /mnt/d/workspace/../../etc/passwd", _THREAD_DATA)
+
+        # Disabled servers should not expose paths
+        disabled_config = ExtensionsConfig(
+            mcp_servers={
+                "filesystem": McpServerConfig(
+                    enabled=False,
+                    command="npx",
+                    args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
+                )
+            }
+        )
+        with patch("deerflow.config.extensions_config.get_extensions_config", return_value=disabled_config):
+            with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+                validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)

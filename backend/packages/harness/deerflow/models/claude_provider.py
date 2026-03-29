@@ -162,10 +162,7 @@ class ClaudeChatModel(ChatAnthropic):
         system = payload.get("system")
         if isinstance(system, list):
             # Remove any existing billing blocks, then insert a single one at index 0.
-            filtered = [
-                b for b in system
-                if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))
-            ]
+            filtered = [b for b in system if not (isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))]
             payload["system"] = [billing_block] + filtered
         elif isinstance(system, str):
             if OAUTH_BILLING_HEADER in system:
@@ -183,11 +180,13 @@ class ClaudeChatModel(ChatAnthropic):
             hostname = socket.gethostname()
             device_id = hashlib.sha256(f"deerflow-{hostname}".encode()).hexdigest()
             session_id = str(uuid.uuid4())
-            payload["metadata"]["user_id"] = json.dumps({
-                "device_id": device_id,
-                "account_uuid": "deerflow",
-                "session_id": session_id,
-            })
+            payload["metadata"]["user_id"] = json.dumps(
+                {
+                    "device_id": device_id,
+                    "account_uuid": "deerflow",
+                    "session_id": session_id,
+                }
+            )
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system and recent messages."""
