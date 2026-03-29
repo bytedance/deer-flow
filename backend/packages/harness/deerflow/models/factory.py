@@ -51,11 +51,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if effective_wte:
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled and has_thinking_settings:
-        if effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+        extra_body = effective_wte.get("extra_body") or {}
+        thinking_in_extra_body = extra_body.get("thinking") or {}
+        if thinking_in_extra_body.get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
             kwargs.update({"extra_body": {"thinking": {"type": "disabled"}}})
             kwargs.update({"reasoning_effort": "minimal"})
-        elif effective_wte.get("thinking", {}).get("type"):
+
+        thinking_direct = effective_wte.get("thinking") or {}
+        if thinking_direct.get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
