@@ -36,17 +36,28 @@ export function groupMessages<T>(
 
   const groups: MessageGroup[] = [];
 
-  // Returns the last group if it can still accept tool messages
-  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  // Returns the nearest prior group that can still accept tool messages.
+  // This intentionally scans backwards instead of only checking the last group,
+  // because an AI message can now render both:
+  // 1. an in-flight processing group for tool calls, and
+  // 2. a normal assistant bubble for user-visible text.
+  // In that case, the assistant bubble is appended after the processing group,
+  // and later tool messages still belong to that earlier processing group.
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
-      return last;
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      const group = groups[i];
+      if (!group) {
+        continue;
+      }
+      if (group.type === "human") {
+        return null;
+      }
+      if (
+        group.type !== "assistant" &&
+        group.type !== "assistant:clarification"
+      ) {
+        return group;
+      }
     }
     return null;
   }
@@ -75,11 +86,6 @@ export function groupMessages<T>(
         const open = lastOpenGroup();
         if (open) {
           open.messages.push(message);
-        } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
         }
       }
       continue;
@@ -112,9 +118,14 @@ export function groupMessages<T>(
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
-      if (hasContent(message) && !hasToolCalls(message)) {
+      // Not an else-if: intermediate assistant messages can contain both
+      // user-facing text and tool calls. We still want to show that text as a
+      // normal assistant bubble instead of rendering only the tool timeline.
+      if (
+        hasContent(message) &&
+        !hasPresentFiles(message) &&
+        !hasSubagent(message)
+      ) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }

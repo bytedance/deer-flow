@@ -130,7 +130,9 @@ const ParticleCard: React.FC<{
         duration: 0.3,
         ease: "back.in(1.7)",
         onComplete: () => {
-          particle.parentNode?.removeChild(particle);
+          if (particle.parentNode) {
+            particle.parentNode.removeChild(particle);
+          }
         },
       });
     });
@@ -482,7 +484,9 @@ const GlobalSpotlight: React.FC<{
     return () => {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseleave", handleMouseLeave);
-      spotlightRef.current?.parentNode?.removeChild(spotlightRef.current);
+      if (spotlightRef.current?.parentNode) {
+        spotlightRef.current.parentNode.removeChild(spotlightRef.current);
+      }
     };
   }, [gridRef, disableAnimations, enabled, spotlightRadius, glowColor]);
 
