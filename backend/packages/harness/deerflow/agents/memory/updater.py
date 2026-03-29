@@ -27,9 +27,11 @@ def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = N
     """Backward-compatible wrapper around the configured memory storage save path."""
     return get_memory_storage().save(memory_data, agent_name)
 
+
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data via storage provider."""
     return get_memory_storage().load(agent_name)
+
 
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Reload memory data via storage provider."""
