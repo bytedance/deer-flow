@@ -225,6 +225,62 @@ class TestSandboxAuditMiddlewareWrapToolCall:
 
 
 # ---------------------------------------------------------------------------
+# SandboxAuditMiddleware.awrap_tool_call async integration tests
+# ---------------------------------------------------------------------------
+
+class TestSandboxAuditMiddlewareAwrapToolCall:
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    async def _call(self, command: str) -> tuple:
+        """Run awrap_tool_call, return (result, handler_called, handler_mock)."""
+        request = _make_request(command)
+        handler_mock = _make_handler()
+
+        async def async_handler(req):
+            return handler_mock(req)
+
+        with patch.object(self.mw, "_write_audit"):
+            result = await self.mw.awrap_tool_call(request, async_handler)
+        return result, handler_mock.called, handler_mock
+
+    @pytest.mark.anyio
+    async def test_non_bash_tool_passes_through(self):
+        request = _make_non_bash_request("ls")
+        handler_mock = _make_handler()
+
+        async def async_handler(req):
+            return handler_mock(req)
+
+        with patch.object(self.mw, "_write_audit"):
+            result = await self.mw.awrap_tool_call(request, async_handler)
+        assert handler_mock.called
+        assert result == handler_mock.return_value
+
+    @pytest.mark.anyio
+    async def test_high_risk_blocks_handler(self):
+        result, called, _ = await self._call("rm -rf /")
+        assert not called
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "blocked" in result.content.lower()
+
+    @pytest.mark.anyio
+    async def test_medium_risk_executes_with_warning(self):
+        result, called, _ = await self._call("pip install requests")
+        assert called
+        assert isinstance(result, ToolMessage)
+        assert "warning" in result.content.lower()
+
+    @pytest.mark.anyio
+    async def test_safe_command_passes_to_handler(self):
+        result, called, handler_mock = await self._call("ls -la")
+        assert called
+        assert result == handler_mock.return_value
+
+
+# ---------------------------------------------------------------------------
 # Precision / recall summary (printed, not asserted — for benchmark reporting)
 # ---------------------------------------------------------------------------
 
