@@ -1,6 +1,7 @@
 "use client";
 
 import { PenLineIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import Link from "next/link";
 import { useDeferredValue, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
@@ -212,7 +213,9 @@ export function MemorySettingsPage() {
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
   const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
   const [factEditorOpen, setFactEditorOpen] = useState(false);
-  const [factForm, setFactForm] = useState<FactFormState>(DEFAULT_FACT_FORM_STATE);
+  const [factForm, setFactForm] = useState<FactFormState>(
+    DEFAULT_FACT_FORM_STATE,
+  );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const deferredQuery = useDeferredValue(query);
@@ -418,7 +421,7 @@ export function MemorySettingsPage() {
                   <ToggleGroupItem value="summaries">
                     {filterSummaries}
                   </ToggleGroupItem>
-                  </ToggleGroup>
+                </ToggleGroup>
               </div>
 
               <div className="flex items-center gap-2">
@@ -501,18 +504,20 @@ export function MemorySettingsPage() {
                                 {formatTimeAgo(fact.createdAt)}
                               </span>
                             </div>
-                            <p className="break-words text-sm">{fact.content}</p>
+                            <p className="text-sm break-words">
+                              {fact.content}
+                            </p>
                             {fact.source === "manual" ? (
                               <span className="text-muted-foreground text-sm">
                                 {manualFactSource}
                               </span>
                             ) : (
-                              <a
+                              <Link
                                 href={pathOfThread(fact.source)}
                                 className="text-primary text-sm underline-offset-4 hover:underline"
                               >
                                 {t.settings.memory.markdown.table.view}
-                              </a>
+                              </Link>
                             )}
                           </div>
 
@@ -589,7 +594,9 @@ export function MemorySettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{factToEdit ? editFactTitle : addFactTitle}</DialogTitle>
+            <DialogTitle>
+              {factToEdit ? editFactTitle : addFactTitle}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
@@ -655,7 +662,10 @@ export function MemorySettingsPage() {
             >
               {t.common.cancel}
             </Button>
-            <Button onClick={() => void handleSaveFact()} disabled={isFactFormPending}>
+            <Button
+              onClick={() => void handleSaveFact()}
+              disabled={isFactFormPending}
+            >
               {isFactFormPending ? t.common.loading : factSave}
             </Button>
           </DialogFooter>

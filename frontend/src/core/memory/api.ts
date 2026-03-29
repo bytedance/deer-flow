@@ -40,7 +40,9 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
   return readMemoryResponse(response, "Failed to delete memory fact");
 }
 
-export async function createMemoryFact(input: MemoryFactInput): Promise<UserMemory> {
+export async function createMemoryFact(
+  input: MemoryFactInput,
+): Promise<UserMemory> {
   const response = await fetch(`${getBackendBaseURL()}/api/memory/facts`, {
     method: "POST",
     headers: {

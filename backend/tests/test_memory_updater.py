@@ -213,6 +213,16 @@ def test_create_memory_fact_rejects_empty_content() -> None:
         raise AssertionError("Expected ValueError for empty fact content")
 
 
+def test_create_memory_fact_rejects_invalid_confidence() -> None:
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        try:
+            create_memory_fact(content="User likes tests", confidence=confidence)
+        except ValueError as exc:
+            assert exc.args == ("confidence",)
+        else:
+            raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
 def test_delete_memory_fact_raises_for_unknown_id() -> None:
     with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
         try:
@@ -277,6 +287,37 @@ def test_update_memory_fact_raises_for_unknown_id() -> None:
             assert exc.args == ("fact_missing",)
         else:
             raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_update_memory_fact_rejects_invalid_confidence() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_data",
+            return_value=current_memory,
+        ):
+            try:
+                update_memory_fact(
+                    fact_id="fact_edit",
+                    content="User prefers spaces",
+                    confidence=confidence,
+                )
+            except ValueError as exc:
+                assert exc.args == ("confidence",)
+            else:
+                raise AssertionError("Expected ValueError for invalid fact confidence")
 
 
 # ---------------------------------------------------------------------------
