@@ -142,10 +142,22 @@ export function extractTextFromMessage(message: Message) {
 }
 
 const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
+const RAW_ACTION_BLOCK_RE =
+  /<(action_call|action_result)>\s*([\s\S]*?)\s*<\/\1>/g;
+
+export function normalizeRawActionBlocks(content: string) {
+  return content.replace(
+    RAW_ACTION_BLOCK_RE,
+    (_, tagName: string, body: string) =>
+      ["```xml", `<${tagName}>`, body.trim(), `</${tagName}>`, "```"].join(
+        "\n",
+      ),
+  );
+}
 
 function splitInlineReasoning(content: string) {
   const reasoningParts: string[] = [];
-  const cleaned = content
+  const cleaned = normalizeRawActionBlocks(content)
     .replace(THINK_TAG_RE, (_, reasoning: string) => {
       const normalized = reasoning.trim();
       if (normalized) {
