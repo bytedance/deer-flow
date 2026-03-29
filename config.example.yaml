@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 3
+config_version: 4
 
 # ============================================================================
 # Logging
@@ -330,6 +330,8 @@ tools:
     use: deerflow.sandbox.tools:str_replace_tool
 
   # Bash execution tool
+  # Active only when using an isolated shell sandbox or when
+  # sandbox.allow_host_bash: true explicitly opts into host bash.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -355,6 +357,10 @@ tool_search:
 # Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Host bash execution is disabled by default because LocalSandboxProvider is
+  # not a secure isolation boundary for shell access. Enable only for fully
+  # trusted, single-user local workflows.
+  allow_host_bash: false
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
