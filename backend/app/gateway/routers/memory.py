@@ -77,8 +77,8 @@ class FactCreateRequest(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
-class FactUpdateRequest(BaseModel):
-    """Request model for partially updating a memory fact."""
+class FactPatchRequest(BaseModel):
+    """PATCH request model that preserves existing values for omitted fields."""
 
     content: str | None = Field(default=None, min_length=1, description="Fact content")
     category: str | None = Field(default=None, description="Fact category")
@@ -223,14 +223,14 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     return MemoryResponse(**memory_data)
 
 
-@router.put(
+@router.patch(
     "/memory/facts/{fact_id}",
     response_model=MemoryResponse,
-    summary="Update Memory Fact",
-    description="Update a single saved memory fact by its fact id.",
+    summary="Patch Memory Fact",
+    description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactUpdateRequest) -> MemoryResponse:
-    """Update a single fact manually."""
+async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
+    """Partially update a single fact manually."""
     try:
         memory_data = update_memory_fact(
             fact_id=fact_id,

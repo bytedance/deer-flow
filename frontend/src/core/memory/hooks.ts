@@ -7,7 +7,11 @@ import {
   loadMemory,
   updateMemoryFact,
 } from "./api";
-import type { MemoryFactInput, UserMemory } from "./types";
+import type {
+  MemoryFactInput,
+  MemoryFactPatchInput,
+  UserMemory,
+} from "./types";
 
 export function useMemory() {
   const { data, isLoading, error } = useQuery({
@@ -59,7 +63,7 @@ export function useUpdateMemoryFact() {
       input,
     }: {
       factId: string;
-      input: MemoryFactInput;
+      input: MemoryFactPatchInput;
     }) => updateMemoryFact(factId, input),
     onSuccess: (memory) => {
       queryClient.setQueryData<UserMemory>(["memory"], memory);

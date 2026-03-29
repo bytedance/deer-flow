@@ -121,7 +121,7 @@ def test_update_memory_fact_route_returns_updated_memory() -> None:
 
     with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory):
         with TestClient(app) as client:
-            response = client.put(
+            response = client.patch(
                 "/api/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",
@@ -152,7 +152,7 @@ def test_update_memory_fact_route_preserves_omitted_fields() -> None:
 
     with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory) as update_fact:
         with TestClient(app) as client:
-            response = client.put(
+            response = client.patch(
                 "/api/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",
@@ -175,7 +175,7 @@ def test_update_memory_fact_route_returns_404_for_missing_fact() -> None:
 
     with patch("app.gateway.routers.memory.update_memory_fact", side_effect=KeyError("fact_missing")):
         with TestClient(app) as client:
-            response = client.put(
+            response = client.patch(
                 "/api/memory/facts/fact_missing",
                 json={
                     "content": "User prefers spaces",
@@ -194,7 +194,7 @@ def test_update_memory_fact_route_returns_specific_error_for_invalid_confidence(
 
     with patch("app.gateway.routers.memory.update_memory_fact", side_effect=ValueError("confidence")):
         with TestClient(app) as client:
-            response = client.put(
+            response = client.patch(
                 "/api/memory/facts/fact_edit",
                 json={
                     "content": "User prefers spaces",

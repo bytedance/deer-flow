@@ -26,7 +26,11 @@ import {
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
-import type { MemoryFactInput, UserMemory } from "@/core/memory/types";
+import type {
+  MemoryFactInput,
+  MemoryFactPatchInput,
+  UserMemory,
+} from "@/core/memory/types";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -363,7 +367,15 @@ export function MemorySettingsPage() {
 
     try {
       if (factToEdit) {
-        await updateMemoryFact.mutateAsync({ factId: factToEdit.id, input });
+        const patchInput: MemoryFactPatchInput = {
+          content: input.content,
+          category: input.category,
+          confidence: input.confidence,
+        };
+        await updateMemoryFact.mutateAsync({
+          factId: factToEdit.id,
+          input: patchInput,
+        });
         toast.success(editFactSuccess);
       } else {
         await createMemoryFact.mutateAsync(input);

@@ -13,6 +13,12 @@ export interface MemoryFactInput {
   confidence: number;
 }
 
+export interface MemoryFactPatchInput {
+  content?: string;
+  category?: string;
+  confidence?: number;
+}
+
 export interface UserMemory {
   version: string;
   lastUpdated: string;

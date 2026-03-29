@@ -1,6 +1,10 @@
 import { getBackendBaseURL } from "../config";
 
-import type { MemoryFactInput, UserMemory } from "./types";
+import type {
+  MemoryFactInput,
+  MemoryFactPatchInput,
+  UserMemory,
+} from "./types";
 
 async function readMemoryResponse(
   response: Response,
@@ -55,12 +59,12 @@ export async function createMemoryFact(
 
 export async function updateMemoryFact(
   factId: string,
-  input: MemoryFactInput,
+  input: MemoryFactPatchInput,
 ): Promise<UserMemory> {
   const response = await fetch(
     `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
     {
-      method: "PUT",
+      method: "PATCH",
       headers: {
         "Content-Type": "application/json",
       },
