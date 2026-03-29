@@ -1,4 +1,5 @@
 import builtins
+from types import SimpleNamespace
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
@@ -73,3 +74,35 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
     monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", fake_find)
 
     assert LocalSandbox._get_shell() == r"C:\Windows\System32\cmd.exe"
+
+
+def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
+    calls: list[tuple[object, dict]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    output = LocalSandbox("t").execute_command("Write-Output hello")
+
+    assert output == "ok"
+    assert calls == [
+        (
+            [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Write-Output hello",
+            ],
+            {
+                "shell": False,
+                "capture_output": True,
+                "text": True,
+                "timeout": 600,
+            },
+        )
+    ]

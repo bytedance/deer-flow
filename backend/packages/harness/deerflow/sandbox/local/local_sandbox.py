@@ -1,3 +1,4 @@
+import ntpath
 import os
 import shutil
 import subprocess
@@ -8,6 +9,11 @@ from deerflow.sandbox.sandbox import Sandbox
 
 
 class LocalSandbox(Sandbox):
+    @staticmethod
+    def _is_powershell(shell: str) -> bool:
+        """Return whether the selected shell is a PowerShell executable."""
+        return ntpath.basename(shell).lower() in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+
     @staticmethod
     def _find_first_available_shell(candidates: tuple[str, ...]) -> str | None:
         """Return the first executable shell path or command found from candidates."""
@@ -163,7 +169,7 @@ class LocalSandbox(Sandbox):
                 (
                     "powershell",
                     "powershell.exe",
-                    os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                    ntpath.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
                     "cmd.exe",
                 )
             )
@@ -180,15 +186,25 @@ class LocalSandbox(Sandbox):
     def execute_command(self, command: str) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
+        shell = self._get_shell()
 
-        result = subprocess.run(
-            resolved_command,
-            executable=self._get_shell(),
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        if os.name == "nt" and self._is_powershell(shell):
+            result = subprocess.run(
+                [shell, "-NoProfile", "-Command", resolved_command],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        else:
+            result = subprocess.run(
+                resolved_command,
+                executable=shell,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
         output = result.stdout
         if result.stderr:
             output += f"\nStd Error:\n{result.stderr}" if output else result.stderr
