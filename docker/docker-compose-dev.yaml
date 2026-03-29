@@ -90,6 +90,7 @@ services:
     environment:
       - NODE_ENV=production
       - CI=true
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
     networks:
       - deer-flow-dev
     restart: unless-stopped
