@@ -302,12 +302,12 @@ class TestSandboxAuditMiddlewareAwrapToolCall:
 
 
 # ---------------------------------------------------------------------------
-# Precision / recall summary (printed, not asserted — for benchmark reporting)
+# Precision / recall summary (asserted metrics for benchmark reporting)
 # ---------------------------------------------------------------------------
 
 
 class TestBenchmarkSummary:
-    """Run the full test-case corpus and print precision / recall metrics."""
+    """Run the full test-case corpus and assert precision / recall metrics."""
 
     HIGH_RISK = [
         "rm -rf /",
