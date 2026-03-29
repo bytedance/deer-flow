@@ -674,6 +674,19 @@ class TestMemoryManagement:
             result = client.reload_memory()
         assert result == data
 
+    def test_clear_memory(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.clear_memory_data", return_value=data):
+            result = client.clear_memory()
+        assert result == data
+
+    def test_delete_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
+            result = client.delete_memory_fact("fact_123")
+            delete_fact.assert_called_once_with("fact_123")
+        assert result == data
+
     def test_get_memory_config(self, client):
         config = MagicMock()
         config.enabled = True
