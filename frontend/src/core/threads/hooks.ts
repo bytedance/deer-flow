@@ -429,7 +429,8 @@ export function useThreads(
       // Preserve prior semantics: if a non-positive limit is explicitly provided,
       // delegate to a single search call with the original parameters.
       if (maxResults !== undefined && maxResults <= 0) {
-        const response = await apiClient.threads.search<AgentThreadState>(params);
+        const response =
+          await apiClient.threads.search<AgentThreadState>(params);
         return response as AgentThread[];
       }
 

@@ -183,7 +183,8 @@ class TestBasicChat:
                 assert "messages" in event.data
                 assert "artifacts" in event.data
             elif event.type == "end":
-                assert event.data == {}
+                # end event may contain usage stats after token tracking was added
+                assert isinstance(event.data, dict)
 
     @requires_llm
     def test_multi_turn_stateless(self, client):

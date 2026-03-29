@@ -66,14 +66,9 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     """Normalize legacy channel assistant IDs into valid custom agent names."""
     normalized = raw_value.strip().lower().replace("_", "-")
     if not normalized:
-        raise InvalidChannelSessionConfigError(
-            "Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name."
-        )
+        raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
-        raise InvalidChannelSessionConfigError(
-            f"Invalid channel session assistant_id {raw_value!r}. "
-            "Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens."
-        )
+        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
     return normalized
 
 
