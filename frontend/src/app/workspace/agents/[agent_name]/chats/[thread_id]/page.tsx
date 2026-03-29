@@ -28,7 +28,6 @@ import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
-  const [settings, setSettings] = useLocalSettings();
   const router = useRouter();
 
   const { agent_name } = useParams<{
@@ -38,6 +37,7 @@ export default function AgentChatPage() {
   const { agent } = useAgent(agent_name);
 
   const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  const [settings, setSettings] = useLocalSettings(threadId);
 
   const { showNotification } = useNotification();
   const [thread, sendMessage] = useThreadStream({

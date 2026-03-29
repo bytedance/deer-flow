@@ -7,21 +7,21 @@ import {
   type LocalSettings,
 } from "./local";
 
-export function useLocalSettings(): [
+export function useLocalSettings(threadId?: string): [
   LocalSettings,
   (
     key: keyof LocalSettings,
     value: Partial<LocalSettings[keyof LocalSettings]>,
   ) => void,
 ] {
-  const [mounted, setMounted] = useState(false);
   const [state, setState] = useState<LocalSettings>(DEFAULT_LOCAL_SETTINGS);
+
+  const [mounted, setMounted] = useState(false);
   useLayoutEffect(() => {
-    if (!mounted) {
-      setState(getLocalSettings());
-    }
+    setState(getLocalSettings(threadId));
     setMounted(true);
-  }, [mounted]);
+  }, [threadId]);
+
   const setter = useCallback(
     (
       key: keyof LocalSettings,
@@ -29,18 +29,18 @@ export function useLocalSettings(): [
     ) => {
       if (!mounted) return;
       setState((prev) => {
-        const newState = {
+        const newState: LocalSettings = {
           ...prev,
           [key]: {
             ...prev[key],
             ...value,
           },
         };
-        saveLocalSettings(newState);
+        saveLocalSettings(newState, threadId);
         return newState;
       });
     },
-    [mounted],
+    [mounted, threadId],
   );
   return [state, setter];
 }

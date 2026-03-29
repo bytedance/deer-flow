@@ -27,9 +27,8 @@ import { cn } from "@/lib/utils";
 
 export default function ChatPage() {
   const { t } = useI18n();
-  const [settings, setSettings] = useLocalSettings();
-
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
+  const [settings, setSettings] = useLocalSettings(threadId);
   useSpecificChatMode();
 
   const { showNotification } = useNotification();

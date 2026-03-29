@@ -15,6 +15,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
 };
 
 const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
+const THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
 
 export interface LocalSettings {
   notification: {
@@ -22,8 +23,14 @@ export interface LocalSettings {
   };
   context: Omit<
     AgentThreadContext,
-    "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+    | "thread_id"
+    | "is_plan_mode"
+    | "thinking_enabled"
+    | "subagent_enabled"
+    | "model_name"
+    | "reasoning_effort"
   > & {
+    model_name?: string | undefined;
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
@@ -32,15 +39,38 @@ export interface LocalSettings {
   };
 }
 
-export function getLocalSettings(): LocalSettings {
+function getThreadModelStorageKey(threadId: string): string {
+  return `${THREAD_MODEL_KEY_PREFIX}${threadId}`;
+}
+
+export function getThreadModelName(threadId: string): string | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  return localStorage.getItem(getThreadModelStorageKey(threadId)) ?? undefined;
+}
+
+export function saveThreadModelName(
+  threadId: string,
+  modelName: string | undefined,
+) {
+  const key = getThreadModelStorageKey(threadId);
+  if (!modelName) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, modelName);
+}
+
+export function getLocalSettings(threadId?: string): LocalSettings {
   if (typeof window === "undefined") {
     return DEFAULT_LOCAL_SETTINGS;
   }
   const json = localStorage.getItem(LOCAL_SETTINGS_KEY);
   try {
     if (json) {
-      const settings = JSON.parse(json);
-      const mergedSettings = {
+      const settings = JSON.parse(json) as Partial<LocalSettings>;
+      const mergedSettings: LocalSettings = {
         ...DEFAULT_LOCAL_SETTINGS,
         context: {
           ...DEFAULT_LOCAL_SETTINGS.context,
@@ -55,12 +85,21 @@ export function getLocalSettings(): LocalSettings {
           ...settings.notification,
         },
       };
+      const threadModelName = threadId
+        ? getThreadModelName(threadId)
+        : undefined;
+      if (threadModelName) {
+        mergedSettings.context.model_name = threadModelName;
+      }
       return mergedSettings;
     }
   } catch {}
   return DEFAULT_LOCAL_SETTINGS;
 }
 
-export function saveLocalSettings(settings: LocalSettings) {
+export function saveLocalSettings(settings: LocalSettings, threadId?: string) {
   localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+  if (threadId) {
+    saveThreadModelName(threadId, settings.context.model_name);
+  }
 }
