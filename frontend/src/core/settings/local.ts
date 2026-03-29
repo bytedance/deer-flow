@@ -39,6 +39,24 @@ export interface LocalSettings {
   };
 }
 
+function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
+  return {
+    ...DEFAULT_LOCAL_SETTINGS,
+    context: {
+      ...DEFAULT_LOCAL_SETTINGS.context,
+      ...settings?.context,
+    },
+    layout: {
+      ...DEFAULT_LOCAL_SETTINGS.layout,
+      ...settings?.layout,
+    },
+    notification: {
+      ...DEFAULT_LOCAL_SETTINGS.notification,
+      ...settings?.notification,
+    },
+  };
+}
+
 function getThreadModelStorageKey(threadId: string): string {
   return `${THREAD_MODEL_KEY_PREFIX}${threadId}`;
 }
@@ -79,7 +97,7 @@ function applyThreadModelOverride(
   };
 }
 
-export function getLocalSettings(threadId?: string): LocalSettings {
+export function getLocalSettings(): LocalSettings {
   if (typeof window === "undefined") {
     return DEFAULT_LOCAL_SETTINGS;
   }
@@ -87,30 +105,24 @@ export function getLocalSettings(threadId?: string): LocalSettings {
   try {
     if (json) {
       const settings = JSON.parse(json) as Partial<LocalSettings>;
-      const mergedSettings: LocalSettings = {
-        ...DEFAULT_LOCAL_SETTINGS,
-        context: {
-          ...DEFAULT_LOCAL_SETTINGS.context,
-          ...settings.context,
-        },
-        layout: {
-          ...DEFAULT_LOCAL_SETTINGS.layout,
-          ...settings.layout,
-        },
-        notification: {
-          ...DEFAULT_LOCAL_SETTINGS.notification,
-          ...settings.notification,
-        },
-      };
-      return applyThreadModelOverride(mergedSettings, threadId);
+      return mergeLocalSettings(settings);
     }
   } catch {}
-  return applyThreadModelOverride(DEFAULT_LOCAL_SETTINGS, threadId);
+  return DEFAULT_LOCAL_SETTINGS;
 }
 
-export function saveLocalSettings(settings: LocalSettings, threadId?: string) {
+export function getThreadLocalSettings(threadId: string): LocalSettings {
+  return applyThreadModelOverride(getLocalSettings(), threadId);
+}
+
+export function saveLocalSettings(settings: LocalSettings) {
   localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
-  if (threadId) {
-    saveThreadModelName(threadId, settings.context.model_name);
-  }
+}
+
+export function saveThreadLocalSettings(
+  threadId: string,
+  settings: LocalSettings,
+) {
+  saveLocalSettings(settings);
+  saveThreadModelName(threadId, settings.context.model_name);
 }

@@ -19,7 +19,7 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useLocalSettings } from "@/core/settings";
+import { useThreadSettings } from "@/core/settings";
 import { useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 export default function ChatPage() {
   const { t } = useI18n();
   const { threadId, isNewThread, setIsNewThread, isMock } = useThreadChat();
-  const [settings, setSettings] = useLocalSettings(threadId);
+  const [settings, setSettings] = useThreadSettings(threadId);
   useSpecificChatMode();
 
   const { showNotification } = useNotification();
