@@ -8,16 +8,23 @@ import "./src/env.js";
 const config = {
   devIndicators: false,
   async rewrites() {
-    if (process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
-      return [];
+    const rewrites = [];
+
+    if (!process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL) {
+      rewrites.push({
+        source: "/api/langgraph/:path*",
+        destination: "http://127.0.0.1:2024/:path*",
+      });
     }
 
-    return [
-      {
+    if (!process.env.NEXT_PUBLIC_BACKEND_BASE_URL) {
+      rewrites.push({
         source: "/api/agents/:path*",
         destination: "http://127.0.0.1:8001/api/agents/:path*",
-      },
-    ];
+      });
+    }
+
+    return rewrites;
   },
 };
 
