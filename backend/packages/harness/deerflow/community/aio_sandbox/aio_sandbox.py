@@ -1,5 +1,6 @@
 import base64
 import logging
+import shlex
 import threading
 import uuid
 
@@ -9,7 +10,7 @@ from deerflow.sandbox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
-_ERROR_OBSERVATION_MARKER = "ErrorObservation"
+_ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
 
 class AioSandbox(Sandbox):
@@ -67,7 +68,7 @@ class AioSandbox(Sandbox):
                 result = self._client.shell.exec_command(command=command)
                 output = result.data.output if result.data else ""
 
-                if output and _ERROR_OBSERVATION_MARKER in output:
+                if output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning(
                         "ErrorObservation detected in sandbox output, "
                         "retrying with a fresh session"
@@ -111,7 +112,7 @@ class AioSandbox(Sandbox):
         """
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=f"find {path} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
+                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
                 output = result.data.output if result.data else ""
                 if output:
                     return [line.strip() for line in output.strip().split("\n") if line.strip()]

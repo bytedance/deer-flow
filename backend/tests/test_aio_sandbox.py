@@ -23,6 +23,7 @@ class TestExecuteCommandSerialization:
     def test_lock_prevents_concurrent_execution(self, sandbox):
         """Concurrent threads should not overlap inside execute_command."""
         call_log = []
+        barrier = threading.Barrier(3)
 
         def slow_exec(command, **kwargs):
             call_log.append(("enter", command))
@@ -34,9 +35,13 @@ class TestExecuteCommandSerialization:
 
         sandbox._client.shell.exec_command = slow_exec
 
+        def worker(cmd):
+            barrier.wait()  # ensure all threads contend for the lock simultaneously
+            sandbox.execute_command(cmd)
+
         threads = []
         for i in range(3):
-            t = threading.Thread(target=sandbox.execute_command, args=(f"cmd-{i}",))
+            t = threading.Thread(target=worker, args=(f"cmd-{i}",))
             threads.append(t)
 
         for t in threads:
@@ -86,7 +91,7 @@ class TestErrorObservationRetry:
             calls.append(kwargs)
             if len(calls) == 1:
                 return SimpleNamespace(
-                    data=SimpleNamespace(output="ErrorObservation crash")
+                    data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'")
                 )
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
@@ -119,12 +124,18 @@ class TestListDirSerialization:
 
     def test_list_dir_uses_lock(self, sandbox):
         """list_dir should hold the lock during execution."""
-        sandbox._client.shell.exec_command = MagicMock(
+        lock_was_held = []
+
+        original_exec = MagicMock(
             return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b"))
         )
 
-        # If list_dir holds the lock, calling it from a thread that
-        # already holds the lock would deadlock. We verify by checking
-        # that list_dir works normally (it acquires and releases).
+        def tracking_exec(command, **kwargs):
+            lock_was_held.append(sandbox._lock.locked())
+            return original_exec(command, **kwargs)
+
+        sandbox._client.shell.exec_command = tracking_exec
+
         result = sandbox.list_dir("/test")
         assert result == ["/a", "/b"]
+        assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
