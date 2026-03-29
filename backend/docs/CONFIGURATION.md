@@ -208,6 +208,7 @@ DeerFlow supports multiple sandbox execution modes. Configure your preferred mod
 ```yaml
 sandbox:
    use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
+   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
@@ -236,7 +237,10 @@ Choose between local execution or Docker-based isolation:
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false
 ```
+
+`allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
 
 **Option 2: Docker Sandbox** (isolated, more secure):
 ```yaml

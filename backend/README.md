@@ -78,13 +78,13 @@ Per-thread isolated execution with virtual path translation:
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
 - **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
-- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace`
+- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
 ### Subagent System
 
 Async task delegation with concurrent execution:
 
-- **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist)
+- **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist, exposed only when shell access is available)
 - **Concurrency**: Max 3 subagents per turn, 15-minute timeout
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
