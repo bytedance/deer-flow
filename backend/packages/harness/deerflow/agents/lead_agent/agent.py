@@ -1,9 +1,9 @@
 import logging
 
-from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
@@ -271,6 +271,8 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
 
 def make_lead_agent(config: RunnableConfig):
+    from deerflow.agents.factory import create_deerflow_agent
+
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent
@@ -330,19 +332,45 @@ def make_lead_agent(config: RunnableConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        return create_agent(
+        return create_deerflow_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
+            features=_build_runtime_features(config=config, model_name=model_name),
             state_schema=ThreadState,
         )
 
     # Default lead agent (unchanged behavior)
-    return create_agent(
+    return create_deerflow_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
+        features=_build_runtime_features(config=config, model_name=model_name),
+        plan_mode=is_plan_mode,
         state_schema=ThreadState,
+        name=agent_name or "default",
+    )
+
+
+def _build_runtime_features(*, config: RunnableConfig, model_name: str) -> RuntimeFeatures:
+    """Translate app + runtime config into the declarative RuntimeFeatures set."""
+    from deerflow.config.guardrails_config import get_guardrails_config
+
+    app_config = get_app_config()
+    subagent_enabled = config.get("configurable", {}).get("subagent_enabled", False)
+    model_config = app_config.get_model_config(model_name)
+    guardrails_config = get_guardrails_config()
+
+    summarization_middleware = _create_summarization_middleware() if get_summarization_config().enabled else False
+
+    return RuntimeFeatures(
+        sandbox=True,
+        memory=True,
+        summarization=summarization_middleware,
+        subagent=subagent_enabled,
+        vision=bool(model_config and model_config.supports_vision),
+        auto_title=True,
+        guardrail=True if guardrails_config.enabled and guardrails_config.provider is not None else False,
+        token_usage=app_config.token_usage.enabled,
+        deferred_tool_filter=app_config.tool_search.enabled,
     )

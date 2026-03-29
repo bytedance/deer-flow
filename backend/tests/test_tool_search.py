@@ -151,6 +151,15 @@ class TestDeferredToolRegistry:
         reg = DeferredToolRegistry()
         assert len(reg) == 0
 
+    def test_promote_removes_selected_tools(self, registry):
+        promoted = registry.promote({"github_create_issue", "slack_send_message"})
+
+        assert {tool.name for tool in promoted} == {"github_create_issue", "slack_send_message"}
+        remaining_names = [entry.name for entry in registry.entries]
+        assert "github_create_issue" not in remaining_names
+        assert "slack_send_message" not in remaining_names
+        assert "github_list_repos" in remaining_names
+
 
 # ── Singleton Tests ──
 
@@ -248,6 +257,18 @@ class TestToolSearchTool:
         assert len(parsed) == 2
         names = {d["name"] for d in parsed}
         assert names == {"github_create_issue", "github_list_repos"}
+
+    def test_promotes_matched_tools_after_returning_schema(self, registry):
+        from deerflow.tools.builtins.tool_search import tool_search
+
+        set_deferred_registry(registry)
+        result = tool_search.invoke({"query": "select:github_create_issue"})
+
+        parsed = json.loads(result)
+        assert parsed[0]["name"] == "github_create_issue"
+        remaining_names = [entry.name for entry in get_deferred_registry().entries]
+        assert "github_create_issue" not in remaining_names
+        assert "github_list_repos" in remaining_names
 
 
 # ── Prompt Section Tests ──
@@ -392,3 +413,27 @@ class TestDeferredToolFilterMiddleware:
 
         # dict_tool has no .name attr → getattr returns None → not in deferred_names → kept
         assert len(filtered.tools) == 2
+
+    def test_promoted_tools_are_no_longer_filtered(self, registry):
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        registry.promote({"github_create_issue"})
+        set_deferred_registry(registry)
+        middleware = DeferredToolFilterMiddleware()
+
+        promoted_tool = _make_mock_tool("github_create_issue", "Promoted tool")
+        still_deferred_tool = registry.entries[0].tool
+
+        class FakeRequest:
+            def __init__(self, tools):
+                self.tools = tools
+
+            def override(self, **kwargs):
+                return FakeRequest(kwargs.get("tools", self.tools))
+
+        request = FakeRequest(tools=[promoted_tool, still_deferred_tool])
+        filtered = middleware._filter_tools(request)
+
+        filtered_names = [getattr(tool, "name", None) for tool in filtered.tools]
+        assert "github_create_issue" in filtered_names
+        assert still_deferred_tool.name not in filtered_names

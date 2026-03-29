@@ -94,7 +94,16 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    created: dict[str, object] = {}
+
+    def _fake_create_deerflow_agent(model, tools, **kwargs):
+        created["model"] = model
+        created["tools"] = tools
+        created["kwargs"] = kwargs
+        return {"graph": "ok"}
+
+    monkeypatch.setattr("deerflow.agents.factory.create_deerflow_agent", _fake_create_deerflow_agent)
 
     result = lead_agent_module.make_lead_agent(
         {
@@ -109,7 +118,52 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
 
     assert captured["name"] == "safe-model"
     assert captured["thinking_enabled"] is False
-    assert result["model"] is not None
+    assert result == {"graph": "ok"}
+    assert created["model"] is not None
+
+
+def test_make_lead_agent_delegates_to_create_deerflow_agent(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=True)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: ["tool-a"])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model-instance")
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_deerflow_agent(model, tools, **kwargs):
+        captured["model"] = model
+        captured["tools"] = tools
+        captured["kwargs"] = kwargs
+        return {"graph": "ok"}
+
+    monkeypatch.setattr("deerflow.agents.factory.create_deerflow_agent", _fake_create_deerflow_agent)
+
+    result = lead_agent_module.make_lead_agent(
+        {
+            "configurable": {
+                "model_name": "safe-model",
+                "thinking_enabled": True,
+                "is_plan_mode": True,
+                "subagent_enabled": True,
+            }
+        }
+    )
+
+    assert result == {"graph": "ok"}
+    assert captured["model"] == "model-instance"
+    assert captured["tools"] == ["tool-a"]
+    assert captured["kwargs"]["plan_mode"] is True
+    assert captured["kwargs"]["system_prompt"] == "prompt"
+
+    features = captured["kwargs"]["features"]
+    assert features.sandbox is True
+    assert features.memory is True
+    assert features.auto_title is True
+    assert features.subagent is True
 
 
 def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):

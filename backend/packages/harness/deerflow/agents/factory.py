@@ -183,7 +183,7 @@ def _assemble_from_features(
     Each feature value is handled as:
       - ``False``: skip
       - ``True``: create the built-in default middleware (not available for
-        ``summarization`` and ``guardrail`` — these require a custom instance)
+        ``summarization`` — this still requires a custom instance)
       - ``AgentMiddleware`` instance: use directly (custom replacement)
     """
     chain: list[AgentMiddleware] = []
@@ -210,10 +210,19 @@ def _assemble_from_features(
         if isinstance(feat.guardrail, AgentMiddleware):
             chain.append(feat.guardrail)
         else:
-            raise ValueError("guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)")
+            chain.append(_create_guardrail_middleware_from_config())
 
     # --- [5] ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
+
+    # --- [5.5] Token usage tracking ---
+    if feat.token_usage is not False:
+        if isinstance(feat.token_usage, AgentMiddleware):
+            chain.append(feat.token_usage)
+        else:
+            from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+
+            chain.append(TokenUsageMiddleware())
 
     # --- [6] Summarization ---
     if feat.summarization is not False:
@@ -258,6 +267,15 @@ def _assemble_from_features(
 
         extra_tools.append(view_image_tool)
 
+    # --- [10.5] Deferred tool filter ---
+    if feat.deferred_tool_filter is not False:
+        if isinstance(feat.deferred_tool_filter, AgentMiddleware):
+            chain.append(feat.deferred_tool_filter)
+        else:
+            from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+            chain.append(DeferredToolFilterMiddleware())
+
     # --- [11] Subagent ---
     if feat.subagent is not False:
         if isinstance(feat.subagent, AgentMiddleware):
@@ -289,6 +307,36 @@ def _assemble_from_features(
             chain.append(chain.pop(clar_idx))
 
     return chain, extra_tools
+
+
+def _create_guardrail_middleware_from_config() -> AgentMiddleware:
+    """Create GuardrailMiddleware from the loaded application config."""
+    import inspect
+
+    from deerflow.config.guardrails_config import get_guardrails_config
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+    from deerflow.reflection import resolve_variable
+
+    guardrails_config = get_guardrails_config()
+    if not guardrails_config.enabled or guardrails_config.provider is None:
+        raise ValueError("guardrail=True requires guardrails.enabled=true and a configured provider")
+
+    provider_cls = resolve_variable(guardrails_config.provider.use)
+    provider_kwargs = dict(guardrails_config.provider.config or {})
+    if "framework" not in provider_kwargs:
+        try:
+            sig = inspect.signature(provider_cls.__init__)
+            if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                provider_kwargs["framework"] = "deerflow"
+        except (ValueError, TypeError):
+            pass
+
+    provider = provider_cls(**provider_kwargs)
+    return GuardrailMiddleware(
+        provider,
+        fail_closed=guardrails_config.fail_closed,
+        passport=guardrails_config.passport,
+    )
 
 
 # ---------------------------------------------------------------------------

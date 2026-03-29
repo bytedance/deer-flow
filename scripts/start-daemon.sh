@@ -72,6 +72,8 @@ trap cleanup_on_failure INT TERM
 
 mkdir -p logs
 
+mapfile -t GATEWAY_RELOAD_FLAGS < <("$REPO_ROOT/scripts/gateway-reload-flags.sh")
+
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
@@ -87,7 +89,12 @@ nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-nohup sh -c 'cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1' &
+nohup env GATEWAY_RELOAD_FLAGS="${GATEWAY_RELOAD_FLAGS[*]}" sh -c '
+    set -f
+    cd backend
+    IFS=" " read -r -a gateway_reload_flags <<< "${GATEWAY_RELOAD_FLAGS:-}"
+    PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 "${gateway_reload_flags[@]}" > ../logs/gateway.log 2>&1
+' &
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log

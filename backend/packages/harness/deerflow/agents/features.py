@@ -31,6 +31,8 @@ class RuntimeFeatures:
     vision: bool | AgentMiddleware = False
     auto_title: bool | AgentMiddleware = False
     guardrail: Literal[False] | AgentMiddleware = False
+    token_usage: bool | AgentMiddleware = False
+    deferred_tool_filter: bool | AgentMiddleware = False
 
 
 # ---------------------------------------------------------------------------

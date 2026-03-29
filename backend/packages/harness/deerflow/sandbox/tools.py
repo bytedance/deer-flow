@@ -243,6 +243,31 @@ def _get_mcp_allowed_paths() -> list[str]:
     return allowed_paths
 
 
+def _get_configured_mounts() -> list[tuple[str, str, bool]]:
+    """Get configured sandbox mounts as (container_path, host_path, read_only)."""
+    mounts: list[tuple[str, str, bool]] = []
+    try:
+        from deerflow.config import get_app_config
+
+        sandbox_mounts = get_app_config().sandbox.mounts or []
+        for mount in sandbox_mounts:
+            container_path = mount.container_path.rstrip("/") or mount.container_path
+            host_path = mount.host_path
+            if container_path and host_path:
+                mounts.append((container_path, host_path, mount.read_only))
+    except Exception:
+        pass
+    return mounts
+
+
+def _get_configured_mount(path: str) -> tuple[str, str, bool] | None:
+    """Return the configured mount that matches *path*, if any."""
+    for container_path, host_path, read_only in sorted(_get_configured_mounts(), key=lambda item: len(item[0]), reverse=True):
+        if path == container_path or path.startswith(f"{container_path}/"):
+            return (container_path, host_path, read_only)
+    return None
+
+
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
 
@@ -425,6 +450,8 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
+      - configured ``sandbox.mounts[*].container_path`` entries — reads always
+        allowed, writes allowed only when the mount is not read-only
 
     Args:
         path: The virtual path to validate.
@@ -452,11 +479,23 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
+    configured_mount = _get_configured_mount(path)
+    if configured_mount is not None:
+        container_path, _, mount_read_only = configured_mount
+        if mount_read_only and not read_only:
+            raise PermissionError(f"Write access to read-only mounted path is not allowed: {path}")
+        if path == container_path:
+            raise PermissionError(f"Mounted path root must include a file or directory under {container_path}/")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, or {_ACP_WORKSPACE_VIRTUAL_PATH}/ are allowed")
+    raise PermissionError(
+        f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, "
+        "or configured sandbox mount paths are allowed"
+    )
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
@@ -535,6 +574,11 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
         # Allow ACP workspace path (path-traversal check only)
         if _is_acp_workspace_path(absolute_path):
+            _reject_path_traversal(absolute_path)
+            continue
+
+        configured_mount = _get_configured_mount(absolute_path)
+        if configured_mount is not None:
             _reject_path_traversal(absolute_path)
             continue
 
@@ -877,17 +921,17 @@ def read_file_tool(
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
     """Write text content to a file.
 
     Args:
-        description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER FIRST.
+        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER SECOND.
+        description: Explain why you are writing to this file in short words. Optional context for logging or planning.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)

@@ -30,6 +30,11 @@ class LocalSandboxProvider(SandboxProvider):
             from deerflow.config import get_app_config
 
             config = get_app_config()
+            for mount in config.sandbox.mounts or []:
+                container_path = mount.container_path.rstrip("/") or mount.container_path
+                if container_path and mount.host_path:
+                    mappings[container_path] = mount.host_path
+
             skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
 

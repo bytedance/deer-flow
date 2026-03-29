@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.channels.feishu import FeishuChannel
-from app.channels.message_bus import MessageBus
+from app.channels.message_bus import InboundMessageType, MessageBus
 
 
 def test_feishu_on_message_plain_text():
@@ -68,3 +68,31 @@ def test_feishu_on_message_rich_text():
         assert "Paragraph 1, part 1. Paragraph 1, part 2." in parsed_text
         assert "@bot  Paragraph 2." in parsed_text
         assert "\n\n" in parsed_text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_type"),
+    [
+        ("/new project kickoff", InboundMessageType.COMMAND),
+        ("/mnt/user-data/project-plan.md", InboundMessageType.CHAT),
+    ],
+)
+def test_feishu_command_detection_only_matches_supported_commands(text, expected_type):
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": text})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"] == expected_type

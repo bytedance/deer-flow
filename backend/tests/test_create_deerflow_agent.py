@@ -170,6 +170,8 @@ def test_agent_features_defaults():
     assert f.vision is False
     assert f.auto_title is False
     assert f.guardrail is False
+    assert f.token_usage is False
+    assert f.deferred_tool_filter is False
 
 
 # ---------------------------------------------------------------------------
@@ -648,8 +650,15 @@ def test_summarization_true_raises():
 # ---------------------------------------------------------------------------
 # 34. guardrail=True without built-in → ValueError
 # ---------------------------------------------------------------------------
-def test_guardrail_true_raises():
-    with pytest.raises(ValueError, match="requires a custom AgentMiddleware"):
+def test_guardrail_true_without_config_raises(monkeypatch):
+    from deerflow.config.guardrails_config import GuardrailsConfig
+
+    monkeypatch.setattr(
+        "deerflow.config.guardrails_config.get_guardrails_config",
+        lambda: GuardrailsConfig(enabled=False, provider=None),
+    )
+
+    with pytest.raises(ValueError, match="guardrails.enabled=true"):
         create_deerflow_agent(
             _make_mock_model(),
             features=RuntimeFeatures(sandbox=False, guardrail=True),
@@ -692,6 +701,74 @@ def test_guardrail_default_off(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
     assert "GuardrailMiddleware" not in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_token_usage_true_adds_default_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, token_usage=True),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "TokenUsageMiddleware" in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_deferred_tool_filter_true_adds_default_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, deferred_tool_filter=True),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert "DeferredToolFilterMiddleware" in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_guardrail_true_uses_configured_default_middleware(mock_create_agent, monkeypatch):
+    from deerflow.config.guardrails_config import GuardrailProviderConfig, GuardrailsConfig
+
+    mock_create_agent.return_value = MagicMock()
+    monkeypatch.setattr(
+        "deerflow.config.guardrails_config.get_guardrails_config",
+        lambda: GuardrailsConfig(
+            enabled=True,
+            fail_closed=False,
+            passport="passport-123",
+            provider=GuardrailProviderConfig(
+                use="tests.fake:Provider",
+                config={"custom_flag": True},
+            ),
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeProvider:
+        def __init__(self, **kwargs):
+            captured["provider_kwargs"] = kwargs
+
+    monkeypatch.setattr("deerflow.reflection.resolve_variable", lambda path: FakeProvider)
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, guardrail=True),
+    )
+
+    call_kwargs = mock_create_agent.call_args[1]
+    middleware = call_kwargs["middleware"]
+    guardrail = next(mw for mw in middleware if type(mw).__name__ == "GuardrailMiddleware")
+    assert guardrail.fail_closed is False
+    assert guardrail.passport == "passport-123"
+    assert isinstance(guardrail.provider, FakeProvider)
+    assert captured["provider_kwargs"] == {"custom_flag": True, "framework": "deerflow"}
 
 
 # ---------------------------------------------------------------------------

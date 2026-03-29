@@ -4,6 +4,7 @@ Converts document files (PDF, PPT, Excel, Word) to Markdown using markitdown.
 No FastAPI or HTTP dependencies — pure utility functions.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -34,11 +35,11 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         from markitdown import MarkItDown
 
         md = MarkItDown()
-        result = md.convert(str(file_path))
+        result = await asyncio.to_thread(md.convert, str(file_path))
 
         # Save as .md file with same name
         md_path = file_path.with_suffix(".md")
-        md_path.write_text(result.text_content, encoding="utf-8")
+        await asyncio.to_thread(md_path.write_text, result.text_content, encoding="utf-8")
 
         logger.info(f"Converted {file_path.name} to markdown: {md_path.name}")
         return md_path

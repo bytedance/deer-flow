@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+import deerflow.tools.builtins.view_image_tool  # noqa: F401
+from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -19,6 +21,7 @@ from deerflow.sandbox.tools import (
     replace_virtual_paths_in_command,
     validate_local_bash_command_paths,
     validate_local_tool_path,
+    write_file_tool,
 )
 
 _THREAD_DATA = {
@@ -130,6 +133,55 @@ def test_validate_local_tool_path_rejects_none_thread_data() -> None:
 
     with pytest.raises(SandboxRuntimeError):
         validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", None)
+
+
+def test_validate_local_tool_path_allows_configured_mount_read_only() -> None:
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=[
+                SimpleNamespace(
+                    container_path="/mnt/project",
+                    host_path="/host/project",
+                    read_only=True,
+                )
+            ]
+        )
+    )
+    with patch("deerflow.config.get_app_config", return_value=config):
+        validate_local_tool_path("/mnt/project/src/app.py", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_blocks_writes_to_read_only_mount() -> None:
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=[
+                SimpleNamespace(
+                    container_path="/mnt/project",
+                    host_path="/host/project",
+                    read_only=True,
+                )
+            ]
+        )
+    )
+    with patch("deerflow.config.get_app_config", return_value=config):
+        with pytest.raises(PermissionError, match="read-only mounted path"):
+            validate_local_tool_path("/mnt/project/src/app.py", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_allows_writes_to_writable_mount() -> None:
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=[
+                SimpleNamespace(
+                    container_path="/mnt/project",
+                    host_path="/host/project",
+                    read_only=False,
+                )
+            ]
+        )
+    )
+    with patch("deerflow.config.get_app_config", return_value=config):
+        validate_local_tool_path("/mnt/project/src/app.py", _THREAD_DATA, read_only=False)
 
 
 # ---------- _resolve_skills_path ----------
@@ -258,6 +310,39 @@ def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
             )
 
 
+def test_validate_local_bash_command_paths_allows_configured_mount_path() -> None:
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=[
+                SimpleNamespace(
+                    container_path="/mnt/project",
+                    host_path="/host/project",
+                    read_only=False,
+                )
+            ]
+        )
+    )
+    with patch("deerflow.config.get_app_config", return_value=config):
+        validate_local_bash_command_paths("cat /mnt/project/src/app.py", _THREAD_DATA)
+
+
+# ---------- write_file_tool ----------
+
+
+def test_write_file_tool_schema_prioritizes_path_and_content() -> None:
+    assert list(write_file_tool.args)[:2] == ["path", "content"]
+
+    field_names = [name for name in write_file_tool.input_schema.model_fields if name != "runtime"]
+    required_fields = [
+        name
+        for name, field in write_file_tool.input_schema.model_fields.items()
+        if name != "runtime" and field.is_required()
+    ]
+
+    assert field_names[:2] == ["path", "content"]
+    assert required_fields == ["path", "content"]
+
+
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
@@ -319,6 +404,29 @@ def test_validate_local_bash_command_paths_allows_skills_path() -> None:
             "cat /mnt/skills/public/bootstrap/SKILL.md",
             _THREAD_DATA,
         )
+
+
+def test_local_sandbox_provider_maps_configured_mounts() -> None:
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=[
+                SimpleNamespace(
+                    container_path="/mnt/project",
+                    host_path="/host/project",
+                    read_only=False,
+                )
+            ]
+        ),
+        skills=SimpleNamespace(
+            get_skills_path=lambda: Path("/missing/skills"),
+            container_path="/mnt/skills",
+        ),
+    )
+
+    with patch("deerflow.config.get_app_config", return_value=config):
+        provider = LocalSandboxProvider()
+
+    assert provider._path_mappings["/mnt/project"] == "/host/project"
 
 
 def test_validate_local_bash_command_paths_still_blocks_other_paths() -> None:

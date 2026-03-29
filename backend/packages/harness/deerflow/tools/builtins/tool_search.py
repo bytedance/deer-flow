@@ -93,6 +93,18 @@ class DeferredToolRegistry:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [entry.tool for _, entry in scored][:MAX_RESULTS]
 
+    def promote(self, names: set[str]) -> list[BaseTool]:
+        """Remove selected tools from the deferred set and return them."""
+        promoted: list[BaseTool] = []
+        remaining: list[DeferredToolEntry] = []
+        for entry in self._entries:
+            if entry.name in names:
+                promoted.append(entry.tool)
+            else:
+                remaining.append(entry)
+        self._entries = remaining
+        return promoted
+
     @property
     def entries(self) -> list[DeferredToolEntry]:
         return list(self._entries)
@@ -166,6 +178,8 @@ def tool_search(query: str) -> str:
     matched_tools = registry.search(query)
     if not matched_tools:
         return f"No tools found matching: {query}"
+
+    registry.promote({tool.name for tool in matched_tools})
 
     # Use LangChain's built-in serialization to produce OpenAI function format.
     # This is model-agnostic: all LLMs understand this standard schema.

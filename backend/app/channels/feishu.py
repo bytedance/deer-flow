@@ -13,6 +13,8 @@ from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMes
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_COMMANDS = frozenset({"bootstrap", "new", "status", "models", "memory", "help"})
+
 
 class FeishuChannel(Channel):
     """Feishu/Lark IM channel using the ``lark-oapi`` WebSocket client.
@@ -423,6 +425,14 @@ class FeishuChannel(Channel):
     # -- internal ----------------------------------------------------------
 
     @staticmethod
+    def _is_supported_command(text: str) -> bool:
+        if not text.startswith("/"):
+            return False
+
+        command = text[1:].split(None, 1)[0].strip().lower()
+        return command in SUPPORTED_COMMANDS
+
+    @staticmethod
     def _log_future_error(fut, name: str, msg_id: str) -> None:
         """Callback for run_coroutine_threadsafe futures to surface errors."""
         try:
@@ -506,8 +516,8 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Treat only supported slash commands as commands.
+            if self._is_supported_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT

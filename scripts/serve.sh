@@ -122,10 +122,10 @@ mkdir -p logs
 
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env'"
+    mapfile -t GATEWAY_EXTRA_FLAGS < <("$REPO_ROOT/scripts/gateway-reload-flags.sh")
 else
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
-    GATEWAY_EXTRA_FLAGS=""
+    GATEWAY_EXTRA_FLAGS=()
 fi
 
 echo "Starting LangGraph server..."
@@ -145,7 +145,7 @@ LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-(cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
+(cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 "${GATEWAY_EXTRA_FLAGS[@]}" > ../logs/gateway.log 2>&1) &
 ./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
