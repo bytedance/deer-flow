@@ -31,6 +31,16 @@ _DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
 _DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
+_NON_SEMANTIC_ARG_KEYS = frozenset({"description"})
+
+
+def _normalize_tool_args(args: dict) -> dict:
+    """Drop prompt-only arg noise so semantically identical tool calls hash together."""
+    return {
+        key: value
+        for key, value in args.items()
+        if key not in _NON_SEMANTIC_ARG_KEYS
+    }
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
@@ -45,7 +55,7 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
         normalized.append(
             {
                 "name": tc.get("name", ""),
-                "args": tc.get("args", {}),
+                "args": _normalize_tool_args(tc.get("args", {})),
             }
         )
 

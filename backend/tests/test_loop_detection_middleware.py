@@ -49,6 +49,31 @@ class TestHashToolCalls:
         assert isinstance(h, str)
         assert len(h) > 0
 
+    def test_ignores_description_only_differences(self):
+        a = _hash_tool_calls(
+            [
+                {
+                    "name": "read_file",
+                    "args": {
+                        "description": "check the uploaded spreadsheet",
+                        "path": "/mnt/user-data/uploads/report.md",
+                    },
+                }
+            ]
+        )
+        b = _hash_tool_calls(
+            [
+                {
+                    "name": "read_file",
+                    "args": {
+                        "description": "read the markdown conversion again",
+                        "path": "/mnt/user-data/uploads/report.md",
+                    },
+                }
+            ]
+        )
+        assert a == b
+
 
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):
@@ -129,6 +154,36 @@ class TestLoopDetection:
         for i in range(10):
             result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
             assert result is None
+
+    def test_description_only_variations_still_trigger_loop_detection(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+
+        first = [
+            {
+                "name": "read_file",
+                "id": "call_1",
+                "args": {
+                    "description": "inspect the converted excel file",
+                    "path": "/mnt/user-data/uploads/budget.md",
+                },
+            }
+        ]
+        second = [
+            {
+                "name": "read_file",
+                "id": "call_2",
+                "args": {
+                    "description": "retry reading the upload",
+                    "path": "/mnt/user-data/uploads/budget.md",
+                },
+            }
+        ]
+
+        assert mw._apply(_make_state(tool_calls=first), runtime) is None
+        result = mw._apply(_make_state(tool_calls=second), runtime)
+        assert result is not None
+        assert "LOOP DETECTED" in result["messages"][0].content
 
     def test_window_sliding(self):
         mw = LoopDetectionMiddleware(warn_threshold=3, window_size=5)
