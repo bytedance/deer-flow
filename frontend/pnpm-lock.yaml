@@ -33,8 +33,8 @@ importers:
         specifier: ^1.1.15
         version: 1.1.20(@opentelemetry/api@1.9.0)
       '@langchain/langgraph-sdk':
-        specifier: ^1.5.3
-        version: 1.6.0(@langchain/core@1.1.20(@opentelemetry/api@1.9.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+        specifier: ^1.8.2
+        version: 1.8.2(@langchain/core@1.1.20(@opentelemetry/api@1.9.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(vue@3.5.28(typescript@5.9.3))
       '@radix-ui/react-avatar':
         specifier: ^1.1.11
         version: 1.1.11(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -843,18 +843,24 @@ packages:
     resolution: {integrity: sha512-rwi7ZMhR336xIewGxVtOVZd63QBzVsV+zg/o1Og82yG4xTWODI8RIczMUATE5YYbEQQcbqsLPmM7vPpXtD5eHQ==}
     engines: {node: '>=20'}
 
-  '@langchain/langgraph-sdk@1.6.0':
-    resolution: {integrity: sha512-J/B1SkCG0U+eXEXH/X89dDHxP8I0eULjLtXYvZ39uk2TxEKjLsrW4LY5J7Qwrf0GCDA+IM/agjKSLXALnctWTw==}
+  '@langchain/langgraph-sdk@1.8.2':
+    resolution: {integrity: sha512-TQSw5O0NiE0W6D+UKcv6AdvCqQD2Xbv96oaUFUSSL3nnQ0WfZLcF5nPNTQm6KLUo4EuhKZeeoAgnDb2hRDW2Hw==}
     peerDependencies:
       '@langchain/core': ^1.1.16
       react: ^18 || ^19
       react-dom: ^18 || ^19
+      svelte: ^4.0.0 || ^5.0.0
+      vue: ^3.0.0
     peerDependenciesMeta:
       '@langchain/core':
         optional: true
       react:
         optional: true
       react-dom:
+        optional: true
+      svelte:
+        optional: true
+      vue:
         optional: true
 
   '@lezer/common@1.5.1':
@@ -5810,7 +5816,7 @@ snapshots:
       - '@opentelemetry/sdk-trace-base'
       - openai
 
-  '@langchain/langgraph-sdk@1.6.0(@langchain/core@1.1.20(@opentelemetry/api@1.9.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
+  '@langchain/langgraph-sdk@1.8.2(@langchain/core@1.1.20(@opentelemetry/api@1.9.0))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(vue@3.5.28(typescript@5.9.3))':
     dependencies:
       '@types/json-schema': 7.0.15
       p-queue: 9.1.0
@@ -5820,6 +5826,7 @@ snapshots:
       '@langchain/core': 1.1.20(@opentelemetry/api@1.9.0)
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
+      vue: 3.5.28(typescript@5.9.3)
 
   '@lezer/common@1.5.1': {}
 

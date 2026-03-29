@@ -5,7 +5,7 @@ const { sanitizeRunStreamOptions } = await import(
   new URL("./stream-mode.ts", import.meta.url).href
 );
 
-void test("drops unsupported stream modes from array payloads", () => {
+void test("keeps supported stream modes in array payloads", () => {
   const sanitized = sanitizeRunStreamOptions({
     streamMode: [
       "values",
@@ -23,12 +23,13 @@ void test("drops unsupported stream modes from array payloads", () => {
     "custom",
     "updates",
     "events",
+    "tools",
   ]);
 });
 
 void test("drops unsupported stream modes from scalar payloads", () => {
   const sanitized = sanitizeRunStreamOptions({
-    streamMode: "tools",
+    streamMode: "bogus-mode",
   });
 
   assert.equal(sanitized.streamMode, undefined);
