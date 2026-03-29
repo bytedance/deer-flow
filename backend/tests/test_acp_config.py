@@ -163,3 +163,24 @@ def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, mo
     config_path.write_text(yaml.safe_dump(config_without_acp), encoding="utf-8")
     AppConfig.from_file(str(config_path))
     assert get_acp_agents() == {}
+
+
+def test_app_config_treats_null_models_as_empty_list(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    example_path = tmp_path / "config.example.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+
+    config_path.write_text(
+        "sandbox:\n"
+        "  use: deerflow.sandbox.local:LocalSandboxProvider\n"
+        "models:\n"
+        "  # intentionally left blank in generated configs\n",
+        encoding="utf-8",
+    )
+    example_path.write_text("config_version: 3\n", encoding="utf-8")
+    extensions_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+    assert config.models == []

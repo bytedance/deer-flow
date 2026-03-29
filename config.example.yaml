@@ -33,7 +33,7 @@ token_usage:
 # ============================================================================
 # Configure available LLM models for the agent to use
 
-models:
+models: []
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8

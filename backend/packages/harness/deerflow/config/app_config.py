@@ -5,7 +5,7 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
@@ -41,6 +41,18 @@ class AppConfig(BaseModel):
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     model_config = ConfigDict(extra="allow", frozen=False)
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
+
+    @field_validator("models", mode="before")
+    @classmethod
+    def _coerce_null_models_to_empty_list(cls, value: Any) -> Any:
+        """Treat a bare ``models:`` YAML key as an empty list.
+
+        YAML parses keys with only comments underneath as ``null``. The stock
+        ``config.example.yaml`` intentionally leaves ``models`` commented out so
+        users can fill in their provider later, which means freshly generated
+        configs otherwise fail validation before local dev can even start.
+        """
+        return [] if value is None else value
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
