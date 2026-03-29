@@ -212,6 +212,35 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
     return str(resolved_path)
 
 
+def _get_mcp_allowed_paths() -> list[str]:
+    """Get the list of allowed paths from MCP config for file system server."""
+    allowed_paths = []
+    try:
+        from deerflow.config.extensions_config import get_extensions_config
+
+        extensions_config = get_extensions_config()
+
+        for _, server in extensions_config.mcp_servers.items():
+            if not server.enabled:
+                continue
+
+            # Only check the filesystem server
+            args = server.args or []
+            # Check if args has server-filesystem package
+            has_filesystem = any("server-filesystem" in arg for arg in args)
+            if not has_filesystem:
+                continue
+            # Unpack the allowed file system paths in config
+            for arg in args:
+                if not arg.startswith("-") and arg.startswith("/"):
+                    allowed_paths.append(arg.rstrip("/") + "/")
+
+    except Exception:
+        pass
+
+    return allowed_paths
+
+
 def _path_variants(path: str) -> set[str]:
     return {path, path.replace("\\", "/"), path.replace("/", "\\")}
 
@@ -481,8 +510,14 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     unsafe_paths: list[str] = []
+    allowed_paths = _get_mcp_allowed_paths()
 
     for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+        # Check for MCP filesystem server allowed paths
+        if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
+            _reject_path_traversal(absolute_path)
+            continue
+
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             _reject_path_traversal(absolute_path)
             continue
