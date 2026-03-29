@@ -710,8 +710,13 @@ def test_full_chain_order(mock_create_agent):
         pass
 
     feat = RuntimeFeatures(
-        sandbox=True, memory=True, summarization=MySummarization(), subagent=True,
-        vision=True, auto_title=True, guardrail=MyGuardrail(),
+        sandbox=True,
+        memory=True,
+        summarization=MySummarization(),
+        subagent=True,
+        vision=True,
+        auto_title=True,
+        guardrail=MyGuardrail(),
     )
     create_deerflow_agent(_make_mock_model(), features=feat, plan_mode=True)
 
