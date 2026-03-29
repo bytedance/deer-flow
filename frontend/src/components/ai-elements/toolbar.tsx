@@ -7,8 +7,8 @@ type ToolbarProps = ComponentProps<typeof NodeToolbar>;
 export const Toolbar = ({ className, ...props }: ToolbarProps) => (
   <NodeToolbar
     className={cn(
-      "flex items-center gap-1 rounded-sm border bg-background p-1.5",
-      className
+      "bg-background flex items-center gap-1 rounded-sm border p-1.5",
+      className,
     )}
     position={Position.Bottom}
     {...props}
