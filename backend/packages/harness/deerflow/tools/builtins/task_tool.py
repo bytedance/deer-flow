@@ -197,6 +197,7 @@ async def task_tool(
                 writer({"type": "task_timed_out", "task_id": task_id})
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
+
         async def cleanup_when_done() -> None:
             max_cleanup_polls = max_poll_count
             cleanup_poll_count = 0
@@ -211,9 +212,7 @@ async def task_tool(
                     return
 
                 if cleanup_poll_count > max_cleanup_polls:
-                    logger.warning(
-                        f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls"
-                    )
+                    logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
                     return
 
                 await asyncio.sleep(5)

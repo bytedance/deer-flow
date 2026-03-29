@@ -118,9 +118,7 @@ def _regex_score(pattern: str, entry: DeferredToolEntry) -> int:
 # loop.run_in_executor, Python copies the current context to the worker thread,
 # so the ContextVar value is correctly inherited there too.
 
-_registry_var: contextvars.ContextVar[DeferredToolRegistry | None] = contextvars.ContextVar(
-    "deferred_tool_registry", default=None
-)
+_registry_var: contextvars.ContextVar[DeferredToolRegistry | None] = contextvars.ContextVar("deferred_tool_registry", default=None)
 
 
 def get_deferred_registry() -> DeferredToolRegistry | None:
