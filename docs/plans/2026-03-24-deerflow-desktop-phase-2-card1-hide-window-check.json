@@ -1,0 +1,38 @@
+﻿[
+    {
+        "Hwnd":  721266,
+        "Visible":  false,
+        "ClassName":  "tray_icon_app",
+        "Title":  ""
+    },
+    {
+        "Hwnd":  526912724,
+        "Visible":  false,
+        "ClassName":  "Tauri Window",
+        "Title":  "DeerFlow"
+    },
+    {
+        "Hwnd":  19727966,
+        "Visible":  true,
+        "ClassName":  "ConsoleWindowClass",
+        "Title":  "G:\\deer-flow\\deer-flow\\desktop\\src-tauri\\target\\debug\\deerflow-desktop.exe"
+    },
+    {
+        "Hwnd":  3216388,
+        "Visible":  true,
+        "ClassName":  "Tao Thread Event Target",
+        "Title":  ""
+    },
+    {
+        "Hwnd":  197791952,
+        "Visible":  false,
+        "ClassName":  "MSCTFIME UI",
+        "Title":  "MSCTFIME UI"
+    },
+    {
+        "Hwnd":  67440382,
+        "Visible":  false,
+        "ClassName":  "IME",
+        "Title":  "Default IME"
+    }
+]

@@ -1,0 +1,25 @@
+[package]
+name = "deerflow-desktop"
+version = "0.1.0"
+description = "DeerFlow desktop shell"
+authors = ["DeerFlow"]
+edition = "2021"
+
+[lib]
+name = "deerflow_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-store = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"

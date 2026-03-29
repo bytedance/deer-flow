@@ -25,9 +25,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "@/core/i18n/hooks";
-import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
+import {
+  executeGlobalShortcutAction,
+  useGlobalShortcuts,
+} from "@/hooks/use-global-shortcuts";
 
 import { SettingsDialog } from "./settings";
+
+const NEW_CHAT_SHORTCUT = {
+  key: "n",
+  meta: true,
+  shift: true,
+} as const;
 
 export function CommandPalette() {
   const { t } = useI18n();
@@ -37,7 +46,12 @@ export function CommandPalette() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleNewChat = useCallback(() => {
-    router.push("/workspace/chats/new");
+    void executeGlobalShortcutAction({
+      ...NEW_CHAT_SHORTCUT,
+      action: () => {
+        router.push("/workspace/chats/new");
+      },
+    });
     setOpen(false);
   }, [router]);
 
@@ -54,7 +68,7 @@ export function CommandPalette() {
   const shortcuts = useMemo(
     () => [
       { key: "k", meta: true, action: () => setOpen((o) => !o) },
-      { key: "n", meta: true, shift: true, action: handleNewChat },
+      { ...NEW_CHAT_SHORTCUT, action: handleNewChat },
       { key: ",", meta: true, action: handleOpenSettings },
       { key: "/", meta: true, action: handleShowShortcuts },
     ],
@@ -62,7 +76,6 @@ export function CommandPalette() {
   );
 
   useGlobalShortcuts(shortcuts);
-
 
   const isMac =
     typeof navigator !== "undefined" && navigator.userAgent.includes("Mac");

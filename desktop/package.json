@@ -1,0 +1,16 @@
+{
+  "name": "deer-flow-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "node ./scripts/run-tauri.mjs",
+    "tauri:build:debug": "node ./scripts/run-tauri.mjs build --debug",
+    "tauri:build:release": "node ./scripts/run-tauri.mjs build",
+    "tauri:signer:generate": "node ./scripts/run-tauri.mjs signer generate"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.1"
+  },
+  "packageManager": "pnpm@10.26.2"
+}

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for the DeerFlow desktop shell.","remote":{"urls":["http://localhost:2026/*"]},"local":true,"windows":["main","chat-*"],"permissions":["core:default","store:default","window-state:default"]}}
