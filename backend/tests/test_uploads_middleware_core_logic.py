@@ -283,7 +283,14 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        assert result["uploaded_files"] == [{"filename": "notes.txt", "size": 5, "path": "/mnt/user-data/uploads/notes.txt", "extension": ".txt", "is_image": False}]
+        assert result["uploaded_files"] == [
+            {
+                "filename": "notes.txt",
+                "size": 5,
+                "path": "/mnt/user-data/uploads/notes.txt",
+                "extension": ".txt",
+            }
+        ]
 
     def test_historical_files_from_uploads_dir_excluding_new(self, tmp_path):
         mw = _middleware(tmp_path)

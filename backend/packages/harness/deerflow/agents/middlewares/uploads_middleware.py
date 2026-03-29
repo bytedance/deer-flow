@@ -57,9 +57,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file in new_files:
                 size_kb = file["size"] / 1024
                 size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                file_kind = "image" if bool(file.get("is_image")) else "file"
                 lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Type: {file_kind}")
                 lines.append(f"  Path: {file['path']}")
                 lines.append("")
         else:
@@ -71,14 +69,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file in historical_files:
                 size_kb = file["size"] / 1024
                 size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-                file_kind = "image" if bool(file.get("is_image")) else "file"
                 lines.append(f"- {file['filename']} ({size_str})")
-                lines.append(f"  Type: {file_kind}")
                 lines.append(f"  Path: {file['path']}")
                 lines.append("")
 
-        lines.append("Use `read_file` for text-based files and documents.")
-        lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
+        lines.append("You can read these files using the `read_file` tool with the paths shown above.")
         lines.append("</uploaded_files>")
 
         return "\n".join(lines)
@@ -117,7 +112,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     "size": int(f.get("size") or 0),
                     "path": f"/mnt/user-data/uploads/{filename}",
                     "extension": Path(filename).suffix,
-                    "is_image": Path(filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"},
                 }
             )
         return files if files else None
@@ -171,7 +165,6 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
                             "extension": file_path.suffix,
-                            "is_image": file_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"},
                         }
                     )
 

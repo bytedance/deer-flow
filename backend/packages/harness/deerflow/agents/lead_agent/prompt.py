@@ -258,8 +258,7 @@ You: "Deploying to staging..." [proceed]
 
 **File Management:**
 - Uploaded files are automatically listed in the <uploaded_files> section before each request
-- Use `read_file` for text-based uploaded files and documents
-- Use `view_image` for uploaded image files when available so you can inspect the image content directly
+- Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - All temporary work happens in `/mnt/user-data/workspace`
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_file` tool
