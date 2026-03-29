@@ -16,6 +16,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
+_URL_PATTERN = re.compile(r"(?<!\w)(?:https?|ftp|s3|gs|data)://[^\s\"'`;&|<>()]*", re.IGNORECASE)
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -482,7 +483,11 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     unsafe_paths: list[str] = []
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
+    # Strip URLs (e.g. https://..., file://...) so their path components
+    # are not misidentified as local absolute paths.
+    command_without_urls = _URL_PATTERN.sub("", command)
+
+    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command_without_urls):
         if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             _reject_path_traversal(absolute_path)
             continue
