@@ -56,10 +56,7 @@ def test_billing_not_duplicated_on_second_call(model):
     payload = {"system": [{"type": "text", "text": "prompt"}]}
     model._apply_oauth_billing(payload)
     model._apply_oauth_billing(payload)
-    billing_count = sum(
-        1 for b in payload["system"]
-        if isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", "")
-    )
+    billing_count = sum(1 for b in payload["system"] if isinstance(b, dict) and OAUTH_BILLING_HEADER in b.get("text", ""))
     assert billing_count == 1
 
 

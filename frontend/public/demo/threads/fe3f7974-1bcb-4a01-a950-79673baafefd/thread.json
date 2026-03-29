@@ -1741,9 +1741,7 @@
           {
             "name": "present_files",
             "args": {
-              "filepaths": [
-                "/mnt/user-data/outputs/index.html"
-              ]
+              "filepaths": ["/mnt/user-data/outputs/index.html"]
             },
             "id": "present_files:34",
             "type": "tool_call"
