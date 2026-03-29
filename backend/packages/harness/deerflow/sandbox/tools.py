@@ -1,5 +1,6 @@
 import posixpath
 import re
+import shlex
 from pathlib import Path
 
 from langchain.tools import ToolRuntime, tool
@@ -593,6 +594,22 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
+    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+
+    Args:
+        command: The bash command to execute.
+        thread_data: The thread data containing the workspace path.
+
+    Returns:
+        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        otherwise the original command unchanged.
+    """
+    if thread_data and (workspace := thread_data.get("workspace_path")):
+        return f"cd {shlex.quote(workspace)} && {command}"
+    return command
+
+
 def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
     """Extract thread_data from runtime state."""
     if runtime is None:
@@ -762,6 +779,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
+            command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
         ensure_thread_directories_exist(runtime)

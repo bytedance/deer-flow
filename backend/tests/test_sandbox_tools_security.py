@@ -6,6 +6,7 @@ import pytest
 
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
+    _apply_cwd_prefix,
     _is_acp_workspace_path,
     _is_skills_path,
     _reject_path_traversal,
@@ -446,6 +447,34 @@ def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
 
         assert acp_host not in masked
         assert "/mnt/acp-workspace/hello.py" in masked
+
+
+# ---------- _apply_cwd_prefix ----------
+
+
+def test_apply_cwd_prefix_prepends_workspace() -> None:
+    """Command is prefixed with cd <workspace> && when workspace_path is set."""
+    result = _apply_cwd_prefix("ls -la", _THREAD_DATA)
+    assert result.startswith("cd ")
+    assert "ls -la" in result
+    assert "/tmp/deer-flow/threads/t1/user-data/workspace" in result
+
+
+def test_apply_cwd_prefix_no_thread_data() -> None:
+    """Command is returned unchanged when thread_data is None."""
+    assert _apply_cwd_prefix("ls -la", None) == "ls -la"
+
+
+def test_apply_cwd_prefix_missing_workspace_path() -> None:
+    """Command is returned unchanged when workspace_path is absent from thread_data."""
+    assert _apply_cwd_prefix("ls -la", {}) == "ls -la"
+
+
+def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
+    """Workspace path containing spaces is properly shell-quoted."""
+    thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
+    result = _apply_cwd_prefix("echo hello", thread_data)
+    assert result == "cd '/tmp/my workspace/t1' && echo hello"
 
 
 def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:
