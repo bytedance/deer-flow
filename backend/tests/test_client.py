@@ -65,14 +65,7 @@ class TestClientInit:
     def test_custom_params(self, mock_app_config):
         mock_middleware = MagicMock()
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
-            c = DeerFlowClient(
-                model_name="gpt-4",
-                thinking_enabled=False,
-                subagent_enabled=True,
-                plan_mode=True,
-                agent_name="test-agent",
-                middlewares=[mock_middleware]
-            )
+            c = DeerFlowClient(model_name="gpt-4", thinking_enabled=False, subagent_enabled=True, plan_mode=True, agent_name="test-agent", middlewares=[mock_middleware])
         assert c._model_name == "gpt-4"
         assert c._thinking_enabled is False
         assert c._subagent_enabled is True
@@ -672,6 +665,19 @@ class TestMemoryManagement:
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
             result = client.reload_memory()
+        assert result == data
+
+    def test_clear_memory(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.clear_memory_data", return_value=data):
+            result = client.clear_memory()
+        assert result == data
+
+    def test_delete_memory_fact(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
+            result = client.delete_memory_fact("fact_123")
+            delete_fact.assert_called_once_with("fact_123")
         assert result == data
 
     def test_get_memory_config(self, client):

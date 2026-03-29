@@ -114,17 +114,17 @@ src/
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `pnpm dev` | Start development server with Turbopack |
-| `pnpm build` | Build for production |
-| `pnpm start` | Start production server |
-| `pnpm format` | Check formatting with Prettier |
-| `pnpm format:write` | Apply formatting with Prettier |
-| `pnpm lint` | Run ESLint |
-| `pnpm lint:fix` | Fix ESLint issues |
-| `pnpm typecheck` | Run TypeScript type checking |
-| `pnpm check` | Run both lint and typecheck |
+| Command             | Description                             |
+| ------------------- | --------------------------------------- |
+| `pnpm dev`          | Start development server with Turbopack |
+| `pnpm build`        | Build for production                    |
+| `pnpm start`        | Start production server                 |
+| `pnpm format`       | Check formatting with Prettier          |
+| `pnpm format:write` | Apply formatting with Prettier          |
+| `pnpm lint`         | Run ESLint                              |
+| `pnpm lint:fix`     | Fix ESLint issues                       |
+| `pnpm typecheck`    | Run TypeScript type checking            |
+| `pnpm check`        | Run both lint and typecheck             |
 
 ## Development Notes
 

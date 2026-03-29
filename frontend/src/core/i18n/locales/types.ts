@@ -218,7 +218,7 @@ export interface Translations {
     output: string;
     total: string;
   };
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
@@ -247,6 +247,22 @@ export interface Translations {
       description: string;
       empty: string;
       rawJson: string;
+      clearAll: string;
+      clearAllConfirmTitle: string;
+      clearAllConfirmDescription: string;
+      clearAllSuccess: string;
+      factDeleteConfirmTitle: string;
+      factDeleteConfirmDescription: string;
+      factDeleteSuccess: string;
+      noFacts: string;
+      summaryReadOnly: string;
+      memoryFullyEmpty: string;
+      factPreviewLabel: string;
+      searchPlaceholder: string;
+      filterAll: string;
+      filterFacts: string;
+      filterSummaries: string;
+      noMatches: string;
       markdown: {
         overview: string;
         userContext: string;

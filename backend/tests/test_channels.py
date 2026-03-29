@@ -600,10 +600,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.wait.assert_not_called()
-            assert outbound_received[0].text == (
-                "Invalid channel session assistant_id 'bad agent!'. "
-                "Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens."
-            )
+            assert outbound_received[0].text == ("Invalid channel session assistant_id 'bad agent!'. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
 
         _run(go())
 
