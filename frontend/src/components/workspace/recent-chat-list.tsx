@@ -56,6 +56,7 @@ import {
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import { pathOfThread, titleOfThread } from "@/core/threads/utils";
 import { env } from "@/env";
+import { isIMEComposing } from "@/lib/ime";
 
 export function RecentChatList() {
   const { t } = useI18n();
@@ -271,7 +272,8 @@ export function RecentChatList() {
               onChange={(e) => setRenameValue(e.target.value)}
               placeholder={t.common.rename}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (e.key === "Enter" && !isIMEComposing(e)) {
+                  e.preventDefault();
                   handleRenameSubmit();
                 }
               }}
