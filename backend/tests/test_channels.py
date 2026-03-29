@@ -1802,6 +1802,19 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://custom-langgraph:2024"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
 
+    def test_containerized_service_defaults_use_docker_hosts(self, monkeypatch):
+        import app.channels.service as service_module
+        from app.channels.service import ChannelService
+
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", raising=False)
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_GATEWAY_URL", raising=False)
+        monkeypatch.setattr(service_module, "_is_containerized_runtime", lambda: True)
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._langgraph_url == "http://langgraph:2024"
+        assert service.manager._gateway_url == "http://gateway:8001"
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
