@@ -268,7 +268,7 @@ export const zhCN: Translations = {
     output: "输出",
     total: "总计",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",
@@ -308,7 +308,8 @@ export const zhCN: Translations = {
         "这条事实会立即从记忆中删除。此操作无法撤销。",
       factDeleteSuccess: "事实已删除",
       noFacts: "还没有保存的事实。",
-      summaryReadOnly: "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
+      summaryReadOnly:
+        "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
       memoryFullyEmpty: "还没有保存任何记忆。",
       factPreviewLabel: "即将删除的事实",
       searchPlaceholder: "搜索记忆",

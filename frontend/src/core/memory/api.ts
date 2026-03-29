@@ -10,7 +10,9 @@ async function readMemoryResponse(
     const errorData = (await response.json().catch(() => ({}))) as {
       detail?: string;
     };
-    throw new Error(errorData.detail ?? `${fallbackMessage}: ${response.statusText}`);
+    throw new Error(
+      errorData.detail ?? `${fallbackMessage}: ${response.statusText}`,
+    );
   }
 
   return response.json() as Promise<UserMemory>;

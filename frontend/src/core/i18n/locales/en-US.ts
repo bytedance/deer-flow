@@ -281,14 +281,15 @@ export const enUS: Translations = {
     output: "Output",
     total: "Total",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
-    keyboardShortcutsDescription: "Navigate DeerFlow faster with keyboard shortcuts.",
+    keyboardShortcutsDescription:
+      "Navigate DeerFlow faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },

@@ -227,8 +227,7 @@ export function MemorySettingsPage() {
   const filterAll = t.settings.memory.filterAll ?? "All";
   const filterFacts = t.settings.memory.filterFacts ?? "Facts";
   const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
-  const noMatches =
-    t.settings.memory.noMatches ?? "No matching memory found";
+  const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
   const filteredSectionGroups = sectionGroups
@@ -295,7 +294,9 @@ export function MemorySettingsPage() {
         description={t.settings.memory.description}
       >
         {isLoading ? (
-          <div className="text-muted-foreground text-sm">{t.common.loading}</div>
+          <div className="text-muted-foreground text-sm">
+            {t.common.loading}
+          </div>
         ) : error ? (
           <div>Error: {error.message}</div>
         ) : !memory ? (
@@ -408,7 +409,9 @@ export function MemorySettingsPage() {
                                 {formatTimeAgo(fact.createdAt)}
                               </span>
                             </div>
-                            <p className="break-words text-sm">{fact.content}</p>
+                            <p className="text-sm break-words">
+                              {fact.content}
+                            </p>
                             <Link
                               href={pathOfThread(fact.source)}
                               className="text-primary text-sm underline-offset-4 hover:underline"
@@ -443,9 +446,7 @@ export function MemorySettingsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{clearAllConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {clearAllConfirmDescription}
-            </DialogDescription>
+            <DialogDescription>{clearAllConfirmDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
