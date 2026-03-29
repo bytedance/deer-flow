@@ -64,8 +64,12 @@ def _make_result(
     )
 
 
-def _run_task_tool(**kwargs):
-    return asyncio.run(task_tool_module.task_tool.coroutine(**kwargs))
+def _run_task_tool(**kwargs) -> str:
+    """Execute the task tool across LangChain sync/async wrapper variants."""
+    coroutine = getattr(task_tool_module.task_tool, "coroutine", None)
+    if coroutine is not None:
+        return asyncio.run(coroutine(**kwargs))
+    return task_tool_module.task_tool.func(**kwargs)
 
 
 async def _no_sleep(_: float) -> None:
@@ -79,6 +83,7 @@ class _DummyScheduledTask:
 
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
 
     result = _run_task_tool(
         runtime=None,
@@ -88,7 +93,22 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
         tool_call_id="tc-1",
     )
 
-    assert result.startswith("Error: Unknown subagent type")
+    assert result == "Error: Unknown subagent type 'general-purpose'. Available: general-purpose"
+
+
+def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
+
+    result = _run_task_tool(
+        runtime=_make_runtime(),
+        description="执行任务",
+        prompt="run commands",
+        subagent_type="bash",
+        tool_call_id="tc-bash",
+    )
+
+    assert result.startswith("Error: Bash subagent is disabled")
 
 
 def test_task_tool_emits_running_and_completed_events(monkeypatch):

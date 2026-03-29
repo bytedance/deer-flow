@@ -72,7 +72,7 @@ def _make_e2e_config() -> AppConfig:
                 supports_vision=False,
             )
         ],
-        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=True),
     )
 
 
