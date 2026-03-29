@@ -554,6 +554,22 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
+    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+
+    Args:
+        command: The bash command to execute.
+        thread_data: The thread data containing the workspace path.
+
+    Returns:
+        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        otherwise the original command unchanged.
+    """
+    if thread_data and (workspace := thread_data.get("workspace_path")):
+        return f"cd {shlex.quote(workspace)} && {command}"
+    return command
+
+
 def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
     """Extract thread_data from runtime state."""
     if runtime is None:
@@ -645,6 +661,9 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     # Lazy acquisition: get thread_id and acquire sandbox
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id is None:
+        # Fallback: LangGraph Server always provides thread_id via configurable
+        thread_id = (runtime.config or {}).get("configurable", {}).get("thread_id")
+    if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
@@ -719,8 +738,7 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         if is_local_sandbox(runtime):
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            if thread_data and (workspace := thread_data.get("workspace_path")):
-                command = f"cd {shlex.quote(workspace)} && {command}"
+            command = _apply_cwd_prefix(command, thread_data)
             output = sandbox.execute_command(command)
             return mask_local_paths_in_output(output, thread_data)
         return sandbox.execute_command(command)
