@@ -475,7 +475,7 @@ def test_apply_cwd_prefix_quotes_path_with_spaces() -> None:
     thread_data = {**_THREAD_DATA, "workspace_path": "/tmp/my workspace/t1"}
     result = _apply_cwd_prefix("echo hello", thread_data)
     assert result == "cd '/tmp/my workspace/t1' && echo hello"
-    
+
 
 def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:
     """Bash commands referencing MCP filesystem server paths should be allowed."""
