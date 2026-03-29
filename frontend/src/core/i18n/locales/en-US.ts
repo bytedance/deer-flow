@@ -311,6 +311,25 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      clearAll: "Clear all memory",
+      clearAllConfirmTitle: "Clear all memory?",
+      clearAllConfirmDescription:
+        "This will remove all saved summaries and facts. This action cannot be undone.",
+      clearAllSuccess: "All memory cleared",
+      factDeleteConfirmTitle: "Delete this fact?",
+      factDeleteConfirmDescription:
+        "This fact will be removed from memory immediately. This action cannot be undone.",
+      factDeleteSuccess: "Fact deleted",
+      noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
+      searchPlaceholder: "Search memory",
+      filterAll: "All",
+      filterFacts: "Facts",
+      filterSummaries: "Summaries",
+      noMatches: "No matching memory found.",
       markdown: {
         overview: "Overview",
         userContext: "User context",
