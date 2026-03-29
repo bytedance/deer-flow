@@ -1187,9 +1187,7 @@
           {
             "name": "present_files",
             "args": {
-              "filepaths": [
-                "/mnt/user-data/outputs/diana_hu_research.md"
-              ]
+              "filepaths": ["/mnt/user-data/outputs/diana_hu_research.md"]
             },
             "id": "call_fiwu3557asbu155mzi3ore72",
             "type": "tool_call"
@@ -1235,9 +1233,7 @@
     },
     "uploaded_files": [],
     "title": "Startup Tech Lead's Video Analysis Request",
-    "artifacts": [
-      "/mnt/user-data/outputs/diana_hu_research.md"
-    ],
+    "artifacts": ["/mnt/user-data/outputs/diana_hu_research.md"],
     "todos": [
       {
         "content": "Analyze video transcript and extract key insights, advice, and frameworks",

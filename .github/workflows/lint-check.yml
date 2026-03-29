@@ -53,6 +53,11 @@ jobs:
           cd frontend
           pnpm install --frozen-lockfile
 
+      - name: Check frontend formatting
+        run: |
+          cd frontend
+          pnpm format
+
       - name: Run frontend linting
         run: |
           cd frontend
