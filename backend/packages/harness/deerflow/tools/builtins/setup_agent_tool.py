@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 
 import yaml
 from langchain_core.messages import ToolMessage
@@ -9,6 +11,19 @@ from langgraph.types import Command
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path, content: str, encoding: str = "utf-8") -> None:
+    """Write content to a file atomically via a temp file + os.replace."""
+    dir_path = path.parent
+    fd, tmp = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 @tool
@@ -32,22 +47,36 @@ def setup_agent(
         agent_dir.mkdir(parents=True, exist_ok=True)
 
         if agent_name:
-            # If agent_name is provided, we are creating a custom agent in the agents/ directory
+            config_file = agent_dir / "config.yaml"
+
+            # Idempotency: skip if config already exists and is valid
+            if config_file.exists():
+                try:
+                    existing = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict) and existing.get("name") == agent_name:
+                        logger.info(f"[agent_creator] Agent '{agent_name}' already exists, skipping config write")
+                        # Still update SOUL.md in case content changed
+                        _atomic_write_text(agent_dir / "SOUL.md", soul)
+                        return Command(
+                            update={
+                                "messages": [ToolMessage(content=f"Agent '{agent_name}' created successfully!", tool_call_id=runtime.tool_call_id)],
+                            }
+                        )
+                except Exception:
+                    pass  # Config exists but is invalid, overwrite it
+
             config_data: dict = {"name": agent_name}
             if description:
                 config_data["description"] = description
 
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+            # Atomic write to prevent corruption from concurrent calls
+            _atomic_write_text(config_file, yaml.dump(config_data, default_flow_style=False, allow_unicode=True))
 
-        soul_file = agent_dir / "SOUL.md"
-        soul_file.write_text(soul, encoding="utf-8")
+        _atomic_write_text(agent_dir / "SOUL.md", soul)
 
         logger.info(f"[agent_creator] Created agent '{agent_name}' at {agent_dir}")
         return Command(
             update={
-                "created_agent_name": agent_name,
                 "messages": [ToolMessage(content=f"Agent '{agent_name}' created successfully!", tool_call_id=runtime.tool_call_id)],
             }
         )
