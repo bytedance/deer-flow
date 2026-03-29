@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from deerflow.models.patched_openai import _restore_tool_call_signatures
+from deerflow.models.patched_openai import PatchedChatOpenAI, _restore_tool_call_signatures
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -172,5 +172,49 @@ def test_tool_call_multiple_sequential_signatures():
     assert payload_tc_b["thought_signature"] == "SIG_STEP2=="
 
 
-# Integration behavior for PatchedChatOpenAI is validated indirectly via
-# _restore_tool_call_signatures unit coverage above.
+def test_create_chat_result_preserves_raw_tool_calls():
+    """Raw tool_calls stay attached to the parsed AIMessage for later replay."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [RAW_TC_SIGNED],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "gpt-4o-mini",
+    }
+
+    result = model._create_chat_result(response)
+    message = result.generations[0].message
+
+    assert isinstance(message, AIMessage)
+    assert message.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
+
+
+def test_final_stream_chunk_keeps_raw_tool_calls():
+    """Final streaming chunk should not drop raw signed tool_calls."""
+    model = PatchedChatOpenAI(model="gpt-4o-mini", api_key="test", base_url="https://example.com/v1")
+    completion = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [RAW_TC_SIGNED],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "model": "gpt-4o-mini",
+    }
+
+    chunk = model._get_generation_chunk_from_completion(completion)
+
+    assert chunk.message.additional_kwargs["tool_calls"][0]["thought_signature"] == "SIG_A=="
