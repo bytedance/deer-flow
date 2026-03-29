@@ -43,7 +43,7 @@ jobs:
       - name: 构建并推送langgraph镜像
         run: |
           LANGGRAPHIMAGE=docker.cnb.cool/xu756/xm/deer-flow-langgraph:${{ env.PACKAGE_VERSION }}
-          cd backend && docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max . -f Dockerfile-langgraph -t $LANGGRAPHIMAGE --push
+          docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max . -f backend/Dockerfile-langgraph -t $LANGGRAPHIMAGE --push
 
 
       # 使用npm安装依赖
