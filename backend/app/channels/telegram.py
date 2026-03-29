@@ -8,7 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import SLASH_COMMANDS, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +60,8 @@ class TelegramChannel(Channel):
 
         # Command handlers
         app.add_handler(CommandHandler("start", self._cmd_start))
-        app.add_handler(CommandHandler("new", self._cmd_generic))
-        app.add_handler(CommandHandler("status", self._cmd_generic))
-        app.add_handler(CommandHandler("models", self._cmd_generic))
-        app.add_handler(CommandHandler("memory", self._cmd_generic))
-        app.add_handler(CommandHandler("help", self._cmd_generic))
+        for cmd in sorted(SLASH_COMMANDS):
+            app.add_handler(CommandHandler(cmd, self._cmd_generic))
 
         # General message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))

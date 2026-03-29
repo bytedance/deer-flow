@@ -9,7 +9,7 @@ from typing import Any
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, is_slash_command
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,7 @@ class SlackChannel(Channel):
         channel_id = event.get("channel", "")
         thread_ts = event.get("thread_ts") or event.get("ts", "")
 
-        if text.startswith("/"):
+        if is_slash_command(text):
             msg_type = InboundMessageType.COMMAND
         else:
             msg_type = InboundMessageType.CHAT

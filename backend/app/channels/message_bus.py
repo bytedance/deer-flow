@@ -26,6 +26,17 @@ class InboundMessageType(StrEnum):
     COMMAND = "command"
 
 
+# Canonical set of slash commands recognised across all IM channels.
+# Keep this in sync when adding or removing commands in ChannelManager.
+SLASH_COMMANDS: frozenset[str] = frozenset({"new", "status", "models", "memory", "bootstrap", "help"})
+
+
+def is_slash_command(text: str) -> bool:
+    """Return True if *text* starts with a recognised slash command."""
+    first_token = text.split(maxsplit=1)[0].lower()
+    return first_token.lstrip("/") in SLASH_COMMANDS and first_token.startswith("/")
+
+
 @dataclass
 class InboundMessage:
     """A message arriving from an IM channel toward the agent dispatcher.
