@@ -3,6 +3,7 @@ from datetime import datetime
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+from deerflow.subagents import get_available_subagent_names
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,19 @@ def _build_subagent_section(max_concurrent: int) -> str:
         Formatted subagent section string.
     """
     n = max_concurrent
+    bash_available = "bash" in get_available_subagent_names()
+    available_subagents = (
+        "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n- **bash**: For command execution (git, build, test, deploy operations)"
+        if bash_available
+        else "- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.\n"
+        "- **bash**: Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+    )
+    direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
+    direct_execution_example = (
+        '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
+        if bash_available
+        else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
+    )
     return f"""<subagent_system>
 **🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
 
@@ -40,8 +54,7 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Example thinking pattern**: "I identified 6 sub-tasks. Since the limit is {n} per turn, I will launch the first {n} now, and the rest in the next turn."
 
 **Available Subagents:**
-- **general-purpose**: For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.
-- **bash**: For command execution (git, build, test, deploy operations)
+{available_subagents}
 
 **Your Orchestration Strategy:**
 
@@ -89,7 +102,7 @@ For complex queries, break them down into focused sub-tasks and execute in paral
 3. **EXECUTE**: Launch ONLY the current batch (max {n} `task` calls). Do NOT launch sub-tasks from future batches.
 4. **REPEAT**: After results return, launch the next batch. Continue until all batches complete.
 5. **SYNTHESIZE**: After ALL batches are done, synthesize all results.
-6. **Cannot decompose** → Execute directly using available tools (bash, read_file, web_search, etc.)
+6. **Cannot decompose** → Execute directly using available tools ({direct_tool_examples})
 
 **⛔ VIOLATION: Launching more than {n} `task` calls in a single response is a HARD ERROR. The system WILL discard excess calls and you WILL lose work. Always batch.**
 
@@ -135,11 +148,7 @@ task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-p
 **Counter-Example - Direct Execution (NO subagents):**
 
 ```python
-# User asks: "Run the tests"
-# Thinking: Cannot decompose into parallel sub-tasks
-# → Execute directly
-
-bash("npm test")  # Direct execution, not task()
+{direct_execution_example}
 ```
 
 **CRITICAL**:
