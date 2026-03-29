@@ -10,9 +10,19 @@ from deerflow.sandbox.sandbox import Sandbox
 
 class LocalSandbox(Sandbox):
     @staticmethod
+    def _shell_name(shell: str) -> str:
+        """Return the executable name for a shell path or command."""
+        return shell.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+    @staticmethod
     def _is_powershell(shell: str) -> bool:
         """Return whether the selected shell is a PowerShell executable."""
-        return ntpath.basename(shell).lower() in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+        return LocalSandbox._shell_name(shell) in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+
+    @staticmethod
+    def _is_cmd_shell(shell: str) -> bool:
+        """Return whether the selected shell is cmd.exe."""
+        return LocalSandbox._shell_name(shell) in {"cmd", "cmd.exe"}
 
     @staticmethod
     def _find_first_available_shell(candidates: tuple[str, ...]) -> str | None:
@@ -167,6 +177,8 @@ class LocalSandbox(Sandbox):
             system_root = os.environ.get("SystemRoot", r"C:\Windows")
             shell = LocalSandbox._find_first_available_shell(
                 (
+                    "pwsh",
+                    "pwsh.exe",
                     "powershell",
                     "powershell.exe",
                     ntpath.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -176,10 +188,7 @@ class LocalSandbox(Sandbox):
             if shell is not None:
                 return shell
 
-            raise RuntimeError(
-                "No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, `sh` on PATH, "
-                "then PowerShell and cmd.exe fallbacks for Windows."
-            )
+            raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, `sh` on PATH, then PowerShell and cmd.exe fallbacks for Windows.")
 
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
@@ -188,9 +197,16 @@ class LocalSandbox(Sandbox):
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
 
-        if os.name == "nt" and self._is_powershell(shell):
+        if os.name == "nt":
+            if self._is_powershell(shell):
+                args = [shell, "-NoProfile", "-Command", resolved_command]
+            elif self._is_cmd_shell(shell):
+                args = [shell, "/c", resolved_command]
+            else:
+                args = [shell, "-c", resolved_command]
+
             result = subprocess.run(
-                [shell, "-NoProfile", "-Command", resolved_command],
+                args,
                 shell=False,
                 capture_output=True,
                 text=True,
