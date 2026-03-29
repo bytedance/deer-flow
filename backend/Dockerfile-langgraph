@@ -11,7 +11,7 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
 ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_NO_PROGRESS=1
 
-ADD . /deps/backend
+ADD backend /deps/backend
 
 RUN cd /deps/backend/packages/harness && \
     PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e .
