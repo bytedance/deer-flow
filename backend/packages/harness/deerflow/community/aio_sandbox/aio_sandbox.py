@@ -1,11 +1,13 @@
 import base64
 import logging
+import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
 from deerflow.sandbox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+_ERROR_OBSERVATION_MARKER = "'ErrorObservation' object has no attribute 'exit_code'"
 
 
 class AioSandbox(Sandbox):
@@ -39,6 +41,19 @@ class AioSandbox(Sandbox):
             self._home_dir = context.home_dir
         return self._home_dir
 
+    def _exec_shell_command(self, command: str) -> str:
+        """Execute a shell command, retrying on broken shared-session output."""
+        result = self._client.shell.exec_command(command=command)
+        output = result.data.output if result.data else ""
+
+        if output and _ERROR_OBSERVATION_MARKER in output:
+            session_id = uuid.uuid4().hex
+            logger.warning("Retrying AIO shell command with a fresh session after shared-session collision: %s", command)
+            result = self._client.shell.exec_command(command=command, id=session_id)
+            output = result.data.output if result.data else ""
+
+        return output
+
     def execute_command(self, command: str) -> str:
         """Execute a shell command in the sandbox.
 
@@ -49,8 +64,7 @@ class AioSandbox(Sandbox):
             The output of the command.
         """
         try:
-            result = self._client.shell.exec_command(command=command)
-            output = result.data.output if result.data else ""
+            output = self._exec_shell_command(command)
             return output if output else "(no output)"
         except Exception as e:
             logger.error(f"Failed to execute command in sandbox: {e}")
@@ -85,8 +99,7 @@ class AioSandbox(Sandbox):
         try:
             # Use shell command to list directory with depth limit
             # The -L flag limits the depth for the tree command
-            result = self._client.shell.exec_command(command=f"find {path} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
-            output = result.data.output if result.data else ""
+            output = self._exec_shell_command(f"find {path} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500")
             if output:
                 return [line.strip() for line in output.strip().split("\n") if line.strip()]
             return []
