@@ -60,12 +60,29 @@ class MemoryResponse(BaseModel):
     facts: list[Fact] = Field(default_factory=list)
 
 
-class FactUpsertRequest(BaseModel):
-    """Request model for creating or updating a memory fact."""
+def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
+    """Convert updater validation errors into stable API responses."""
+    if exc.args and exc.args[0] == "confidence":
+        detail = "Invalid confidence value; must be between 0 and 1."
+    else:
+        detail = "Memory fact content cannot be empty."
+    return HTTPException(status_code=400, detail=detail)
+
+
+class FactCreateRequest(BaseModel):
+    """Request model for creating a memory fact."""
 
     content: str = Field(..., min_length=1, description="Fact content")
     category: str = Field(default="context", description="Fact category")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence score (0-1)")
+
+
+class FactUpdateRequest(BaseModel):
+    """Request model for partially updating a memory fact."""
+
+    content: str | None = Field(default=None, min_length=1, description="Fact content")
+    category: str | None = Field(default=None, description="Fact category")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
 class MemoryConfigResponse(BaseModel):
@@ -172,7 +189,7 @@ async def clear_memory() -> MemoryResponse:
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
-async def create_memory_fact_endpoint(request: FactUpsertRequest) -> MemoryResponse:
+async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
     """Create a single fact manually."""
     try:
         memory_data = create_memory_fact(
@@ -181,7 +198,7 @@ async def create_memory_fact_endpoint(request: FactUpsertRequest) -> MemoryRespo
             confidence=request.confidence,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Memory fact content cannot be empty.") from exc
+        raise _map_memory_fact_value_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
 
@@ -212,7 +229,7 @@ async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
     summary="Update Memory Fact",
     description="Update a single saved memory fact by its fact id.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactUpsertRequest) -> MemoryResponse:
+async def update_memory_fact_endpoint(fact_id: str, request: FactUpdateRequest) -> MemoryResponse:
     """Update a single fact manually."""
     try:
         memory_data = update_memory_fact(
@@ -222,7 +239,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactUpsertRequest) 
             confidence=request.confidence,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Memory fact content cannot be empty.") from exc
+        raise _map_memory_fact_value_error(exc) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:

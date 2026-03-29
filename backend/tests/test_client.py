@@ -712,6 +712,21 @@ class TestMemoryManagement:
             )
         assert result == data
 
+    def test_update_memory_fact_preserves_omitted_fields(self, client):
+        data = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+            result = client.update_memory_fact(
+                "fact_123",
+                "User prefers spaces",
+            )
+            update_fact.assert_called_once_with(
+                fact_id="fact_123",
+                content="User prefers spaces",
+                category=None,
+                confidence=None,
+            )
+        assert result == data
+
     def test_get_memory_config(self, client):
         config = MagicMock()
         config.enabled = True

@@ -108,18 +108,12 @@ def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str,
 
 def update_memory_fact(
     fact_id: str,
-    content: str,
-    category: str = "context",
-    confidence: float = 0.5,
+    content: str | None = None,
+    category: str | None = None,
+    confidence: float | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing fact and persist the updated memory data."""
-    normalized_content = content.strip()
-    if not normalized_content:
-        raise ValueError("content")
-
-    normalized_category = category.strip() or "context"
-    validated_confidence = _validate_confidence(confidence)
     memory_data = get_memory_data(agent_name)
     updated_memory = dict(memory_data)
     updated_facts: list[dict[str, Any]] = []
@@ -129,9 +123,15 @@ def update_memory_fact(
         if fact.get("id") == fact_id:
             found = True
             updated_fact = dict(fact)
-            updated_fact["content"] = normalized_content
-            updated_fact["category"] = normalized_category
-            updated_fact["confidence"] = validated_confidence
+            if content is not None:
+                normalized_content = content.strip()
+                if not normalized_content:
+                    raise ValueError("content")
+                updated_fact["content"] = normalized_content
+            if category is not None:
+                updated_fact["category"] = category.strip() or "context"
+            if confidence is not None:
+                updated_fact["confidence"] = _validate_confidence(confidence)
             updated_facts.append(updated_fact)
         else:
             updated_facts.append(fact)

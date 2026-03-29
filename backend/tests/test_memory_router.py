@@ -134,6 +134,41 @@ def test_update_memory_fact_route_returns_updated_memory() -> None:
     assert response.json()["facts"] == updated_memory["facts"]
 
 
+def test_update_memory_fact_route_preserves_omitted_fields() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    updated_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers spaces",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    with patch("app.gateway.routers.memory.update_memory_fact", return_value=updated_memory) as update_fact:
+        with TestClient(app) as client:
+            response = client.put(
+                "/api/memory/facts/fact_edit",
+                json={
+                    "content": "User prefers spaces",
+                },
+            )
+
+    assert response.status_code == 200
+    update_fact.assert_called_once_with(
+        fact_id="fact_edit",
+        content="User prefers spaces",
+        category=None,
+        confidence=None,
+    )
+    assert response.json()["facts"] == updated_memory["facts"]
+
+
 def test_update_memory_fact_route_returns_404_for_missing_fact() -> None:
     app = FastAPI()
     app.include_router(memory.router)
@@ -151,3 +186,21 @@ def test_update_memory_fact_route_returns_404_for_missing_fact() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Memory fact 'fact_missing' not found."
+
+
+def test_update_memory_fact_route_returns_specific_error_for_invalid_confidence() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    with patch("app.gateway.routers.memory.update_memory_fact", side_effect=ValueError("confidence")):
+        with TestClient(app) as client:
+            response = client.put(
+                "/api/memory/facts/fact_edit",
+                json={
+                    "content": "User prefers spaces",
+                    "confidence": 0.91,
+                },
+            )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid confidence value; must be between 0 and 1."

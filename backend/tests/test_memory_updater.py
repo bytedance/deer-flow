@@ -274,6 +274,34 @@ def test_update_memory_fact_updates_only_matching_fact() -> None:
     assert result["facts"][1]["source"] == "manual"
 
 
+def test_update_memory_fact_preserves_omitted_fields() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = update_memory_fact(
+            fact_id="fact_edit",
+            content="User prefers spaces",
+        )
+
+    assert result["facts"][0]["content"] == "User prefers spaces"
+    assert result["facts"][0]["category"] == "preference"
+    assert result["facts"][0]["confidence"] == 0.8
+
+
 def test_update_memory_fact_raises_for_unknown_id() -> None:
     with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
         try:

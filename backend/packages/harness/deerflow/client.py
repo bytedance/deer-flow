@@ -700,8 +700,14 @@ class DeerFlowClient:
 
         return delete_memory_fact(fact_id)
 
-    def update_memory_fact(self, fact_id: str, content: str, category: str = "context", confidence: float = 0.5) -> dict:
-        """Update a single fact manually."""
+    def update_memory_fact(
+        self,
+        fact_id: str,
+        content: str | None = None,
+        category: str | None = None,
+        confidence: float | None = None,
+    ) -> dict:
+        """Update a single fact manually, preserving omitted fields."""
         from deerflow.agents.memory.updater import update_memory_fact
 
         return update_memory_fact(

@@ -2,7 +2,7 @@
 
 import { PenLineIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import Link from "next/link";
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useId, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
@@ -220,6 +220,10 @@ export function MemorySettingsPage() {
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const deferredQuery = useDeferredValue(query);
   const normalizedQuery = deferredQuery.trim().toLowerCase();
+  const factContentInputId = useId();
+  const factCategoryInputId = useId();
+  const factConfidenceInputId = useId();
+  const factConfidenceHintId = useId();
 
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
   const clearAllConfirmTitle =
@@ -600,8 +604,14 @@ export function MemorySettingsPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <div className="text-sm font-medium">{factContentLabel}</div>
+              <label
+                className="text-sm font-medium"
+                htmlFor={factContentInputId}
+              >
+                {factContentLabel}
+              </label>
               <Textarea
+                id={factContentInputId}
                 value={factForm.content}
                 onChange={(event) =>
                   setFactForm((current) => ({
@@ -616,8 +626,14 @@ export function MemorySettingsPage() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <div className="text-sm font-medium">{factCategoryLabel}</div>
+                <label
+                  className="text-sm font-medium"
+                  htmlFor={factCategoryInputId}
+                >
+                  {factCategoryLabel}
+                </label>
                 <Input
+                  id={factCategoryInputId}
                   value={factForm.category}
                   onChange={(event) =>
                     setFactForm((current) => ({
@@ -630,8 +646,15 @@ export function MemorySettingsPage() {
               </div>
 
               <div className="space-y-2">
-                <div className="text-sm font-medium">{factConfidenceLabel}</div>
+                <label
+                  className="text-sm font-medium"
+                  htmlFor={factConfidenceInputId}
+                >
+                  {factConfidenceLabel}
+                </label>
                 <Input
+                  id={factConfidenceInputId}
+                  aria-describedby={factConfidenceHintId}
                   type="number"
                   min="0"
                   max="1"
@@ -644,7 +667,10 @@ export function MemorySettingsPage() {
                     }))
                   }
                 />
-                <div className="text-muted-foreground text-xs">
+                <div
+                  className="text-muted-foreground text-xs"
+                  id={factConfidenceHintId}
+                >
                   {factConfidenceHint}
                 </div>
               </div>
