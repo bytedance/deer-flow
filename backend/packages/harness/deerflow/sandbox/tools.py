@@ -510,10 +510,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     unsafe_paths: list[str] = []
+    allowed_paths = _get_mcp_allowed_paths()
 
     for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
         # Check for MCP filesystem server allowed paths
-        allowed_paths = _get_mcp_allowed_paths()
         if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
             _reject_path_traversal(absolute_path)
             continue
