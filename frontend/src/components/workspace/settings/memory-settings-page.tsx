@@ -501,7 +501,6 @@ export function MemorySettingsPage() {
                                 {formatTimeAgo(fact.createdAt)}
                               </span>
                             </div>
-<<<<<<< HEAD
                             <p className="break-words text-sm">{fact.content}</p>
                             {fact.source === "manual" ? (
                               <span className="text-muted-foreground text-sm">
