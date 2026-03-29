@@ -622,3 +622,34 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+def test_header_like_extra_keys_are_folded_into_default_headers(monkeypatch):
+    model = ModelConfig(
+        name="kimi-for-coding",
+        display_name="Kimi For Coding",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="kimi-for-coding",
+        api_base="https://api.kimi.com/coding/v1",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_vision=True,
+        **{"User-Agent": "claude-code/1.0"},
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="kimi-for-coding")
+
+    assert "User-Agent" not in captured
+    assert captured.get("default_headers") == {"User-Agent": "claude-code/1.0"}

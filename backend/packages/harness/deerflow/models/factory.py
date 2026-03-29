@@ -1,4 +1,5 @@
 import logging
+import re
 
 from langchain.chat_models import BaseChatModel
 
@@ -6,6 +7,32 @@ from deerflow.config import get_app_config, get_tracing_config, is_tracing_enabl
 from deerflow.reflection import resolve_class
 
 logger = logging.getLogger(__name__)
+_HTTP_HEADER_KEY_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$")
+
+
+def _normalize_default_headers(model_settings: dict) -> dict:
+    """Move header-like extra config keys into default_headers.
+
+    This makes model config more tolerant of YAML snippets where custom headers
+    are accidentally declared at the model root instead of nested under
+    ``default_headers``.
+    """
+    normalized = dict(model_settings)
+    existing_headers = normalized.get("default_headers")
+    default_headers = dict(existing_headers) if isinstance(existing_headers, dict) else {}
+
+    header_keys = [
+        key
+        for key, value in normalized.items()
+        if key != "default_headers" and isinstance(value, str) and _HTTP_HEADER_KEY_PATTERN.fullmatch(key)
+    ]
+    for key in header_keys:
+        default_headers.setdefault(key, normalized.pop(key))
+
+    if default_headers:
+        normalized["default_headers"] = default_headers
+
+    return normalized
 
 
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
@@ -38,6 +65,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "supports_vision",
         },
     )
+    model_settings_from_config = _normalize_default_headers(model_settings_from_config)
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
     has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
