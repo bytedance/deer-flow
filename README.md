@@ -1,20 +1,50 @@
-# 🦌 DeerFlow - 2.0
+# SIM-DATA-AGENT
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
+English | [中文](./README_zh.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-<a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-> On February 28th, 2026, DeerFlow claimed the 🏆 #1 spot on GitHub Trending following the launch of version 2. Thanks a million to our incredible community — you made this happen! 💪🔥
+> **Forked from [bytedance/deer-flow](https://github.com/bytedance/deer-flow)**
+
+SIM-DATA-AGENT is an AI-powered intelligent data analysis agent platform, built on top of DeerFlow with custom data analysis toolchain.
+
+## Upstream Relationship
+
+| | URL | Role |
+|---|---|---|
+| Upstream | https://github.com/bytedance/deer-flow | Official DeerFlow (sync via `git merge upstream/main`) |
+| This repo | https://github.com/meliwanx/data-agent-flow | Private fork with custom additions |
+
+### Sync Upstream Updates
+
+```bash
+git fetch upstream
+git merge upstream/main
+```
+
+### Custom Additions (vs Upstream DeerFlow)
+
+| Module | Path | Description |
+|--------|------|-------------|
+| Custom Agent Package | `backend/packages/harness/sim_data_agent/` | Data analysis agent, independent from upstream `deerflow` |
+| Tools Router | `backend/app/gateway/routers/tools.py` | Custom API route for tools |
+| PostgreSQL Query Tool | `backend/packages/harness/sim_data_agent/tools/builtins/pgsql_query_tool.py` | Database query tool |
+| Python Exec Tool | `backend/packages/harness/sim_data_agent/tools/builtins/python_exec_tool.py` | Code execution tool |
+| MCP Servers | `scripts/mcp-servers/postgres_server.py`, `python_exec_server.py` | MCP protocol services |
+| Frontend Tools Module | `frontend/src/core/tools/` | Frontend tool API and hooks |
+
+---
+
+## DeerFlow Original README
+
+> On February 28th, 2026, DeerFlow claimed the #1 spot on GitHub Trending following the launch of version 2.
 
 DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
 
-https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
-
 > [!NOTE]
-> **DeerFlow 2.0 is a ground-up rewrite.** It shares no code with v1. If you're looking for the original Deep Research framework, it's maintained on the [`1.x` branch](https://github.com/bytedance/deer-flow/tree/main-1.x) — contributions there are still welcome. Active development has moved to 2.0.
+> **DeerFlow 2.0 is a ground-up rewrite.** It shares no code with v1. If you're looking for the original Deep Research framework, it's maintained on the [`1.x` branch`](https://github.com/bytedance/deer-flow/tree/main-1.x) — contributions there are still welcome. Active development has moved to 2.0.
 
 ## Official Website
 

@@ -51,6 +51,19 @@ sandbox_image_cache.tar
 # ignore the legacy `web` folder
 web/
 
+# Frontend dependencies and build
+node_modules/
+.next/
+dist/
+build/
+
+# Python build artifacts
+*.egg-info/
+*.whl
+
+# Runtime data
+backend/.sim-data-agent/
+
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
