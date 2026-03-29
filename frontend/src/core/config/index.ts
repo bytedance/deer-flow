@@ -4,7 +4,6 @@ function getBaseOrigin() {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-
   return undefined;
 }
 
@@ -13,7 +12,9 @@ export function getBackendBaseURL() {
     return new URL(
       env.NEXT_PUBLIC_BACKEND_BASE_URL,
       getBaseOrigin(),
-    ).toString();
+    )
+      .toString()
+      .replace(/\/+$/, "");
   } else {
     return "";
   }
