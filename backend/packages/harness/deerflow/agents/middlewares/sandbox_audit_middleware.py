@@ -76,18 +76,16 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
 
     For every ``bash`` tool call:
     1. **Command classification**: regex + shlex analysis grades commands as
-       high-risk (block), medium-risk (warn/reject), or safe (pass).
+       high-risk (block), medium-risk (warn), or safe (pass).
     2. **Audit log**: every bash call is recorded as a structured JSON entry
        via the standard logger (visible in langgraph.log).
 
-    Note: cwd anchoring (relative path isolation) is handled at the execution
-    layer in ``sandbox/tools.py`` by prepending ``cd {workspace_path} &&``
-    before passing commands to the sandbox.
+    High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked:
+    the handler is not called and an error ``ToolMessage`` is returned so the
+    agent loop can continue gracefully.
 
-    Architecture note: medium-risk commands are currently rejected with a
-    human-readable message so the LLM can choose an alternative approach.
-    The design intentionally leaves room for a future ``pending_queue`` /
-    human-in-the-loop approval flow without changing the middleware interface.
+    Medium-risk commands (e.g. ``pip install``, ``chmod 777``) are executed
+    normally; a warning is appended to the tool result so the LLM is aware.
     """
 
     state_schema = ThreadState

@@ -1,4 +1,4 @@
-"""Tests for SandboxAuditMiddleware - command classification, cwd fix, and audit logging."""
+"""Tests for SandboxAuditMiddleware - command classification and audit logging."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -270,22 +270,15 @@ class TestBenchmarkSummary:
         "chmod 644 /mnt/user-data/outputs/report.md",
     ]
 
-    def test_benchmark_metrics(self, capsys):
+    def test_benchmark_metrics(self):
         high_blocked = sum(1 for c in self.HIGH_RISK if _classify_command(c) == "block")
         medium_warned = sum(1 for c in self.MEDIUM_RISK if _classify_command(c) == "warn")
         safe_passed = sum(1 for c in self.SAFE if _classify_command(c) == "pass")
 
         high_recall = high_blocked / len(self.HIGH_RISK)
         medium_recall = medium_warned / len(self.MEDIUM_RISK)
-        safe_precision = safe_passed / len(self.SAFE)  # 1 - false_positive_rate
+        safe_precision = safe_passed / len(self.SAFE)
         false_positive_rate = 1 - safe_precision
-
-        with capsys.disabled():
-            print("\n=== SandboxAuditMiddleware Benchmark ===")
-            print(f"High-risk block rate:   {high_blocked}/{len(self.HIGH_RISK)} = {high_recall:.0%}  (target: 100%)")
-            print(f"Medium-risk warn rate:  {medium_warned}/{len(self.MEDIUM_RISK)} = {medium_recall:.0%}  (target: >90%)")
-            print(f"Safe pass rate:         {safe_passed}/{len(self.SAFE)} = {safe_precision:.0%}")
-            print(f"False positive rate:    {false_positive_rate:.0%}  (target: 0%)")
 
         assert high_recall == 1.0, f"High-risk block rate must be 100%, got {high_recall:.0%}"
         assert medium_recall >= 0.9, f"Medium-risk warn rate must be >=90%, got {medium_recall:.0%}"
