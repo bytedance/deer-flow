@@ -1,7 +1,10 @@
+import logging
 from datetime import datetime
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.skills import load_skills
+
+logger = logging.getLogger(__name__)
 
 
 def _build_subagent_section(max_concurrent: int) -> str:
@@ -250,6 +253,7 @@ You: "Deploying to staging..." [proceed]
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - All temporary work happens in `/mnt/user-data/workspace`
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_file` tool
+{acp_section}
 </working_directory>
 
 <response_style>
@@ -363,7 +367,7 @@ def _get_memory_context(agent_name: str | None = None) -> str:
 </memory>
 """
     except Exception as e:
-        print(f"Failed to load memory context: {e}")
+        logger.error("Failed to load memory context: %s", e)
         return ""
 
 
@@ -444,6 +448,26 @@ def get_deferred_tools_prompt_section() -> str:
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
+def _build_acp_section() -> str:
+    """Build the ACP agent prompt section, only if ACP agents are configured."""
+    try:
+        from deerflow.config.acp_config import get_acp_agents
+
+        agents = get_acp_agents()
+        if not agents:
+            return ""
+    except Exception:
+        return ""
+
+    return (
+        "\n**ACP Agent Tasks (invoke_acp_agent):**\n"
+        "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`\n"
+        "- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths\n"
+        "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
+        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_file`"
+    )
+
+
 def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagents: int = 3, *, agent_name: str | None = None, available_skills: set[str] | None = None) -> str:
     # Get memory context
     memory_context = _get_memory_context(agent_name)
@@ -476,6 +500,9 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section()
 
+    # Build ACP agent section only if ACP agents are configured
+    acp_section = _build_acp_section()
+
     # Format the prompt with dynamic skills and memory
     prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
@@ -486,6 +513,7 @@ def apply_prompt_template(subagent_enabled: bool = False, max_concurrent_subagen
         subagent_section=subagent_section,
         subagent_reminder=subagent_reminder,
         subagent_thinking=subagent_thinking,
+        acp_section=acp_section,
     )
 
     return prompt + f"\n<current_date>{datetime.now().strftime('%Y-%m-%d, %A')}</current_date>"

@@ -5,8 +5,10 @@ import pytest
 
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
+    _is_acp_workspace_path,
     _is_skills_path,
     _reject_path_traversal,
+    _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
     mask_local_paths_in_output,
@@ -27,10 +29,7 @@ _THREAD_DATA = {
 
 
 def test_replace_virtual_path_maps_virtual_root_and_subpaths() -> None:
-    assert (
-        Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix()
-        == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
-    )
+    assert Path(replace_virtual_path("/mnt/user-data/workspace/a.txt", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/workspace/a.txt"
     assert Path(replace_virtual_path("/mnt/user-data", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data"
 
 
@@ -322,3 +321,105 @@ def test_validate_local_tool_path_skills_custom_container_path() -> None:
                 _THREAD_DATA,
                 read_only=True,
             )
+
+
+# ---------- ACP workspace path tests ----------
+
+
+def test_is_acp_workspace_path_recognises_prefix() -> None:
+    assert _is_acp_workspace_path("/mnt/acp-workspace") is True
+    assert _is_acp_workspace_path("/mnt/acp-workspace/hello.py") is True
+    assert _is_acp_workspace_path("/mnt/acp-workspace-extra/foo") is False
+    assert _is_acp_workspace_path("/mnt/user-data/workspace") is False
+
+
+def test_validate_local_tool_path_allows_acp_workspace_read_only() -> None:
+    """read_file / ls should be able to access /mnt/acp-workspace paths."""
+    validate_local_tool_path(
+        "/mnt/acp-workspace/hello_world.py",
+        _THREAD_DATA,
+        read_only=True,
+    )
+
+
+def test_validate_local_tool_path_blocks_acp_workspace_write() -> None:
+    """write_file / str_replace must NOT write to ACP workspace paths."""
+    with pytest.raises(PermissionError, match="Write access to ACP workspace is not allowed"):
+        validate_local_tool_path(
+            "/mnt/acp-workspace/hello_world.py",
+            _THREAD_DATA,
+            read_only=False,
+        )
+
+
+def test_validate_local_bash_command_paths_allows_acp_workspace() -> None:
+    """bash commands referencing /mnt/acp-workspace should be allowed."""
+    validate_local_bash_command_paths(
+        "cp /mnt/acp-workspace/hello_world.py /mnt/user-data/outputs/hello_world.py",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_blocks_traversal_in_acp_workspace() -> None:
+    """Bash commands with traversal in ACP workspace paths should be blocked."""
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_bash_command_paths(
+            "cat /mnt/acp-workspace/../../etc/passwd",
+            _THREAD_DATA,
+        )
+
+
+def test_resolve_acp_workspace_path_resolves_correctly(tmp_path: Path) -> None:
+    """ACP workspace virtual path should resolve to host path."""
+    acp_dir = tmp_path / "acp-workspace"
+    acp_dir.mkdir()
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=str(acp_dir)):
+        resolved = _resolve_acp_workspace_path("/mnt/acp-workspace/hello.py")
+        assert resolved == str(acp_dir / "hello.py")
+
+
+def test_resolve_acp_workspace_path_resolves_root(tmp_path: Path) -> None:
+    """ACP workspace root should resolve to host directory."""
+    acp_dir = tmp_path / "acp-workspace"
+    acp_dir.mkdir()
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=str(acp_dir)):
+        resolved = _resolve_acp_workspace_path("/mnt/acp-workspace")
+        assert resolved == str(acp_dir)
+
+
+def test_resolve_acp_workspace_path_raises_when_not_available() -> None:
+    """Should raise FileNotFoundError when ACP workspace does not exist."""
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=None):
+        with pytest.raises(FileNotFoundError, match="ACP workspace directory not available"):
+            _resolve_acp_workspace_path("/mnt/acp-workspace/hello.py")
+
+
+def test_resolve_acp_workspace_path_blocks_traversal(tmp_path: Path) -> None:
+    """Path traversal in ACP workspace paths must be rejected."""
+    acp_dir = tmp_path / "acp-workspace"
+    acp_dir.mkdir()
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=str(acp_dir)):
+        with pytest.raises(PermissionError, match="path traversal"):
+            _resolve_acp_workspace_path("/mnt/acp-workspace/../../etc/passwd")
+
+
+def test_replace_virtual_paths_in_command_replaces_acp_workspace() -> None:
+    """ACP workspace virtual paths in commands should be resolved to host paths."""
+    acp_host = "/home/user/.deer-flow/acp-workspace"
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
+        cmd = "cp /mnt/acp-workspace/hello.py /mnt/user-data/outputs/hello.py"
+        result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
+        assert "/mnt/acp-workspace" not in result
+        assert f"{acp_host}/hello.py" in result
+        assert "/tmp/deer-flow/threads/t1/user-data/outputs/hello.py" in result
+
+
+def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
+    """ACP workspace host paths in bash output should be masked to virtual paths."""
+    acp_host = "/home/user/.deer-flow/acp-workspace"
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
+        output = f"Copied: {acp_host}/hello.py"
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+        assert acp_host not in masked
+        assert "/mnt/acp-workspace/hello.py" in masked

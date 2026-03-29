@@ -8,6 +8,8 @@
     "build": "next build",
     "check": "eslint . --ext .ts,.tsx && tsc --noEmit",
     "dev": "next dev --turbo",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "preview": "next build && next start",

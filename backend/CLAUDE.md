@@ -208,7 +208,7 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
-| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
+| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
@@ -258,6 +258,12 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
 - `jina_ai/` - Web fetch via Jina reader API with readability extraction
 - `firecrawl/` - Web scraping via Firecrawl API
+
+**ACP agent tools**:
+- `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
+- ACP launchers must be real ACP adapters. The standard `codex` CLI is not ACP-compatible by itself; configure a wrapper such as `npx -y @zed-industries/codex-acp` or an installed `codex-acp` binary
+- Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
+- Each ACP agent uses a per-thread workspace at `{base_dir}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
 - `image_search/` - Image search via DuckDuckGo
 
 ### MCP System (`packages/harness/deerflow/mcp/`)
@@ -312,6 +318,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
+- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://langgraph:2024` / `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)

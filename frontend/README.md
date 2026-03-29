@@ -41,6 +41,12 @@ pnpm dev
 # Type check
 pnpm typecheck
 
+# Check formatting
+pnpm format
+
+# Apply formatting
+pnpm format:write
+
 # Lint
 pnpm lint
 
@@ -101,22 +107,24 @@ src/
 │   └── utils/              # Utility functions
 ├── hooks/                  # Custom React hooks
 ├── lib/                    # Shared libraries & utilities
-├── server/                 # Server-side code (Not available yet)
-│   └── better-auth/        # Authentication setup (Not available yet)
+├── server/                 # Server-side code
+│   └── better-auth/        # Authentication setup and session helpers
 └── styles/                 # Global styles
 ```
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `pnpm dev` | Start development server with Turbopack |
-| `pnpm build` | Build for production |
-| `pnpm start` | Start production server |
-| `pnpm lint` | Run ESLint |
-| `pnpm lint:fix` | Fix ESLint issues |
-| `pnpm typecheck` | Run TypeScript type checking |
-| `pnpm check` | Run both lint and typecheck |
+| Command             | Description                             |
+| ------------------- | --------------------------------------- |
+| `pnpm dev`          | Start development server with Turbopack |
+| `pnpm build`        | Build for production                    |
+| `pnpm start`        | Start production server                 |
+| `pnpm format`       | Check formatting with Prettier          |
+| `pnpm format:write` | Apply formatting with Prettier          |
+| `pnpm lint`         | Run ESLint                              |
+| `pnpm lint:fix`     | Fix ESLint issues                       |
+| `pnpm typecheck`    | Run TypeScript type checking            |
+| `pnpm check`        | Run both lint and typecheck             |
 
 ## Development Notes
 

@@ -15,6 +15,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 class PathTraversalError(ValueError):
     """Raised when a path escapes its allowed base directory."""
 
+
 # thread_id must be alphanumeric, hyphens, underscores, or dots only.
 _SAFE_THREAD_ID = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -128,13 +129,15 @@ def list_files_in_dir(directory: Path) -> dict:
             if not entry.is_file(follow_symlinks=False):
                 continue
             st = entry.stat(follow_symlinks=False)
-            files.append({
-                "filename": entry.name,
-                "size": st.st_size,
-                "path": entry.path,
-                "extension": Path(entry.name).suffix,
-                "modified": st.st_mtime,
-            })
+            files.append(
+                {
+                    "filename": entry.name,
+                    "size": st.st_size,
+                    "path": entry.path,
+                    "extension": Path(entry.name).suffix,
+                    "modified": st.st_mtime,
+                }
+            )
     return {"files": files, "count": len(files)}
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.uploads.manager import PathTraversalError
 
 # Skip entire module in CI or when no config.yaml exists
 _skip_reason = None
@@ -321,5 +322,5 @@ class TestLiveErrorResilience:
             client.get_artifact("t", "invalid/path")
 
     def test_path_traversal_blocked(self, client):
-        with pytest.raises(PermissionError):
+        with pytest.raises(PathTraversalError):
             client.delete_upload("t", "../../etc/passwd")

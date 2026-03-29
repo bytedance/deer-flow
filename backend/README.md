@@ -312,6 +312,26 @@ MCP servers and skill states in a single file:
 - Model API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, etc.
 - Tool API keys: `TAVILY_API_KEY`, `GITHUB_TOKEN`, etc.
 
+### LangSmith Tracing
+
+DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, tool executions, and middleware processing are traced and visible in the LangSmith dashboard.
+
+**Setup:**
+
+1. Sign up at [smith.langchain.com](https://smith.langchain.com) and create a project.
+2. Add the following to your `.env` file in the project root:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+**Legacy variables:** The `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, and `LANGCHAIN_ENDPOINT` variables are also supported for backward compatibility. `LANGSMITH_*` variables take precedence when both are set.
+
+**Docker:** In `docker-compose.yaml`, tracing is disabled by default (`LANGSMITH_TRACING=false`). Set `LANGSMITH_TRACING=true` and provide `LANGSMITH_API_KEY` in your `.env` to enable it in containerized deployments.
+
 ---
 
 ## Development

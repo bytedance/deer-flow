@@ -119,4 +119,3 @@ def test_format_memory_skips_non_string_content_facts() -> None:
     # The formatted line for a list content would be "- [knowledge | 0.85] ['list']".
     assert "| 0.85]" not in result
     assert "Valid fact" in result
-
