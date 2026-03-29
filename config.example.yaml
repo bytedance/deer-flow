@@ -302,6 +302,8 @@ tools:
     use: deerflow.sandbox.tools:str_replace_tool
 
   # Bash execution tool
+  # Active only when using an isolated shell sandbox or when
+  # sandbox.allow_host_bash: true explicitly opts into host bash.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
