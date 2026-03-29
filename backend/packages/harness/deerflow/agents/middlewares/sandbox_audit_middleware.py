@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+[/~]"),   # rm -rf / or rm -rf ~
-    re.compile(r"rm\s+-[^\s]*f[^\s]*\s+[/~]"),   # rm -f / variants
+    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),  # rm -rf / /* ~ /home /root
     re.compile(r"(curl|wget).+\|\s*(ba)?sh"),      # curl|sh, wget|sh
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
@@ -128,8 +127,12 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if not isinstance(result, ToolMessage):
             return result
         warning = f"\n\n⚠️ Warning: `{command}` is a medium-risk command that may modify the runtime environment."
+        if isinstance(result.content, list):
+            new_content = list(result.content) + [{"type": "text", "text": warning}]
+        else:
+            new_content = str(result.content) + warning
         return ToolMessage(
-            content=str(result.content) + warning,
+            content=new_content,
             tool_call_id=result.tool_call_id,
             name=result.name,
             status=result.status,
