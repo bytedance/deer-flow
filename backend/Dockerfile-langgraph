@@ -1,13 +1,30 @@
-FROM langchain/langgraph-api:3.12
+FROM langchain/langgraph-api:3.12-bookworm
 
-RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-    sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources && \
-    sed -i 's|http://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
-    elif [ -f /etc/apt/sources.list ]; then \
-    sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list && \
-    sed -i 's|http://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list; \
-    fi
+ARG NODE_MAJOR=22
 
+USER root
+
+# Install Node.js
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    gnupg \
+    ca-certificates \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI only
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm config set maxsockets 50 && \
+    npm config set fetch-retries 5
+
+ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_NO_PROGRESS=1
 

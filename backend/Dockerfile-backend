@@ -6,37 +6,10 @@ FROM ${UV_IMAGE} AS uv-source
 
 FROM python:3.12-slim-bookworm
 
-ARG NODE_MAJOR=22
-ARG APT_MIRROR
 
-# Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
-RUN if [ -n "${APT_MIRROR}" ]; then \
-      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
-    fi
 
-# Install system dependencies + Node.js (provides npx for MCP servers)
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    gnupg \
-    ca-certificates \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
-COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-# Install uv (source image overridable via UV_IMAGE build arg)
-COPY --from=uv-source /uv /uvx /usr/local/bin/
-
-RUN npm config set registry https://registry.npmmirror.com && \
-    npm config set maxsockets 50 && \
-    npm config set fetch-retries 5
 
 # Set working directory
 WORKDIR /app
@@ -44,11 +17,7 @@ WORKDIR /app
 # Copy backend source code
 COPY backend ./backend
 
-# uv mirror/cache config
-ENV UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ENV UV_CACHE_DIR=/root/.cache/uv
-ENV UV_NO_PROGRESS=1
+
 
 # Pre-build local workspace package first, so sync is less likely to fail on live build resolution
 RUN --mount=type=cache,target=/root/.cache/uv \
