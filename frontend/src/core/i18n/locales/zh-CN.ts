@@ -181,7 +181,8 @@ export const zhCN: Translations = {
     nameStepContinue: "继续",
     nameStepInvalidError: "名称无效，只允许字母、数字和连字符",
     nameStepAlreadyExistsError: "已存在同名智能体",
-    nameStepCheckError: "无法验证名称可用性，请稍后重试",
+    nameStepCheckError:
+      "\u65e0\u6cd5\u8fde\u63a5 DeerFlow \u540e\u7aef\u6765\u9a8c\u8bc1\u540d\u79f0\u662f\u5426\u53ef\u7528\u3002\u8bf7\u5148\u542f\u52a8\u540e\u7aef\uff0c\u6216\u914d\u7f6e NEXT_PUBLIC_BACKEND_BASE_URL\uff0c\u7136\u540e\u518d\u91cd\u8bd5\u3002",
     nameStepBootstrapMessage:
       "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
     agentCreated: "智能体已创建！",
