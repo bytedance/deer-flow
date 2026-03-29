@@ -42,7 +42,7 @@ COPY backend ./backend
 
 # Install dependencies with cache mount
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && uv sync"
+    sh -c "cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync"
 
 # Expose ports (gateway: 8001, langgraph: 2024)
 EXPOSE 8001 2024

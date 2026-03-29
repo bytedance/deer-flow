@@ -66,7 +66,7 @@ services:
     image: nginx:alpine
     container_name: deer-flow-nginx
     ports:
-      - "2026:2026"
+      - "${PORT:-2026}:2026"
     volumes:
       - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -77,31 +77,19 @@ services:
       - deer-flow-dev
     restart: unless-stopped
 
-  # Frontend - Next.js Development Server
+  # Frontend - Next.js Production Server
   frontend:
     build:
       context: ../
       dockerfile: frontend/Dockerfile
-      target: dev
+      target: prod
       args:
         PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: deer-flow-frontend
-    command: sh -c "cd frontend && pnpm run dev > /app/logs/frontend.log 2>&1"
-    volumes:
-      - ../frontend/src:/app/frontend/src
-      - ../frontend/public:/app/frontend/public
-      - ../frontend/next.config.js:/app/frontend/next.config.js:ro
-      - ../logs:/app/logs
-      # Mount pnpm store for caching
-      - ${PNPM_STORE_PATH:-~/.local/share/pnpm/store}:/root/.local/share/pnpm/store
-    working_dir: /app
     environment:
-      - NODE_ENV=development
-      - WATCHPACK_POLLING=true
+      - NODE_ENV=production
       - CI=true
-    env_file:
-      - ../frontend/.env
     networks:
       - deer-flow-dev
     restart: unless-stopped
