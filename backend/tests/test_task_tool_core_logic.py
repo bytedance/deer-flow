@@ -63,6 +63,7 @@ def _make_result(
         error=error,
     )
 
+
 def _run_task_tool(**kwargs) -> str:
     """Execute the task tool across LangChain sync/async wrapper variants."""
     coroutine = getattr(task_tool_module.task_tool, "coroutine", None)
