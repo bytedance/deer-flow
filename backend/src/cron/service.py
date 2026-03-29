@@ -29,6 +29,18 @@ class NoFutureRunTimeError(ValueError):
     """Raised when a job cannot be enabled because it has no future run time."""
 
 
+class CronStoreError(RuntimeError):
+    """Base class for cron store read/write failures."""
+
+
+class CronStoreUnavailableError(CronStoreError):
+    """Raised when the cron store cannot be safely read."""
+
+
+class CronStorePersistenceError(CronStoreError):
+    """Raised when the cron store cannot be safely persisted."""
+
+
 def _compute_next_run(
     schedule: CronSchedule,
     now_ms: int,
@@ -142,6 +154,14 @@ class _JobExecutionResult:
     last_error: str | None
 
 
+@dataclass
+class _ManualRunResult:
+    """Outcome for a manual run request."""
+
+    status: Literal["executed", "ignored"]
+    result: str
+
+
 class CronService:
     """Periodic task scheduling service.
 
@@ -171,25 +191,27 @@ class CronService:
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
     ):
+        self._store_retry_delay_s = 5.0
         self.store_path = Path(store_path)
         self.on_job = on_job
         self._store: CronStore | None = None
         self._running = False
         self._timer_task: asyncio.Task | None = None
-        self._last_mtime: float | None = None
+        self._last_mtime: int | None = None
         self._store_lock = asyncio.Lock()
         self._executing_job_ids: set[str] = set()
+        self._store_error: str | None = None
+        self._store_error_mtime: int | None = None
+        self._store_sync_pending = False
 
-    def _get_store_mtime(self) -> float | None:
-        """Read the current store file modification time, if it exists."""
+    def _get_store_mtime(self) -> int | None:
+        """Read the current store file modification time in nanoseconds, if it exists."""
         try:
-            if not self.store_path.exists():
-                return None
-            return self.store_path.stat().st_mtime
-        except OSError:
+            return self.store_path.stat().st_mtime_ns
+        except FileNotFoundError:
             return None
 
-    def _read_store_from_disk(self) -> tuple[CronStore, float | None]:
+    def _read_store_from_disk(self) -> tuple[CronStore, int | None]:
         """Read and deserialize the persisted cron store."""
         with open(self.store_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -198,7 +220,7 @@ class CronService:
         store = CronStore(version=data.get("version", 1), jobs=jobs)
         return store, self._get_store_mtime()
 
-    def _write_store_to_disk(self, store: CronStore) -> float | None:
+    def _write_store_to_disk(self, store: CronStore) -> int | None:
         """Atomically persist the cron store to disk."""
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -223,36 +245,126 @@ class CronService:
             temp_path.unlink(missing_ok=True)
             raise
 
+    def _copy_store(self, store: CronStore) -> CronStore:
+        """Create an isolated store snapshot so writes are transactional."""
+        return CronStore(version=store.version, jobs=[self._copy_job(job) for job in store.jobs])
+
+    def _set_store_error_locked(self, message: str, current_mtime: int | None) -> bool:
+        """Record the latest store error and report whether it changed."""
+        changed = self._store_error != message or self._store_error_mtime != current_mtime
+        self._store_error = message
+        self._store_error_mtime = current_mtime
+        return changed
+
+    def _clear_store_error_locked(self) -> None:
+        """Clear any store error once disk state is readable again."""
+        self._store_error = None
+        self._store_error_mtime = None
+
+    def _mark_store_error_locked(self, action: str, current_mtime: int | None, exc: Exception) -> str:
+        """Capture an actionable store error without discarding last known-good state."""
+        message = f"Failed to {action} cron store at {self.store_path}: {exc}"
+        if self._set_store_error_locked(message, current_mtime):
+            logger.exception(message)
+        return message
+
+    def _mark_missing_store_error_locked(self) -> str:
+        """Capture an actionable error when a previously persisted store disappears."""
+        return self._mark_store_error_locked(
+            "load",
+            None,
+            FileNotFoundError(f"{self.store_path} is missing"),
+        )
+
+    def _require_store_available_locked(self) -> None:
+        """Reject unsafe operations while the latest on-disk state is unreadable."""
+        if self._store_error is not None:
+            raise CronStoreUnavailableError(self._store_error)
+
+    async def _ensure_store_writable_locked(self) -> None:
+        """Retry pending persistence before allowing new writes or executions."""
+        if self._store_sync_pending:
+            if self._store is None:
+                raise CronStoreUnavailableError("Cron store has pending in-memory state but no loaded snapshot")
+            await self._commit_store_locked(
+                self._copy_store(self._store),
+                allow_existing_error=True,
+                keep_memory_on_failure=True,
+            )
+        self._require_store_available_locked()
+
     async def _load_store_locked(self) -> CronStore:
         """Load store from disk, with hot-reload detection."""
-        current_mtime = await asyncio.to_thread(self._get_store_mtime)
+        try:
+            current_mtime = await asyncio.to_thread(self._get_store_mtime)
+        except Exception as exc:
+            message = self._mark_store_error_locked("stat", self._last_mtime, exc)
+            if self._store is None:
+                raise CronStoreUnavailableError(message) from exc
+            return self._store
+
+        if self._store_sync_pending:
+            if self._store is None:
+                raise CronStoreUnavailableError("Cron store has pending in-memory state but no loaded snapshot")
+            return self._store
+
+        if current_mtime is None:
+            if self._last_mtime is not None:
+                message = self._mark_missing_store_error_locked()
+                if self._store is None:
+                    raise CronStoreUnavailableError(message)
+                return self._store
+
+            if self._store is None:
+                self._store = CronStore()
+            self._last_mtime = None
+            self._clear_store_error_locked()
+            return self._store
+
+        should_reload = self._store is None or current_mtime != self._last_mtime or self._store_error is not None
+        if not should_reload:
+            return self._store
+
+        try:
+            loaded_store, loaded_mtime = await asyncio.to_thread(self._read_store_from_disk)
+        except Exception as exc:
+            message = self._mark_store_error_locked("load", current_mtime, exc)
+            if self._store is None:
+                raise CronStoreUnavailableError(message) from exc
+            return self._store
+
         if self._store is not None and current_mtime != self._last_mtime:
             logger.info("Cron: jobs.json modified externally, reloading")
-            self._store = None
 
-        if self._store is None:
-            if current_mtime is None:
-                self._store = CronStore()
-                self._last_mtime = None
-            else:
-                try:
-                    self._store, self._last_mtime = await asyncio.to_thread(self._read_store_from_disk)
-                except Exception as e:
-                    logger.error(f"Failed to load cron store: {e}")
-                    self._store = CronStore()
-                    self._last_mtime = current_mtime
+        self._store = loaded_store
+        self._last_mtime = loaded_mtime
+        self._clear_store_error_locked()
 
         return self._store
 
-    async def _save_store_locked(self) -> None:
-        """Save store to disk."""
-        if self._store is None:
-            return
-
+    async def _commit_store_locked(
+        self,
+        store: CronStore,
+        *,
+        allow_existing_error: bool = False,
+        keep_memory_on_failure: bool = False,
+    ) -> None:
+        """Persist a prepared store and commit it to memory only on success."""
+        if not allow_existing_error:
+            self._require_store_available_locked()
         try:
-            self._last_mtime = await asyncio.to_thread(self._write_store_to_disk, self._store)
-        except Exception as e:
-            logger.error(f"Failed to save cron store: {e}")
+            new_mtime = await asyncio.to_thread(self._write_store_to_disk, store)
+        except Exception as exc:
+            if keep_memory_on_failure:
+                self._store = store
+                self._store_sync_pending = True
+            message = self._mark_store_error_locked("save", self._last_mtime, exc)
+            raise CronStorePersistenceError(message) from exc
+
+        self._store = store
+        self._last_mtime = new_mtime
+        self._store_sync_pending = False
+        self._clear_store_error_locked()
 
     def _recompute_next_runs_locked(self, store: CronStore, *, preserve_existing: bool = False) -> None:
         """Recompute next run times for jobs that need them."""
@@ -314,10 +426,11 @@ class CronService:
                 return
 
             store = await self._load_store_locked()
-            self._recompute_next_runs_locked(store, preserve_existing=True)
-            await self._save_store_locked()
+            working_store = self._copy_store(store)
+            self._recompute_next_runs_locked(working_store, preserve_existing=True)
+            await self._commit_store_locked(working_store)
             self._running = True
-            job_count = len(store.jobs)
+            job_count = len(working_store.jobs)
 
         self._arm_timer()
         logger.info(f"CronService started with {job_count} jobs")
@@ -336,12 +449,17 @@ class CronService:
             self._timer_task.cancel()
             self._timer_task = None
 
-        next_wake = self._get_next_wake_ms_locked()
-        if not next_wake or not self._running:
+        if not self._running:
             return
 
-        delay_ms = max(0, next_wake - _now_ms())
-        delay_s = delay_ms / 1000
+        if self._store_error is not None:
+            delay_s = self._store_retry_delay_s
+        else:
+            next_wake = self._get_next_wake_ms_locked()
+            if not next_wake:
+                return
+            delay_ms = max(0, next_wake - _now_ms())
+            delay_s = delay_ms / 1000
 
         async def tick():
             try:
@@ -368,42 +486,50 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer wake-up."""
-        async with self._store_lock:
-            store = await self._load_store_locked()
-            self._recompute_next_runs_locked(store, preserve_existing=True)
-            now = _now_ms()
-            due_jobs = [
-                self._copy_job(job)
-                for job in store.jobs
-                if (
-                    job.id not in self._executing_job_ids
-                    and job.enabled
-                    and job.state.next_run_at_ms
-                    and now >= job.state.next_run_at_ms
-                )
-            ]
-            if not due_jobs:
-                await self._save_store_locked()
-                self._arm_timer()
-                return
-
-            for job in due_jobs:
-                self._executing_job_ids.add(job.id)
-
+        due_jobs: list[CronJob] = []
         try:
+            async with self._store_lock:
+                store = await self._load_store_locked()
+                await self._ensure_store_writable_locked()
+                store = self._store if self._store is not None else store
+
+                working_store = self._copy_store(store)
+                self._recompute_next_runs_locked(working_store, preserve_existing=True)
+                now = _now_ms()
+                due_jobs = [
+                    self._copy_job(job)
+                    for job in working_store.jobs
+                    if (
+                        job.id not in self._executing_job_ids
+                        and job.enabled
+                        and job.state.next_run_at_ms
+                        and now >= job.state.next_run_at_ms
+                    )
+                ]
+                if not due_jobs:
+                    await self._commit_store_locked(working_store, keep_memory_on_failure=True)
+                    return
+
+                for job in due_jobs:
+                    self._executing_job_ids.add(job.id)
+
             execution_results = [await self._execute_job(job) for job in due_jobs]
 
             async with self._store_lock:
                 store = await self._load_store_locked()
+                self._require_store_available_locked()
+                working_store = self._copy_store(store)
+                self._recompute_next_runs_locked(working_store, preserve_existing=True)
                 for result in execution_results:
-                    self._apply_execution_result_locked(store, result)
-                await self._save_store_locked()
+                    self._apply_execution_result_locked(working_store, result)
+                await self._commit_store_locked(working_store, keep_memory_on_failure=True)
+        except CronStoreError:
+            logger.warning("Cron: timer run paused until cron store becomes healthy again")
         finally:
             async with self._store_lock:
                 for job in due_jobs:
                     self._executing_job_ids.discard(job.id)
-
-        self._arm_timer()
+            self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> _JobExecutionResult:
         """Execute a single job snapshot outside the store lock."""
@@ -507,8 +633,11 @@ class CronService:
             job.state.next_run_at_ms = next_run_at_ms
 
             store = await self._load_store_locked()
-            store.jobs.append(job)
-            await self._save_store_locked()
+            await self._ensure_store_writable_locked()
+            store = self._store if self._store is not None else store
+            working_store = self._copy_store(store)
+            working_store.jobs.append(self._copy_job(job))
+            await self._commit_store_locked(working_store)
 
         self._arm_timer()
 
@@ -520,10 +649,13 @@ class CronService:
         removed = False
         async with self._store_lock:
             store = await self._load_store_locked()
-            for i, job in enumerate(store.jobs):
+            await self._ensure_store_writable_locked()
+            store = self._store if self._store is not None else store
+            working_store = self._copy_store(store)
+            for i, job in enumerate(working_store.jobs):
                 if job.id == job_id:
-                    del store.jobs[i]
-                    await self._save_store_locked()
+                    del working_store.jobs[i]
+                    await self._commit_store_locked(working_store)
                     removed = True
                     break
 
@@ -537,7 +669,10 @@ class CronService:
         updated = False
         async with self._store_lock:
             store = await self._load_store_locked()
-            for job in store.jobs:
+            await self._ensure_store_writable_locked()
+            store = self._store if self._store is not None else store
+            working_store = self._copy_store(store)
+            for job in working_store.jobs:
                 if job.id == job_id:
                     if enabled:
                         next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
@@ -550,7 +685,7 @@ class CronService:
                     else:
                         job.enabled = False
                         job.state.next_run_at_ms = None
-                    await self._save_store_locked()
+                    await self._commit_store_locked(working_store)
                     updated = True
                     break
 
@@ -559,7 +694,7 @@ class CronService:
             logger.info(f"Cron: {'enabled' if enabled else 'disabled'} job {job_id}")
         return updated
 
-    async def run_job(self, job_id: str, force: bool = True) -> str | None:
+    async def run_job(self, job_id: str, force: bool = True) -> _ManualRunResult | None:
         """Manually trigger a job.
 
         Args:
@@ -567,43 +702,46 @@ class CronService:
             force: Run even if disabled
 
         Returns:
-            Job result or None if not found
+            Manual run outcome, or None if not found
         """
         job_to_run: CronJob | None = None
-        while job_to_run is None:
-            should_wait = False
+        reserved_job = False
+        try:
             async with self._store_lock:
                 store = await self._load_store_locked()
+                await self._ensure_store_writable_locked()
+                store = self._store if self._store is not None else store
                 for job in store.jobs:
                     if job.id != job_id or not (job.enabled or force):
                         continue
                     if job.id in self._executing_job_ids:
-                        should_wait = True
-                    else:
-                        self._executing_job_ids.add(job.id)
-                        job_to_run = self._copy_job(job)
+                        return _ManualRunResult(status="ignored", result="already_running")
+
+                    self._executing_job_ids.add(job.id)
+                    job_to_run = self._copy_job(job)
+                    reserved_job = True
                     break
+                else:
+                    return None
 
-            if job_to_run is not None:
-                break
-            if not should_wait:
-                return None
-
-            await asyncio.sleep(0.01)
-
-        try:
             execution_result = await self._execute_job(job_to_run)
 
             async with self._store_lock:
                 store = await self._load_store_locked()
-                self._apply_execution_result_locked(store, execution_result)
-                await self._save_store_locked()
+                await self._ensure_store_writable_locked()
+                store = self._store if self._store is not None else store
+                working_store = self._copy_store(store)
+                self._apply_execution_result_locked(working_store, execution_result)
+                await self._commit_store_locked(working_store, keep_memory_on_failure=True)
+            return _ManualRunResult(
+                status="executed",
+                result=execution_result.last_error if execution_result.last_status == "error" else "ok",
+            )
         finally:
             async with self._store_lock:
-                self._executing_job_ids.discard(job_id)
-
-        self._arm_timer()
-        return execution_result.last_error if execution_result.last_status == "error" else "ok"
+                if reserved_job:
+                    self._executing_job_ids.discard(job_id)
+            self._arm_timer()
 
     async def status(self) -> dict:
         """Get service status."""
@@ -617,6 +755,8 @@ class CronService:
             "jobs": len(jobs),
             "enabled": enabled,
             "disabled": len(jobs) - enabled,
+            "store_available": self._store_error is None,
+            "store_error": self._store_error,
         }
 
 
@@ -644,9 +784,10 @@ async def start_cron_service(
 
         store_path = get_paths().base_dir / "cron" / "jobs.json"
 
-    _cron_service = CronService(store_path=store_path, on_job=on_job)
-    await _cron_service.start()
-    return _cron_service
+    service = CronService(store_path=store_path, on_job=on_job)
+    await service.start()
+    _cron_service = service
+    return service
 
 
 def stop_cron_service() -> None:

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from src.cron import get_cron_service
-from src.cron.service import NoFutureRunTimeError
+from src.cron.service import CronStoreError, NoFutureRunTimeError
 from src.cron.types import CronPayload, CronSchedule
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,8 @@ class CronStatusResponse(BaseModel):
     jobs: int
     enabled: int
     disabled: int
+    store_available: bool = True
+    store_error: str | None = None
 
 
 class CronJobActionResponse(BaseModel):
@@ -137,6 +139,19 @@ class CronJobRunResponse(CronJobActionResponse):
     """Response model for manual job execution."""
 
     result: str
+
+
+def _raise_translated_cron_error(exc: Exception) -> None:
+    """Translate cron service exceptions into API-facing HTTP errors."""
+    if isinstance(exc, NoFutureRunTimeError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, CronStoreError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    logger.exception("Unhandled cron service error")
+    raise HTTPException(status_code=500, detail="Internal cron service error") from exc
 
 
 def _job_to_response(job: dict) -> CronJobResponse:
@@ -252,9 +267,8 @@ async def add_job(request: AddCronJobRequest) -> CronJobResponse:
 
         return _job_to_response(job.to_dict())
 
-    except Exception as e:
-        logger.error(f"Failed to add cron job: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as exc:
+        _raise_translated_cron_error(exc)
 
 
 @router.delete("/{job_id}", response_model=CronJobActionResponse)
@@ -264,8 +278,11 @@ async def remove_job(job_id: str) -> CronJobActionResponse:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    if await cron_service.remove_job(job_id):
-        return CronJobActionResponse(status="removed", job_id=job_id)
+    try:
+        if await cron_service.remove_job(job_id):
+            return CronJobActionResponse(status="removed", job_id=job_id)
+    except Exception as exc:
+        _raise_translated_cron_error(exc)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -280,8 +297,8 @@ async def enable_job(job_id: str) -> CronJobActionResponse:
     try:
         if await cron_service.enable_job(job_id, enabled=True):
             return CronJobActionResponse(status="enabled", job_id=job_id)
-    except NoFutureRunTimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        _raise_translated_cron_error(exc)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -293,8 +310,11 @@ async def disable_job(job_id: str) -> CronJobActionResponse:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    if await cron_service.enable_job(job_id, enabled=False):
-        return CronJobActionResponse(status="disabled", job_id=job_id)
+    try:
+        if await cron_service.enable_job(job_id, enabled=False):
+            return CronJobActionResponse(status="disabled", job_id=job_id)
+    except Exception as exc:
+        _raise_translated_cron_error(exc)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -306,8 +326,11 @@ async def run_job(job_id: str) -> CronJobRunResponse:
     if cron_service is None:
         raise HTTPException(status_code=503, detail="Cron service is not running")
 
-    result = await cron_service.run_job(job_id, force=True)
-    if result is not None:
-        return CronJobRunResponse(status="executed", job_id=job_id, result=result)
+    try:
+        result = await cron_service.run_job(job_id, force=True)
+        if result is not None:
+            return CronJobRunResponse(status=result.status, job_id=job_id, result=result.result)
+    except Exception as exc:
+        _raise_translated_cron_error(exc)
 
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
