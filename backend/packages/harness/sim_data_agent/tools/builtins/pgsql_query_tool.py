@@ -1,8 +1,12 @@
 """PostgreSQL query tool."""
 
+import os
 import traceback
 
+from dotenv import load_dotenv
 from langchain.tools import tool
+
+load_dotenv()
 
 
 @tool("pgsql_query", parse_docstring=True)
@@ -14,13 +18,14 @@ def pgsql_query_tool(query: str) -> str:
     """
     try:
         import psycopg2
+
         conn = psycopg2.connect(
-            host="120.26.208.161",
-            port=35432,
-            user="postgres",
-            password="8ajFSypp7KCfZL2c",
-            dbname="sim_data_agent",
-            connect_timeout=10
+            host=os.getenv("DB_HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            user=os.getenv("DB_USER", "postgres"),
+            password=os.getenv("DB_PASSWORD", ""),
+            dbname=os.getenv("DB_DATABASE", "sim_data_agent"),
+            connect_timeout=10,
         )
         conn.autocommit = False
         cursor = conn.cursor()

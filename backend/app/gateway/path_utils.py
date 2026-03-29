@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from deerflow.config.paths import get_paths
+from sim_data_agent.config.paths import get_paths
 
 
 def resolve_thread_virtual_path(thread_id: str, virtual_path: str) -> Path:

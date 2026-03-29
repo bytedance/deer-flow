@@ -275,7 +275,7 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
     Skips artifacts that cannot be resolved (missing files, invalid paths)
     and logs warnings for them.
     """
-    from deerflow.config.paths import get_paths
+    from sim_data_agent.config.paths import get_paths
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()

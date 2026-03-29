@@ -5,7 +5,7 @@ description = "LangGraph-based AI agent system with sandbox execution capabiliti
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "deerflow-harness",
+    "sim-data-agent-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.20",
@@ -25,4 +25,4 @@ dev = ["pytest>=8.0.0", "ruff>=0.14.11"]
 members = ["packages/harness"]
 
 [tool.uv.sources]
-deerflow-harness = { workspace = true }
+sim-data-agent-harness = { workspace = true }
