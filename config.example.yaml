@@ -557,10 +557,17 @@ checkpointer:
 #   langgraph_url: http://localhost:2024
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
+#   #
+#   # Docker Compose note:
+#   # If channels run inside the gateway container, use container DNS names instead
+#   # of localhost, for example:
+#   # langgraph_url: http://langgraph:2024
+#   # gateway_url: http://gateway:8001
+#   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL.
 #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
-#     assistant_id: lead_agent
+#     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
 #     config:
 #       recursion_limit: 100
 #     context:
@@ -586,14 +593,14 @@ checkpointer:
 #
 #     # Optional: channel-level session overrides
 #     session:
-#       assistant_id: mobile_agent
+#       assistant_id: mobile-agent  # custom agent names are supported here too
 #       context:
 #         thinking_enabled: false
 #
 #       # Optional: per-user overrides by user_id
 #       users:
 #         "123456789":
-#           assistant_id: vip_agent
+#           assistant_id: vip-agent
 #           config:
 #             recursion_limit: 150
 #           context:
