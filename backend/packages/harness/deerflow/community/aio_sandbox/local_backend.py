@@ -228,6 +228,8 @@ class LocalContainerBackend(SandboxBackend):
         # Docker-specific security options
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
+            # Run as root to allow installing tools inside the sandbox
+            cmd.extend(["--user", "root"])
 
         cmd.extend(
             [
