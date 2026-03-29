@@ -1,16 +1,16 @@
 FROM langchain/langgraph-api:3.12
 
-# ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-# ENV UV_NO_PROGRESS=1
+
 
 # -- Adding local package . --
-ADD . /deps/edge-langchain
+ADD . /deps/backend
 # -- End of local package . --
 
 # -- Installing all local dependencies --
 RUN for dep in /deps/*; do             echo "Installing $dep";             if [ -d "$dep" ]; then                 echo "Installing $dep";                 (cd "$dep" && PYTHONDONTWRITEBYTECODE=1 uv pip install --system --no-cache-dir -c /api/constraints.txt -e .);             fi;         done
 # -- End of local dependencies install --
-ENV LANGSERVE_GRAPHS='{"default_agent": "/deps/edge-langchain/app/langgraph_graphs.py:default_agent_graph", "lead_agent": "/deps/edge-langchain/app/langgraph_graphs.py:lead_agent_graph", "math_agent": "/deps/edge-langchain/app/langgraph_graphs.py:math_agent_graph"}'
+ENV LANGGRAPH_CHECKPOINTER='{"path": "/deps/backend/packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"}'
+ENV LANGSERVE_GRAPHS='{"lead_agent": "deerflow.agents:make_lead_agent"}'
 
 
 
@@ -24,4 +24,4 @@ RUN rm -rf /usr/local/lib/python*/site-packages/pip* /usr/local/lib/python*/site
 RUN rm -rf /usr/lib/python*/site-packages/pip* /usr/lib/python*/site-packages/setuptools* /usr/lib/python*/site-packages/wheel* && find /usr/bin -name "pip*" -delete || true
 RUN uv pip uninstall --system pip setuptools wheel && rm /usr/bin/uv /usr/bin/uvx
 
-WORKDIR /deps/edge-langchain
+WORKDIR /deps/backend
