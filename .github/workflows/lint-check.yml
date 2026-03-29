@@ -1,8 +1,11 @@
 name: Lint Check
 
+
 on:
-  # pull_request:
-  #   branches: [ '*' ]
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+
 
 permissions:
   contents: read
