@@ -2,8 +2,9 @@
 
 import asyncio
 import importlib
+import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -15,6 +16,7 @@ from src.cron.service import CronService, NoFutureRunTimeError
 from src.cron.types import CronPayload, CronSchedule
 
 cron_service_module = importlib.import_module("src.cron.service")
+cron_timezones_module = importlib.import_module("src.cron.timezones")
 cron_router_module = importlib.import_module("app.gateway.routers.cron")
 
 
@@ -75,6 +77,238 @@ def test_compute_next_run_for_cron_schedule(monkeypatch):
     assert captured["expr"] == "30 9 * * *"
     assert captured["base_dt"].tzinfo is not None
     assert next_run == int(datetime(2026, 3, 12, 9, 30, tzinfo=UTC).timestamp() * 1000)
+
+
+def test_format_timestamp_ms_uses_local_timezone_for_legacy_cron_schedule(monkeypatch):
+    monkeypatch.setattr(
+        cron_timezones_module,
+        "_local_timezone",
+        lambda: timezone(timedelta(hours=8), "UTC+08:00"),
+    )
+
+    formatted = cron_timezones_module.format_timestamp_ms(
+        1_774_863_000_000,
+        schedule={"kind": "cron", "tz": None},
+    )
+
+    assert formatted == "2026-03-30T17:30:00+08:00"
+
+
+def test_format_timestamp_ms_uses_utc_for_non_cron_schedule(monkeypatch):
+    monkeypatch.setattr(
+        cron_timezones_module,
+        "_local_timezone",
+        lambda: timezone(timedelta(hours=8), "UTC+08:00"),
+    )
+
+    formatted = cron_timezones_module.format_timestamp_ms(
+        0,
+        schedule={"kind": "at", "at_ms": 0},
+    )
+
+    assert formatted == "1970-01-01T00:00:00+00:00"
+
+
+def test_normalize_cron_schedule_timezone_uses_configured_default_timezone(monkeypatch):
+    monkeypatch.setattr(cron_timezones_module, "get_default_timezone_name", lambda: "Asia/Tokyo")
+
+    schedule = cron_timezones_module.normalize_cron_schedule_timezone(
+        CronSchedule(kind="cron", expr="30 17 * * *")
+    )
+
+    assert schedule.tz == "Asia/Tokyo"
+
+
+def test_job_to_response_formats_times_using_schedule_timezone():
+    response = cron_router_module._job_to_response(
+        {
+            "id": "job-1",
+            "name": "Dinner reminder",
+            "enabled": True,
+            "schedule": {
+                "kind": "cron",
+                "at_ms": None,
+                "every_ms": None,
+                "expr": "30 17 * * *",
+                "tz": "UTC+08:00",
+            },
+            "payload": {"kind": "agent_turn", "message": "Eat"},
+            "state": {
+                "next_run_at_ms": 1_774_863_000_000,
+                "last_run_at_ms": 1_774_776_600_012,
+                "last_status": "ok",
+                "last_error": None,
+            },
+            "delete_after_run": False,
+            "created_at_ms": 1_774_774_183_250,
+        }
+    )
+
+    assert response.schedule.tz == "UTC+08:00"
+    assert response.state.next_run_at == "2026-03-30T17:30:00+08:00"
+    assert response.state.last_run_at == "2026-03-29T17:30:00.012000+08:00"
+    assert response.created_at == "2026-03-29T08:49:43.250000+00:00"
+
+
+def test_job_to_response_handles_missing_created_at_ms():
+    response = cron_router_module._job_to_response(
+        {
+            "id": "job-1",
+            "name": "Dinner reminder",
+            "enabled": True,
+            "schedule": {
+                "kind": "cron",
+                "at_ms": None,
+                "every_ms": None,
+                "expr": "30 17 * * *",
+                "tz": "Asia/Shanghai",
+            },
+            "payload": {"kind": "agent_turn", "message": "Eat"},
+            "state": {
+                "next_run_at_ms": None,
+                "last_run_at_ms": None,
+                "last_status": "pending",
+                "last_error": None,
+            },
+            "delete_after_run": False,
+            "created_at_ms": None,
+        }
+    )
+
+    assert response.created_at == "1970-01-01T00:00:00+00:00"
+
+
+def test_add_job_normalizes_missing_cron_timezone(monkeypatch, tmp_path: Path):
+    captured: dict = {}
+    croniter_module = ModuleType("croniter")
+
+    def fake_croniter(expr, base_dt):
+        captured["expr"] = expr
+        captured["base_dt"] = base_dt
+
+        class FakeIterator:
+            def get_next(self, value_type):
+                assert value_type is datetime
+                return datetime(2026, 3, 30, 17, 30, tzinfo=base_dt.tzinfo)
+
+        return FakeIterator()
+
+    croniter_module.croniter = fake_croniter
+    monkeypatch.setitem(sys.modules, "croniter", croniter_module)
+    monkeypatch.setattr(cron_service_module, "_now_ms", lambda: 1_774_849_620_000)
+    monkeypatch.setattr(cron_timezones_module, "get_default_timezone_name", lambda: "Asia/Shanghai")
+
+    service = CronService(store_path=_make_store_path(tmp_path))
+    created = _run(
+        service.add_job(
+            name="Dinner reminder",
+            schedule=CronSchedule(kind="cron", expr="30 17 * * *"),
+            payload=CronPayload(message="Eat"),
+        )
+    )
+
+    [saved_job] = _run(CronService(store_path=_make_store_path(tmp_path)).get_jobs())
+
+    assert captured["expr"] == "30 17 * * *"
+    assert created.schedule.tz == "Asia/Shanghai"
+    assert saved_job.schedule.tz == "Asia/Shanghai"
+    assert created.state.next_run_at_ms == 1_774_863_000_000
+
+
+def test_start_does_not_persist_legacy_cron_timezones(monkeypatch, tmp_path: Path):
+    store_path = _make_store_path(tmp_path)
+    store_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "name": "Dinner reminder",
+                        "enabled": True,
+                        "schedule": {
+                            "kind": "cron",
+                            "at_ms": None,
+                            "every_ms": None,
+                            "expr": "30 17 * * *",
+                            "tz": None,
+                        },
+                        "payload": {"kind": "agent_turn", "message": "Eat"},
+                        "state": {
+                            "next_run_at_ms": 1_774_863_000_000,
+                            "last_run_at_ms": None,
+                            "last_status": "pending",
+                            "last_error": None,
+                        },
+                        "delete_after_run": False,
+                        "created_at_ms": 1_774_774_183_250,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = CronService(store_path=store_path)
+
+    def fail_write(_store):
+        raise AssertionError("start() should not write the cron store")
+
+    monkeypatch.setattr(service, "_write_store_to_disk", fail_write)
+    _run(service.start())
+    service.stop()
+
+    persisted = json.loads(store_path.read_text(encoding="utf-8"))
+    assert persisted["jobs"][0]["schedule"]["tz"] is None
+
+
+def test_enable_job_preserves_legacy_cron_timezone(monkeypatch, tmp_path: Path):
+    captured: dict = {}
+    croniter_module = ModuleType("croniter")
+
+    def fake_croniter(expr, base_dt):
+        captured["expr"] = expr
+        captured["base_dt"] = base_dt
+
+        class FakeIterator:
+            def get_next(self, value_type):
+                assert value_type is datetime
+                return datetime(2026, 3, 30, 17, 30, tzinfo=base_dt.tzinfo)
+
+        return FakeIterator()
+
+    croniter_module.croniter = fake_croniter
+    monkeypatch.setitem(sys.modules, "croniter", croniter_module)
+    monkeypatch.setattr(cron_timezones_module, "get_default_timezone_name", lambda: "Asia/Shanghai")
+    monkeypatch.setattr(
+        cron_timezones_module,
+        "_local_timezone",
+        lambda: timezone(timedelta(hours=8), "UTC+08:00"),
+    )
+    monkeypatch.setattr(cron_service_module, "_now_ms", lambda: 1_774_849_620_000)
+
+    service = CronService(store_path=_make_store_path(tmp_path))
+    created = _run(
+        service.add_job(
+            name="Dinner reminder",
+            schedule=CronSchedule(kind="cron", expr="30 17 * * *"),
+            payload=CronPayload(message="Eat"),
+            enabled=False,
+        )
+    )
+
+    store_path = _make_store_path(tmp_path)
+    persisted = json.loads(store_path.read_text(encoding="utf-8"))
+    persisted["jobs"][0]["schedule"]["tz"] = None
+    store_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    reloaded_service = CronService(store_path=store_path)
+    updated = _run(reloaded_service.enable_job(created.id, enabled=True))
+    [saved_job] = _run(CronService(store_path=store_path).get_jobs())
+
+    assert updated is True
+    assert captured["expr"] == "30 17 * * *"
+    assert saved_job.schedule.tz is None
+    assert saved_job.state.next_run_at_ms == 1_774_863_000_000
 
 
 def test_add_job_rejects_invalid_interval_schedule(tmp_path: Path):

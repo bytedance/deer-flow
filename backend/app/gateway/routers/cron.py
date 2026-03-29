@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from src.cron import get_cron_service
+from src.cron.timezones import format_timestamp_ms
 from src.cron.service import CronStoreError, NoFutureRunTimeError
 from src.cron.types import CronPayload, CronSchedule
 
@@ -156,30 +157,31 @@ def _raise_translated_cron_error(exc: Exception) -> None:
 
 def _job_to_response(job: dict) -> CronJobResponse:
     """Convert a job dict to API response format."""
+    schedule = job.get("schedule", {})
     job_state = job.get("state", {})
     next_run = job_state.get("next_run_at_ms")
     last_run = job_state.get("last_run_at_ms")
-    created_at_ms = job.get("created_at_ms", 0)
+    created_at_ms = job.get("created_at_ms")
 
-    def _isoformat_ms(timestamp_ms: int | None) -> str | None:
+    def _isoformat_utc(timestamp_ms: int | None) -> str:
         if timestamp_ms is None:
-            return None
+            timestamp_ms = 0
         return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()
 
     return CronJobResponse(
         id=job["id"],
         name=job["name"],
         enabled=job["enabled"],
-        schedule=CronScheduleResponse(**job["schedule"]),
+        schedule=CronScheduleResponse(**schedule),
         payload=CronPayloadResponse(**job["payload"]),
         state=CronJobStateResponse(
-            next_run_at=_isoformat_ms(next_run),
-            last_run_at=_isoformat_ms(last_run),
+            next_run_at=format_timestamp_ms(next_run, schedule=schedule),
+            last_run_at=format_timestamp_ms(last_run, schedule=schedule),
             last_status=job_state.get("last_status", "pending"),
             last_error=job_state.get("last_error"),
         ),
         delete_after_run=job.get("delete_after_run", False),
-        created_at=_isoformat_ms(created_at_ms) or datetime.fromtimestamp(0, tz=UTC).isoformat(),
+        created_at=_isoformat_utc(created_at_ms),
     )
 
 

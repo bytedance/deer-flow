@@ -2,6 +2,7 @@
 
 import atexit
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -10,6 +11,7 @@ from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langgraph.typing import ContextT
 
 from deerflow.agents.thread_state import ThreadState
+from src.cron.timezones import get_default_timezone_name, normalize_iana_timezone, resolve_timezone_name
 
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _CRON_API_CLIENT: httpx.Client | None = None
@@ -33,8 +35,6 @@ def _parse_time_to_ms(time_str: str) -> int | None:
         return int(dt.timestamp() * 1000)
     except ValueError:
         pass
-
-    import re
 
     now_ms = int(datetime.now().timestamp() * 1000)
     match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", time_str)
@@ -75,8 +75,6 @@ def _parse_interval_to_ms(interval_str: str) -> int | None:
         return int(seconds * 1000)
     except ValueError:
         pass
-
-    import re
 
     match = re.match(r"(\d+)\s*(minute|hour|day|week|sec(?:ond)?)s?", interval_str, re.I)
     if match:
@@ -216,7 +214,62 @@ def _get_delivery_target(runtime: ToolRuntime[ContextT, ThreadState] | None) -> 
     )
 
 
-def _format_jobs(jobs: list[dict[str, Any]]) -> str:
+def _resolve_deliver_flag(
+    deliver: bool | None,
+    *,
+    channel_name: str | None,
+    chat_id: str | None,
+) -> bool:
+    """Default delivery to the current IM chat when a target is available."""
+    if deliver is not None:
+        return deliver
+    return bool(channel_name and chat_id)
+
+
+def _get_runtime_timezone(runtime: ToolRuntime[ContextT, ThreadState] | None) -> str | None:
+    """Read the caller-provided timezone, falling back to the configured default."""
+    if runtime is None:
+        return get_default_timezone_name()
+    return normalize_iana_timezone(runtime.context.get("timezone")) or get_default_timezone_name()
+
+
+def _resolve_display_timezone(runtime: ToolRuntime[ContextT, ThreadState] | None, schedule: dict[str, Any] | None = None):
+    """Resolve the timezone used when showing times back to the user."""
+    schedule_tz = _normalize_optional_string(schedule.get("tz")) if isinstance(schedule, dict) else None
+    if schedule_tz:
+        try:
+            return resolve_timezone_name(schedule_tz)
+        except Exception:
+            pass
+
+    runtime_tz = _get_runtime_timezone(runtime)
+    if runtime_tz:
+        try:
+            return resolve_timezone_name(runtime_tz)
+        except Exception:
+            pass
+    return resolve_timezone_name(get_default_timezone_name())
+
+
+def _format_next_run_for_display(
+    next_run: Any,
+    *,
+    runtime: ToolRuntime[ContextT, ThreadState] | None,
+    schedule: dict[str, Any] | None = None,
+) -> str | None:
+    """Convert an API timestamp string into the user's display timezone."""
+    if not isinstance(next_run, str) or not next_run:
+        return None
+    try:
+        parsed = datetime.fromisoformat(next_run.replace("Z", "+00:00"))
+    except ValueError:
+        return next_run
+
+    display_tz = _resolve_display_timezone(runtime, schedule)
+    return parsed.astimezone(display_tz).isoformat()
+
+
+def _format_jobs(jobs: list[dict[str, Any]], *, runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> str:
     """Format jobs returned by the cron API for LLM consumption."""
     if not jobs:
         return "No scheduled tasks found."
@@ -225,7 +278,11 @@ def _format_jobs(jobs: list[dict[str, Any]]) -> str:
     for job in jobs:
         status = "enabled" if job.get("enabled") else "disabled"
         state = job.get("state", {})
-        next_run = state.get("next_run_at")
+        next_run = _format_next_run_for_display(
+            state.get("next_run_at"),
+            runtime=runtime,
+            schedule=job.get("schedule"),
+        )
         next_suffix = f" (next: {next_run})" if isinstance(next_run, str) and next_run else ""
         lines.append(f"  [{status}] {job['id']}: {job['name']}{next_suffix}")
     return "\n".join(lines)
@@ -290,7 +347,7 @@ def cron_tool(
     cron_expr: str | None = None,
     timezone: str | None = None,
     job_id: str | None = None,
-    deliver: bool = False,
+    deliver: bool | None = None,
 ) -> str:
     """Schedule reminders and recurring tasks.
 
@@ -309,9 +366,9 @@ def cron_tool(
         at: When to run a one-time task. Supports ISO datetime, local time like "00:08", relative time like "in 5 minutes", or Unix timestamp
         every: Interval for recurring tasks. Supports "5 minutes", "1 hour", "2 days", or short form like "5m"
         cron_expr: Cron expression for complex schedules (e.g., "0 9 * * 1-5" for weekdays at 9am)
-        timezone: Timezone for cron expressions (e.g., "Asia/Shanghai", "America/New_York")
+        timezone: Timezone for cron expressions (e.g., "Asia/Shanghai", "America/New_York"). Explicit values override runtime context.
         job_id: ID of the job to remove/enable/disable
-        deliver: If True, deliver the result to the originating channel when task completes
+        deliver: Whether to deliver the result to the originating channel when the task completes. Defaults to True when the current request came from an IM chat with a delivery target.
     """
     del tool_call_id
 
@@ -320,7 +377,7 @@ def cron_tool(
 
     if action == "list":
         jobs = _cron_api_request("GET", "/api/cron", params={"include_disabled": True})
-        return _format_jobs(jobs)
+        return _format_jobs(jobs, runtime=runtime)
 
     if action == "add":
         if not message:
@@ -340,20 +397,26 @@ def cron_tool(
                 return f"Error: Could not parse interval '{every}'. Use format like '5 minutes' or '1h'"
             schedule = _build_schedule_dict(kind="every", every_ms=every_ms)
         elif cron_expr:
-            schedule = _build_schedule_dict(kind="cron", expr=cron_expr, tz=timezone)
+            effective_timezone = _normalize_optional_string(timezone) or _get_runtime_timezone(runtime)
+            schedule = _build_schedule_dict(kind="cron", expr=cron_expr, tz=effective_timezone)
         else:
             return "Error: Must specify one of 'at', 'every', or 'cron_expr'"
 
         thread_id = _get_thread_id(runtime)
         assistant_id, agent_name, thinking_enabled, subagent_enabled = _get_run_settings(runtime)
         channel_name, chat_id, thread_ts = _get_delivery_target(runtime)
+        effective_deliver = _resolve_deliver_flag(
+            deliver,
+            channel_name=channel_name,
+            chat_id=chat_id,
+        )
 
         payload = _build_payload_dict(
             message=message,
-            deliver=deliver,
-            channel=channel_name if deliver else None,
-            to=chat_id if deliver else None,
-            thread_ts=thread_ts if deliver else None,
+            deliver=effective_deliver,
+            channel=channel_name if effective_deliver else None,
+            to=chat_id if effective_deliver else None,
+            thread_ts=thread_ts if effective_deliver else None,
             thread_id=thread_id,
             assistant_id=assistant_id,
             agent_name=agent_name,
@@ -373,7 +436,11 @@ def cron_tool(
             },
         )
 
-        next_run = job.get("state", {}).get("next_run_at")
+        next_run = _format_next_run_for_display(
+            job.get("state", {}).get("next_run_at"),
+            runtime=runtime,
+            schedule=job.get("schedule"),
+        )
         next_str = f" at {next_run}" if isinstance(next_run, str) and next_run else ""
         return f"Task scheduled: '{name}' (id: {job['id']}){next_str}"
 

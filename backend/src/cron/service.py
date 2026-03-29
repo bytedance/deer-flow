@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from .timezones import get_schedule_timezone, normalize_cron_schedule_timezone, resolve_timezone
 from .types import CronJob, CronPayload, CronSchedule, _generate_id, _now_ms
 
 logger = logging.getLogger(__name__)
@@ -76,12 +77,10 @@ def _compute_next_run(
     if schedule.kind == "cron" and schedule.expr:
         # Cron expression: use croniter to compute next run
         try:
-            from zoneinfo import ZoneInfo
-
             from croniter import croniter
 
             base_time = now_ms / 1000
-            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            tz = get_schedule_timezone(schedule)
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
@@ -113,18 +112,14 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
             raise ValueError("cron schedules require 'expr'")
         if schedule.tz:
             try:
-                from zoneinfo import ZoneInfo
-
-                ZoneInfo(schedule.tz)
+                resolve_timezone(schedule.tz)
             except Exception as exc:
                 raise ValueError(f"unknown timezone '{schedule.tz}'") from exc
 
         try:
-            from zoneinfo import ZoneInfo
-
             from croniter import croniter
 
-            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            tz = get_schedule_timezone(schedule)
             croniter(schedule.expr, datetime.fromtimestamp(_now_ms() / 1000, tz=tz))
         except ValueError:
             raise
@@ -428,7 +423,7 @@ class CronService:
             store = await self._load_store_locked()
             working_store = self._copy_store(store)
             self._recompute_next_runs_locked(working_store, preserve_existing=True)
-            await self._commit_store_locked(working_store)
+            self._store = working_store
             self._running = True
             job_count = len(working_store.jobs)
 
@@ -613,6 +608,7 @@ class CronService:
         Returns:
             The created CronJob
         """
+        normalize_cron_schedule_timezone(schedule)
         _validate_schedule_for_add(schedule)
 
         async with self._store_lock:
