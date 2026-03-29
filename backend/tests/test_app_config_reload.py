@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.app_config import get_app_config, reset_app_config
+from deerflow.config.app_config import AppConfig
 
 
 def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> None:
@@ -79,3 +80,43 @@ def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
         assert second is not first
     finally:
         reset_app_config()
+
+
+def test_app_config_loads_env_relative_to_config_path(tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    run_dir = tmp_path / "runner"
+    project_dir.mkdir()
+    run_dir.mkdir()
+
+    config_path = project_dir / "config.yaml"
+    extensions_path = project_dir / "extensions_config.json"
+    env_path = project_dir / ".env"
+
+    _write_extensions_config(extensions_path)
+    env_path.write_text("ZHIPUAI_API_KEY=test-zhipu-key\n", encoding="utf-8")
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {
+                    "use": "deerflow.sandbox.local:LocalSandboxProvider",
+                    "environment": {"ZHIPUAI_API_KEY": "$ZHIPUAI_API_KEY"},
+                },
+                "models": [
+                    {
+                        "name": "test-model",
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": "gpt-test",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(run_dir)
+    monkeypatch.delenv("ZHIPUAI_API_KEY", raising=False)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.sandbox.environment["ZHIPUAI_API_KEY"] == "test-zhipu-key"

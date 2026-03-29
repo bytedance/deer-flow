@@ -84,6 +84,7 @@ class AppConfig(BaseModel):
             AppConfig: The loaded config.
         """
         resolved_path = cls.resolve_config_path(config_path)
+        cls.load_env_for_config(resolved_path)
         with open(resolved_path, encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
 
@@ -129,6 +130,19 @@ class AppConfig(BaseModel):
 
         result = cls.model_validate(config_data)
         return result
+
+    @classmethod
+    def load_env_for_config(cls, config_path: Path) -> None:
+        """Load .env files near the resolved config path.
+
+        This makes config loading independent from the process working directory.
+        The closest .env to config.yaml wins because later parent loads do not
+        override already-populated variables.
+        """
+        for base in (config_path.parent, *config_path.parents):
+            env_path = base / ".env"
+            if env_path.is_file():
+                load_dotenv(env_path, override=False)
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
