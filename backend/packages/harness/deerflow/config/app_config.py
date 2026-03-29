@@ -127,6 +127,13 @@ class AppConfig(BaseModel):
         extensions_config = ExtensionsConfig.from_file()
         config_data["extensions"] = extensions_config.model_dump()
 
+        # Older configs or partial config-upgrade merges may leave list fields as
+        # explicit null instead of omitting them. Treat those as empty lists so
+        # startup can fall back to defaults instead of failing validation.
+        for key in ("models", "tools", "tool_groups"):
+            if config_data.get(key) is None:
+                config_data[key] = []
+
         result = cls.model_validate(config_data)
         return result
 
