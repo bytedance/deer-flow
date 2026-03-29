@@ -1,7 +1,7 @@
 import logging
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
@@ -205,12 +205,13 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
+def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, custom_middlewares: list[AgentMiddleware] | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
+        custom_middlewares: Optional list of custom middlewares to inject into the chain.
 
     Returns:
         List of middleware instances.
@@ -259,6 +260,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     middlewares.append(LoopDetectionMiddleware())
+
+    # Inject custom middlewares before ClarificationMiddleware
+    if custom_middlewares:
+        middlewares.extend(custom_middlewares)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())

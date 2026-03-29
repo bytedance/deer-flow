@@ -258,12 +258,19 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
    make setup-sandbox
    ```
 
-4. **Start services**:
+4. **(Optional) Load sample memory data for local review**:
+   ```bash
+   python scripts/load_memory_sample.py
+   ```
+   This copies the sample fixture into the default local runtime memory file so reviewers can immediately test `Settings > Memory`.
+   See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
+
+5. **Start services**:
    ```bash
    make dev
    ```
 
-5. **Access**: http://localhost:2026
+6. **Access**: http://localhost:2026
 
 ### Advanced
 #### Sandbox Mode
@@ -304,7 +311,7 @@ channels:
 
   # Optional: global session defaults for all mobile channels
   session:
-    assistant_id: lead_agent
+    assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
     config:
       recursion_limit: 100
     context:
@@ -330,18 +337,22 @@ channels:
 
     # Optional: per-channel / per-user session settings
     session:
-      assistant_id: mobile_agent
+      assistant_id: mobile-agent  # custom agent names are also supported here
       context:
         thinking_enabled: false
       users:
         "123456789":
-          assistant_id: vip_agent
+          assistant_id: vip-agent
           config:
             recursion_limit: 150
           context:
             thinking_enabled: true
             subagent_enabled: true
 ```
+
+Notes:
+- `assistant_id: lead_agent` calls the default LangGraph assistant directly.
+- If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -377,6 +388,8 @@ FEISHU_APP_SECRET=your_app_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://langgraph:2024` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
 **Commands**
 

@@ -22,12 +22,13 @@ import mimetypes
 import shutil
 import tempfile
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -116,6 +117,7 @@ class DeerFlowClient:
         subagent_enabled: bool = False,
         plan_mode: bool = False,
         agent_name: str | None = None,
+        middlewares: Sequence[AgentMiddleware] | None = None,
     ):
         """Initialize the client.
 
@@ -131,6 +133,7 @@ class DeerFlowClient:
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
+            middlewares: Optional list of custom middlewares to inject into the agent.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -145,6 +148,7 @@ class DeerFlowClient:
         self._subagent_enabled = subagent_enabled
         self._plan_mode = plan_mode
         self._agent_name = agent_name
+        self._middlewares = list(middlewares) if middlewares else []
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -217,7 +221,7 @@ class DeerFlowClient:
         kwargs: dict[str, Any] = {
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name),
+            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
@@ -677,6 +681,18 @@ class DeerFlowClient:
         from deerflow.agents.memory.updater import reload_memory_data
 
         return reload_memory_data()
+
+    def clear_memory(self) -> dict:
+        """Clear all persisted memory data."""
+        from deerflow.agents.memory.updater import clear_memory_data
+
+        return clear_memory_data()
+
+    def delete_memory_fact(self, fact_id: str) -> dict:
+        """Delete a single fact from memory by fact id."""
+        from deerflow.agents.memory.updater import delete_memory_fact
+
+        return delete_memory_fact(fact_id)
 
     def get_memory_config(self) -> dict:
         """Get memory system configuration.

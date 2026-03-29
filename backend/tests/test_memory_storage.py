@@ -33,6 +33,7 @@ class TestMemoryStorageInterface:
 
     def test_abstract_methods(self):
         """Should raise TypeError when trying to instantiate abstract class."""
+
         class TestStorage(MemoryStorage):
             pass
 
@@ -45,6 +46,7 @@ class TestFileMemoryStorage:
 
     def test_get_memory_file_path_global(self, tmp_path):
         """Should return global memory file path when agent_name is None."""
+
         def mock_get_paths():
             mock_paths = MagicMock()
             mock_paths.memory_file = tmp_path / "memory.json"
@@ -58,6 +60,7 @@ class TestFileMemoryStorage:
 
     def test_get_memory_file_path_agent(self, tmp_path):
         """Should return per-agent memory file path when agent_name is provided."""
+
         def mock_get_paths():
             mock_paths = MagicMock()
             mock_paths.agent_memory_file.return_value = tmp_path / "agents" / "test-agent" / "memory.json"
@@ -68,9 +71,7 @@ class TestFileMemoryStorage:
             path = storage._get_memory_file_path("test-agent")
             assert path == tmp_path / "agents" / "test-agent" / "memory.json"
 
-    @pytest.mark.parametrize(
-        "invalid_name", ["", "../etc/passwd", "agent/name", "agent\\name", "agent name", "agent@123", "agent_name"]
-    )
+    @pytest.mark.parametrize("invalid_name", ["", "../etc/passwd", "agent/name", "agent\\name", "agent name", "agent@123", "agent_name"])
     def test_validate_agent_name_invalid(self, invalid_name):
         """Should raise ValueError for invalid agent names that don't match the pattern."""
         storage = FileMemoryStorage()
@@ -79,6 +80,7 @@ class TestFileMemoryStorage:
 
     def test_load_creates_empty_memory(self, tmp_path):
         """Should create empty memory when file doesn't exist."""
+
         def mock_get_paths():
             mock_paths = MagicMock()
             mock_paths.memory_file = tmp_path / "non_existent_memory.json"
@@ -125,10 +127,10 @@ class TestFileMemoryStorage:
                 # First load
                 memory1 = storage.load()
                 assert memory1["facts"][0]["content"] == "initial fact"
-                
+
                 # Update file directly
                 memory_file.write_text('{"version": "1.0", "facts": [{"content": "updated fact"}]}')
-                
+
                 # Reload should get updated data
                 memory2 = storage.reload()
                 assert memory2["facts"][0]["content"] == "updated fact"
@@ -141,6 +143,7 @@ class TestGetMemoryStorage:
     def reset_storage_instance(self):
         """Reset the global storage instance before and after each test."""
         import deerflow.agents.memory.storage as storage_mod
+
         storage_mod._storage_instance = None
         yield
         storage_mod._storage_instance = None
@@ -167,6 +170,7 @@ class TestGetMemoryStorage:
     def test_get_memory_storage_thread_safety(self):
         """Should safely initialize the singleton even with concurrent calls."""
         results = []
+
         def get_storage():
             # get_memory_storage is called concurrently from multiple threads while
             # get_memory_config is patched once around thread creation. This verifies
