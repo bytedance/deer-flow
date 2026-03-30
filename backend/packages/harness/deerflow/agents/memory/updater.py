@@ -52,9 +52,10 @@ def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = Non
     Raises:
         OSError: If persisting the imported memory fails.
     """
-    if not get_memory_storage().save(memory_data, agent_name):
+    storage = get_memory_storage()
+    if not storage.save(memory_data, agent_name):
         raise OSError("Failed to save imported memory data")
-    return get_memory_storage().load(agent_name)
+    return storage.load(agent_name)
 
 
 def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
