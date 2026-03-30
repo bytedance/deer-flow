@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
 from langgraph_sdk.errors import ConflictError
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
@@ -80,18 +79,6 @@ async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.Asyn
 
 
 register_inbound_file_reader("wecom", _read_wecom_inbound_file)
-
-
-class InvalidChannelSessionConfigError(ValueError):
-    """Raised when IM channel session overrides contain invalid agent config."""
-
-
-def _is_thread_busy_error(exc: BaseException | None) -> bool:
-    if exc is None:
-        return False
-    if isinstance(exc, ConflictError):
-        return True
-    return "already running a task" in str(exc)
 
 
 class InvalidChannelSessionConfigError(ValueError):
