@@ -192,6 +192,8 @@ export const enUS: Translations = {
     nameStepInvalidError:
       "Invalid name — use only letters, digits, and hyphens",
     nameStepAlreadyExistsError: "An agent with this name already exists",
+    nameStepCorsError:
+      "Request blocked — possible CORS issue, check backend config or access via nginx",
     nameStepCheckError: "Could not verify name availability — please try again",
     nameStepBootstrapMessage:
       "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",

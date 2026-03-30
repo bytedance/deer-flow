@@ -131,6 +131,7 @@ export interface Translations {
     nameStepContinue: string;
     nameStepInvalidError: string;
     nameStepAlreadyExistsError: string;
+    nameStepCorsError: string;
     nameStepCheckError: string;
     nameStepBootstrapMessage: string;
     agentCreated: string;

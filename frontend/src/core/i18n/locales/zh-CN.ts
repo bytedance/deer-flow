@@ -181,6 +181,8 @@ export const zhCN: Translations = {
     nameStepContinue: "继续",
     nameStepInvalidError: "名称无效，只允许字母、数字和连字符",
     nameStepAlreadyExistsError: "已存在同名智能体",
+    nameStepCorsError:
+      "网络请求被拦截，可能是跨域问题，请检查后端或通过 nginx 访问",
     nameStepCheckError: "无法验证名称可用性，请稍后重试",
     nameStepBootstrapMessage:
       "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
