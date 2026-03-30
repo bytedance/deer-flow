@@ -149,9 +149,7 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
-      # Disable LangSmith tracing — LANGSMITH_API_KEY is not required.
-      # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
-      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      # LangSmith tracing: set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable.
     env_file:
       - ../.env
     extra_hosts:
