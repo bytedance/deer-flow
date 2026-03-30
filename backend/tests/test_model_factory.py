@@ -456,6 +456,142 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
     assert captured.get("max_tokens") == 4096
 
 
+def _make_capturing_model(captured: dict):
+    """Return a FakeChatModel subclass that records constructor kwargs into *captured*."""
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    return CapturingModel
+
+
+def test_stream_usage_default_injected_when_supported(monkeypatch):
+    """When supports_stream_usage=True and stream_usage absent from config, factory injects True."""
+    model = ModelConfig(
+        name="minimax-m2.5-stream",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        supports_stream_usage=True,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _make_capturing_model(captured))
+
+    factory_module.create_chat_model(name="minimax-m2.5-stream")
+
+    assert captured.get("stream_usage") is True
+
+
+def test_stream_usage_not_injected_without_flag(monkeypatch):
+    """When supports_stream_usage is not set, factory never injects stream_usage."""
+    model = ModelConfig(
+        name="generic-openai",
+        display_name="Generic OpenAI",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4o",
+        api_key="test-key",
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _make_capturing_model(captured))
+
+    factory_module.create_chat_model(name="generic-openai")
+
+    assert "stream_usage" not in captured
+
+
+def test_stream_usage_config_explicit_true_overrides_default(monkeypatch):
+    """Explicit stream_usage=True in config is forwarded even when supports_stream_usage=True."""
+    model = ModelConfig(
+        name="minimax-m2.5-explicit-true",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        stream_usage=True,
+        supports_stream_usage=True,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _make_capturing_model(captured))
+
+    factory_module.create_chat_model(name="minimax-m2.5-explicit-true")
+
+    assert captured.get("stream_usage") is True
+
+
+def test_stream_usage_config_explicit_false_overrides_default(monkeypatch):
+    """Explicit stream_usage=False in config suppresses default injection."""
+    model = ModelConfig(
+        name="minimax-m2.5-explicit-false",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        stream_usage=False,
+        supports_stream_usage=True,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _make_capturing_model(captured))
+
+    factory_module.create_chat_model(name="minimax-m2.5-explicit-false")
+
+    assert captured.get("stream_usage") is False
+
+
+def test_stream_usage_callsite_override(monkeypatch):
+    """A stream_usage kwarg at the call site takes precedence over the default injection."""
+    model = ModelConfig(
+        name="minimax-m2.5-callsite",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        supports_stream_usage=True,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _make_capturing_model(captured))
+
+    factory_module.create_chat_model(name="minimax-m2.5-callsite", stream_usage=False)
+
+    assert captured.get("stream_usage") is False
+
+
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(

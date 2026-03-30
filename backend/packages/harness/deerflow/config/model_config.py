@@ -28,6 +28,16 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is enabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    supports_stream_usage: bool = Field(
+        default_factory=lambda: False,
+        description=(
+            "Whether to enable stream_usage by default for this model. "
+            "Set to true for OpenAI-compatible providers (e.g. MiniMax) that require "
+            "include_usage in streaming responses so that SummarizationMiddleware "
+            "receives token-usage metadata. An explicit stream_usage value in the model "
+            "config or at the call site always takes precedence."
+        ),
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(
