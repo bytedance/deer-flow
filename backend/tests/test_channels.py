@@ -1815,6 +1815,68 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://langgraph:2024"
         assert service.manager._gateway_url == "http://gateway:8001"
 
+    def test_non_containerized_service_defaults_use_localhost(self, monkeypatch):
+        import app.channels.service as service_module
+        from app.channels.service import ChannelService
+
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", raising=False)
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_GATEWAY_URL", raising=False)
+        monkeypatch.setattr(service_module, "_is_containerized_runtime", lambda: False)
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._langgraph_url == "http://localhost:2024"
+        assert service.manager._gateway_url == "http://localhost:8001"
+
+    def test_env_vars_override_container_defaults(self, monkeypatch):
+        import app.channels.service as service_module
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", "http://custom-lg:2024")
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_GATEWAY_URL", "http://custom-gw:8001")
+        monkeypatch.setattr(service_module, "_is_containerized_runtime", lambda: True)
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._langgraph_url == "http://custom-lg:2024"
+        assert service.manager._gateway_url == "http://custom-gw:8001"
+
+    def test_config_urls_override_container_defaults(self, monkeypatch):
+        import app.channels.service as service_module
+        from app.channels.service import ChannelService
+
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_LANGGRAPH_URL", raising=False)
+        monkeypatch.delenv("DEER_FLOW_CHANNELS_GATEWAY_URL", raising=False)
+        monkeypatch.setattr(service_module, "_is_containerized_runtime", lambda: True)
+
+        service = ChannelService(
+            channels_config={
+                "langgraph_url": "http://override-langgraph:2024",
+                "gateway_url": "http://override-gateway:8001",
+            }
+        )
+
+        assert service.manager._langgraph_url == "http://override-langgraph:2024"
+        assert service.manager._gateway_url == "http://override-gateway:8001"
+
+
+class TestIsContainerizedRuntime:
+    def test_returns_true_when_kubernetes_env_set(self, monkeypatch):
+        import app.channels.service as service_module
+
+        monkeypatch.setattr(service_module.os.path, "exists", lambda p: False)
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+        assert service_module._is_containerized_runtime() is True
+
+    def test_returns_false_in_plain_host(self, monkeypatch):
+        import app.channels.service as service_module
+
+        monkeypatch.setattr(service_module.os.path, "exists", lambda p: False)
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+
+        assert service_module._is_containerized_runtime() is False
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
