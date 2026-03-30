@@ -12,9 +12,7 @@ _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
     if not _SAFE_THREAD_ID_RE.match(thread_id):
-        raise ValueError(
-            f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed."
-        )
+        raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return thread_id
 
 

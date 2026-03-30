@@ -100,6 +100,7 @@ def _validate_thread_id(thread_id: str) -> str:
         )
     return thread_id
 
+
 # ── K8s client setup ────────────────────────────────────────────────────
 
 core_v1: k8s_client.CoreV1Api | None = None
