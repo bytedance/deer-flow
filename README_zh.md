@@ -255,6 +255,8 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # 国内版（默认）
+    # domain: https://open.larksuite.com   # 国际版
 
   slack:
     enabled: true
