@@ -16,7 +16,11 @@ import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";
-import { checkAgentName, getAgent } from "@/core/agents/api";
+import {
+  AgentNameCheckError,
+  checkAgentName,
+  getAgent,
+} from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
@@ -76,8 +80,16 @@ export default function NewAgentPage() {
         setNameError(t.agents.nameStepAlreadyExistsError);
         return;
       }
-    } catch {
-      setNameError(t.agents.nameStepCheckError);
+    } catch (error) {
+      if (error instanceof AgentNameCheckError) {
+        setNameError(
+          error.reason === "backend_unreachable"
+            ? t.agents.nameStepCheckError
+            : error.message,
+        );
+      } else {
+        setNameError(t.agents.nameStepCheckError);
+      }
       return;
     } finally {
       setIsCheckingName(false);
