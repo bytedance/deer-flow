@@ -1,6 +1,7 @@
 """Tests for JinaClient async crawl method."""
 
 import logging
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -151,6 +152,9 @@ async def test_web_fetch_tool_returns_error_on_crawl_failure(monkeypatch):
     async def mock_crawl(self, url, **kwargs):
         return "Error: Jina API returned status 429: Rate limited"
 
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
     monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert result.startswith("Error:")
@@ -164,6 +168,9 @@ async def test_web_fetch_tool_returns_markdown_on_success(monkeypatch):
     async def mock_crawl(self, url, **kwargs):
         return "<html><body><p>Hello world</p></body></html>"
 
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
     monkeypatch.setattr(JinaClient, "crawl", mock_crawl)
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert "Hello world" in result
