@@ -9,6 +9,15 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 _SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
+def _validate_thread_id(thread_id: str) -> str:
+    """Validate a thread ID before using it in filesystem paths."""
+    if not _SAFE_THREAD_ID_RE.match(thread_id):
+        raise ValueError(
+            f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed."
+        )
+    return thread_id
+
+
 def _join_host_path(base: str, *parts: str) -> str:
     """Join host filesystem path segments while preserving native style.
 
@@ -137,9 +146,7 @@ class Paths:
             ValueError: If `thread_id` contains unsafe characters (path separators
                         or `..`) that could cause directory traversal.
         """
-        if not _SAFE_THREAD_ID_RE.match(thread_id):
-            raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
-        return self.base_dir / "threads" / thread_id
+        return self.base_dir / "threads" / _validate_thread_id(thread_id)
 
     def sandbox_work_dir(self, thread_id: str) -> Path:
         """
@@ -186,7 +193,7 @@ class Paths:
 
     def host_thread_dir(self, thread_id: str) -> str:
         """Host path for a thread directory, preserving Windows path syntax."""
-        return _join_host_path(self._host_base_dir_str(), "threads", thread_id)
+        return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
 
     def host_sandbox_user_data_dir(self, thread_id: str) -> str:
         """Host path for a thread's user-data root."""

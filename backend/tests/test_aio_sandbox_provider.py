@@ -31,6 +31,13 @@ def test_ensure_thread_dirs_acp_workspace_is_world_writable(tmp_path):
     assert mode == oct(0o777)
 
 
+def test_host_thread_dir_rejects_invalid_thread_id(tmp_path):
+    paths = Paths(base_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        paths.host_thread_dir("../escape")
+
+
 # ── _get_thread_mounts ───────────────────────────────────────────────────────
 
 
