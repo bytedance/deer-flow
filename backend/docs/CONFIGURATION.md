@@ -255,6 +255,10 @@ sandbox:
     - host_path: /path/on/host
       container_path: /path/in/container
       read_only: false
+
+  # Optional: Disable DeerFlow's automatic thread-data and skills mounts.
+  # Use this when you want only the mounts defined above to be attached.
+  # disable_auto_mounts: true
 ```
 
 ### Skills

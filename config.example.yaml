@@ -398,6 +398,10 @@ sandbox:
 #   #     container_path: /home/user/shared
 #   #     read_only: false
 #
+#   # Optional: Disable DeerFlow's automatic thread-data and skills mounts.
+#   # When true, only the mounts listed above are attached.
+#   # disable_auto_mounts: true
+#
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
 #   # environment:

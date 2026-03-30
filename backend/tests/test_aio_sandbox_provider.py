@@ -103,3 +103,38 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+def test_get_extra_mounts_respects_disable_auto_mounts(tmp_path, monkeypatch):
+    """When disabled, the provider should only use explicitly configured mounts."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._config = {"disable_auto_mounts": True}
+
+    thread_mounts_called = {"value": False}
+    skills_mount_called = {"value": False}
+
+    def fake_thread_mounts(_thread_id: str):
+        thread_mounts_called["value"] = True
+        return [("host-thread", "/mnt/user-data/workspace", False)]
+
+    def fake_skills_mount():
+        skills_mount_called["value"] = True
+        return ("host-skills", "/mnt/skills", True)
+
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_get_thread_mounts",
+        staticmethod(fake_thread_mounts),
+    )
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_get_skills_mount",
+        staticmethod(fake_skills_mount),
+    )
+
+    mounts = provider._get_extra_mounts("thread-6")
+
+    assert mounts == []
+    assert thread_mounts_called["value"] is False
+    assert skills_mount_called["value"] is False

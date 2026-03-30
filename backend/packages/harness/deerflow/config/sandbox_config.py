@@ -55,6 +55,10 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+    disable_auto_mounts: bool = Field(
+        default=False,
+        description="Disable DeerFlow's automatic thread-data and skills mounts for AioSandboxProvider. Only explicitly configured mounts will be used.",
+    )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
