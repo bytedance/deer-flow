@@ -429,7 +429,10 @@ class FeishuChannel(Channel):
         if not text.startswith("/"):
             return False
 
-        command = text[1:].split(None, 1)[0].strip().lower()
+        parts = text[1:].split(None, 1)
+        if not parts:
+            return False
+        command = parts[0].strip().lower()
         return command in SUPPORTED_COMMANDS
 
     @staticmethod

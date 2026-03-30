@@ -96,3 +96,41 @@ def test_feishu_command_detection_only_matches_supported_commands(text, expected
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"] == expected_type
+
+
+# ---------------------------------------------------------------------------
+# _is_supported_command unit tests — all supported commands + edge cases
+# ---------------------------------------------------------------------------
+
+
+from app.channels.feishu import SUPPORTED_COMMANDS, FeishuChannel as _FC  # noqa: E402
+
+
+@pytest.mark.parametrize("cmd", sorted(SUPPORTED_COMMANDS))
+def test_is_supported_command_recognizes_all_supported_commands(cmd):
+    assert _FC._is_supported_command(f"/{cmd}") is True
+
+
+@pytest.mark.parametrize("cmd", sorted(SUPPORTED_COMMANDS))
+def test_is_supported_command_case_insensitive(cmd):
+    assert _FC._is_supported_command(f"/{cmd.upper()}") is True
+
+
+@pytest.mark.parametrize("cmd", sorted(SUPPORTED_COMMANDS))
+def test_is_supported_command_with_argument(cmd):
+    assert _FC._is_supported_command(f"/{cmd} some argument") is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/mnt/user-data/workspace/file.txt",
+        "/unknown-cmd",
+        "/run-script",
+        "no-slash",
+        "",
+        "/",  # slash only → empty command
+    ],
+)
+def test_is_supported_command_rejects_non_commands(text):
+    assert _FC._is_supported_command(text) is False
