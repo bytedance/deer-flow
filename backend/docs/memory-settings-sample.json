@@ -101,6 +101,14 @@
       "confidence": 0.78,
       "createdAt": "2026-03-28T10:06:00Z",
       "source": "thread_delete_demo"
+    },
+    {
+      "id": "fact_review_010",
+      "content": "This sample fact is intended for edit testing.",
+      "category": "testing",
+      "confidence": 0.8,
+      "createdAt": "2026-03-28T10:08:00Z",
+      "source": "manual"
     }
   ]
 }

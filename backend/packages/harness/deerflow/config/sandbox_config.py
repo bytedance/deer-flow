@@ -14,6 +14,8 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
+        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
+            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
@@ -28,6 +30,10 @@ class SandboxConfig(BaseModel):
     use: str = Field(
         ...,
         description="Class path of the sandbox provider (e.g. deerflow.sandbox.local:LocalSandboxProvider)",
+    )
+    allow_host_bash: bool = Field(
+        default=False,
+        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
     image: str | None = Field(
         default=None,
