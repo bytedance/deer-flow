@@ -13,6 +13,21 @@ from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMes
 
 logger = logging.getLogger(__name__)
 
+KNOWN_FEISHU_COMMANDS = {
+    "/bootstrap",
+    "/new",
+    "/status",
+    "/models",
+    "/memory",
+    "/help",
+}
+
+
+def _is_feishu_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in KNOWN_FEISHU_COMMANDS
+
 
 class FeishuChannel(Channel):
     """Feishu/Lark IM channel using the ``lark-oapi`` WebSocket client.
@@ -509,8 +524,9 @@ class FeishuChannel(Channel):
                 logger.info("[Feishu] empty text, ignoring message")
                 return
 
-            # Check if it's a command
-            if text.startswith("/"):
+            # Only treat known slash commands as commands; absolute paths and
+            # other slash-prefixed text should be handled as normal chat.
+            if _is_feishu_command(text):
                 msg_type = InboundMessageType.COMMAND
             else:
                 msg_type = InboundMessageType.CHAT

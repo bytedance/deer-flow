@@ -68,3 +68,45 @@ def test_feishu_on_message_rich_text():
         assert "Paragraph 1, part 1. Paragraph 1, part 2." in parsed_text
         assert "@bot  Paragraph 2." in parsed_text
         assert "\n\n" in parsed_text
+
+
+def test_feishu_recognizes_known_slash_command():
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": "/status"})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "command"
+
+
+def test_feishu_treats_slash_prefixed_paths_as_chat():
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": "/mnt/user-data/outputs/prd/http://technical-design.md/ this file exists?"})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "chat"
