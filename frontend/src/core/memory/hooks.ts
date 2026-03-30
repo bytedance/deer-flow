@@ -4,6 +4,7 @@ import {
   clearMemory,
   createMemoryFact,
   deleteMemoryFact,
+  importMemory,
   loadMemory,
   updateMemoryFact,
 } from "./api";
@@ -37,6 +38,17 @@ export function useDeleteMemoryFact() {
 
   return useMutation({
     mutationFn: (factId: string) => deleteMemoryFact(factId),
+    onSuccess: (memory) => {
+      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    },
+  });
+}
+
+export function useImportMemory() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (memory: UserMemory) => importMemory(memory),
     onSuccess: (memory) => {
       queryClient.setQueryData<UserMemory>(["memory"], memory);
     },
