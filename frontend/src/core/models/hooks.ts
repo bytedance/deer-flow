@@ -1,13 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { loadModels } from "./api";
+import { modelsQueryOptions } from "./query";
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ["models"],
-    queryFn: () => loadModels(),
+    ...modelsQueryOptions(),
     enabled,
-    refetchOnWindowFocus: false,
   });
   return { models: data ?? [], isLoading, error };
 }

@@ -19,7 +19,7 @@ fi
 docker exec "$container_name" sh -lc "wget -Y off -qO- '$workspace_url'" >"$tmp_file"
 
 match_count="$(
-  grep -oiE 'codemirror' "$tmp_file" | wc -l | tr -d '[:space:]'
+  { grep -oiE 'codemirror' "$tmp_file" || true; } | wc -l | tr -d '[:space:]'
 )"
 
 if [[ "$match_count" -gt 0 ]]; then

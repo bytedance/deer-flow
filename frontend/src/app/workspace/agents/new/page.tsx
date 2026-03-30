@@ -12,7 +12,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArtifactsProvider } from "@/components/workspace/artifacts";
+import { ArtifactsProvider } from "@/components/workspace/artifacts/context";
 import { MessageList } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import type { Agent } from "@/core/agents";

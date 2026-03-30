@@ -33,7 +33,7 @@ import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { useArtifacts } from "../artifacts";
+import { useArtifacts } from "../artifacts/context";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 

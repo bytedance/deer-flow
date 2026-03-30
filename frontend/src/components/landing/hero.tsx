@@ -7,9 +7,15 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import Galaxy from "@/components/ui/galaxy";
 import { WordRotate } from "@/components/ui/word-rotate";
+import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export function Hero({ className }: { className?: string }) {
+  const workspaceEntryHref =
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+      ? "/workspace"
+      : "/workspace/chats/new";
+
   return (
     <div
       className={cn(
@@ -68,7 +74,7 @@ export function Hero({ className }: { className?: string }) {
           <br />
           different levels of tasks that could take minutes to hours.
         </p>
-        <Link href="/workspace">
+        <Link href={workspaceEntryHref}>
           <Button className="size-lg mt-8 scale-108" size="lg">
             <span className="text-md">Get Started with 2.0</span>
             <ChevronRightIcon className="size-4" />
