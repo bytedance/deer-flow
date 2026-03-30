@@ -284,3 +284,69 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert "default" in mw._history
+
+
+class TestNormalizeToolArgs:
+    """Direct unit tests for the _normalize_tool_args helper."""
+
+    def test_description_key_is_stripped(self):
+        from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_args
+
+        result = _normalize_tool_args({"description": "some prompt text", "path": "/tmp/file.txt"})
+        assert "description" not in result
+        assert result["path"] == "/tmp/file.txt"
+
+    def test_non_semantic_keys_preserved(self):
+        from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_args
+
+        result = _normalize_tool_args({"command": "ls -la", "timeout": 30})
+        assert result == {"command": "ls -la", "timeout": 30}
+
+    def test_empty_args_returns_empty_dict(self):
+        from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_args
+
+        assert _normalize_tool_args({}) == {}
+
+    def test_args_with_only_description_returns_empty_dict(self):
+        from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_args
+
+        result = _normalize_tool_args({"description": "I should be stripped"})
+        assert result == {}
+
+    def test_multiple_semantic_keys_all_retained(self):
+        from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_args
+
+        result = _normalize_tool_args(
+            {"description": "noise", "path": "/tmp/a.txt", "encoding": "utf-8", "start_line": 1}
+        )
+        assert result == {"path": "/tmp/a.txt", "encoding": "utf-8", "start_line": 1}
+
+
+class TestHashToolCallsAdditional:
+    """Additional hash stability tests not covered in the base TestHashToolCalls class."""
+
+    def test_missing_args_key_treated_as_empty(self):
+        # Tool call dict without 'args' should not raise
+        a = _hash_tool_calls([{"name": "bash"}])
+        b = _hash_tool_calls([{"name": "bash", "args": {}}])
+        assert a == b
+
+    def test_missing_name_key_treated_as_empty_string(self):
+        a = _hash_tool_calls([{"args": {"path": "/tmp"}}])
+        b = _hash_tool_calls([{"name": "", "args": {"path": "/tmp"}}])
+        assert a == b
+
+    def test_multiple_tools_with_descriptions_stripped(self):
+        a = _hash_tool_calls(
+            [
+                {"name": "read_file", "args": {"description": "first pass", "path": "/a.txt"}},
+                {"name": "bash", "args": {"description": "run it", "command": "echo hi"}},
+            ]
+        )
+        b = _hash_tool_calls(
+            [
+                {"name": "read_file", "args": {"description": "second pass", "path": "/a.txt"}},
+                {"name": "bash", "args": {"description": "re-run", "command": "echo hi"}},
+            ]
+        )
+        assert a == b
