@@ -115,6 +115,9 @@ def _build_runtime_middlewares(
         provider = provider_cls(**provider_kwargs)
         middlewares.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
 
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+
+    middlewares.append(SandboxAuditMiddleware())
     middlewares.append(ToolErrorHandlingMiddleware())
     return middlewares
 
