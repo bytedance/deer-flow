@@ -1,4 +1,4 @@
-import {
+﻿import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -22,6 +22,7 @@ export const zhCN: Translations = {
     home: "首页",
     settings: "设置",
     delete: "删除",
+    edit: "编辑",
     rename: "重命名",
     share: "分享",
     openInNewWindow: "在新窗口打开",
@@ -308,6 +309,11 @@ export const zhCN: Translations = {
       importInvalidFile: "读取记忆文件失败，请选择有效的 JSON 导出文件。",
       importSuccess: "记忆已导入",
       manualFactSource: "手动添加",
+      addFact: "添加事实",
+      addFactTitle: "添加记忆事实",
+      editFactTitle: "编辑记忆事实",
+      addFactSuccess: "事实已创建",
+      editFactSuccess: "事实已更新",
       clearAll: "清空全部记忆",
       clearAllConfirmTitle: "要清空全部记忆吗？",
       clearAllConfirmDescription:
@@ -317,6 +323,15 @@ export const zhCN: Translations = {
       factDeleteConfirmDescription:
         "这条事实会立即从记忆中删除。此操作无法撤销。",
       factDeleteSuccess: "事实已删除",
+      factContentLabel: "内容",
+      factCategoryLabel: "类别",
+      factConfidenceLabel: "置信度",
+      factContentPlaceholder: "描述你想保存的记忆事实",
+      factCategoryPlaceholder: "context",
+      factConfidenceHint: "请输入 0 到 1 之间的数字。",
+      factSave: "保存事实",
+      factValidationContent: "事实内容不能为空。",
+      factValidationConfidence: "置信度必须是 0 到 1 之间的数字。",
       noFacts: "还没有保存的事实。",
       summaryReadOnly:
         "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
