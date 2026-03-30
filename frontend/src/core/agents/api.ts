@@ -2,7 +2,7 @@ import { getBackendBaseURL } from "@/core/config";
 
 import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
 
-const BACKEND_UNAVAILABLE_STATUSES = new Set([404, 502, 503, 504]);
+const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
 export class AgentNameCheckError extends Error {
   constructor(
