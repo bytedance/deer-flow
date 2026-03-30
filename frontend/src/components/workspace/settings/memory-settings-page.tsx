@@ -1,8 +1,14 @@
 "use client";
 
-import { PenLineIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import {
+  DownloadIcon,
+  PenLineIcon,
+  PlusIcon,
+  Trash2Icon,
+  UploadIcon,
+} from "lucide-react";
 import Link from "next/link";
-import { useDeferredValue, useId, useState } from "react";
+import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Streamdown } from "streamdown";
 
@@ -19,10 +25,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/core/i18n/hooks";
+import { exportMemory } from "@/core/memory/api";
 import {
   useClearMemory,
   useCreateMemoryFact,
   useDeleteMemoryFact,
+  useImportMemory,
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
@@ -50,6 +58,65 @@ type MemorySectionGroup = {
   title: string;
   sections: MemorySection[];
 };
+
+type PendingImport = {
+  fileName: string;
+  memory: UserMemory;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isMemorySection(value: unknown): value is {
+  summary: string;
+  updatedAt: string;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.summary === "string" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.content === "string" &&
+    typeof value.category === "string" &&
+    typeof value.confidence === "number" &&
+    Number.isFinite(value.confidence) &&
+    typeof value.createdAt === "string" &&
+    typeof value.source === "string"
+  );
+}
+
+function isImportedMemory(value: unknown): value is UserMemory {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (
+    typeof value.version !== "string" ||
+    typeof value.lastUpdated !== "string" ||
+    !isRecord(value.user) ||
+    !isRecord(value.history) ||
+    !Array.isArray(value.facts)
+  ) {
+    return false;
+  }
+
+  return (
+    isMemorySection(value.user.workContext) &&
+    isMemorySection(value.user.personalContext) &&
+    isMemorySection(value.user.topOfMind) &&
+    isMemorySection(value.history.recentMonths) &&
+    isMemorySection(value.history.earlierContext) &&
+    isMemorySection(value.history.longTermBackground) &&
+    value.facts.every(isMemoryFact)
+  );
+}
 
 type FactFormState = {
   content: string;
@@ -212,6 +279,8 @@ export function MemorySettingsPage() {
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
+  const importMemoryMutation = useImportMemory();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const updateMemoryFact = useUpdateMemoryFact();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
@@ -222,6 +291,10 @@ export function MemorySettingsPage() {
   );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(
+    null,
+  );
+  const [isExporting, setIsExporting] = useState(false);
   const deferredQuery = useDeferredValue(query);
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const factContentInputId = useId();
@@ -258,7 +331,6 @@ export function MemorySettingsPage() {
   const factSave = t.settings.memory.factSave;
   const factValidationContent = t.settings.memory.factValidationContent;
   const factValidationConfidence = t.settings.memory.factValidationConfidence;
-  const manualFactSource = t.settings.memory.manualFactSource;
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
   const summaryReadOnly = t.settings.memory.summaryReadOnly;
   const memoryFullyEmpty =
@@ -271,6 +343,11 @@ export function MemorySettingsPage() {
   const filterFacts = t.settings.memory.filterFacts ?? "Facts";
   const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
+  const exportButton = t.settings.memory.exportButton ?? t.common.export;
+  const exportSuccess =
+    t.settings.memory.exportSuccess ?? t.common.exportSuccess;
+  const importButton = t.settings.memory.importButton ?? t.common.import;
+  const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
   const filteredSectionGroups = sectionGroups
@@ -307,6 +384,68 @@ export function MemorySettingsPage() {
     !memory ||
     (showSummaries && filteredSectionGroups.length > 0) ||
     (showFacts && filteredFacts.length > 0);
+
+  async function handleExportMemory() {
+    try {
+      setIsExporting(true);
+      const exportedMemory = await exportMemory();
+      const fileName = `deerflow-memory-${(exportedMemory.lastUpdated || new Date().toISOString()).replace(/[:.]/g, "-")}.json`;
+      const blob = new Blob([JSON.stringify(exportedMemory, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success(exportSuccess);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function handleImportFileSelection(event: {
+    target: HTMLInputElement;
+  }) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      if (!isImportedMemory(parsed)) {
+        toast.error(t.settings.memory.importInvalidFile);
+        return;
+      }
+      setPendingImport({
+        fileName: file.name,
+        memory: parsed,
+      });
+    } catch {
+      toast.error(t.settings.memory.importInvalidFile);
+    }
+  }
+
+  async function handleConfirmImport() {
+    if (!pendingImport) {
+      return;
+    }
+
+    try {
+      await importMemoryMutation.mutateAsync(pendingImport.memory);
+      toast.success(importSuccess);
+      setPendingImport(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function handleClearMemory() {
     try {
@@ -416,7 +555,7 @@ export function MemorySettingsPage() {
               </div>
             ) : null}
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
                 <Input
                   value={query}
@@ -440,7 +579,30 @@ export function MemorySettingsPage() {
                 </ToggleGroup>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(event) => void handleImportFileSelection(event)}
+                />
+                <Button
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={importMemoryMutation.isPending}
+                >
+                  <UploadIcon className="mr-2 h-4 w-4" />
+                  {importButton}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void handleExportMemory()}
+                  disabled={isExporting}
+                >
+                  <DownloadIcon className="mr-2 h-4 w-4" />
+                  {isExporting ? t.common.loading : exportButton}
+                </Button>
                 <Button variant="outline" onClick={openCreateFactDialog}>
                   <PlusIcon className="mr-2 h-4 w-4" />
                   {addFactLabel}
@@ -519,22 +681,25 @@ export function MemorySettingsPage() {
                                 </span>{" "}
                                 {formatTimeAgo(fact.createdAt)}
                               </span>
+                              <span>
+                                <span className="text-muted-foreground">
+                                  {t.settings.memory.markdown.table.source}:
+                                </span>{" "}
+                                {fact.source === "manual" ? (
+                                  t.settings.memory.manualFactSource
+                                ) : (
+                                  <Link
+                                    href={pathOfThread(fact.source)}
+                                    className="text-primary underline-offset-4 hover:underline"
+                                  >
+                                    {t.settings.memory.markdown.table.view}
+                                  </Link>
+                                )}
+                              </span>
                             </div>
                             <p className="text-sm break-words">
                               {fact.content}
                             </p>
-                            {fact.source === "manual" ? (
-                              <span className="text-muted-foreground text-sm">
-                                {manualFactSource}
-                              </span>
-                            ) : (
-                              <Link
-                                href={pathOfThread(fact.source)}
-                                className="text-primary text-sm underline-offset-4 hover:underline"
-                              >
-                                {t.settings.memory.markdown.table.view}
-                              </Link>
-                            )}
                           </div>
 
                           <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
@@ -749,6 +914,65 @@ export function MemorySettingsPage() {
               disabled={deleteMemoryFact.isPending}
             >
               {deleteMemoryFact.isPending ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingImport !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingImport(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.settings.memory.importConfirmTitle}</DialogTitle>
+            <DialogDescription>
+              {t.settings.memory.importConfirmDescription}
+            </DialogDescription>
+          </DialogHeader>
+          {pendingImport ? (
+            <div className="bg-muted rounded-md border p-3 text-sm">
+              <div>
+                <span className="text-muted-foreground">
+                  {t.settings.memory.importFileLabel}:
+                </span>{" "}
+                {pendingImport.fileName}
+              </div>
+              <div>
+                <span className="text-muted-foreground">
+                  {t.settings.memory.markdown.facts}:
+                </span>{" "}
+                {pendingImport.memory.facts.length}
+              </div>
+              <div>
+                <span className="text-muted-foreground">
+                  {t.common.lastUpdated}:
+                </span>{" "}
+                {pendingImport.memory.lastUpdated
+                  ? formatTimeAgo(pendingImport.memory.lastUpdated)
+                  : "-"}
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingImport(null)}
+              disabled={importMemoryMutation.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              onClick={() => void handleConfirmImport()}
+              disabled={importMemoryMutation.isPending}
+            >
+              {importMemoryMutation.isPending
+                ? t.common.loading
+                : t.common.import}
             </Button>
           </DialogFooter>
         </DialogContent>

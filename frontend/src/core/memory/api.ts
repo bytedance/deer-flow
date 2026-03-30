@@ -10,12 +10,69 @@ async function readMemoryResponse(
   response: Response,
   fallbackMessage: string,
 ): Promise<UserMemory> {
+  function formatErrorDetail(detail: unknown): string | null {
+    if (typeof detail === "string") {
+      return detail;
+    }
+
+    if (Array.isArray(detail)) {
+      const parts = detail
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+
+          if (item && typeof item === "object") {
+            const record = item as Record<string, unknown>;
+            if (typeof record.msg === "string") {
+              return record.msg;
+            }
+
+            try {
+              return JSON.stringify(record);
+            } catch {
+              return null;
+            }
+          }
+
+          return String(item);
+        })
+        .filter(Boolean);
+
+      return parts.length > 0 ? parts.join("; ") : null;
+    }
+
+    if (detail && typeof detail === "object") {
+      try {
+        return JSON.stringify(detail);
+      } catch {
+        return null;
+      }
+    }
+
+    if (
+      typeof detail === "string" ||
+      typeof detail === "number" ||
+      typeof detail === "boolean" ||
+      typeof detail === "bigint"
+    ) {
+      return String(detail);
+    }
+
+    if (typeof detail === "symbol") {
+      return detail.description ?? null;
+    }
+
+    return null;
+  }
+
   if (!response.ok) {
     const errorData = (await response.json().catch(() => ({}))) as {
-      detail?: string;
+      detail?: unknown;
     };
+    const detailMessage = formatErrorDetail(errorData.detail);
     throw new Error(
-      errorData.detail ?? `${fallbackMessage}: ${response.statusText}`,
+      detailMessage ?? `${fallbackMessage}: ${response.statusText}`,
     );
   }
 
@@ -42,6 +99,22 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
     },
   );
   return readMemoryResponse(response, "Failed to delete memory fact");
+}
+
+export async function exportMemory(): Promise<UserMemory> {
+  const response = await fetch(`${getBackendBaseURL()}/api/memory/export`);
+  return readMemoryResponse(response, "Failed to export memory");
+}
+
+export async function importMemory(memory: UserMemory): Promise<UserMemory> {
+  const response = await fetch(`${getBackendBaseURL()}/api/memory/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(memory),
+  });
+  return readMemoryResponse(response, "Failed to import memory");
 }
 
 export async function createMemoryFact(
