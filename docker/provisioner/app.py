@@ -41,6 +41,8 @@ from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel
 
+from deerflow.config.paths import join_host_path
+
 # Suppress only the InsecureRequestWarning from urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -298,7 +300,7 @@ def _build_pod(sandbox_id: str, thread_id: str) -> k8s_client.V1Pod:
                 k8s_client.V1Volume(
                     name="user-data",
                     host_path=k8s_client.V1HostPathVolumeSource(
-                        path=f"{THREADS_HOST_PATH}/{thread_id}/user-data",
+                        path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
                         type="DirectoryOrCreate",
                     ),
                 ),
