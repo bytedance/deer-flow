@@ -39,6 +39,25 @@ def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     return get_memory_storage().reload(agent_name)
 
 
+def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None) -> dict[str, Any]:
+    """Persist imported memory data via storage provider.
+
+    Args:
+        memory_data: Full memory payload to persist.
+        agent_name: If provided, imports into per-agent memory.
+
+    Returns:
+        The saved memory data after storage normalization.
+
+    Raises:
+        OSError: If persisting the imported memory fails.
+    """
+    storage = get_memory_storage()
+    if not storage.save(memory_data, agent_name):
+        raise OSError("Failed to save imported memory data")
+    return storage.load(agent_name)
+
+
 def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Clear all stored memory data and persist an empty structure."""
     cleared_memory = create_empty_memory()

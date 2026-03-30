@@ -145,6 +145,13 @@ class TestConfigQueries:
             mock_mem.assert_called_once()
         assert result == memory
 
+    def test_export_memory(self, client):
+        memory = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+            result = client.export_memory()
+            mock_mem.assert_called_once()
+        assert result == memory
+
 
 # ---------------------------------------------------------------------------
 # stream / chat
@@ -661,6 +668,14 @@ class TestSkillsManagement:
 
 
 class TestMemoryManagement:
+    def test_import_memory(self, client):
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
+            result = client.import_memory(imported)
+
+        mock_import.assert_called_once_with(imported)
+        assert result == imported
+
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):

@@ -44,6 +44,7 @@ export const enUS: Translations = {
     save: "Save",
     install: "Install",
     create: "Create",
+    import: "Import",
     export: "Export",
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
@@ -313,6 +314,17 @@ export const enUS: Translations = {
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
+      exportButton: "Export memory",
+      exportSuccess: "Memory exported",
+      importButton: "Import memory",
+      importConfirmTitle: "Import memory?",
+      importConfirmDescription:
+        "This will overwrite your current memory with the selected JSON backup.",
+      importFileLabel: "Selected file",
+      importInvalidFile:
+        "Failed to read the selected memory file. Please choose a valid JSON export.",
+      importSuccess: "Memory imported",
+      manualFactSource: "Manual",
       addFact: "Add fact",
       addFactTitle: "Add memory fact",
       editFactTitle: "Edit memory fact",
@@ -336,7 +348,6 @@ export const enUS: Translations = {
       factSave: "Save fact",
       factValidationContent: "Fact content cannot be empty.",
       factValidationConfidence: "Confidence must be a number between 0 and 1.",
-      manualFactSource: "Manual",
       noFacts: "No saved facts yet.",
       summaryReadOnly:
         "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
