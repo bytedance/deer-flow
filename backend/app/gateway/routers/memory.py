@@ -1,9 +1,16 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from deerflow.agents.memory.updater import get_memory_data, reload_memory_data
+from deerflow.agents.memory.updater import (
+    clear_memory_data,
+    create_memory_fact,
+    delete_memory_fact,
+    get_memory_data,
+    reload_memory_data,
+    update_memory_fact,
+)
 from deerflow.config.memory_config import get_memory_config
 
 router = APIRouter(prefix="/api", tags=["memory"])
@@ -51,6 +58,31 @@ class MemoryResponse(BaseModel):
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
     facts: list[Fact] = Field(default_factory=list)
+
+
+def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
+    """Convert updater validation errors into stable API responses."""
+    if exc.args and exc.args[0] == "confidence":
+        detail = "Invalid confidence value; must be between 0 and 1."
+    else:
+        detail = "Memory fact content cannot be empty."
+    return HTTPException(status_code=400, detail=detail)
+
+
+class FactCreateRequest(BaseModel):
+    """Request model for creating a memory fact."""
+
+    content: str = Field(..., min_length=1, description="Fact content")
+    category: str = Field(default="context", description="Fact category")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence score (0-1)")
+
+
+class FactPatchRequest(BaseModel):
+    """PATCH request model that preserves existing values for omitted fields."""
+
+    content: str | None = Field(default=None, min_length=1, description="Fact content")
+    category: str | None = Field(default=None, description="Fact category")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
 class MemoryConfigResponse(BaseModel):
@@ -132,6 +164,87 @@ async def reload_memory() -> MemoryResponse:
         The reloaded memory data.
     """
     memory_data = reload_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.delete(
+    "/memory",
+    response_model=MemoryResponse,
+    summary="Clear All Memory Data",
+    description="Delete all saved memory data and reset the memory structure to an empty state.",
+)
+async def clear_memory() -> MemoryResponse:
+    """Clear all persisted memory data."""
+    try:
+        memory_data = clear_memory_data()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.post(
+    "/memory/facts",
+    response_model=MemoryResponse,
+    summary="Create Memory Fact",
+    description="Create a single saved memory fact manually.",
+)
+async def create_memory_fact_endpoint(request: FactCreateRequest) -> MemoryResponse:
+    """Create a single fact manually."""
+    try:
+        memory_data = create_memory_fact(
+            content=request.content,
+            category=request.category,
+            confidence=request.confidence,
+        )
+    except ValueError as exc:
+        raise _map_memory_fact_value_error(exc) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.delete(
+    "/memory/facts/{fact_id}",
+    response_model=MemoryResponse,
+    summary="Delete Memory Fact",
+    description="Delete a single saved memory fact by its fact id.",
+)
+async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
+    """Delete a single fact from memory by fact id."""
+    try:
+        memory_data = delete_memory_fact(fact_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to delete memory fact.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.patch(
+    "/memory/facts/{fact_id}",
+    response_model=MemoryResponse,
+    summary="Patch Memory Fact",
+    description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
+)
+async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -> MemoryResponse:
+    """Partially update a single fact manually."""
+    try:
+        memory_data = update_memory_fact(
+            fact_id=fact_id,
+            content=request.content,
+            category=request.category,
+            confidence=request.confidence,
+        )
+    except ValueError as exc:
+        raise _map_memory_fact_value_error(exc) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
+
     return MemoryResponse(**memory_data)
 
 

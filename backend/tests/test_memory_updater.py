@@ -1,7 +1,14 @@
 from unittest.mock import MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
-from deerflow.agents.memory.updater import MemoryUpdater, _extract_text
+from deerflow.agents.memory.updater import (
+    MemoryUpdater,
+    _extract_text,
+    clear_memory_data,
+    create_memory_fact,
+    delete_memory_fact,
+    update_memory_fact,
+)
 from deerflow.config.memory_config import MemoryConfig
 
 
@@ -136,6 +143,209 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     ]
     assert all(fact["content"] != "User likes noisy logs" for fact in result["facts"])
     assert result["facts"][1]["source"] == "thread-9"
+
+
+def test_clear_memory_data_resets_all_sections() -> None:
+    with patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True):
+        result = clear_memory_data()
+
+    assert result["version"] == "1.0"
+    assert result["facts"] == []
+    assert result["user"]["workContext"]["summary"] == ""
+    assert result["history"]["recentMonths"]["summary"] == ""
+
+
+def test_delete_memory_fact_removes_only_matching_fact() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_keep",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_delete",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-b",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = delete_memory_fact("fact_delete")
+
+    assert [fact["id"] for fact in result["facts"]] == ["fact_keep"]
+
+
+def test_create_memory_fact_appends_manual_fact() -> None:
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = create_memory_fact(
+            content="  User prefers concise code reviews.  ",
+            category="preference",
+            confidence=0.88,
+        )
+
+    assert len(result["facts"]) == 1
+    assert result["facts"][0]["content"] == "User prefers concise code reviews."
+    assert result["facts"][0]["category"] == "preference"
+    assert result["facts"][0]["confidence"] == 0.88
+    assert result["facts"][0]["source"] == "manual"
+
+
+def test_create_memory_fact_rejects_empty_content() -> None:
+    try:
+        create_memory_fact(content="   ")
+    except ValueError as exc:
+        assert exc.args == ("content",)
+    else:
+        raise AssertionError("Expected ValueError for empty fact content")
+
+
+def test_create_memory_fact_rejects_invalid_confidence() -> None:
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        try:
+            create_memory_fact(content="User likes tests", confidence=confidence)
+        except ValueError as exc:
+            assert exc.args == ("confidence",)
+        else:
+            raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
+def test_delete_memory_fact_raises_for_unknown_id() -> None:
+    with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
+        try:
+            delete_memory_fact("fact_missing")
+        except KeyError as exc:
+            assert exc.args == ("fact_missing",)
+        else:
+            raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_update_memory_fact_updates_only_matching_fact() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_keep",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "thread-a",
+            },
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = update_memory_fact(
+            fact_id="fact_edit",
+            content="User prefers spaces",
+            category="workflow",
+            confidence=0.91,
+        )
+
+    assert result["facts"][0]["content"] == "User likes Python"
+    assert result["facts"][1]["content"] == "User prefers spaces"
+    assert result["facts"][1]["category"] == "workflow"
+    assert result["facts"][1]["confidence"] == 0.91
+    assert result["facts"][1]["createdAt"] == "2026-03-18T00:00:00Z"
+    assert result["facts"][1]["source"] == "manual"
+
+
+def test_update_memory_fact_preserves_omitted_fields() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=current_memory),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result = update_memory_fact(
+            fact_id="fact_edit",
+            content="User prefers spaces",
+        )
+
+    assert result["facts"][0]["content"] == "User prefers spaces"
+    assert result["facts"][0]["category"] == "preference"
+    assert result["facts"][0]["confidence"] == 0.8
+
+
+def test_update_memory_fact_raises_for_unknown_id() -> None:
+    with patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()):
+        try:
+            update_memory_fact(
+                fact_id="fact_missing",
+                content="User prefers concise code reviews.",
+                category="preference",
+                confidence=0.88,
+            )
+        except KeyError as exc:
+            assert exc.args == ("fact_missing",)
+        else:
+            raise AssertionError("Expected KeyError for missing fact id")
+
+
+def test_update_memory_fact_rejects_invalid_confidence() -> None:
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_edit",
+                "content": "User prefers tabs",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            },
+        ]
+    )
+
+    for confidence in (-0.1, 1.1, float("nan"), float("inf"), float("-inf")):
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_data",
+            return_value=current_memory,
+        ):
+            try:
+                update_memory_fact(
+                    fact_id="fact_edit",
+                    content="User prefers spaces",
+                    confidence=confidence,
+                )
+            except ValueError as exc:
+                assert exc.args == ("confidence",)
+            else:
+                raise AssertionError("Expected ValueError for invalid fact confidence")
 
 
 # ---------------------------------------------------------------------------

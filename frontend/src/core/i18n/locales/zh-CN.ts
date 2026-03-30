@@ -22,6 +22,7 @@ export const zhCN: Translations = {
     home: "首页",
     settings: "设置",
     delete: "删除",
+    edit: "编辑",
     rename: "重命名",
     share: "分享",
     openInNewWindow: "在新窗口打开",
@@ -268,7 +269,7 @@ export const zhCN: Translations = {
     output: "输出",
     total: "总计",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",
@@ -298,6 +299,40 @@ export const zhCN: Translations = {
         "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
+      addFact: "添加事实",
+      addFactTitle: "添加记忆事实",
+      editFactTitle: "编辑记忆事实",
+      addFactSuccess: "事实已创建",
+      editFactSuccess: "事实已更新",
+      clearAll: "清空全部记忆",
+      clearAllConfirmTitle: "要清空全部记忆吗？",
+      clearAllConfirmDescription:
+        "这会删除所有已保存的摘要和事实。此操作无法撤销。",
+      clearAllSuccess: "已清空全部记忆",
+      factDeleteConfirmTitle: "要删除这条事实吗？",
+      factDeleteConfirmDescription:
+        "这条事实会立即从记忆中删除。此操作无法撤销。",
+      factDeleteSuccess: "事实已删除",
+      factContentLabel: "内容",
+      factCategoryLabel: "类别",
+      factConfidenceLabel: "置信度",
+      factContentPlaceholder: "描述你想保存的记忆事实",
+      factCategoryPlaceholder: "context",
+      factConfidenceHint: "请输入 0 到 1 之间的数字。",
+      factSave: "保存事实",
+      factValidationContent: "事实内容不能为空。",
+      factValidationConfidence: "置信度必须是 0 到 1 之间的数字。",
+      manualFactSource: "手动添加",
+      noFacts: "还没有保存的事实。",
+      summaryReadOnly:
+        "摘要分区当前仍为只读。你可以在下方添加、编辑或删除事实，或清空全部记忆。",
+      memoryFullyEmpty: "还没有保存任何记忆。",
+      factPreviewLabel: "即将删除的事实",
+      searchPlaceholder: "搜索记忆",
+      filterAll: "全部",
+      filterFacts: "事实",
+      filterSummaries: "摘要",
+      noMatches: "没有找到匹配的记忆。",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import re
 import uuid
 from datetime import datetime
@@ -11,19 +12,139 @@ from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import get_memory_storage
+from deerflow.agents.memory.storage import create_empty_memory, get_memory_storage
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
+
+def _create_empty_memory() -> dict[str, Any]:
+    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
+    return create_empty_memory()
+
+
+def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    """Backward-compatible wrapper around the configured memory storage save path."""
+    return get_memory_storage().save(memory_data, agent_name)
+
+
 def get_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Get the current memory data via storage provider."""
     return get_memory_storage().load(agent_name)
 
+
 def reload_memory_data(agent_name: str | None = None) -> dict[str, Any]:
     """Reload memory data via storage provider."""
     return get_memory_storage().reload(agent_name)
+
+
+def clear_memory_data(agent_name: str | None = None) -> dict[str, Any]:
+    """Clear all stored memory data and persist an empty structure."""
+    cleared_memory = create_empty_memory()
+    if not _save_memory_to_file(cleared_memory, agent_name):
+        raise OSError("Failed to save cleared memory data")
+    return cleared_memory
+
+
+def _validate_confidence(confidence: float) -> float:
+    """Validate persisted fact confidence so stored JSON stays standards-compliant."""
+    if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
+        raise ValueError("confidence")
+    return confidence
+
+
+def create_memory_fact(
+    content: str,
+    category: str = "context",
+    confidence: float = 0.5,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Create a new fact and persist the updated memory data."""
+    normalized_content = content.strip()
+    if not normalized_content:
+        raise ValueError("content")
+
+    normalized_category = category.strip() or "context"
+    validated_confidence = _validate_confidence(confidence)
+    now = datetime.utcnow().isoformat() + "Z"
+    memory_data = get_memory_data(agent_name)
+    updated_memory = dict(memory_data)
+    facts = list(memory_data.get("facts", []))
+    facts.append(
+        {
+            "id": f"fact_{uuid.uuid4().hex[:8]}",
+            "content": normalized_content,
+            "category": normalized_category,
+            "confidence": validated_confidence,
+            "createdAt": now,
+            "source": "manual",
+        }
+    )
+    updated_memory["facts"] = facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError("Failed to save memory data after creating fact")
+
+    return updated_memory
+
+
+def delete_memory_fact(fact_id: str, agent_name: str | None = None) -> dict[str, Any]:
+    """Delete a fact by its id and persist the updated memory data."""
+    memory_data = get_memory_data(agent_name)
+    facts = memory_data.get("facts", [])
+    updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
+    if len(updated_facts) == len(facts):
+        raise KeyError(fact_id)
+
+    updated_memory = dict(memory_data)
+    updated_memory["facts"] = updated_facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
+
+    return updated_memory
+
+
+def update_memory_fact(
+    fact_id: str,
+    content: str | None = None,
+    category: str | None = None,
+    confidence: float | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing fact and persist the updated memory data."""
+    memory_data = get_memory_data(agent_name)
+    updated_memory = dict(memory_data)
+    updated_facts: list[dict[str, Any]] = []
+    found = False
+
+    for fact in memory_data.get("facts", []):
+        if fact.get("id") == fact_id:
+            found = True
+            updated_fact = dict(fact)
+            if content is not None:
+                normalized_content = content.strip()
+                if not normalized_content:
+                    raise ValueError("content")
+                updated_fact["content"] = normalized_content
+            if category is not None:
+                updated_fact["category"] = category.strip() or "context"
+            if confidence is not None:
+                updated_fact["confidence"] = _validate_confidence(confidence)
+            updated_facts.append(updated_fact)
+        else:
+            updated_facts.append(fact)
+
+    if not found:
+        raise KeyError(fact_id)
+
+    updated_memory["facts"] = updated_facts
+
+    if not _save_memory_to_file(updated_memory, agent_name):
+        raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
+
+    return updated_memory
 
 
 def _extract_text(content: Any) -> str:
