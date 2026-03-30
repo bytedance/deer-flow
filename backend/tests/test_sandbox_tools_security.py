@@ -7,7 +7,10 @@ import pytest
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
+    _get_custom_mount_for_path,
+    _get_custom_mounts,
     _is_acp_workspace_path,
+    _is_custom_mount_path,
     _is_skills_path,
     _reject_path_traversal,
     _resolve_acp_workspace_path,
@@ -512,3 +515,113 @@ def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None
         with patch("deerflow.config.extensions_config.get_extensions_config", return_value=disabled_config):
             with pytest.raises(PermissionError, match="Unsafe absolute paths"):
                 validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+
+
+# ---------- Custom mount path tests ----------
+
+
+def _mock_custom_mounts():
+    """Create mock VolumeMountConfig objects for testing."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    return [
+        VolumeMountConfig(host_path="/home/user/code-read", container_path="/mnt/code-read", read_only=True),
+        VolumeMountConfig(host_path="/home/user/data", container_path="/mnt/data", read_only=False),
+    ]
+
+
+def test_is_custom_mount_path_recognises_configured_mounts() -> None:
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        assert _is_custom_mount_path("/mnt/code-read") is True
+        assert _is_custom_mount_path("/mnt/code-read/src/main.py") is True
+        assert _is_custom_mount_path("/mnt/data") is True
+        assert _is_custom_mount_path("/mnt/data/file.txt") is True
+        assert _is_custom_mount_path("/mnt/code-read-extra/foo") is False
+        assert _is_custom_mount_path("/mnt/other") is False
+
+
+def test_get_custom_mount_for_path_returns_longest_prefix() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [
+        VolumeMountConfig(host_path="/var/mnt", container_path="/mnt", read_only=False),
+        VolumeMountConfig(host_path="/home/user/code", container_path="/mnt/code", read_only=True),
+    ]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        mount = _get_custom_mount_for_path("/mnt/code/file.py")
+        assert mount is not None
+        assert mount.container_path == "/mnt/code"
+
+
+def test_validate_local_tool_path_allows_custom_mount_read() -> None:
+    """read_file / ls should be able to access custom mount paths."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_tool_path("/mnt/code-read/src/main.py", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/data/file.txt", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_blocks_read_only_mount_write() -> None:
+    """write_file / str_replace must NOT write to read-only custom mounts."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="Write access to read-only mount is not allowed"):
+            validate_local_tool_path("/mnt/code-read/src/main.py", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_allows_writable_mount_write() -> None:
+    """write_file / str_replace should succeed on writable custom mounts."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_tool_path("/mnt/data/file.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_blocks_traversal_in_custom_mount() -> None:
+    """Path traversal via .. in custom mount paths must be rejected."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_tool_path("/mnt/code-read/../../etc/passwd", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_bash_command_paths_allows_custom_mount() -> None:
+    """bash commands referencing custom mount paths should be allowed."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        validate_local_bash_command_paths("cat /mnt/code-read/src/main.py", _THREAD_DATA)
+        validate_local_bash_command_paths("ls /mnt/data", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_blocks_traversal_in_custom_mount() -> None:
+    """Bash commands with traversal in custom mount paths should be blocked."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths("cat /mnt/code-read/../../etc/passwd", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_still_blocks_non_mount_paths() -> None:
+    """Paths not matching any custom mount should still be blocked."""
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_mock_custom_mounts()):
+        with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+            validate_local_bash_command_paths("cat /etc/shadow", _THREAD_DATA)
+
+
+def test_get_custom_mounts_caching(monkeypatch) -> None:
+    """_get_custom_mounts should cache after first successful load."""
+    # Clear any existing cache
+    if hasattr(_get_custom_mounts, "_cached"):
+        monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+    mounts = _mock_custom_mounts()
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
+    mock_config = SimpleNamespace(sandbox=mock_sandbox)
+
+    with patch("deerflow.sandbox.tools.get_app_config", mock_config) if False else patch(
+        "deerflow.config.get_app_config", return_value=mock_config
+    ):
+        result = _get_custom_mounts()
+        assert len(result) == 2
+
+    # After caching, should return cached value even without mock
+    assert hasattr(_get_custom_mounts, "_cached")
+    assert len(_get_custom_mounts()) == 2
+
+    # Cleanup
+    monkeypatch.delattr(_get_custom_mounts, "_cached")

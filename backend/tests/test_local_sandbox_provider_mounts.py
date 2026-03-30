@@ -1,0 +1,186 @@
+import pytest
+from pathlib import Path
+
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+
+
+class TestPathMapping:
+    def test_path_mapping_dataclass(self):
+        mapping = PathMapping(container_path="/mnt/skills", local_path="/home/user/skills", read_only=True)
+        assert mapping.container_path == "/mnt/skills"
+        assert mapping.local_path == "/home/user/skills"
+        assert mapping.read_only is True
+
+    def test_path_mapping_defaults_to_false(self):
+        mapping = PathMapping(container_path="/mnt/data", local_path="/home/user/data")
+        assert mapping.read_only is False
+
+
+class TestLocalSandboxPathResolution:
+    def test_resolve_path_exact_match(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills"),
+        ])
+        resolved = sandbox._resolve_path("/mnt/skills")
+        assert resolved == "/home/user/skills"
+
+    def test_resolve_path_nested_path(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills"),
+        ])
+        resolved = sandbox._resolve_path("/mnt/skills/agent/prompt.py")
+        assert resolved == "/home/user/skills/agent/prompt.py"
+
+    def test_resolve_path_no_mapping(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills"),
+        ])
+        resolved = sandbox._resolve_path("/mnt/other/file.txt")
+        assert resolved == "/mnt/other/file.txt"
+
+    def test_resolve_path_longest_prefix_first(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills"),
+            PathMapping(container_path="/mnt", local_path="/var/mnt"),
+        ])
+        resolved = sandbox._resolve_path("/mnt/skills/file.py")
+        # Should match /mnt/skills first (longer prefix)
+        assert resolved == "/home/user/skills/file.py"
+
+    def test_reverse_resolve_path_exact_match(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir)),
+        ])
+        resolved = sandbox._reverse_resolve_path(str(skills_dir))
+        assert resolved == "/mnt/skills"
+
+    def test_reverse_resolve_path_nested(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        file_path = skills_dir / "agent" / "prompt.py"
+        file_path.parent.mkdir()
+        file_path.write_text("test")
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir)),
+        ])
+        resolved = sandbox._reverse_resolve_path(str(file_path))
+        assert resolved == "/mnt/skills/agent/prompt.py"
+
+
+class TestReadOnlyPath:
+    def test_is_read_only_true(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills", read_only=True),
+        ])
+        assert sandbox._is_read_only_path("/home/user/skills/file.py") is True
+
+    def test_is_read_only_false_for_writable(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/data", local_path="/home/user/data", read_only=False),
+        ])
+        assert sandbox._is_read_only_path("/home/user/data/file.txt") is False
+
+    def test_is_read_only_false_for_unmapped_path(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills", read_only=True),
+        ])
+        # Path not under any mapping
+        assert sandbox._is_read_only_path("/tmp/other/file.txt") is False
+
+    def test_is_read_only_true_for_exact_match(self):
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path="/home/user/skills", read_only=True),
+        ])
+        assert sandbox._is_read_only_path("/home/user/skills") is True
+
+    def test_write_file_blocked_on_read_only(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
+        ])
+        # Skills dir is read-only, write should be blocked
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/skills/new_file.py", "content")
+        assert exc_info.value.errno == 30  # EROFS
+
+    def test_write_file_allowed_on_writable_mount(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/data", local_path=str(data_dir), read_only=False),
+        ])
+        sandbox.write_file("/mnt/data/file.txt", "content")
+        assert (data_dir / "file.txt").read_text() == "content"
+
+    def test_update_file_blocked_on_read_only(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        existing_file = skills_dir / "existing.py"
+        existing_file.write_bytes(b"original")
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
+        ])
+        with pytest.raises(OSError) as exc_info:
+            sandbox.update_file("/mnt/skills/existing.py", b"updated")
+        assert exc_info.value.errno == 30
+
+
+class TestMultipleMounts:
+    def test_multiple_read_write_mounts(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        external_dir = tmp_path / "external"
+        external_dir.mkdir()
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
+            PathMapping(container_path="/mnt/data", local_path=str(data_dir), read_only=False),
+            PathMapping(container_path="/mnt/external", local_path=str(external_dir), read_only=True),
+        ])
+
+        # Skills is read-only
+        with pytest.raises(OSError):
+            sandbox.write_file("/mnt/skills/file.py", "content")
+
+        # Data is writable
+        sandbox.write_file("/mnt/data/file.txt", "data content")
+        assert (data_dir / "file.txt").read_text() == "data content"
+
+        # External is read-only
+        with pytest.raises(OSError):
+            sandbox.write_file("/mnt/external/file.txt", "content")
+
+    def test_execute_command_path_replacement(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        test_file = data_dir / "test.txt"
+        test_file.write_text("hello")
+
+        sandbox = LocalSandbox("test", [
+            PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+        ])
+
+        # Mock subprocess to capture the resolved command
+        captured = {}
+        original_run = __import__("subprocess").run
+
+        def mock_run(*args, **kwargs):
+            if len(args) > 0:
+                captured["command"] = args[0]
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.run", mock_run)
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._get_shell", lambda self: "/bin/sh")
+
+        sandbox.execute_command("cat /mnt/data/test.txt")
+        # Verify the command received the resolved local path
+        assert str(data_dir) in captured.get("command", "")
