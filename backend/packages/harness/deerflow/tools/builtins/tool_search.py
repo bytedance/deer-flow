@@ -175,7 +175,7 @@ def tool_search(query: str) -> str:
         Matched tool definitions as JSON array.
     """
     registry = get_deferred_registry()
-    if registry is None:
+    if not registry:
         return "No deferred tools available."
 
     matched_tools = registry.search(query)

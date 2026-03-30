@@ -454,6 +454,7 @@ class TestDeferredToolRegistryPromote:
         class FakeRequest:
             def __init__(self, tools):
                 self.tools = tools
+
             def override(self, **kwargs):
                 return FakeRequest(kwargs.get("tools", self.tools))
 
