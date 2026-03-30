@@ -1,6 +1,10 @@
 import { getBackendBaseURL } from "../config";
 
-import type { UserMemory } from "./types";
+import type {
+  MemoryFactInput,
+  MemoryFactPatchInput,
+  UserMemory,
+} from "./types";
 
 async function readMemoryResponse(
   response: Response,
@@ -38,4 +42,34 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
     },
   );
   return readMemoryResponse(response, "Failed to delete memory fact");
+}
+
+export async function createMemoryFact(
+  input: MemoryFactInput,
+): Promise<UserMemory> {
+  const response = await fetch(`${getBackendBaseURL()}/api/memory/facts`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  return readMemoryResponse(response, "Failed to create memory fact");
+}
+
+export async function updateMemoryFact(
+  factId: string,
+  input: MemoryFactPatchInput,
+): Promise<UserMemory> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  return readMemoryResponse(response, "Failed to update memory fact");
 }
