@@ -70,11 +70,7 @@ class TestErrorObservationRetry:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return SimpleNamespace(
-                    data=SimpleNamespace(
-                        output="'ErrorObservation' object has no attribute 'exit_code'"
-                    )
-                )
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
             return SimpleNamespace(data=SimpleNamespace(output="success"))
 
         sandbox._client.shell.exec_command = mock_exec
@@ -90,9 +86,7 @@ class TestErrorObservationRetry:
         def mock_exec(command, **kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
-                return SimpleNamespace(
-                    data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'")
-                )
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
         sandbox._client.shell.exec_command = mock_exec
@@ -126,9 +120,7 @@ class TestListDirSerialization:
         """list_dir should hold the lock during execution."""
         lock_was_held = []
 
-        original_exec = MagicMock(
-            return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b"))
-        )
+        original_exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b")))
 
         def tracking_exec(command, **kwargs):
             lock_was_held.append(sandbox._lock.locked())

@@ -69,14 +69,9 @@ class AioSandbox(Sandbox):
                 output = result.data.output if result.data else ""
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
-                    logger.warning(
-                        "ErrorObservation detected in sandbox output, "
-                        "retrying with a fresh session"
-                    )
+                    logger.warning("ErrorObservation detected in sandbox output, retrying with a fresh session")
                     fresh_id = str(uuid.uuid4())
-                    result = self._client.shell.exec_command(
-                        command=command, id=fresh_id
-                    )
+                    result = self._client.shell.exec_command(command=command, id=fresh_id)
                     output = result.data.output if result.data else ""
 
                 return output if output else "(no output)"
