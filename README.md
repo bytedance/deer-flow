@@ -217,7 +217,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
 
-Docker builds use China-friendly package registry defaults for `uv` and `pnpm`, so image builds should be faster on restricted networks. If you want the upstream registries instead, export `UV_INDEX_URL=https://pypi.org/simple` and `NPM_REGISTRY=https://registry.npmjs.org` before running `make docker-init` or `make docker-start`.
+Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
