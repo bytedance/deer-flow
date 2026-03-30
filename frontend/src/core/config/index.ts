@@ -4,7 +4,8 @@ function getBaseOrigin() {
   if (typeof window !== "undefined") {
     return window.location.origin;
   }
-  return undefined;
+  // Fallback for SSR
+  return "http://localhost:2026";
 }
 
 export function getBackendBaseURL() {

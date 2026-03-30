@@ -32,7 +32,7 @@ Even with digital Leicas, photographers often emulate film characteristics: natu
 
 ### Image 1: Parisian Decisive Moment
 
-![Paris Decisive Moment](/mock/api/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/artifacts/mnt/user-data/outputs/leica-paris-decisive-moment.jpg)
+![Paris Decisive Moment](/frontend/public/demo/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/user-data/outputs/leica-paris-decisive-moment.jpg)
 
 This image captures the essence of Cartier-Bresson's philosophy. A woman in a red coat leaps over a puddle while a cyclist passes in perfect synchrony. The composition follows the rule of thirds, with the subject positioned at the intersection of grid lines. Shot with a simulated Leica M11 and 35mm Summicron lens at f/2.8, the image features shallow depth of field, natural film grain, and the warm, muted color palette characteristic of Leica photography.
 
@@ -40,7 +40,7 @@ The "decisive moment" here isn't just about timing—it's about the alignment of
 
 ### Image 2: Tokyo Night Reflections
 
-![Tokyo Night Scene](/mock/api/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/artifacts/mnt/user-data/outputs/leica-tokyo-night.jpg)
+![Tokyo Night Scene](/frontend/public/demo/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/user-data/outputs/leica-tokyo-night.jpg)
 
 Moving to Shinjuku, Tokyo, this image explores the atmospheric possibilities of Leica's legendary Noctilux lens. Simulating a Leica M10-P with a 50mm f/0.95 Noctilux wide open, the image creates extremely shallow depth of field with beautiful bokeh balls from neon signs reflected in wet pavement.
 
@@ -48,7 +48,7 @@ A salaryman waits under glowing kanji signs, steam rising from a nearby ramen sh
 
 ### Image 3: New York City Candid
 
-![NYC Candid Scene](/mock/api/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/artifacts/mnt/user-data/outputs/leica-nyc-candid.jpg)
+![NYC Candid Scene](/frontend/public/demo/threads/7f9dc56c-e49c-4671-a3d2-c492ff4dce0c/user-data/outputs/leica-nyc-candid.jpg)
 
 This Chinatown scene demonstrates the documentary power of Leica's Q2 camera with its fixed 28mm Summilux lens. The wide angle captures environmental context while maintaining intimate proximity to the subjects. A fishmonger hands a live fish to a customer while tourists photograph the scene—a moment of cultural contrast and authentic urban life.
 
