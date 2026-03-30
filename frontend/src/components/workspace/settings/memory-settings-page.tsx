@@ -1,6 +1,12 @@
 "use client";
 
-import { DownloadIcon, PenLineIcon, PlusIcon, Trash2Icon, UploadIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  PenLineIcon,
+  PlusIcon,
+  Trash2Icon,
+  UploadIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -285,7 +291,9 @@ export function MemorySettingsPage() {
   );
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryViewFilter>("all");
-  const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(
+    null,
+  );
   const [isExporting, setIsExporting] = useState(false);
   const deferredQuery = useDeferredValue(query);
   const normalizedQuery = deferredQuery.trim().toLowerCase();
@@ -336,7 +344,8 @@ export function MemorySettingsPage() {
   const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
   const exportButton = t.settings.memory.exportButton ?? t.common.export;
-  const exportSuccess = t.settings.memory.exportSuccess ?? t.common.exportSuccess;
+  const exportSuccess =
+    t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
@@ -400,9 +409,9 @@ export function MemorySettingsPage() {
     }
   }
 
-  async function handleImportFileSelection(
-    event: { target: HTMLInputElement },
-  ) {
+  async function handleImportFileSelection(event: {
+    target: HTMLInputElement;
+  }) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) {
@@ -688,7 +697,9 @@ export function MemorySettingsPage() {
                                 )}
                               </span>
                             </div>
-                            <p className="break-words text-sm">{fact.content}</p>
+                            <p className="text-sm break-words">
+                              {fact.content}
+                            </p>
                           </div>
 
                           <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
@@ -959,7 +970,9 @@ export function MemorySettingsPage() {
               onClick={() => void handleConfirmImport()}
               disabled={importMemoryMutation.isPending}
             >
-              {importMemoryMutation.isPending ? t.common.loading : t.common.import}
+              {importMemoryMutation.isPending
+                ? t.common.loading
+                : t.common.import}
             </Button>
           </DialogFooter>
         </DialogContent>
