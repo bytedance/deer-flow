@@ -36,6 +36,7 @@ models:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)
 - DeepSeek (`langchain_deepseek:ChatDeepSeek`)
+- Zhipu AI GLM (`langchain_openai:ChatOpenAI`)
 - Claude Code OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
 - Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider

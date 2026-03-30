@@ -137,6 +137,25 @@ models:
   #       thinking:
   #         type: enabled
 
+  # Example: Zhipu AI GLM model (OpenAI-compatible API)
+  # GLM API Docs: https://open.bigmodel.cn/dev/api
+  # - name: glm-5-turbo
+  #   display_name: GLM-5-Turbo
+  #   use: langchain_openai:ChatOpenAI
+  #   model: glm-5-turbo
+  #   api_key: $ZHIPU_API_KEY
+  #   base_url: https://open.bigmodel.cn/api/anthropic/v1
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 196608
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+
   # Example: Kimi K2.5 model
   # - name: kimi-k2.5
   #   display_name: Kimi K2.5
