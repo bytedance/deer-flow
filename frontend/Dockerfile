@@ -4,6 +4,7 @@
 #   --target prod  — full build baked in, run `pnpm start` at container start (default if no --target is specified)
 
 ARG PNPM_STORE_PATH=/root/.local/share/pnpm/store
+ARG NPM_REGISTRY
 
 # ── Base: shared setup ────────────────────────────────────────────────────────
 FROM node:22-alpine AS base
