@@ -77,7 +77,7 @@ export default function NewAgentPage() {
       }
     } catch (err) {
       if (err instanceof TypeError && err.message === "Failed to fetch") {
-        setNameError(t.agents.nameStepCorsError);
+        setNameError(t.agents.nameStepNetworkError);
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -98,7 +98,7 @@ export default function NewAgentPage() {
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepInvalidError,
     t.agents.nameStepAlreadyExistsError,
-    t.agents.nameStepCorsError,
+    t.agents.nameStepNetworkError,
     t.agents.nameStepCheckError,
   ]);
 
