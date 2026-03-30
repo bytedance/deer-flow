@@ -8,6 +8,7 @@ from deerflow.agents.memory.updater import (
     create_memory_fact,
     delete_memory_fact,
     get_memory_data,
+    import_memory_data,
     reload_memory_data,
     update_memory_fact,
 )
@@ -244,6 +245,34 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest) -
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.get(
+    "/memory/export",
+    response_model=MemoryResponse,
+    summary="Export Memory Data",
+    description="Export the current global memory data as JSON for backup or transfer.",
+)
+async def export_memory() -> MemoryResponse:
+    """Export the current memory data."""
+    memory_data = get_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.post(
+    "/memory/import",
+    response_model=MemoryResponse,
+    summary="Import Memory Data",
+    description="Import and overwrite the current global memory data from a JSON payload.",
+)
+async def import_memory(request: MemoryResponse) -> MemoryResponse:
+    """Import and persist memory data."""
+    try:
+        memory_data = import_memory_data(request.model_dump())
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
     return MemoryResponse(**memory_data)
 
