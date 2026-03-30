@@ -2,6 +2,11 @@ import logging
 
 from langchain.chat_models import BaseChatModel
 
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:  # pragma: no cover - optional dependency guard
+    ChatOpenAI = None
+
 from deerflow.config import get_app_config, get_tracing_config, is_tracing_enabled
 from deerflow.reflection import resolve_class
 
@@ -60,6 +65,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]
+
+    # OpenAI-compatible streaming models only emit usage metadata when stream_usage is enabled.
+    # Keep user-specified values intact, but default to True for ChatOpenAI-based providers.
+    if ChatOpenAI is not None and issubclass(model_class, ChatOpenAI) and "stream_usage" not in model_settings_from_config:
+        model_settings_from_config["stream_usage"] = True
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
