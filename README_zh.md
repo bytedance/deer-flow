@@ -181,6 +181,30 @@ make down   # 停止并移除容器
 
 前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`，也可以通过 `DEER_FLOW_CONFIG_PATH` 覆盖。
 
+**Windows 一键启动**
+
+如果你在 Windows 上走本地启动路径，可以直接使用 `start-windows.bat` 作为一键入口。它会以本地模式启动 DeerFlow，不需要 Docker，并自动打开 `http://localhost:2026`。前端开发服务器现在会代理本地 backend/LangGraph，因此这条 Windows 本地路径不再需要 nginx。
+这是一条可替代下方手动本地开发流程的快捷路径。
+
+- 前置依赖：Node.js 22+、`pnpm`、Python 3.12+、`uv`；`git` 可选，但官方自动更新检查需要它
+- 请先安装依赖：
+
+  ```bash
+  cd backend
+  uv sync
+  cd ..
+  cd frontend
+  pnpm install
+  ```
+
+- `start-windows.bat` 可以直接在当前 checkout 上运行；如果当前分支落后于官方 `origin/main`，脚本会停止，并提示你先更新后再重试
+- 脚本不会主动结束已有进程；如果所需端口已被占用，它会直接停止，并在可用时打印对应的 PID 和进程名
+- 如需验证或排查，Windows 专用的 PowerShell 检查位于 `scripts/start-windows.Tests.ps1`，可通过以下命令运行：
+
+  ```powershell
+  powershell -NoLogo -NoProfile -Command "Invoke-Pester -Script '.\\scripts\\start-windows.Tests.ps1'"
+  ```
+
 1. **检查依赖环境**：
    ```bash
    make check  # 校验 Node.js 22+、pnpm、uv、nginx
