@@ -161,6 +161,8 @@ make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 
 
 如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
 
+如果网络环境受限，可以在执行 `make docker-start` 前设置 Docker 构建镜像源，例如 `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 和 `NPM_REGISTRY=https://registry.npmmirror.com`。
+
 **生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
 ```bash
