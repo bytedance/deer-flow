@@ -43,6 +43,7 @@ log/
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
+.worktrees/
 
 # pnpm
 .pnpm-store
