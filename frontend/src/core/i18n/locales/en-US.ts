@@ -282,14 +282,15 @@ export const enUS: Translations = {
     output: "Output",
     total: "Total",
   },
-  
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
-    keyboardShortcutsDescription: "Navigate DeerFlow faster with keyboard shortcuts.",
+    keyboardShortcutsDescription:
+      "Navigate DeerFlow faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },
@@ -323,6 +324,25 @@ export const enUS: Translations = {
         "Failed to read the selected memory file. Please choose a valid JSON export.",
       importSuccess: "Memory imported",
       manualFactSource: "Manual",
+      clearAll: "Clear all memory",
+      clearAllConfirmTitle: "Clear all memory?",
+      clearAllConfirmDescription:
+        "This will remove all saved summaries and facts. This action cannot be undone.",
+      clearAllSuccess: "All memory cleared",
+      factDeleteConfirmTitle: "Delete this fact?",
+      factDeleteConfirmDescription:
+        "This fact will be removed from memory immediately. This action cannot be undone.",
+      factDeleteSuccess: "Fact deleted",
+      noFacts: "No saved facts yet.",
+      summaryReadOnly:
+        "Summary sections are read-only for now. You can currently clear all memory or delete individual facts.",
+      memoryFullyEmpty: "No memory saved yet.",
+      factPreviewLabel: "Fact to delete",
+      searchPlaceholder: "Search memory",
+      filterAll: "All",
+      filterFacts: "Facts",
+      filterSummaries: "Summaries",
+      noMatches: "No matching memory found.",
       markdown: {
         overview: "Overview",
         userContext: "User context",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
@@ -130,12 +132,11 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
-    middlewares = lead_agent_module._build_middlewares(
-        {"configurable": {"model_name": "stale-model", "is_plan_mode": False, "subagent_enabled": False}},
-        model_name="vision-model",
-    )
+    middlewares = lead_agent_module._build_middlewares({"configurable": {"model_name": "stale-model", "is_plan_mode": False, "subagent_enabled": False}}, model_name="vision-model", custom_middlewares=[MagicMock()])
 
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
+    # verify the custom middleware is injected correctly
+    assert len(middlewares) > 0 and isinstance(middlewares[-2], MagicMock)
 
 
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):

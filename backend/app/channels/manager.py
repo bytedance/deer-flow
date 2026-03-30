@@ -10,6 +10,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from langgraph_sdk.errors import ConflictError
+
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -27,6 +29,7 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 
 CHANNEL_CAPABILITIES = {
     "feishu": {"supports_streaming": True},
@@ -37,6 +40,14 @@ CHANNEL_CAPABILITIES = {
 
 class InvalidChannelSessionConfigError(ValueError):
     """Raised when IM channel session overrides contain invalid agent config."""
+
+
+def _is_thread_busy_error(exc: BaseException | None) -> bool:
+    if exc is None:
+        return False
+    if isinstance(exc, ConflictError):
+        return True
+    return "already running a task" in str(exc)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -55,14 +66,9 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     """Normalize legacy channel assistant IDs into valid custom agent names."""
     normalized = raw_value.strip().lower().replace("_", "-")
     if not normalized:
-        raise InvalidChannelSessionConfigError(
-            "Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name."
-        )
+        raise InvalidChannelSessionConfigError("Channel session assistant_id is empty. Use 'lead_agent' or a valid custom agent name.")
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
-        raise InvalidChannelSessionConfigError(
-            f"Invalid channel session assistant_id {raw_value!r}. "
-            "Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens."
-        )
+        raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
     return normalized
 
 
@@ -606,6 +612,7 @@ class ChannelManager:
                 config=run_config,
                 context=run_context,
                 stream_mode=["messages-tuple", "values"],
+                multitask_strategy="reject",
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
@@ -641,7 +648,10 @@ class ChannelManager:
                 last_publish_at = now
         except Exception as exc:
             stream_error = exc
-            logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
+            if _is_thread_busy_error(exc):
+                logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+            else:
+                logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
@@ -652,7 +662,10 @@ class ChannelManager:
                 if attachments:
                     response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
                 elif stream_error:
-                    response_text = "An error occurred while processing your request. Please try again."
+                    if _is_thread_busy_error(stream_error):
+                        response_text = THREAD_BUSY_MESSAGE
+                    else:
+                        response_text = "An error occurred while processing your request. Please try again."
                 else:
                     response_text = latest_text or "(No response from agent)"
 

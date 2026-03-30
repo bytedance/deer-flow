@@ -600,10 +600,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.wait.assert_not_called()
-            assert outbound_received[0].text == (
-                "Invalid channel session assistant_id 'bad agent!'. "
-                "Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens."
-            )
+            assert outbound_received[0].text == ("Invalid channel session assistant_id 'bad agent!'. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
 
         _run(go())
 
@@ -723,6 +720,60 @@ class TestChannelManager:
             # Should have at least one intermediate and one final message
             final_msgs = [m for m in outbound_received if m.is_final]
             assert len(final_msgs) == 1
+            assert final_msgs[0].thread_ts == "om-source-1"
+
+        _run(go())
+
+    def test_handle_feishu_stream_conflict_sends_busy_message(self, monkeypatch):
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            async def _conflict_stream():
+                request = httpx.Request("POST", "http://127.0.0.1:2024/runs")
+                response = httpx.Response(409, request=request)
+                raise ConflictError(
+                    "Thread is already running a task. Wait for it to finish or choose a different multitask strategy.",
+                    response=response,
+                    body={"message": "Thread is already running a task. Wait for it to finish or choose a different multitask strategy."},
+                )
+                yield  # pragma: no cover
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_conflict_stream())
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="om-source-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await manager.stop()
+
+            final_msgs = [m for m in outbound_received if m.is_final]
+            assert len(final_msgs) == 1
+            assert final_msgs[0].text == THREAD_BUSY_MESSAGE
             assert final_msgs[0].thread_ts == "om-source-1"
 
         _run(go())

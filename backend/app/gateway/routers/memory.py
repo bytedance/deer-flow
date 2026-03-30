@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.agents.memory.updater import (
+    clear_memory_data,
+    delete_memory_fact,
     get_memory_data,
     import_memory_data,
     reload_memory_data,
@@ -136,6 +138,40 @@ async def reload_memory() -> MemoryResponse:
         The reloaded memory data.
     """
     memory_data = reload_memory_data()
+    return MemoryResponse(**memory_data)
+
+
+@router.delete(
+    "/memory",
+    response_model=MemoryResponse,
+    summary="Clear All Memory Data",
+    description="Delete all saved memory data and reset the memory structure to an empty state.",
+)
+async def clear_memory() -> MemoryResponse:
+    """Clear all persisted memory data."""
+    try:
+        memory_data = clear_memory_data()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.delete(
+    "/memory/facts/{fact_id}",
+    response_model=MemoryResponse,
+    summary="Delete Memory Fact",
+    description="Delete a single saved memory fact by its fact id.",
+)
+async def delete_memory_fact_endpoint(fact_id: str) -> MemoryResponse:
+    """Delete a single fact from memory by fact id."""
+    try:
+        memory_data = delete_memory_fact(fact_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to delete memory fact.") from exc
+
     return MemoryResponse(**memory_data)
 
 

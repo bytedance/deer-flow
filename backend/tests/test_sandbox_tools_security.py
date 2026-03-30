@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from deerflow.sandbox.tools import (
     _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
     _resolve_skills_path,
+    bash_tool,
     mask_local_paths_in_output,
     replace_virtual_path,
     replace_virtual_paths_in_command,
@@ -255,6 +257,27 @@ def test_validate_local_bash_command_paths_blocks_traversal_in_skills() -> None:
             )
 
 
+def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("host bash should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: False)
+
+    result = bash_tool.func(
+        runtime=runtime,
+        description="run command",
+        command="/bin/echo hello",
+    )
+
+    assert "Host bash execution is disabled" in result
+
+
 # ---------- Skills path tests ----------
 
 
@@ -423,3 +446,40 @@ def test_mask_local_paths_in_output_hides_acp_workspace_host_paths() -> None:
 
         assert acp_host not in masked
         assert "/mnt/acp-workspace/hello.py" in masked
+
+
+def test_validate_local_bash_command_paths_allows_mcp_filesystem_paths() -> None:
+    """Bash commands referencing MCP filesystem server paths should be allowed."""
+    from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+
+    mock_config = ExtensionsConfig(
+        mcp_servers={
+            "filesystem": McpServerConfig(
+                enabled=True,
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
+            )
+        }
+    )
+    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=mock_config):
+        # Should not raise - MCP filesystem paths are allowed
+        validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
+        validate_local_bash_command_paths("cat /mnt/d/workspace/subdir/file.txt", _THREAD_DATA)
+
+        # Path traversal should still be blocked
+        with pytest.raises(PermissionError, match="path traversal"):
+            validate_local_bash_command_paths("cat /mnt/d/workspace/../../etc/passwd", _THREAD_DATA)
+
+        # Disabled servers should not expose paths
+        disabled_config = ExtensionsConfig(
+            mcp_servers={
+                "filesystem": McpServerConfig(
+                    enabled=False,
+                    command="npx",
+                    args=["-y", "@modelcontextprotocol/server-filesystem", "/mnt/d/workspace"],
+                )
+            }
+        )
+        with patch("deerflow.config.extensions_config.get_extensions_config", return_value=disabled_config):
+            with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+                validate_local_bash_command_paths("ls /mnt/d/workspace", _THREAD_DATA)
