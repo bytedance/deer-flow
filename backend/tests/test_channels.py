@@ -811,6 +811,40 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_command_help_ptbr(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/help",
+                msg_type=InboundMessageType.COMMAND,
+                metadata={"locale": "pt-BR"},
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert "Comandos disponiveis" in outbound_received[0].text
+            assert "/status - Mostra a thread atual" in outbound_received[0].text
+
+        _run(go())
+
     def test_handle_command_new(self):
         from app.channels.manager import ChannelManager
 
@@ -1125,6 +1159,44 @@ class TestChannelManager:
             # Default text should be used when no text is provided
             assert call_args[1]["input"]["messages"][0]["content"] == "Initialize workspace"
             assert call_args[1]["context"]["is_bootstrap"] is True
+
+        _run(go())
+
+    def test_handle_command_bootstrap_without_text_ptbr(self):
+        """/bootstrap in pt-BR should use a localized default message."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/bootstrap",
+                msg_type=InboundMessageType.COMMAND,
+                metadata={"locale": "pt-BR"},
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[1]["input"]["messages"][0]["content"] == "Inicializar workspace"
 
         _run(go())
 
@@ -1918,12 +1990,20 @@ class TestTelegramSendRetry:
 # ---------------------------------------------------------------------------
 
 
-def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+def _make_telegram_update(
+    chat_type: str,
+    message_id: int,
+    *,
+    reply_to_message_id: int | None = None,
+    text: str = "hello",
+    language_code: str = "en-US",
+):
     """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
     update = MagicMock()
     update.effective_chat.type = chat_type
     update.effective_chat.id = 100
     update.effective_user.id = 42
+    update.effective_user.language_code = language_code
     update.message.text = text
     update.message.message_id = message_id
     if reply_to_message_id is not None:
@@ -2066,6 +2146,40 @@ class TestTelegramPrivateChatThread:
             msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
             assert msg.topic_id == "20"
             assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_private_chat_propagates_ptbr_locale_metadata(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=40, language_code="pt-BR")
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.metadata["locale"] == "pt-BR"
+
+        _run(go())
+
+    def test_start_command_uses_ptbr_welcome(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            update = _make_telegram_update("private", message_id=41, language_code="pt-BR")
+            update.message.reply_text = AsyncMock()
+
+            await ch._cmd_start(update, None)
+
+            update.message.reply_text.assert_awaited_once()
+            sent_text = update.message.reply_text.await_args.args[0]
+            assert "Boas-vindas ao DeerFlow" in sent_text
+            assert "/help" in sent_text
 
         _run(go())
 

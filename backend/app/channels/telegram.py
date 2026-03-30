@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 from app.channels.base import Channel
+from app.channels.i18n import channel_text, normalize_channel_locale
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ class TelegramChannel(Channel):
         self._tg_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users: set[int] = set()
+        self._default_locale = normalize_channel_locale(config.get("default_locale"))
+        self._chat_locales: dict[str, str] = {}
         for uid in config.get("allowed_users", []):
             try:
                 self._allowed_users.add(int(uid))
@@ -177,9 +180,10 @@ class TelegramChannel(Channel):
             return
         try:
             bot = self._application.bot
+            locale = self._chat_locales.get(chat_id, self._default_locale)
             await bot.send_message(
                 chat_id=int(chat_id),
-                text="Working on it...",
+                text=channel_text(locale, "channel.running"),
                 reply_to_message_id=reply_to_message_id,
             )
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
@@ -230,7 +234,10 @@ class TelegramChannel(Channel):
         """Handle /start command."""
         if not self._check_user(update.effective_user.id):
             return
-        await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
+        locale = normalize_channel_locale(getattr(update.effective_user, "language_code", None), self._default_locale)
+        chat_id = str(update.effective_chat.id)
+        self._chat_locales[chat_id] = locale
+        await update.message.reply_text(channel_text(locale, "telegram.welcome"))
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
         await self._send_running_reply(chat_id, msg_id)
@@ -245,6 +252,8 @@ class TelegramChannel(Channel):
         chat_id = str(update.effective_chat.id)
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
+        locale = normalize_channel_locale(getattr(update.effective_user, "language_code", None), self._default_locale)
+        self._chat_locales[chat_id] = locale
 
         # Use the same topic_id logic as _on_text so that commands
         # like /new target the correct thread mapping.
@@ -263,6 +272,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
+            metadata={"locale": locale},
         )
         inbound.topic_id = topic_id
 
@@ -284,6 +294,8 @@ class TelegramChannel(Channel):
         chat_id = str(update.effective_chat.id)
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
+        locale = normalize_channel_locale(getattr(update.effective_user, "language_code", None), self._default_locale)
+        self._chat_locales[chat_id] = locale
 
         # topic_id determines which DeerFlow thread the message maps to.
         # In private chats, use None so that all messages share a single
@@ -305,6 +317,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            metadata={"locale": locale},
         )
         inbound.topic_id = topic_id
 
