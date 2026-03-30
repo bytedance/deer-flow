@@ -42,6 +42,22 @@ class CronStorePersistenceError(CronStoreError):
     """Raised when the cron store cannot be safely persisted."""
 
 
+class CronServiceStoppingError(RuntimeError):
+    """Raised when a queued or inflight run is aborted during service shutdown."""
+
+
+class CronServiceShutdownTimeoutError(TimeoutError):
+    """Raised when graceful shutdown cannot finish within the requested timeout."""
+
+
+_quarantined_store_paths: dict[str, str] = {}
+
+
+def _store_quarantine_key(store_path: Path) -> str:
+    """Return a normalized key for per-process store quarantine tracking."""
+    return os.path.normcase(str(store_path.resolve()))
+
+
 def _compute_next_run(
     schedule: CronSchedule,
     now_ms: int,
@@ -157,6 +173,32 @@ class _ManualRunResult:
     result: str
 
 
+@dataclass
+class _QueuedRun:
+    """A reserved cron run waiting for background execution."""
+
+    job: CronJob
+    source: Literal["timer", "manual"]
+    generation: int
+    completion_future: asyncio.Future[_ManualRunResult] | None = None
+
+
+@dataclass
+class _CompletedRun:
+    """A finished cron run waiting for single-writer state application."""
+
+    queued_run: _QueuedRun
+    result: _JobExecutionResult
+
+
+def _manual_result_from_execution(result: _JobExecutionResult) -> _ManualRunResult:
+    """Translate an execution result into the public manual-run response model."""
+    return _ManualRunResult(
+        status="executed",
+        result=result.last_error if result.last_status == "error" else "ok",
+    )
+
+
 class CronService:
     """Periodic task scheduling service.
 
@@ -185,19 +227,202 @@ class CronService:
         self,
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        *,
+        max_concurrent_runs: int = 4,
     ):
         self._store_retry_delay_s = 5.0
         self.store_path = Path(store_path)
+        self._store_quarantine_key = _store_quarantine_key(self.store_path)
         self.on_job = on_job
+        self._max_concurrent_runs = max(1, max_concurrent_runs)
         self._store: CronStore | None = None
         self._running = False
         self._timer_task: asyncio.Task | None = None
         self._last_mtime: int | None = None
         self._store_lock = asyncio.Lock()
         self._executing_job_ids: set[str] = set()
+        self._running_job_ids: set[str] = set()
         self._store_error: str | None = None
+        self._store_error_action: Literal["stat", "load", "save"] | None = None
         self._store_error_mtime: int | None = None
         self._store_sync_pending = False
+        self._run_queue: asyncio.Queue[_QueuedRun] | None = None
+        self._result_queue: asyncio.Queue[_CompletedRun] | None = None
+        self._worker_tasks: list[asyncio.Task] = []
+        self._result_writer_task: asyncio.Task | None = None
+        self._accepting_new_runs = False
+        self._shutting_down = False
+        self._hard_stop_requested = False
+        self._background_generation = 0
+        self._reserved_runs: dict[str, _QueuedRun] = {}
+        self._applying_job_ids: set[str] = set()
+
+    def _ensure_background_processors_locked(self) -> None:
+        """Start background workers and the single-writer loop when needed."""
+        if self._shutting_down:
+            raise CronServiceStoppingError("CronService is shutting down")
+        if self._run_queue is None:
+            self._run_queue = asyncio.Queue()
+        if self._result_queue is None:
+            self._result_queue = asyncio.Queue()
+
+        self._prune_background_processors()
+        starting_index = len(self._worker_tasks)
+        missing_workers = self._max_concurrent_runs - len(self._worker_tasks)
+        for worker_index in range(missing_workers):
+            task_name = f"cron-worker-{starting_index + worker_index + 1}"
+            self._worker_tasks.append(asyncio.create_task(self._worker_loop(), name=task_name))
+
+        if self._result_writer_task is None or self._result_writer_task.done():
+            self._result_writer_task = asyncio.create_task(
+                self._result_writer_loop(),
+                name="cron-result-writer",
+            )
+
+        self._accepting_new_runs = True
+
+    def _request_cancel_background_processors(self) -> list[asyncio.Task]:
+        """Cancel worker/writer tasks and detach them from the service state."""
+        tasks: list[asyncio.Task] = []
+        if self._result_writer_task is not None:
+            self._result_writer_task.cancel()
+            tasks.append(self._result_writer_task)
+            self._result_writer_task = None
+
+        for task in self._worker_tasks:
+            task.cancel()
+            tasks.append(task)
+        self._worker_tasks = []
+
+        return tasks
+
+    def _prune_background_processors(self) -> None:
+        """Drop completed worker/writer tasks from the service state."""
+        self._worker_tasks = [task for task in self._worker_tasks if not task.done()]
+        if self._result_writer_task is not None and self._result_writer_task.done():
+            self._result_writer_task = None
+
+    async def _wait_background_processors(
+        self,
+        tasks: list[asyncio.Task],
+        *,
+        timeout_s: float | None,
+    ) -> set[asyncio.Task]:
+        """Wait for background processors that belong to the current event loop."""
+        if not tasks:
+            return set()
+
+        current_loop = asyncio.get_running_loop()
+        waitable_tasks = [
+            task
+            for task in tasks
+            if not task.done() and task.get_loop() is current_loop
+        ]
+        if not waitable_tasks:
+            return set()
+
+        if timeout_s is None:
+            await asyncio.gather(*waitable_tasks, return_exceptions=True)
+            return set()
+
+        _, pending = await asyncio.wait(waitable_tasks, timeout=timeout_s)
+        return pending
+
+    async def _cancel_background_processors(self, *, timeout_s: float | None = None) -> set[asyncio.Task]:
+        """Cancel worker/writer tasks and optionally bound how long we wait for exit."""
+        tasks = self._request_cancel_background_processors()
+        return await self._wait_background_processors(tasks, timeout_s=timeout_s)
+
+    def _drain_queue_nowait(self, queue: asyncio.Queue[Any] | None) -> list[Any]:
+        """Remove and return all currently queued items, marking them done."""
+        drained_items: list[Any] = []
+        if queue is None:
+            return drained_items
+
+        while True:
+            try:
+                drained_items.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return drained_items
+            else:
+                queue.task_done()
+
+    def _reserve_run_locked(self, queued_run: _QueuedRun) -> None:
+        """Register an in-flight run so shutdown can account for it."""
+        self._executing_job_ids.add(queued_run.job.id)
+        self._reserved_runs[queued_run.job.id] = queued_run
+
+    def _raise_if_store_quarantined(self) -> None:
+        """Block restarts for stores quarantined after a hard stop during commit."""
+        reason = _quarantined_store_paths.get(self._store_quarantine_key)
+        if reason is not None:
+            raise RuntimeError(reason)
+
+    def _quarantine_store(self, reason: str) -> None:
+        """Prevent the current store path from being restarted in this process."""
+        _quarantined_store_paths[self._store_quarantine_key] = reason
+
+    def _release_reserved_run_locked(self, job_id: str) -> None:
+        """Clear bookkeeping for a run that has been fully handled."""
+        self._executing_job_ids.discard(job_id)
+        self._reserved_runs.pop(job_id, None)
+
+    def _abort_reserved_runs(self, reason: str) -> None:
+        """Fail unresolved runs and clear in-memory bookkeeping immediately."""
+        stop_error = CronServiceStoppingError(reason)
+        reserved_runs = list(self._reserved_runs.values())
+        self._reserved_runs.clear()
+        self._executing_job_ids.clear()
+        self._running_job_ids.clear()
+        self._applying_job_ids.clear()
+
+        for queued_run in reserved_runs:
+            future = queued_run.completion_future
+            if future is not None and not future.done():
+                future.set_exception(stop_error)
+
+    async def _apply_completed_run(self, completed_run: _CompletedRun) -> None:
+        """Apply one finished run back onto the store and settle its manual future."""
+        job_id = completed_run.result.job_id
+        manual_future = completed_run.queued_run.completion_future
+        manual_result = _manual_result_from_execution(completed_run.result)
+        manual_error: Exception | None = None
+
+        try:
+            async with self._store_lock:
+                store = await self._load_store_locked()
+                can_merge_pending_store = self._can_merge_into_pending_store_locked()
+                if not can_merge_pending_store:
+                    self._require_store_available_locked()
+                store = self._store if self._store is not None else store
+                working_store = self._copy_store(store)
+                self._recompute_next_runs_locked(working_store, preserve_existing=True)
+                self._apply_execution_result_locked(working_store, completed_run.result)
+                await self._commit_store_locked(
+                    working_store,
+                    allow_existing_error=can_merge_pending_store,
+                    keep_memory_on_failure=True,
+                )
+        except CronStoreError as exc:
+            if completed_run.queued_run.source == "manual":
+                manual_error = exc
+            else:
+                logger.warning(
+                    "Cron: background result sync failed for job %s; scheduler will retry once the store is healthy",
+                    job_id,
+                )
+        finally:
+            async with self._store_lock:
+                self._release_reserved_run_locked(job_id)
+
+            if manual_future is not None and not manual_future.done():
+                if manual_error is not None:
+                    manual_future.set_exception(manual_error)
+                else:
+                    manual_future.set_result(manual_result)
+
+            self._applying_job_ids.discard(job_id)
+            self._arm_timer()
 
     def _get_store_mtime(self) -> int | None:
         """Read the current store file modification time in nanoseconds, if it exists."""
@@ -254,11 +479,13 @@ class CronService:
     def _clear_store_error_locked(self) -> None:
         """Clear any store error once disk state is readable again."""
         self._store_error = None
+        self._store_error_action = None
         self._store_error_mtime = None
 
     def _mark_store_error_locked(self, action: str, current_mtime: int | None, exc: Exception) -> str:
         """Capture an actionable store error without discarding last known-good state."""
         message = f"Failed to {action} cron store at {self.store_path}: {exc}"
+        self._store_error_action = action
         if self._set_store_error_locked(message, current_mtime):
             logger.exception(message)
         return message
@@ -275,6 +502,14 @@ class CronService:
         """Reject unsafe operations while the latest on-disk state is unreadable."""
         if self._store_error is not None:
             raise CronStoreUnavailableError(self._store_error)
+
+    def _can_merge_into_pending_store_locked(self) -> bool:
+        """Return whether a save-failed in-memory snapshot can accept more completed results."""
+        return (
+            self._store_sync_pending
+            and self._store is not None
+            and self._store_error_action == "save"
+        )
 
     async def _ensure_store_writable_locked(self) -> None:
         """Retry pending persistence before allowing new writes or executions."""
@@ -413,17 +648,114 @@ class CronService:
 
         return True
 
+    def _build_unexpected_execution_result(self, job: CronJob, exc: Exception) -> _JobExecutionResult:
+        """Convert an unexpected worker failure into a normal execution result."""
+        start_ms = _now_ms()
+        scheduled_run_at_ms = job.state.next_run_at_ms
+        if job.schedule.kind == "at":
+            next_run_at_ms = None
+        else:
+            cadence_anchor_ms = (
+                scheduled_run_at_ms
+                if scheduled_run_at_ms is not None and scheduled_run_at_ms <= start_ms
+                else start_ms
+            )
+            next_run_at_ms = _compute_next_run(
+                job.schedule,
+                _now_ms(),
+                anchor_ms=cadence_anchor_ms,
+            )
+
+        return _JobExecutionResult(
+            job_id=job.id,
+            last_run_at_ms=start_ms,
+            next_run_at_ms=next_run_at_ms,
+            last_status="error",
+            last_error=str(exc),
+        )
+
+    async def _worker_loop(self) -> None:
+        """Execute reserved jobs in the background without touching the store."""
+        run_queue = self._run_queue
+        result_queue = self._result_queue
+        assert run_queue is not None
+        assert result_queue is not None
+
+        while True:
+            queued_run = await run_queue.get()
+            try:
+                self._running_job_ids.add(queued_run.job.id)
+                try:
+                    execution_result = await self._execute_job(queued_run.job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Cron: worker crashed while executing job %s", queued_run.job.id)
+                    execution_result = self._build_unexpected_execution_result(queued_run.job, exc)
+
+                if queued_run.generation != self._background_generation or self._hard_stop_requested:
+                    continue
+
+                await result_queue.put(
+                    _CompletedRun(
+                        queued_run=queued_run,
+                        result=execution_result,
+                    )
+                )
+            finally:
+                self._running_job_ids.discard(queued_run.job.id)
+                run_queue.task_done()
+
+    async def _result_writer_loop(self) -> None:
+        """Apply completed execution results back onto the store in a single place."""
+        result_queue = self._result_queue
+        assert result_queue is not None
+
+        while True:
+            completed_run = await result_queue.get()
+            try:
+                if completed_run.queued_run.generation != self._background_generation or self._hard_stop_requested:
+                    continue
+
+                self._applying_job_ids.add(completed_run.result.job_id)
+                apply_task = asyncio.create_task(self._apply_completed_run(completed_run))
+                try:
+                    await asyncio.shield(apply_task)
+                except asyncio.CancelledError:
+                    if self._hard_stop_requested:
+                        apply_task.cancel()
+                        await asyncio.gather(apply_task, return_exceptions=True)
+                    else:
+                        await apply_task
+                    raise
+            finally:
+                result_queue.task_done()
+
     async def start(self) -> None:
         """Start the cron service."""
         async with self._store_lock:
             if self._running:
                 logger.warning("CronService already running")
                 return
+            self._raise_if_store_quarantined()
+            self._prune_background_processors()
+            if self._shutting_down and (
+                self._worker_tasks
+                or self._result_writer_task is not None
+                or self._store_sync_pending
+            ):
+                raise RuntimeError("CronService shutdown is still in progress")
 
+            self._shutting_down = False
+            self._hard_stop_requested = False
+            self._background_generation += 1
+            self._run_queue = asyncio.Queue()
+            self._result_queue = asyncio.Queue()
             store = await self._load_store_locked()
             working_store = self._copy_store(store)
             self._recompute_next_runs_locked(working_store, preserve_existing=True)
             self._store = working_store
+            self._ensure_background_processors_locked()
             self._running = True
             job_count = len(working_store.jobs)
 
@@ -431,12 +763,65 @@ class CronService:
         logger.info(f"CronService started with {job_count} jobs")
 
     def stop(self) -> None:
-        """Stop the cron service."""
+        """Stop the cron service immediately without draining background work."""
+        should_quarantine_store = bool(self._applying_job_ids)
         self._running = False
+        self._accepting_new_runs = False
+        self._shutting_down = True
+        self._hard_stop_requested = True
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        run_queue = self._run_queue
+        result_queue = self._result_queue
+        self._request_cancel_background_processors()
+        self._drain_queue_nowait(run_queue)
+        self._drain_queue_nowait(result_queue)
+        self._run_queue = None
+        self._result_queue = None
+        self._abort_reserved_runs("CronService stopped before queued work could finish")
+        if should_quarantine_store:
+            self._quarantine_store(
+                f"Cron store at {self.store_path} is quarantined after a hard stop during result persistence; "
+                "restart the process before starting cron again for this store"
+            )
         logger.info("CronService stopped")
+
+    async def shutdown(self, *, drain_timeout_s: float = 5.0) -> None:
+        """Gracefully stop accepting new runs and persist completed work before stopping."""
+        self._running = False
+        self._accepting_new_runs = False
+        self._shutting_down = True
+        self._hard_stop_requested = False
+        if self._timer_task:
+            self._timer_task.cancel()
+            self._timer_task = None
+
+        queues_drained = False
+        try:
+            async with asyncio.timeout(drain_timeout_s):
+                if self._run_queue is not None:
+                    await self._run_queue.join()
+                if self._result_queue is not None:
+                    await self._result_queue.join()
+                queues_drained = True
+                async with self._store_lock:
+                    await self._ensure_store_writable_locked()
+        except TimeoutError:
+            logger.warning(
+                "CronService shutdown timed out after %.1fs while waiting for graceful drain",
+                drain_timeout_s,
+            )
+            self.stop()
+            raise CronServiceShutdownTimeoutError(
+                f"CronService shutdown timed out after {drain_timeout_s:.1f}s"
+            ) from None
+        finally:
+            if queues_drained:
+                await self._cancel_background_processors(timeout_s=None)
+                self._run_queue = None
+                self._result_queue = None
+                logger.info("CronService shutdown complete")
 
     def _arm_timer(self) -> None:
         """Set the timer for the next wake-up."""
@@ -481,6 +866,8 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer wake-up."""
+        if self._shutting_down:
+            return
         due_jobs: list[CronJob] = []
         try:
             async with self._store_lock:
@@ -505,25 +892,24 @@ class CronService:
                     await self._commit_store_locked(working_store, keep_memory_on_failure=True)
                     return
 
-                for job in due_jobs:
-                    self._executing_job_ids.add(job.id)
+                self._ensure_background_processors_locked()
+                queued_runs = [
+                    _QueuedRun(job=job, source="timer", generation=self._background_generation)
+                    for job in due_jobs
+                ]
+                for queued_run in queued_runs:
+                    self._reserve_run_locked(queued_run)
 
-            execution_results = [await self._execute_job(job) for job in due_jobs]
-
-            async with self._store_lock:
-                store = await self._load_store_locked()
-                self._require_store_available_locked()
-                working_store = self._copy_store(store)
-                self._recompute_next_runs_locked(working_store, preserve_existing=True)
-                for result in execution_results:
-                    self._apply_execution_result_locked(working_store, result)
-                await self._commit_store_locked(working_store, keep_memory_on_failure=True)
+            run_queue = self._run_queue
+            if run_queue is None or self._shutting_down:
+                return
+            for queued_run in queued_runs:
+                if queued_run.generation != self._background_generation or self._hard_stop_requested:
+                    break
+                run_queue.put_nowait(queued_run)
         except CronStoreError:
             logger.warning("Cron: timer run paused until cron store becomes healthy again")
         finally:
-            async with self._store_lock:
-                for job in due_jobs:
-                    self._executing_job_ids.discard(job.id)
             self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> _JobExecutionResult:
@@ -700,43 +1086,49 @@ class CronService:
         Returns:
             Manual run outcome, or None if not found
         """
-        job_to_run: CronJob | None = None
-        reserved_job = False
+        if self._shutting_down:
+            raise CronServiceStoppingError("CronService is shutting down")
+        queued_run: _QueuedRun | None = None
+        run_queue: asyncio.Queue[_QueuedRun] | None = None
+        async with self._store_lock:
+            store = await self._load_store_locked()
+            await self._ensure_store_writable_locked()
+            store = self._store if self._store is not None else store
+            for job in store.jobs:
+                if job.id != job_id or not (job.enabled or force):
+                    continue
+                if job.id in self._executing_job_ids:
+                    return _ManualRunResult(status="ignored", result="already_running")
+
+                self._ensure_background_processors_locked()
+                queued_run = _QueuedRun(
+                    job=self._copy_job(job),
+                    source="manual",
+                    generation=self._background_generation,
+                    completion_future=asyncio.get_running_loop().create_future(),
+                )
+                run_queue = self._run_queue
+                self._reserve_run_locked(queued_run)
+                break
+            else:
+                return None
+
+        if (
+            run_queue is None
+            or queued_run.generation != self._background_generation
+            or self._shutting_down
+            or self._hard_stop_requested
+        ):
+            stop_error = CronServiceStoppingError("CronService is shutting down")
+            if not queued_run.completion_future.done():
+                queued_run.completion_future.set_exception(stop_error)
+            raise stop_error
+
+        assert queued_run is not None
+        run_queue.put_nowait(queued_run)
         try:
-            async with self._store_lock:
-                store = await self._load_store_locked()
-                await self._ensure_store_writable_locked()
-                store = self._store if self._store is not None else store
-                for job in store.jobs:
-                    if job.id != job_id or not (job.enabled or force):
-                        continue
-                    if job.id in self._executing_job_ids:
-                        return _ManualRunResult(status="ignored", result="already_running")
-
-                    self._executing_job_ids.add(job.id)
-                    job_to_run = self._copy_job(job)
-                    reserved_job = True
-                    break
-                else:
-                    return None
-
-            execution_result = await self._execute_job(job_to_run)
-
-            async with self._store_lock:
-                store = await self._load_store_locked()
-                await self._ensure_store_writable_locked()
-                store = self._store if self._store is not None else store
-                working_store = self._copy_store(store)
-                self._apply_execution_result_locked(working_store, execution_result)
-                await self._commit_store_locked(working_store, keep_memory_on_failure=True)
-            return _ManualRunResult(
-                status="executed",
-                result=execution_result.last_error if execution_result.last_status == "error" else "ok",
-            )
+            return await queued_run.completion_future
         finally:
-            async with self._store_lock:
-                if reserved_job:
-                    self._executing_job_ids.discard(job_id)
             self._arm_timer()
 
     async def status(self) -> dict:
@@ -746,11 +1138,21 @@ class CronService:
             jobs = list(store.jobs)
 
         enabled = sum(1 for j in jobs if j.enabled)
+        queued_runs = self._run_queue.qsize() if self._run_queue is not None else 0
+        queued_result_writes = self._result_queue.qsize() if self._result_queue is not None else 0
+        applying_result_writes = len(self._applying_job_ids)
         return {
             "running": self._running,
             "jobs": len(jobs),
             "enabled": enabled,
             "disabled": len(jobs) - enabled,
+            "executing_jobs": len(self._running_job_ids),
+            "inflight_runs": len(self._executing_job_ids),
+            "queued_runs": queued_runs,
+            "queued_result_writes": queued_result_writes,
+            "applying_result_writes": applying_result_writes,
+            "pending_result_writes": queued_result_writes + applying_result_writes,
+            "max_concurrent_runs": self._max_concurrent_runs,
             "store_available": self._store_error is None,
             "store_error": self._store_error,
         }
@@ -786,8 +1188,19 @@ async def start_cron_service(
     return service
 
 
+async def stop_cron_service_async(*, drain_timeout_s: float = 5.0) -> None:
+    """Gracefully stop the global CronService and wait for queued work to settle."""
+    global _cron_service
+    if _cron_service is not None:
+        service = _cron_service
+        try:
+            await service.shutdown(drain_timeout_s=drain_timeout_s)
+        finally:
+            _cron_service = None
+
+
 def stop_cron_service() -> None:
-    """Stop the global CronService."""
+    """Stop the global CronService immediately without draining background work."""
     global _cron_service
     if _cron_service is not None:
         _cron_service.stop()

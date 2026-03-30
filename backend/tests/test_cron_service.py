@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import sys
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
@@ -12,7 +13,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.cron.service import CronService, NoFutureRunTimeError
+from src.cron.service import (
+    CronService,
+    CronServiceShutdownTimeoutError,
+    CronServiceStoppingError,
+    NoFutureRunTimeError,
+)
 from src.cron.types import CronPayload, CronSchedule
 
 cron_service_module = importlib.import_module("src.cron.service")
@@ -32,6 +38,13 @@ def _make_store_path(tmp_path: Path) -> Path:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _drain_background_runs(service: CronService) -> None:
+    if service._run_queue is not None:
+        await asyncio.wait_for(service._run_queue.join(), timeout=1)
+    if service._result_queue is not None:
+        await asyncio.wait_for(service._result_queue.join(), timeout=1)
 
 
 def test_compute_next_run_for_at_schedule():
@@ -255,7 +268,7 @@ def test_start_does_not_persist_legacy_cron_timezones(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(service, "_write_store_to_disk", fail_write)
     _run(service.start())
-    service.stop()
+    _run(service.shutdown())
 
     persisted = json.loads(store_path.read_text(encoding="utf-8"))
     assert persisted["jobs"][0]["schedule"]["tz"] is None
@@ -455,6 +468,21 @@ def test_run_job_api_returns_ignored_status(monkeypatch):
     }
 
 
+def test_run_job_api_returns_503_when_service_is_stopping(monkeypatch):
+    class FakeCronService:
+        async def run_job(self, job_id: str, force: bool = True):
+            del job_id, force
+            raise CronServiceStoppingError("CronService is shutting down")
+
+    monkeypatch.setattr(cron_router_module, "get_cron_service", lambda: FakeCronService())
+
+    with TestClient(_make_app()) as client:
+        response = client.post("/api/cron/job-1/run")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "CronService is shutting down"
+
+
 def test_persistence_round_trip_reloads_saved_job(monkeypatch, tmp_path: Path):
     store_path = _make_store_path(tmp_path)
     now_ms = 1_700_000_000_000
@@ -522,7 +550,7 @@ def test_external_store_corruption_preserves_last_known_jobs_and_recovers(tmp_pa
             recovered_status = await service.status()
             return healthy_jobs, degraded_jobs, degraded_status, recovered_jobs, recovered_status
         finally:
-            service.stop()
+            await service.shutdown()
 
     healthy_jobs, degraded_jobs, degraded_status, recovered_jobs, recovered_status = asyncio.run(run())
 
@@ -571,7 +599,7 @@ def test_external_store_deletion_preserves_last_known_jobs_and_recovers(tmp_path
             recovered_status = await service.status()
             return healthy_jobs, degraded_jobs, degraded_status, recovered_jobs, recovered_status
         finally:
-            service.stop()
+            await service.shutdown()
 
     healthy_jobs, degraded_jobs, degraded_status, recovered_jobs, recovered_status = asyncio.run(run())
 
@@ -606,7 +634,7 @@ def test_one_time_failed_job_is_disabled_instead_of_deleted(tmp_path: Path):
             await service.run_job(job.id)
             return (await service.get_jobs())[0]
         finally:
-            service.stop()
+            await service.shutdown()
 
     saved_job = asyncio.run(run())
 
@@ -650,15 +678,71 @@ def test_service_admin_calls_remain_available_while_job_runs(tmp_path: Path):
             result = await asyncio.wait_for(run_task, timeout=1)
             return job.id, status, jobs, result
         finally:
-            service.stop()
+            await service.shutdown()
 
     job_id, status, jobs, result = asyncio.run(run())
 
     assert status["running"] is True
     assert status["jobs"] == 1
+    assert status["executing_jobs"] == 1
+    assert status["queued_runs"] == 0
+    assert status["pending_result_writes"] == 0
+    assert status["max_concurrent_runs"] == 4
     assert jobs[0]["id"] == job_id
     assert result.status == "executed"
     assert result.result == "ok"
+
+
+def test_status_distinguishes_running_and_reserved_runs(tmp_path: Path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_job(job):
+        del job
+        started.set()
+        await release.wait()
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=slow_job,
+        max_concurrent_runs=1,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            for name in ("A", "B", "C"):
+                await service.add_job(
+                    name=f"Job {name}",
+                    schedule=CronSchedule(kind="every", every_ms=60_000),
+                    payload=CronPayload(message=name),
+                )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                for job in working_store.jobs:
+                    job.state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            await service._on_timer()
+            await asyncio.wait_for(started.wait(), timeout=1)
+            status = await service.status()
+
+            release.set()
+            await _drain_background_runs(service)
+            return status
+        finally:
+            await service.shutdown()
+
+    status = asyncio.run(run())
+
+    assert status["executing_jobs"] == 1
+    assert status["inflight_runs"] == 3
+    assert status["queued_runs"] == 2
+    assert status["pending_result_writes"] == 0
+
 
 def test_run_job_ignores_inflight_execution_without_polling(monkeypatch, tmp_path: Path):
     started = asyncio.Event()
@@ -760,6 +844,133 @@ def test_timer_triggered_execution_causes_manual_run_to_be_ignored(tmp_path: Pat
     assert run_count == 1
 
 
+def test_timer_executes_same_batch_jobs_concurrently(tmp_path: Path):
+    started: dict[str, asyncio.Event] = {
+        "Job A": asyncio.Event(),
+        "Job B": asyncio.Event(),
+    }
+    release = asyncio.Event()
+    running = 0
+    max_running = 0
+
+    async def slow_job(job):
+        nonlocal running, max_running
+        running += 1
+        max_running = max(max_running, running)
+        started[job.name].set()
+        await release.wait()
+        running -= 1
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=slow_job,
+        max_concurrent_runs=2,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            await service.add_job(
+                name="Job A",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="A"),
+            )
+            await service.add_job(
+                name="Job B",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="B"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                for job in working_store.jobs:
+                    job.state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            await service._on_timer()
+            await asyncio.wait_for(started["Job A"].wait(), timeout=1)
+            await asyncio.wait_for(started["Job B"].wait(), timeout=1)
+
+            status = await service.status()
+            release.set()
+            await _drain_background_runs(service)
+            return status
+        finally:
+            await service.shutdown()
+
+    status = asyncio.run(run())
+
+    assert max_running == 2
+    assert status["executing_jobs"] == 2
+
+
+def test_later_due_job_can_start_while_earlier_timer_job_is_still_running(tmp_path: Path):
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    start_order: list[str] = []
+
+    async def selective_job(job):
+        start_order.append(job.name)
+        if job.name == "first":
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=selective_job,
+        max_concurrent_runs=2,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            await service.add_job(
+                name="first",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="first"),
+            )
+            await service.add_job(
+                name="second",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="second"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                working_store.jobs[0].state.next_run_at_ms = 1
+                working_store.jobs[1].state.next_run_at_ms = 32_503_680_000_000
+                await service._commit_store_locked(working_store)
+
+            await service._on_timer()
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                working_store.jobs[1].state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            await service._on_timer()
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+
+            release_first.set()
+            await _drain_background_runs(service)
+            return start_order
+        finally:
+            await service.shutdown()
+
+    start_order = asyncio.run(run())
+
+    assert start_order[:2] == ["first", "second"]
+
+
 def test_timer_retries_pending_execution_persistence_without_rerunning_job(monkeypatch, tmp_path: Path):
     run_count = 0
 
@@ -802,6 +1013,7 @@ def test_timer_retries_pending_execution_persistence_without_rerunning_job(monke
             monkeypatch.setattr(service, "_write_store_to_disk", flaky_write)
 
             await service._on_timer()
+            await _drain_background_runs(service)
             after_failure_status = await service.status()
             after_failure_jobs = await service.list_jobs(include_disabled=True)
 
@@ -811,7 +1023,7 @@ def test_timer_retries_pending_execution_persistence_without_rerunning_job(monke
 
             return job, after_failure_status, after_failure_jobs, recovered_status, recovered_jobs
         finally:
-            service.stop()
+            await service.shutdown()
 
     job, after_failure_status, after_failure_jobs, recovered_status, recovered_jobs = asyncio.run(run())
 
@@ -826,6 +1038,474 @@ def test_timer_retries_pending_execution_persistence_without_rerunning_job(monke
     assert recovered_jobs[0]["id"] == job.id
     assert recovered_jobs[0]["state"]["last_status"] == "ok"
     assert recovered_jobs[0]["state"]["last_run_at_ms"] is not None
+
+
+def test_status_counts_results_already_in_apply_stage(monkeypatch, tmp_path: Path):
+    apply_started = asyncio.Event()
+    release_apply = asyncio.Event()
+
+    async def fast_job(job):
+        del job
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=fast_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            await service.add_job(
+                name="Apply stage status",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="observe apply"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                working_store.jobs[0].state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            original_apply = service._apply_completed_run
+
+            async def blocking_apply(completed_run):
+                apply_started.set()
+                await release_apply.wait()
+                return await original_apply(completed_run)
+
+            monkeypatch.setattr(service, "_apply_completed_run", blocking_apply)
+
+            await service._on_timer()
+            await asyncio.wait_for(apply_started.wait(), timeout=1)
+            status = await service.status()
+
+            release_apply.set()
+            await _drain_background_runs(service)
+            return status
+        finally:
+            if service._running:
+                await service.shutdown()
+
+    status = asyncio.run(run())
+
+    assert status["executing_jobs"] == 0
+    assert status["inflight_runs"] == 1
+    assert status["queued_result_writes"] == 0
+    assert status["applying_result_writes"] == 1
+    assert status["pending_result_writes"] == 1
+
+
+def test_concurrent_completed_runs_merge_while_store_sync_pending(monkeypatch, tmp_path: Path):
+    run_counts: dict[str, int] = {}
+
+    async def fast_job(job):
+        run_counts[job.id] = run_counts.get(job.id, 0) + 1
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=fast_job,
+        max_concurrent_runs=2,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            first = await service.add_job(
+                name="Pending sync first",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="first"),
+            )
+            second = await service.add_job(
+                name="Pending sync second",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="second"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                for job in working_store.jobs:
+                    job.state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            original_write = service._write_store_to_disk
+            attempts = 0
+
+            def flaky_write(store):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise OSError("disk full")
+                return original_write(store)
+
+            monkeypatch.setattr(service, "_write_store_to_disk", flaky_write)
+
+            await service._on_timer()
+            await _drain_background_runs(service)
+
+            jobs = sorted(await service.list_jobs(include_disabled=True), key=lambda job: job["id"])
+            status = await service.status()
+            return first, second, jobs, status
+        finally:
+            await service.shutdown()
+
+    first, second, jobs, status = asyncio.run(run())
+
+    assert run_counts[first.id] == 1
+    assert run_counts[second.id] == 1
+    assert status["store_available"] is True
+    assert status["store_error"] is None
+    assert [job["id"] for job in jobs] == sorted([first.id, second.id])
+    assert all(job["state"]["last_status"] == "ok" for job in jobs)
+    assert all(job["state"]["last_run_at_ms"] is not None for job in jobs)
+
+
+def test_shutdown_flushes_pending_store_before_return(monkeypatch, tmp_path: Path):
+    run_count = 0
+
+    async def fast_job(job):
+        nonlocal run_count
+        del job
+        run_count += 1
+        return "done"
+
+    store_path = _make_store_path(tmp_path)
+    service = CronService(
+        store_path=store_path,
+        on_job=fast_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            job = await service.add_job(
+                name="Flush on shutdown",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="flush before return"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                working_store.jobs[0].state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            original_write = service._write_store_to_disk
+            attempts = 0
+
+            def flaky_write(store):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise OSError("disk full")
+                return original_write(store)
+
+            monkeypatch.setattr(service, "_write_store_to_disk", flaky_write)
+
+            await service._on_timer()
+            await _drain_background_runs(service)
+            failed_status = await service.status()
+
+            await service.shutdown()
+            persisted_jobs = await CronService(store_path=store_path).list_jobs(include_disabled=True)
+            return job, failed_status, persisted_jobs
+        finally:
+            if service._running or service._worker_tasks or service._result_writer_task is not None:
+                service.stop()
+
+    job, failed_status, persisted_jobs = asyncio.run(run())
+
+    assert run_count == 1
+    assert failed_status["store_available"] is False
+    assert "Failed to save cron store" in failed_status["store_error"]
+    assert persisted_jobs[0]["id"] == job.id
+    assert persisted_jobs[0]["state"]["last_status"] == "ok"
+    assert persisted_jobs[0]["state"]["last_run_at_ms"] is not None
+
+
+def test_shutdown_drains_inflight_background_runs(tmp_path: Path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_job(job):
+        del job
+        started.set()
+        await release.wait()
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=slow_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            await service.add_job(
+                name="Drain on shutdown",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="finish before stop"),
+            )
+
+            async with service._store_lock:
+                store = await service._load_store_locked()
+                working_store = service._copy_store(store)
+                working_store.jobs[0].state.next_run_at_ms = 1
+                await service._commit_store_locked(working_store)
+
+            await service._on_timer()
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            shutdown_task = asyncio.create_task(service.shutdown(drain_timeout_s=1))
+            await asyncio.sleep(0.05)
+            assert shutdown_task.done() is False
+
+            release.set()
+            await asyncio.wait_for(shutdown_task, timeout=1)
+            jobs = await service.list_jobs(include_disabled=True)
+            status = await service.status()
+            return jobs, status
+        finally:
+            if service._running:
+                await service.shutdown(drain_timeout_s=1)
+
+    jobs, status = asyncio.run(run())
+
+    assert jobs[0]["state"]["last_status"] == "ok"
+    assert jobs[0]["state"]["last_run_at_ms"] is not None
+    assert status["running"] is False
+    assert status["executing_jobs"] == 0
+    assert status["queued_runs"] == 0
+    assert status["pending_result_writes"] == 0
+
+
+def test_stop_discards_late_background_results(tmp_path: Path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def cancellation_resistant_job(job):
+        del job
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        finally:
+            finished.set()
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=cancellation_resistant_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            job = await service.add_job(
+                name="Hard stop manual run",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="drop late result"),
+            )
+
+            run_task = asyncio.create_task(service.run_job(job.id))
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            service.stop()
+            with pytest.raises(CronServiceStoppingError, match="stopped"):
+                await run_task
+
+            stopped_status = await service.status()
+
+            await service.start()
+            release.set()
+            await asyncio.wait_for(finished.wait(), timeout=1)
+            await asyncio.sleep(0)
+
+            jobs = await service.list_jobs(include_disabled=True)
+            restarted_status = await service.status()
+            return jobs, stopped_status, restarted_status
+        finally:
+            if service._running:
+                await service.shutdown()
+
+    jobs, stopped_status, restarted_status = asyncio.run(run())
+
+    assert stopped_status["pending_result_writes"] == 0
+    assert stopped_status["executing_jobs"] == 0
+    assert restarted_status["pending_result_writes"] == 0
+    assert jobs[0]["state"]["last_run_at_ms"] is None
+    assert jobs[0]["state"]["last_status"] == "pending"
+
+
+def test_stop_cron_service_async_clears_singleton(tmp_path: Path):
+    async def noop(job):
+        del job
+        return "done"
+
+    async def run():
+        cron_service_module.stop_cron_service()
+        service = await cron_service_module.start_cron_service(
+            store_path=_make_store_path(tmp_path),
+            on_job=noop,
+        )
+        assert cron_service_module.get_cron_service() is service
+        await cron_service_module.stop_cron_service_async()
+        assert cron_service_module.get_cron_service() is None
+
+    asyncio.run(run())
+
+
+def test_shutdown_timeout_aborts_pending_manual_run(tmp_path: Path):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def slow_job(job):
+        del job
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        finally:
+            finished.set()
+        return "done"
+
+    service = CronService(
+        store_path=_make_store_path(tmp_path),
+        on_job=slow_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            job = await service.add_job(
+                name="Timeout manual run",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="will be aborted"),
+            )
+
+            run_task = asyncio.create_task(service.run_job(job.id))
+            await asyncio.wait_for(started.wait(), timeout=1)
+
+            with pytest.raises(CronServiceShutdownTimeoutError, match="timed out after 0.1s"):
+                await asyncio.wait_for(service.shutdown(drain_timeout_s=0.05), timeout=0.5)
+            assert finished.is_set() is False
+            with pytest.raises(CronServiceStoppingError, match="stopped"):
+                await run_task
+
+            release.set()
+            await asyncio.wait_for(finished.wait(), timeout=1)
+            await service.start()
+            jobs = await service.list_jobs(include_disabled=True)
+            await service.shutdown()
+            status = await service.status()
+            return jobs, status
+        finally:
+            release.set()
+            if service._running:
+                await service.shutdown()
+            elif service._worker_tasks or service._result_writer_task is not None:
+                service.stop()
+
+    jobs, status = asyncio.run(run())
+
+    assert status["running"] is False
+    assert status["executing_jobs"] == 0
+    assert status["queued_runs"] == 0
+    assert status["pending_result_writes"] == 0
+    assert jobs[0]["state"]["last_run_at_ms"] is None
+    assert jobs[0]["state"]["last_status"] == "pending"
+
+
+def test_shutdown_timeout_during_commit_quarantines_store_restart(tmp_path: Path):
+    started_write = threading.Event()
+    release_write = threading.Event()
+
+    async def fast_job(job):
+        del job
+        return "done"
+
+    store_path = _make_store_path(tmp_path)
+    service = CronService(
+        store_path=store_path,
+        on_job=fast_job,
+    )
+
+    async def run():
+        await service.start()
+        try:
+            job = await service.add_job(
+                name="Commit timeout quarantine",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="quarantine same store"),
+            )
+
+            original_write = service._write_store_to_disk
+
+            def blocking_write(store):
+                started_write.set()
+                release_write.wait(timeout=1)
+                return original_write(store)
+
+            service._write_store_to_disk = blocking_write
+
+            run_task = asyncio.create_task(service.run_job(job.id))
+            write_started = await asyncio.to_thread(started_write.wait, 1)
+            assert write_started is True
+
+            with pytest.raises(CronServiceShutdownTimeoutError):
+                await service.shutdown(drain_timeout_s=0.05)
+            with pytest.raises(CronServiceStoppingError, match="stopped"):
+                await run_task
+            with pytest.raises(RuntimeError, match="quarantined after a hard stop"):
+                await service.start()
+
+            replacement = CronService(store_path=store_path, on_job=fast_job)
+            with pytest.raises(RuntimeError, match="quarantined after a hard stop"):
+                await replacement.start()
+        finally:
+            release_write.set()
+            if service._running:
+                await service.shutdown()
+            elif service._worker_tasks or service._result_writer_task is not None:
+                service.stop()
+
+    asyncio.run(run())
+
+
+def test_run_job_shutdown_race_raises_cron_service_stopping_error(monkeypatch, tmp_path: Path):
+    service = CronService(store_path=_make_store_path(tmp_path))
+
+    async def run():
+        await service.start()
+        try:
+            job = await service.add_job(
+                name="Race manual run",
+                schedule=CronSchedule(kind="every", every_ms=60_000),
+                payload=CronPayload(message="race"),
+            )
+
+            original = service._ensure_background_processors_locked
+
+            def flip_to_shutdown_then_start_processors():
+                service._shutting_down = True
+                original()
+
+            monkeypatch.setattr(service, "_ensure_background_processors_locked", flip_to_shutdown_then_start_processors)
+
+            with pytest.raises(CronServiceStoppingError, match="shutting down"):
+                await service.run_job(job.id)
+        finally:
+            service.stop()
+
+    asyncio.run(run())
+
 
 def test_auto_deleted_job_is_removed_after_manual_run(tmp_path: Path):
     service = CronService(store_path=_make_store_path(tmp_path))

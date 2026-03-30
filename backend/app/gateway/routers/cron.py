@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from src.cron import get_cron_service
 from src.cron.timezones import format_timestamp_ms
-from src.cron.service import CronStoreError, NoFutureRunTimeError
+from src.cron.service import CronServiceStoppingError, CronStoreError, NoFutureRunTimeError
 from src.cron.types import CronPayload, CronSchedule
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,8 @@ def _raise_translated_cron_error(exc: Exception) -> None:
     """Translate cron service exceptions into API-facing HTTP errors."""
     if isinstance(exc, NoFutureRunTimeError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, CronServiceStoppingError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, CronStoreError):

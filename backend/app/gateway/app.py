@@ -76,9 +76,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Stop cron service on shutdown
     try:
-        from src.cron import stop_cron_service
+        from src.cron import stop_cron_service_async
 
-        stop_cron_service()
+        await stop_cron_service_async()
     except Exception:
         logger.exception("Failed to stop cron service")
 
