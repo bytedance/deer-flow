@@ -454,6 +454,38 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
     assert captured.get("max_tokens") == 4096
+    assert captured.get("stream_usage") is True
+
+
+def test_openai_compatible_provider_preserves_explicit_stream_usage_override(monkeypatch):
+    """Factory should not override an explicit stream_usage setting from config/caller."""
+    model = ModelConfig(
+        name="minimax-m2.5-no-stream-usage",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        stream_usage=False,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m2.5-no-stream-usage")
+
+    assert captured.get("stream_usage") is False
 
 
 def test_openai_compatible_provider_multiple_models(monkeypatch):

@@ -8,6 +8,21 @@ from deerflow.reflection import resolve_class
 logger = logging.getLogger(__name__)
 
 
+def _is_openai_compatible_chat_model(model_path: str, model_class: type[BaseChatModel]) -> bool:
+    if model_path == "langchain_openai:ChatOpenAI":
+        return True
+
+    if model_path in {
+        "deerflow.models.patched_openai:PatchedChatOpenAI",
+        "deerflow.models.patched_minimax:PatchedChatMiniMax",
+    }:
+        return True
+
+    from langchain_openai import ChatOpenAI
+
+    return issubclass(model_class, ChatOpenAI)
+
+
 def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
@@ -60,6 +75,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             kwargs.update({"thinking": {"type": "disabled"}})
     if not model_config.supports_reasoning_effort and "reasoning_effort" in kwargs:
         del kwargs["reasoning_effort"]
+
+    # OpenAI-compatible streaming models only report usage in stream mode when
+    # stream_usage is enabled. Default it on so token-based middleware keeps working,
+    # while still allowing explicit config/call-site overrides to disable it.
+    if (
+        _is_openai_compatible_chat_model(model_config.use, model_class)
+        and "stream_usage" not in kwargs
+        and "stream_usage" not in model_settings_from_config
+    ):
+        kwargs["stream_usage"] = True
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
