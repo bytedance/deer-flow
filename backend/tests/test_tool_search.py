@@ -392,3 +392,120 @@ class TestDeferredToolFilterMiddleware:
 
         # dict_tool has no .name attr → getattr returns None → not in deferred_names → kept
         assert len(filtered.tools) == 2
+
+
+# ── Promote Tests ──
+
+
+class TestDeferredToolRegistryPromote:
+    def test_promote_removes_tools(self, registry):
+        assert len(registry) == 6
+        registry.promote({"github_create_issue", "slack_send_message"})
+        assert len(registry) == 4
+        remaining = {e.name for e in registry.entries}
+        assert "github_create_issue" not in remaining
+        assert "slack_send_message" not in remaining
+        assert "github_list_repos" in remaining
+
+    def test_promote_nonexistent_is_noop(self, registry):
+        assert len(registry) == 6
+        registry.promote({"nonexistent_tool"})
+        assert len(registry) == 6
+
+    def test_promote_empty_set_is_noop(self, registry):
+        assert len(registry) == 6
+        registry.promote(set())
+        assert len(registry) == 6
+
+    def test_promote_all(self, registry):
+        all_names = {e.name for e in registry.entries}
+        registry.promote(all_names)
+        assert len(registry) == 0
+
+    def test_search_after_promote_excludes_promoted(self, registry):
+        """After promoting github tools, searching 'github' returns nothing."""
+        registry.promote({"github_create_issue", "github_list_repos"})
+        results = registry.search("github")
+        assert results == []
+
+    def test_filter_after_promote_passes_through(self, registry):
+        """After tool_search promotes a tool, the middleware lets it through."""
+        import sys
+        from unittest.mock import MagicMock
+
+        # Clear any mock entries
+        mock_keys = [
+            "deerflow.agents",
+            "deerflow.agents.middlewares",
+            "deerflow.agents.middlewares.deferred_tool_filter_middleware",
+        ]
+        for key in mock_keys:
+            if isinstance(sys.modules.get(key), MagicMock):
+                del sys.modules[key]
+
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+        set_deferred_registry(registry)
+        middleware = DeferredToolFilterMiddleware()
+
+        target_tool = registry.entries[0].tool  # github_create_issue
+        active_tool = _make_mock_tool("my_active_tool", "Active")
+
+        class FakeRequest:
+            def __init__(self, tools):
+                self.tools = tools
+
+            def override(self, **kwargs):
+                return FakeRequest(kwargs.get("tools", self.tools))
+
+        # Before promote: deferred tool is filtered
+        request = FakeRequest(tools=[active_tool, target_tool])
+        filtered = middleware._filter_tools(request)
+        assert len(filtered.tools) == 1
+        assert filtered.tools[0].name == "my_active_tool"
+
+        # Promote the tool
+        registry.promote({"github_create_issue"})
+
+        # After promote: tool passes through the filter
+        request2 = FakeRequest(tools=[active_tool, target_tool])
+        filtered2 = middleware._filter_tools(request2)
+        assert len(filtered2.tools) == 2
+        tool_names = {t.name for t in filtered2.tools}
+        assert "github_create_issue" in tool_names
+        assert "my_active_tool" in tool_names
+
+
+class TestToolSearchPromotion:
+    def test_tool_search_promotes_matched_tools(self, registry):
+        """tool_search should promote matched tools so they become callable."""
+        from deerflow.tools.builtins.tool_search import tool_search
+
+        set_deferred_registry(registry)
+        assert len(registry) == 6
+
+        # Search for github tools — should return schemas AND promote them
+        result = tool_search.invoke({"query": "select:github_create_issue"})
+        parsed = json.loads(result)
+        assert len(parsed) == 1
+        assert parsed[0]["name"] == "github_create_issue"
+
+        # The tool should now be promoted (removed from registry)
+        assert len(registry) == 5
+        remaining = {e.name for e in registry.entries}
+        assert "github_create_issue" not in remaining
+
+    def test_tool_search_keyword_promotes_all_matches(self, registry):
+        """Keyword search promotes all matched tools."""
+        from deerflow.tools.builtins.tool_search import tool_search
+
+        set_deferred_registry(registry)
+        result = tool_search.invoke({"query": "slack"})
+        parsed = json.loads(result)
+        assert len(parsed) == 2
+
+        # Both slack tools promoted
+        remaining = {e.name for e in registry.entries}
+        assert "slack_send_message" not in remaining
+        assert "slack_list_channels" not in remaining
+        assert len(registry) == 4
