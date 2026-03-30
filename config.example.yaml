@@ -188,6 +188,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # - name: minimax-m2.5-highspeed
   #   display_name: MiniMax M2.5 Highspeed
@@ -200,6 +201,7 @@ models:
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
+  #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
   # MiniMax provides high-performance models with 204K context window
