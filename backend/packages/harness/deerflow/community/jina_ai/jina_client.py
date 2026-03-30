@@ -5,9 +5,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_api_key_warned = False
+
 
 class JinaClient:
     async def crawl(self, url: str, return_format: str = "html", timeout: int = 10) -> str:
+        global _api_key_warned
         headers = {
             "Content-Type": "application/json",
             "X-Return-Format": return_format,
@@ -15,7 +18,8 @@ class JinaClient:
         }
         if os.getenv("JINA_API_KEY"):
             headers["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
-        else:
+        elif not _api_key_warned:
+            _api_key_warned = True
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
@@ -35,5 +39,5 @@ class JinaClient:
             return response.text
         except Exception as e:
             error_message = f"Request to Jina API failed: {str(e)}"
-            logger.error(error_message)
+            logger.exception(error_message)
             return f"Error: {error_message}"
