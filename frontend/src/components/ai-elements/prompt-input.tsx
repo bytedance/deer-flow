@@ -77,7 +77,7 @@ import {
 // ============================================================================
 
 export type AttachmentsContext = {
-  files: (FileUIPart & { id: string })[];
+  files: (FileUIPart & { id: string; _originalFile?: File })[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
@@ -172,6 +172,7 @@ export function PromptInputProvider({
           url: URL.createObjectURL(file),
           mediaType: file.type,
           filename: file.name,
+          _originalFile: file,
         })),
       ),
     );
@@ -431,9 +432,14 @@ export const PromptInputActionAddAttachments = ({
   );
 };
 
+export type FileUIPartWithFile = FileUIPart & {
+  /** The original File object, retained to avoid unreliable blob URL re-fetching. */
+  _originalFile?: File;
+};
+
 export type PromptInputMessage = {
   text: string;
-  files: FileUIPart[];
+  files: FileUIPartWithFile[];
 };
 
 export type PromptInputProps = Omit<
@@ -483,7 +489,9 @@ export const PromptInput = ({
   const formRef = useRef<HTMLFormElement | null>(null);
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
+  const [items, setItems] = useState<
+    (FileUIPart & { id: string; _originalFile?: File })[]
+  >([]);
   const files = usingProvider ? controller.attachments.files : items;
 
   // Keep a ref to files for cleanup on unmount (avoids stale closure)
@@ -551,7 +559,7 @@ export const PromptInput = ({
             message: "Too many files. Some were not added.",
           });
         }
-        const next: (FileUIPart & { id: string })[] = [];
+        const next: (FileUIPart & { id: string; _originalFile?: File })[] = [];
         for (const file of capped) {
           next.push({
             id: nanoid(),
@@ -559,6 +567,7 @@ export const PromptInput = ({
             url: URL.createObjectURL(file),
             mediaType: file.type,
             filename: file.name,
+            _originalFile: file,
           });
         }
         return prev.concat(next);
@@ -686,10 +695,14 @@ export const PromptInput = ({
 
   const convertBlobUrlToDataUrl = async (
     url: string,
+    originalFile?: File,
   ): Promise<string | null> => {
     try {
-      const response = await fetch(url);
-      const blob = await response.blob();
+      // Prefer reading from the original File object directly — this avoids
+      // the unreliable `fetch(blobUrl)` path that fails in Docker / restricted
+      // browser environments (see #1630).
+      const blob: Blob =
+        originalFile ?? (await fetch(url).then((r) => r.blob()));
       return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onloadend = () => resolve(reader.result as string);
@@ -732,9 +745,12 @@ export const PromptInput = ({
 
     // Convert blob URLs to data URLs asynchronously
     Promise.all(
-      files.map(async ({ id, ...item }) => {
+      files.map(async ({ id, _originalFile, ...item }) => {
         if (item.url && item.url.startsWith("blob:")) {
-          const dataUrl = await convertBlobUrlToDataUrl(item.url);
+          const dataUrl = await convertBlobUrlToDataUrl(
+            item.url,
+            _originalFile,
+          );
           // If conversion failed, keep the original blob URL
           return {
             ...item,

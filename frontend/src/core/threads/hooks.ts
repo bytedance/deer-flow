@@ -5,7 +5,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import type {
+  FileUIPartWithFile,
+  PromptInputMessage,
+} from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
 import { getBackendBaseURL } from "../config";
@@ -254,28 +257,33 @@ export function useThreadStream({
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            // Convert FileUIPart to File objects by fetching blob URLs
-            const filePromises = message.files.map(async (fileUIPart) => {
-              if (fileUIPart.url && fileUIPart.filename) {
-                try {
-                  // Fetch the blob URL to get the file data
-                  const response = await fetch(fileUIPart.url);
-                  const blob = await response.blob();
-
-                  // Create a File object from the blob
-                  return new File([blob], fileUIPart.filename, {
-                    type: fileUIPart.mediaType || blob.type,
-                  });
-                } catch (error) {
-                  console.error(
-                    `Failed to fetch file ${fileUIPart.filename}:`,
-                    error,
-                  );
-                  return null;
+            // Convert FileUIPart to File objects.
+            // Prefer the retained original File object to avoid unreliable
+            // blob URL re-fetching that fails in Docker / restricted browser
+            // environments (see #1630).
+            const filePromises = message.files.map(
+              async (fileUIPart: FileUIPartWithFile) => {
+                if (fileUIPart._originalFile) {
+                  return fileUIPart._originalFile;
                 }
-              }
-              return null;
-            });
+                if (fileUIPart.url && fileUIPart.filename) {
+                  try {
+                    const response = await fetch(fileUIPart.url);
+                    const blob = await response.blob();
+                    return new File([blob], fileUIPart.filename, {
+                      type: fileUIPart.mediaType || blob.type,
+                    });
+                  } catch (error) {
+                    console.error(
+                      `Failed to fetch file ${fileUIPart.filename}:`,
+                      error,
+                    );
+                    return null;
+                  }
+                }
+                return null;
+              },
+            );
 
             const conversionResults = await Promise.all(filePromises);
             const files = conversionResults.filter(
